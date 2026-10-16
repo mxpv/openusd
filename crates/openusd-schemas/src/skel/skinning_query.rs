@@ -59,21 +59,14 @@ impl SkinningResolver {
         let properties = &binding.properties;
         // TODO(perf): every prim bound to one skeleton re-reads its joint order.
         let skeleton_joint_order = binding.skeleton.joint_paths()?;
-        let joint_subset: Vec<String> = properties
-            .joints
-            .as_ref()
-            .map(Attribute::cast)
-            .transpose()?
-            .flatten()
-            .unwrap_or_default();
+        let joint_subset: Option<Vec<String>> = properties.joints.as_ref().map(Attribute::cast).transpose()?.flatten();
         // No subset authored → skinning transforms feed straight through; an
-        // identity mapper keeps callers on one code path.
-        let target = if joint_subset.is_empty() {
-            &skeleton_joint_order
-        } else {
-            &joint_subset
-        };
-        let mapper = AnimMapper::new(&skeleton_joint_order, target);
+        // identity mapper keeps callers on one code path. An authored empty
+        // subset maps no joints.
+        let mapper = AnimMapper::new(
+            &skeleton_joint_order,
+            joint_subset.as_ref().unwrap_or(&skeleton_joint_order),
+        );
         let indices = properties.joint_indices.clone().map(Primvar::new);
         let weights = properties.joint_weights.clone().map(Primvar::new);
         Ok(Self {
@@ -142,21 +135,15 @@ impl SkinningResolver {
     }
 
     /// Remap skinning transforms from the bound skeleton's joint order into the
-    /// mesh's effective order. No-op when no `skel:joints` subset was authored.
-    ///
-    /// Walks the pre-computed mapper indices once with no intermediate buffers,
-    /// so this is cheap to call per frame. Missing joints (a target joint that
-    /// isn't in the bound skeleton — rare but legal) get [`gf::Mat4d::IDENTITY`].
-    pub fn remap_transforms(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
-        if self.mapper.is_identity() {
-            return skel_skinning_xforms.to_vec();
-        }
-        (0..self.mapper.target_len())
-            .map(|t| match self.mapper.source_index(t) {
-                Some(i) => skel_skinning_xforms[i],
-                None => gf::Mat4d::IDENTITY,
-            })
-            .collect()
+    /// mesh's effective order. A copy when no `skel:joints` subset was
+    /// authored. Missing joints (a target joint that isn't in the bound
+    /// skeleton — rare but legal) get [`gf::Mat4d::IDENTITY`]. `None` unless
+    /// `skel_skinning_xforms` holds one transform per skeleton joint.
+    pub fn remap_transforms(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Mat4d>> {
+        let mut mesh_xforms = vec![gf::Mat4d::IDENTITY; self.mapper.target_len()];
+        self.mapper
+            .remap_into(skel_skinning_xforms, &mut mesh_xforms)
+            .then_some(mesh_xforms)
     }
 
     /// Skin `points` through this binding's joint influences, using
@@ -164,11 +151,13 @@ impl SkinningResolver {
     /// `ComputeSkinnedPoints`). Constant influences apply to every point.
     ///
     /// `None` where the influences cannot skin `points`: they are not bound,
-    /// their arrays do not fit `points`, or an index names no joint.
+    /// their arrays do not fit `points`, or an index names no joint. `None`
+    /// also when `skel_skinning_xforms` holds other than one transform per
+    /// skeleton joint.
     pub fn skinned_points(&self, points: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
+        let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
+        in_range(&self.joint_indices, &mesh_xforms)?;
         let (indices, weights) = self.varying_influences(points.len())?;
-        let mesh_xforms = self.remap_transforms(skel_skinning_xforms);
-        in_range(&indices, &mesh_xforms)?;
         Some(skin_points_lbs(
             points,
             &indices,
@@ -185,9 +174,9 @@ impl SkinningResolver {
     /// [`super::skinning::skin_normals_lbs`] for the caveat about the
     /// inverse-transpose under non-uniform scale.
     pub fn skinned_normals(&self, normals: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
+        let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
+        in_range(&self.joint_indices, &mesh_xforms)?;
         let (indices, weights) = self.varying_influences(normals.len())?;
-        let mesh_xforms = self.remap_transforms(skel_skinning_xforms);
-        in_range(&indices, &mesh_xforms)?;
         Some(skin_normals_lbs(
             normals,
             &indices,
@@ -202,12 +191,14 @@ impl SkinningResolver {
     /// transform (C++ `ComputeSkinnedTransform`).
     ///
     /// `None` for a prim whose influences are not constant, not bound, sized to
-    /// other than one element, or name a joint that does not exist.
+    /// other than one element, or name a joint that does not exist, and when
+    /// `skel_skinning_xforms` holds other than one transform per skeleton
+    /// joint.
     pub fn rigid_transform(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Option<gf::Mat4d> {
         let (InfluenceInterpolation::Constant, element_size) = self.joint_influences()? else {
             return None;
         };
-        let mesh_xforms = self.remap_transforms(skel_skinning_xforms);
+        let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
         in_range(&self.joint_indices, &mesh_xforms)?;
         Some(rigid_skinning_transform(
             &self.joint_indices,

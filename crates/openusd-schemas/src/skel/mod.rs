@@ -50,7 +50,7 @@
 //!     .set(openusd::sdf::Value::TokenVec(vec!["Root".into(), "Root/Hip".into()])).unwrap();
 //!
 //! let skel = Skeleton::get(&stage, "/Rig").unwrap().expect("Skeleton");
-//! let resolver = SkeletonResolver::from_skeleton(&skel).unwrap();
+//! let resolver = SkeletonResolver::from_skeleton(&skel).unwrap().expect("valid topology");
 //! assert_eq!(resolver.topology().joint_count(), 2);
 //! ```
 

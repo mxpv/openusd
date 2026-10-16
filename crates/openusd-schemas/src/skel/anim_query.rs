@@ -119,11 +119,12 @@ impl AnimQuery {
         Ok((translations, rotations, scales))
     }
 
-    /// Returns the joint-local 4×4 transform per joint at `time`,
-    /// composed `scale · rotation · translation` in USD's row-major
-    /// convention. Callers feeding the result into
-    /// [`super::SkeletonResolver::skinning_transforms_from_local`]
-    /// get full skinning transforms out the other side.
+    /// Returns the joint-local 4×4 transform per joint at `time`, in the
+    /// animation's joint order, composed `scale · rotation · translation` in
+    /// USD's row-major convention.
+    /// [`super::SkeletonResolver::joint_local_transforms`] maps the result
+    /// onto a skeleton's joint order, ready for
+    /// [`super::SkeletonResolver::skinning_transforms_from_local`].
     pub fn joint_local_transforms(&self, time: impl Into<TimeCode>) -> Result<Vec<gf::Mat4d>> {
         let (translations, rotations, scales) = self.joint_transform_components(time.into())?;
         Ok(translations

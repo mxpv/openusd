@@ -48,16 +48,14 @@ impl Skeleton {
         Ok(self.joints_attr().cast()?.unwrap_or_default())
     }
 
-    /// Parent index of each joint, recovered from the path encoding:
-    /// `joints[i] = "A/B"` ⇒ parent is the index of `"A"`; a joint with no
-    /// `/` is a root and gets `None`.
+    /// Parent index of each joint, the nearest ancestor path among the
+    /// joints as [`Topology::from_joint_paths`](super::Topology::from_joint_paths)
+    /// reads it; a root gets `None`. The indices are not validated: a parent
+    /// may follow its child where the joints are misordered (see
+    /// [`Topology::validate`](super::Topology::validate)).
     pub fn joint_parent_indices(&self) -> Result<Vec<Option<usize>>> {
-        let joints = self.joint_paths()?;
-        let by_path = super::topology::joint_index_map(&joints);
-        Ok(joints
-            .iter()
-            .map(|p| p.rsplit_once('/').and_then(|(parent, _)| by_path.get(parent).copied()))
-            .collect())
+        let topology = super::Topology::from_joint_paths(&self.joint_paths()?);
+        Ok((0..topology.joint_count()).map(|i| topology.parent(i)).collect())
     }
 
     /// Last path segment of each joint — the bone's display name (the full

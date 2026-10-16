@@ -3,35 +3,32 @@
 
 use openusd::gf;
 
-use super::topology::{NO_PARENT, Topology};
+use super::topology::Topology;
 
 /// Compose joint-local transforms into skeleton-space transforms by
 /// concatenating each joint's local transform with its parent's
 /// already-resolved skel-space transform.
 ///
 /// Per the UsdSkel spec: `jointSkelSpaceTransform =
-/// jointLocalSpaceTransform * parentJointSkelSpaceTransform`. The
-/// canonical UsdSkel `joints` ordering guarantees parents precede
-/// children, so a single forward pass is enough.
+/// jointLocalSpaceTransform * parentJointSkelSpaceTransform`, in one forward
+/// pass over the canonical UsdSkel `joints` ordering, where parents precede
+/// children (C++ `UsdSkelConcatJointTransforms`).
 ///
-/// Root joints (parent == [`NO_PARENT`]) keep their local transform
-/// as their skel-space transform.
-pub fn joint_local_to_skel_space(local: &[gf::Mat4d], topology: &Topology) -> Vec<gf::Mat4d> {
-    assert_eq!(
-        local.len(),
-        topology.joint_count(),
-        "joint_local_to_skel_space: local.len() must equal topology.joint_count()"
-    );
-    let mut out = vec![gf::Mat4d::IDENTITY; local.len()];
-    for i in 0..local.len() {
-        let p = topology.parent(i);
-        out[i] = if p == NO_PARENT {
-            local[i]
-        } else {
-            local[i] * out[p as usize]
-        };
+/// Root joints (a negative parent index) keep their local transform as
+/// their skel-space transform. `None` when `local` holds other than one
+/// transform per joint, or a joint's parent does not precede it.
+pub fn joint_local_to_skel_space(local: &[gf::Mat4d], topology: &Topology) -> Option<Vec<gf::Mat4d>> {
+    if local.len() != topology.joint_count() {
+        return None;
     }
-    out
+    let mut out = Vec::with_capacity(local.len());
+    for (i, &transform) in local.iter().enumerate() {
+        out.push(match topology.parent(i) {
+            Some(parent) => transform * *out.get(parent)?,
+            None => transform,
+        });
+    }
+    Some(out)
 }
 
 /// Compose skel-space joint transforms with the skel-root's
@@ -51,20 +48,16 @@ pub fn joint_skel_to_world(skel: &[gf::Mat4d], skel_local_to_world: gf::Mat4d) -
 ///
 /// Per Pixar's `UsdSkelSkeletonQuery::ComputeSkinningTransforms`:
 /// `skinningTransform = inverse(bindTransform) · jointSkelTransform`, with
-/// `joint` in skeleton space.
-pub fn skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
-    assert_eq!(
-        joint.len(),
-        inverse_bind.len(),
-        "skinning_transforms: array lengths must match"
-    );
-    joint.iter().zip(inverse_bind).map(|(j, b)| *b * *j).collect()
+/// `joint` in skeleton space. `None` unless the two arrays have the same
+/// length.
+pub fn skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> Option<Vec<gf::Mat4d>> {
+    (joint.len() == inverse_bind.len()).then(|| joint.iter().zip(inverse_bind).map(|(j, b)| *b * *j).collect())
 }
 
 /// Pre-compute the per-joint inverse-bind transforms used by
 /// [`skinning_transforms`]. Joints whose bind transform is
-/// singular get [`gf::Mat4d::IDENTITY`] — same fallback as Pixar's
-/// reference implementation.
+/// singular get [`gf::Mat4d::IDENTITY`], where C++ `GfMatrix4d::GetInverse`
+/// answers `FLT_MAX` times the identity.
 pub fn inverse_bind_transforms(bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
     bind.iter()
         .map(|m| m.inverse().unwrap_or(gf::Mat4d::IDENTITY))
@@ -337,6 +330,7 @@ fn lerp_offsets(a: &[gf::Vec3f], b: &[gf::Vec3f], t: f32, len: usize) -> Vec<gf:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skel::NO_PARENT;
 
     fn translation(x: f64, y: f64, z: f64) -> gf::Mat4d {
         gf::Mat4d::translation([x, y, z])
@@ -346,10 +340,17 @@ mod tests {
     fn joint_local_to_skel_chains_translations() {
         let topo = Topology::from_parents(vec![NO_PARENT, 0]);
         let local = vec![translation(1.0, 0.0, 0.0), translation(0.0, 1.0, 0.0)];
-        let skel = joint_local_to_skel_space(&local, &topo);
+        let skel = joint_local_to_skel_space(&local, &topo).expect("ordered joints");
         assert_eq!(skel[0][(3, 0)], 1.0);
         assert_eq!(skel[1][(3, 0)], 1.0);
         assert_eq!(skel[1][(3, 1)], 1.0);
+    }
+
+    #[test]
+    fn misordered_parent_rejected() {
+        let topo = Topology::from_parents(vec![1, NO_PARENT]);
+        assert!(joint_local_to_skel_space(&[gf::Mat4d::IDENTITY; 2], &topo).is_none());
+        assert!(joint_local_to_skel_space(&[gf::Mat4d::IDENTITY], &topo).is_none());
     }
 
     #[test]
@@ -357,7 +358,7 @@ mod tests {
         let bind = vec![translation(1.0, 0.0, 0.0)];
         let inv_bind = inverse_bind_transforms(&bind);
         let current = vec![translation(1.0, 2.0, 0.0)];
-        let skin = skinning_transforms(&current, &inv_bind);
+        let skin = skinning_transforms(&current, &inv_bind).expect("one inverse per joint");
         let p = skin[0].transform_affine(gf::vec3d(1.0, 0.0, 0.0));
         assert_eq!(p, gf::vec3d(1.0, 2.0, 0.0));
     }

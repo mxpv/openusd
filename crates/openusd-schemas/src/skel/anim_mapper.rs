@@ -27,9 +27,9 @@ pub struct AnimMapper {
     /// or [`MISSING`] if the target joint isn't in the source.
     indices: Vec<i32>,
     /// Number of joints the mapper was constructed for on the source
-    /// side. [`remap`] / [`remap_with_stride`] assert that incoming
-    /// arrays match this length so callers fail fast on a mismatch
-    /// rather than picking up garbage.
+    /// side. Every remap checks incoming arrays against this length:
+    /// [`remap`] / [`remap_with_stride`] panic on a mismatch, and
+    /// [`remap_into`](Self::remap_into) answers `false`.
     source_len: usize,
     /// `true` iff `indices == [0, 1, 2, …, n-1]` AND `source.len() ==
     /// target.len()`. When set, [`remap`] is a straight clone.
@@ -109,26 +109,36 @@ impl AnimMapper {
     ///
     /// Panics when `source.len() != self.source_len()`.
     pub fn remap<T: Clone>(&self, source: &[T], default: T) -> Vec<T> {
-        assert_eq!(
-            source.len(),
-            self.source_len,
+        let mut target = vec![default; self.indices.len()];
+        assert!(
+            self.remap_into(source, &mut target),
             "AnimMapper::remap: source length {} != mapper source length {}",
             source.len(),
             self.source_len
         );
-        if self.identity {
-            return source.to_vec();
+        target
+    }
+
+    /// Copy each element of `source` (one per source joint) into its slot of
+    /// `target` (one per target joint), leaving the slots of target joints the
+    /// source does not cover as they are (C++ `UsdSkelAnimMapper::Remap` over
+    /// a target that already holds values). `false`, with `target` untouched,
+    /// when either length differs from the mapper's.
+    #[must_use]
+    pub fn remap_into<T: Clone>(&self, source: &[T], target: &mut [T]) -> bool {
+        if source.len() != self.source_len || target.len() != self.indices.len() {
+            return false;
         }
-        self.indices
-            .iter()
-            .map(|&i| {
-                if i == MISSING {
-                    default.clone()
-                } else {
-                    source[i as usize].clone()
-                }
-            })
-            .collect()
+        if self.identity {
+            target.clone_from_slice(source);
+            return true;
+        }
+        for (slot, &index) in target.iter_mut().zip(&self.indices) {
+            if let Ok(index) = usize::try_from(index) {
+                slot.clone_from(&source[index]);
+            }
+        }
+        true
     }
 
     /// Remap a flat array of `stride`-sized slots — useful for

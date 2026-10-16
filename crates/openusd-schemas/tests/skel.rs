@@ -212,16 +212,17 @@ fn binding_of(stage: &Stage, root_path: &str, prim: &str) -> Result<Option<SkelB
 fn skeleton_resolver_pre_computes_inverse_bind() -> Result<()> {
     let stage = open()?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
-    let resolver = SkeletonResolver::from_skeleton(&skl)?;
+    let resolver = SkeletonResolver::from_skeleton(&skl)?.expect("valid topology");
 
     assert_eq!(resolver.topology().joint_count(), 3);
     assert_eq!(resolver.topology().parents(), &[NO_PARENT, 0, 1]);
-    assert_eq!(resolver.inverse_bind_transforms().len(), 3);
+    assert!(resolver.has_bind_pose() && resolver.has_rest_pose());
+    assert_eq!(resolver.inverse_bind_transforms().map(<[_]>::len), Some(3));
 
     // rest_pose composed into skel-space: identity rests with the chain
     // (0,0,0) → (0,1,0) → (0,2,0) should produce skel-space translations
     // matching the bind transforms.
-    let skel_space = resolver.rest_pose_skel_space();
+    let skel_space = resolver.rest_pose_skel_space().expect("rest pose");
     assert_eq!(skel_space[1].0[12..16], [0.0, 1.0, 0.0, 1.0]);
     assert_eq!(skel_space[2].0[12..16], [0.0, 2.0, 0.0, 1.0]);
     Ok(())
@@ -241,11 +242,15 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<(), SchemaErr
     assert_eq!(resolver.joint_order_len(), 2);
     assert_eq!(resolver.skinning_method(), SkinningMethod::ClassicLinear);
 
-    let identity = Mat4d::IDENTITY;
-    let skel_xforms = vec![identity; 3];
-    let mesh_xforms = resolver.remap_transforms(&skel_xforms);
-    assert_eq!(mesh_xforms.len(), 2);
-    assert_eq!(mesh_xforms[0], identity);
+    // Skeleton joints 1 and 2 land at mesh joints 0 and 1.
+    let skel_xforms: Vec<_> = (0..3).map(|i| Mat4d::translation([f64::from(i), 0.0, 0.0])).collect();
+    let mesh_xforms = resolver
+        .remap_transforms(&skel_xforms)
+        .expect("one transform per joint");
+    assert_eq!(mesh_xforms, skel_xforms[1..]);
+    // Too few skeleton transforms are rejected.
+    assert!(resolver.remap_transforms(&[]).is_none());
+    assert!(resolver.skinned_points(&[Vec3f::default(); 4], &[]).is_none());
     Ok(())
 }
 
@@ -294,7 +299,7 @@ fn topology_unit_methods() {
     assert_eq!(topo.joint_count(), 3);
     assert!(topo.is_root(0));
     assert!(!topo.is_root(1));
-    assert_eq!(topo.parent(2), 1);
+    assert_eq!(topo.parent(2), Some(1));
     topo.validate().expect("valid");
 }
 
@@ -388,7 +393,7 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     let stage = open()?;
     let q = anim_query(&stage)?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
-    let resolver = SkeletonResolver::from_skeleton(&skl)?;
+    let resolver = SkeletonResolver::from_skeleton(&skl)?.expect("valid topology");
 
     let locals = q.joint_local_transforms(0.0)?;
     assert_eq!(locals.len(), 3);
@@ -397,8 +402,12 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
 
     // At t=0 the animated pose matches the bind pose, so every skinning
     // transform is the identity.
+    let mapper = AnimMapper::new(q.joint_order(), resolver.joint_order());
+    let locals = resolver
+        .joint_local_transforms(&mapper, &locals)
+        .expect("covered joints");
     let skinning = resolver.skinning_transforms_from_local(&locals);
-    assert_eq!(skinning, vec![Mat4d::IDENTITY; 3]);
+    assert_eq!(skinning, Some(vec![Mat4d::IDENTITY; 3]));
     Ok(())
 }
 
@@ -706,5 +715,102 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
         binding.animation_source.as_ref().map(|a| a.path().as_str()),
         Some("/R/RigAnim")
     );
+    Ok(())
+}
+
+#[test]
+fn sparse_anim_fills_rest() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Skeleton "Rig" {
+    uniform token[] joints = ["A", "A/B"]
+    uniform matrix4d[] restTransforms = [
+        ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) ),
+        ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ),
+    ]
+}
+def Skeleton "Bare" {
+    uniform token[] joints = ["A", "A/B"]
+}
+"#,
+    )?;
+    let anim_joints = ["A/B".to_string()];
+    let anim_local = [Mat4d::translation([0.0, 5.0, 0.0])];
+
+    let rig = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
+    let rig = SkeletonResolver::from_skeleton(&rig)?.expect("valid topology");
+    let mapper = AnimMapper::new(&anim_joints, rig.joint_order());
+    assert_eq!(
+        rig.joint_local_transforms(&mapper, &anim_local),
+        Some(vec![
+            Mat4d::translation([1.0, 0.0, 0.0]),
+            Mat4d::translation([0.0, 5.0, 0.0])
+        ])
+    );
+    // The animation's arrays must match its own joint order.
+    assert!(rig.joint_local_transforms(&mapper, &[]).is_none());
+
+    // Without a rest pose the uncovered joint has no transform.
+    let bare = Skeleton::get(&stage, "/Bare")?.expect("Skeleton");
+    let bare = SkeletonResolver::from_skeleton(&bare)?.expect("valid topology");
+    assert!(bare.joint_local_transforms(&mapper, &anim_local).is_none());
+    Ok(())
+}
+
+#[test]
+fn mismatched_bind_ignored() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Skeleton "Rig" {
+    uniform token[] joints = ["A", "A/B"]
+    uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]
+    uniform matrix4d[] restTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]
+}
+"#,
+    )?;
+    let rig = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
+    let rig = SkeletonResolver::from_skeleton(&rig)?.expect("valid topology");
+    assert!(!rig.has_bind_pose());
+    assert!(!rig.has_rest_pose());
+    assert!(rig.skinning_transforms(&[Mat4d::IDENTITY; 2]).is_none());
+    assert!(rig.rest_pose_skel_space().is_none());
+    Ok(())
+}
+
+#[test]
+fn invalid_topology_rejected() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Skeleton "Rig" {
+    uniform token[] joints = ["A/B", "A"]
+}
+"#,
+    )?;
+    let rig = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
+    assert!(SkeletonResolver::from_skeleton(&rig)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn empty_joint_subset_maps_none() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A"]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = []
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let resolver = SkinningResolver::new(&binding)?;
+    assert_eq!(resolver.joint_order_len(), 0);
+    assert!(resolver.rigid_transform(&[Mat4d::IDENTITY]).is_none());
     Ok(())
 }
