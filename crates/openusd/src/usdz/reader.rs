@@ -5,6 +5,7 @@ use std::io::{self, Cursor, Read};
 use std::path::Path;
 use std::str;
 
+use zip::read::{ArchiveOffset, Config};
 use zip::{CompressionMethod, ZipArchive};
 
 use super::ArchiveError;
@@ -35,9 +36,16 @@ impl Archive {
     }
 
     /// A package over `asset`, reading only its central directory.
+    ///
+    /// The archive starts at the asset's first byte, as C++ `SdfZipFile`
+    /// reads it, so the directory is found from the offsets its end record
+    /// gives, without searching the asset for it.
     pub fn from_asset(asset: Box<dyn ar::Asset>) -> Result<Self, ArchiveError> {
         let bytes = asset.shared_buffer();
-        let archive = ZipArchive::new(asset)?;
+        let config = Config {
+            archive_offset: ArchiveOffset::Known(0),
+        };
+        let archive = ZipArchive::with_config(config, asset)?;
         Ok(Archive { archive, bytes })
     }
 
