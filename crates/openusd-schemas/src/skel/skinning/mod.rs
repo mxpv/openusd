@@ -11,8 +11,8 @@ use openusd::gf;
 pub(crate) use influences::has_shape;
 pub use influences::{interleave_influences, normalize_weights, resize_influences, resize_weights, sort_influences};
 pub use transforms::{
-    JointTransformComponents, decompose_transform, decompose_transforms, inverse_bind_transforms,
-    joint_local_to_skel_space, joint_skel_to_local, joints_extent, make_transforms, skinning_transforms,
+    JointTransformComponents, decompose_transform, decompose_transforms, inverse_transforms, joint_local_to_skel_space,
+    joint_skel_to_local, joints_extent, make_transforms, skinning_transforms,
 };
 
 use super::SkinningMethod;

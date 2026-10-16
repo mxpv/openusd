@@ -64,7 +64,7 @@ pub fn joint_skel_to_local(
     }
     // TODO(perf): only a joint with children needs its inverse; the inverses
     // are independent of each other (TODO(rayon)).
-    let inverse: Vec<gf::Mat4d> = skel.iter().map(|transform| transform.inverse_or_max()).collect();
+    let inverse = inverse_transforms(skel);
     skel.iter()
         .enumerate()
         .map(|(i, &transform)| match topology.parent(i) {
@@ -86,11 +86,11 @@ pub fn skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> O
     (joint.len() == inverse_bind.len()).then(|| joint.iter().zip(inverse_bind).map(|(j, b)| *b * *j).collect())
 }
 
-/// Pre-compute the per-joint inverse-bind transforms used by
-/// [`skinning_transforms`], each as [`gf::Mat4d::inverse_or_max`] answers it
-/// (C++ `UsdSkel_SkelDefinition`'s `GetInverse`).
-pub fn inverse_bind_transforms(bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
-    bind.iter().map(|bind| bind.inverse_or_max()).collect()
+/// The inverse of each of `xforms`, as [`gf::Mat4d::inverse_or_max`] answers
+/// it (C++ `GfMatrix4d::GetInverse`): the inverse bind transforms
+/// [`skinning_transforms`] takes, or the inverse rest transforms.
+pub fn inverse_transforms(xforms: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+    xforms.iter().map(|xform| xform.inverse_or_max()).collect()
 }
 
 /// The box around the joints' pivots, the translations of `xforms`, each
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn skinning_transform_is_inverse_bind_times_current() {
         let bind = vec![translation(1.0, 0.0, 0.0)];
-        let inv_bind = inverse_bind_transforms(&bind);
+        let inv_bind = inverse_transforms(&bind);
         let current = vec![translation(1.0, 2.0, 0.0)];
         let skin = skinning_transforms(&current, &inv_bind).expect("one inverse per joint");
         let p = skin[0].transform_affine(gf::vec3d(1.0, 0.0, 0.0));

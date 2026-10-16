@@ -1,8 +1,8 @@
 //! UsdSkel schema views and skinning toolkit.
 //!
 //! Typed value-views over a composed [`openusd::usd::Stage`], mirroring Pixar's
-//! `UsdSkel` family, plus the time-independent half of Pixar's UsdSkel object
-//! model: topology, animation-to-skeleton mappers, per-mesh skinning
+//! `UsdSkel` family, plus Pixar's UsdSkel object model: topology,
+//! animation-to-skeleton mappers, the skeleton query, per-mesh skinning
 //! resolvers, and pure-math helpers for linear blend skinning and blend-shape
 //! application.
 //!
@@ -21,9 +21,9 @@
 //! evaluation is handled by [`AnimQuery`], which delegates to
 //! [`openusd::usd::Attribute::get`] and inherits the stage's interpolation mode
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
-//! The static resolvers ([`SkeletonResolver`] / [`SkinningResolver`]) take
-//! pre-evaluated joint poses, so callers typically wire `AnimQuery` into
-//! them at each frame. [`discover_bindings`] walks a `Root` subtree and
+//! [`SkeletonQuery`] binds a skeleton to the animation it inherits and poses
+//! it at any time; [`SkinningResolver`] takes the skinning transforms it
+//! answers. [`discover_bindings`] walks a `Root` subtree and
 //! resolves every skinnable prim's inherited skeleton and binding properties,
 //! with the animation bound to that skeleton
 //! (C++ `UsdSkelCache::ComputeSkelBindings`).
@@ -39,7 +39,7 @@
 //! # Example
 //!
 //! ```
-//! use openusd_schemas::skel::{self, Skeleton, SkeletonResolver, SkeletonSchema};
+//! use openusd_schemas::skel::{self, Skeleton, SkeletonQuery, SkeletonSchema};
 //! use openusd::usd::Stage;
 //!
 //! let stage = Stage::builder()
@@ -50,8 +50,8 @@
 //!     .set(openusd::sdf::Value::TokenVec(vec!["Root".into(), "Root/Hip".into()])).unwrap();
 //!
 //! let skel = Skeleton::get(&stage, "/Rig").unwrap().expect("Skeleton");
-//! let resolver = SkeletonResolver::from_skeleton(&skel).unwrap().expect("valid topology");
-//! assert_eq!(resolver.topology().joint_count(), 2);
+//! let query = SkeletonQuery::new(&skel).unwrap().expect("valid topology");
+//! assert_eq!(query.topology().joint_count(), 2);
 //! ```
 
 openusd::include_schema!("usdSkel");
@@ -69,7 +69,7 @@ pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::AnimQuery;
 pub use binding::{SkelBinding, discover_bindings, is_skinnable};
 pub use decode::{INBETWEENS_NAMESPACE, Inbetween};
-pub use skeleton_query::SkeletonResolver;
+pub use skeleton_query::SkeletonQuery;
 pub use skinning_query::SkinningResolver;
 pub use topology::{NO_PARENT, Topology, TopologyError};
 

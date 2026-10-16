@@ -1,17 +1,17 @@
 //! Integration tests for the UsdSkel views against a fixture that exercises
-//! every schema family, plus the time-independent object-model layer
-//! (topology, AnimMapper, SkeletonResolver, SkinningResolver, binding
-//! discovery).
+//! every schema family, plus the object-model layer (topology, AnimMapper,
+//! SkeletonQuery, SkinningResolver, binding discovery).
 
 use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
-use openusd_schemas::geom::BoundableSchema;
+use openusd_schemas::geom::{BoundableSchema, XformCache, XformableExt};
 use openusd_schemas::skel::{
-    AnimMapper, AnimQuery, Animation, BindingAPI, BlendShape, BlendShapeSchema, NO_PARENT, Root, SkelBinding, Skeleton,
-    SkeletonResolver, SkeletonSchema, SkinningMethod, SkinningResolver, Topology, discover_bindings,
+    AnimMapper, AnimQuery, Animation, AnimationSchema, BindingAPI, BlendShape, BlendShapeSchema, NO_PARENT, Root,
+    SkelBinding, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningResolver, Topology,
+    discover_bindings, skinning,
 };
 
 mod common;
@@ -209,20 +209,25 @@ fn binding_of(stage: &Stage, root_path: &str, prim: &str) -> Result<Option<SkelB
 }
 
 #[test]
-fn skeleton_resolver_pre_computes_inverse_bind() -> Result<()> {
+fn skeleton_query_rest_pose() -> Result<()> {
     let stage = open()?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
-    let resolver = SkeletonResolver::from_skeleton(&skl)?.expect("valid topology");
+    let query = SkeletonQuery::new(&skl)?.expect("valid topology");
 
-    assert_eq!(resolver.topology().joint_count(), 3);
-    assert_eq!(resolver.topology().parents(), &[NO_PARENT, 0, 1]);
-    assert!(resolver.has_bind_pose() && resolver.has_rest_pose());
-    assert_eq!(resolver.inverse_bind_transforms().map(<[_]>::len), Some(3));
+    assert_eq!(query.topology().joint_count(), 3);
+    assert_eq!(query.topology().parents(), &[NO_PARENT, 0, 1]);
+    assert!(query.has_bind_pose() && query.has_rest_pose());
+    assert_eq!(query.bind_transforms().map(<[_]>::len), Some(3));
+    assert_eq!(query.inverse_bind_transforms().map(<[_]>::len), Some(3));
+    assert_eq!(
+        query.anim_query().map(|q| q.animation().path().as_str()),
+        Some("/World/Character/Anim")
+    );
 
     // rest_pose composed into skel-space: identity rests with the chain
     // (0,0,0) → (0,1,0) → (0,2,0) should produce skel-space translations
     // matching the bind transforms.
-    let skel_space = resolver.rest_pose_skel_space().expect("rest pose");
+    let skel_space = query.rest_skel_transforms().expect("rest pose");
     assert_eq!(skel_space[1].0[12..16], [0.0, 1.0, 0.0, 1.0]);
     assert_eq!(skel_space[2].0[12..16], [0.0, 2.0, 0.0, 1.0]);
     Ok(())
@@ -393,11 +398,11 @@ fn skel_anim_query_blend_shape_weights_lerp() -> Result<()> {
 }
 
 #[test]
-fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> {
+fn anim_drives_skinning() -> Result<()> {
     let stage = open()?;
     let q = anim_query(&stage)?;
     let skl = Skeleton::get(&stage, "/World/Character/Rig")?.unwrap();
-    let resolver = SkeletonResolver::from_skeleton(&skl)?.expect("valid topology");
+    let query = SkeletonQuery::new(&skl)?.expect("valid topology");
 
     let locals = q
         .joint_local_transforms(TimeCode::new(0.0))?
@@ -408,11 +413,7 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
 
     // At t=0 the animated pose matches the bind pose, so every skinning
     // transform is the identity.
-    let mapper = AnimMapper::new(q.joint_order(), resolver.joint_order());
-    let locals = resolver
-        .joint_local_transforms(&mapper, &locals)
-        .expect("covered joints");
-    let skinning = resolver.skinning_transforms_from_local(&locals);
+    let skinning = query.skinning_transforms(TimeCode::new(0.0))?;
     assert_eq!(skinning, Some(vec![Mat4d::IDENTITY; 3]));
     Ok(())
 }
@@ -728,38 +729,48 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
 fn sparse_anim_fills_rest() -> Result<()> {
     let stage = from_usda(
         r#"#usda 1.0
-def Skeleton "Rig" {
+def SkelAnimation "Anim" {
+    uniform token[] joints = ["A/B"]
+    float3[] translations = [(0, 5, 0)]
+    quatf[] rotations = [(1, 0, 0, 0)]
+    half3[] scales = [(1, 1, 1)]
+}
+def Skeleton "Rig" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:animationSource = </Anim>
     uniform token[] joints = ["A", "A/B"]
     uniform matrix4d[] restTransforms = [
         ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) ),
         ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ),
     ]
 }
-def Skeleton "Bare" {
+def Skeleton "Bare" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:animationSource = </Anim>
     uniform token[] joints = ["A", "A/B"]
 }
 "#,
     )?;
-    let anim_joints = ["A/B".to_string()];
-    let anim_local = [Mat4d::translation([0.0, 5.0, 0.0])];
-
     let rig = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
-    let rig = SkeletonResolver::from_skeleton(&rig)?.expect("valid topology");
-    let mapper = AnimMapper::new(&anim_joints, rig.joint_order());
+    let rig = SkeletonQuery::new(&rig)?.expect("valid topology");
+    assert!(rig.mapper().is_some_and(AnimMapper::is_sparse));
     assert_eq!(
-        rig.joint_local_transforms(&mapper, &anim_local),
+        rig.joint_local_transforms(None)?,
         Some(vec![
             Mat4d::translation([1.0, 0.0, 0.0]),
             Mat4d::translation([0.0, 5.0, 0.0])
         ])
     );
-    // The animation's arrays must match its own joint order.
-    assert!(rig.joint_local_transforms(&mapper, &[]).is_none());
+    assert_eq!(
+        rig.joint_skel_transforms(None)?,
+        Some(vec![
+            Mat4d::translation([1.0, 0.0, 0.0]),
+            Mat4d::translation([1.0, 5.0, 0.0])
+        ])
+    );
 
     // Without a rest pose the uncovered joint has no transform.
     let bare = Skeleton::get(&stage, "/Bare")?.expect("Skeleton");
-    let bare = SkeletonResolver::from_skeleton(&bare)?.expect("valid topology");
-    assert!(bare.joint_local_transforms(&mapper, &anim_local).is_none());
+    let bare = SkeletonQuery::new(&bare)?.expect("valid topology");
+    assert!(bare.joint_local_transforms(None)?.is_none());
     Ok(())
 }
 
@@ -775,11 +786,13 @@ def Skeleton "Rig" {
 "#,
     )?;
     let rig = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
-    let rig = SkeletonResolver::from_skeleton(&rig)?.expect("valid topology");
+    let rig = SkeletonQuery::new(&rig)?.expect("valid topology");
     assert!(!rig.has_bind_pose());
     assert!(!rig.has_rest_pose());
-    assert!(rig.skinning_transforms(&[Mat4d::IDENTITY; 2]).is_none());
-    assert!(rig.rest_pose_skel_space().is_none());
+    assert!(rig.skinning_transforms(None)?.is_none());
+    assert!(rig.rest_skel_transforms().is_none());
+    // Without an animation or a rest pose there is no pose at all.
+    assert!(rig.joint_local_transforms(None)?.is_none());
     Ok(())
 }
 
@@ -793,7 +806,7 @@ def Skeleton "Rig" {
 "#,
     )?;
     let rig = Skeleton::get(&stage, "/Rig")?.expect("Skeleton");
-    assert!(SkeletonResolver::from_skeleton(&rig)?.is_none());
+    assert!(SkeletonQuery::new(&rig)?.is_none());
     Ok(())
 }
 
@@ -873,5 +886,236 @@ def SkelAnimation "Mismatched" {
     // Weights are answered as authored; unauthored weights are `None`.
     assert_eq!(mismatched.blend_shape_weights(None)?, Some(vec![0.5, 0.25, 1.0]));
     assert!(short.blend_shape_weights(None)?.is_none());
+    Ok(())
+}
+
+/// A deterministic stand-in for the C++ test's `random.random()`.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// A rotation about each axis and a translation, with unit scale, as the
+    /// C++ test's `_RandomXf` builds: the components and the matrix.
+    fn transform(&mut self) -> (Vec3f, Quatf, Mat4d) {
+        let rotation = Mat4d::rotation_x(self.next() * 6.0)
+            * Mat4d::rotation_y(self.next() * 6.0)
+            * Mat4d::rotation_z(self.next() * 6.0);
+        let translation = gf::vec3f(
+            ((self.next() - 0.5) * 10.0) as f32,
+            ((self.next() - 0.5) * 10.0) as f32,
+            ((self.next() - 0.5) * 10.0) as f32,
+        );
+        let rotation = rotation.extract_rotation_quat().to_f32();
+        (
+            translation,
+            rotation,
+            Mat4d::from_trs(translation, rotation, gf::vec3f(1.0, 1.0, 1.0)),
+        )
+    }
+}
+
+fn tokens(names: &[&str]) -> Value {
+    Value::TokenVec(names.iter().map(|name| (*name).into()).collect())
+}
+
+fn assert_close(a: &[Mat4d], b: &[Mat4d]) {
+    assert_eq!(a.len(), b.len());
+    for (a, b) in a.iter().zip(b) {
+        assert!(
+            a.0.iter().zip(b.0.iter()).all(|(x, y)| (x - y).abs() < 1e-4),
+            "{a:?} != {b:?}"
+        );
+    }
+}
+
+/// Port of C++ `testUsdSkelSkeletonQuery.py`: a skeleton under an animated
+/// root, bound to an animation that leaves its last joint out.
+#[test]
+fn skeleton_query_poses() -> Result<(), SchemaError> {
+    let mut random = Lcg(0);
+    let frames: u32 = 10;
+    let stage = memory()?;
+    let root = Root::define(&stage, "/SkelRoot")?;
+    let anim = Animation::define(&stage, "/SkelRoot/Anim")?;
+    let skel = Skeleton::define(&stage, "/SkelRoot/Skel")?;
+    let binding = BindingAPI::apply(&stage.prim("/SkelRoot")?)?;
+    binding.create_skeleton_rel()?.add_target("/SkelRoot/Skel")?;
+    binding.create_animation_source_rel()?.add_target("/SkelRoot/Anim")?;
+
+    let joints = ["A", "A/B", "A/B/C", "D", "D/E/F"];
+    let (a, ab, abc, d, def) = (0, 1, 2, 3, 4);
+    skel.create_joints_attr()?.set(tokens(&joints))?;
+    let rest: Vec<Mat4d> = joints.iter().map(|_| random.transform().2).collect();
+    let topology = Topology::from_joint_paths(&joints.map(String::from));
+    let bind = skinning::joint_local_to_skel_space(&rest, &topology, None).expect("ordered joints");
+    skel.create_bind_transforms_attr()?.set(Value::Matrix4dVec(bind))?;
+    skel.create_rest_transforms_attr()?
+        .set(Value::Matrix4dVec(rest.clone()))?;
+
+    let root_op = root.make_matrix_xform()?;
+    let mut root_xforms = Vec::new();
+    for frame in 0..frames {
+        let xform = random.transform().2;
+        root_op.set_at(xform, TimeCode::new(f64::from(frame)))?;
+        root_xforms.push(xform);
+    }
+
+    // The animation leaves the last joint out.
+    anim.create_joints_attr()?.set(tokens(&joints[..4]))?;
+    let (translations, rotations, scales) = (
+        anim.create_translations_attr()?,
+        anim.create_rotations_attr()?,
+        anim.create_scales_attr()?,
+    );
+    scales.set(Value::Vec3hVec(vec![gf::Vec3h::from([gf::f16::from_f32(1.0); 3]); 4]))?;
+    let mut anim_xforms = Vec::new();
+    for frame in 0..frames {
+        let (t, r): (Vec<Vec3f>, Vec<Quatf>) = (0..4)
+            .map(|_| {
+                let (t, r, _) = random.transform();
+                (t, r)
+            })
+            .unzip();
+        let time = TimeCode::new(f64::from(frame));
+        translations.clone().set_at(Value::Vec3fVec(t.clone()), time)?;
+        rotations.clone().set_at(Value::QuatfVec(r.clone()), time)?;
+        anim_xforms.push(skinning::make_transforms(&t, &r, &[gf::vec3f(1.0, 1.0, 1.0); 4]).expect("one of each"));
+    }
+
+    let query = SkeletonQuery::new(&skel)?.expect("valid topology");
+    assert_close(query.rest_local_transforms().expect("rest pose"), &rest);
+    let rest_skel = vec![
+        rest[a],
+        rest[ab] * rest[a],
+        rest[abc] * rest[ab] * rest[a],
+        rest[d],
+        rest[def] * rest[d],
+    ];
+    assert_close(query.rest_skel_transforms().expect("rest pose"), &rest_skel);
+
+    for frame in 0..frames {
+        let time = TimeCode::new(f64::from(frame));
+        let xforms = &anim_xforms[frame as usize];
+        let root = root_xforms[frame as usize];
+        let mut cache = XformCache::new(time);
+
+        let local: Vec<Mat4d> = xforms.iter().copied().chain([rest[def]]).collect();
+        assert_close(&query.joint_local_transforms(time)?.expect("posed"), &local);
+
+        let skel_space = vec![
+            xforms[a],
+            xforms[ab] * xforms[a],
+            xforms[abc] * xforms[ab] * xforms[a],
+            xforms[d],
+            rest[def] * xforms[d],
+        ];
+        assert_close(&query.joint_skel_transforms(time)?.expect("posed"), &skel_space);
+
+        let world: Vec<Mat4d> = skel_space.iter().map(|&xform| xform * root).collect();
+        assert_close(&query.joint_world_transforms(&mut cache)?.expect("posed"), &world);
+
+        let rest_relative: Vec<Mat4d> = local
+            .iter()
+            .zip(&rest)
+            .map(|(&local, rest)| local * rest.inverse().expect("rigid"))
+            .collect();
+        assert_close(
+            &query.joint_rest_relative_transforms(time)?.expect("rest pose"),
+            &rest_relative,
+        );
+
+        let rest_world: Vec<Mat4d> = rest_skel.iter().map(|&xform| xform * root).collect();
+        assert_close(
+            &query.rest_world_transforms(&mut cache)?.expect("rest pose"),
+            &rest_world,
+        );
+    }
+
+    // An inactive animation binds nothing, so the pose is the rest pose.
+    stage.prim("/SkelRoot/Anim")?.set_active(false)?;
+    let query = SkeletonQuery::new(&skel)?.expect("valid topology");
+    assert!(query.anim_query().is_none());
+    assert_close(
+        &query.joint_local_transforms(TimeCode::new(5.0))?.expect("rest pose"),
+        &rest,
+    );
+    assert_eq!(
+        query.joint_rest_relative_transforms(None)?,
+        Some(vec![Mat4d::IDENTITY; 5])
+    );
+    stage.prim("/SkelRoot/Anim")?.set_active(true)?;
+
+    // Blocked translations leave the animation nothing to compose.
+    translations.block()?;
+    let query = SkeletonQuery::new(&skel)?.expect("valid topology");
+    assert_close(
+        &query.joint_local_transforms(TimeCode::new(5.0))?.expect("rest pose"),
+        &rest,
+    );
+
+    // An inactive skeleton has no query.
+    stage.prim("/SkelRoot/Skel")?.set_active(false)?;
+    assert!(SkeletonQuery::new(&skel)?.is_none());
+    Ok(())
+}
+
+/// A non-identity rest pose survives an animation that cannot compute,
+/// rather than being overwritten with identity components.
+#[test]
+fn rest_on_bad_anim() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelAnimation "NoTranslations" {
+    uniform token[] joints = ["A", "A/B"]
+    quatf[] rotations = [(1, 0, 0, 0), (1, 0, 0, 0)]
+    half3[] scales = [(1, 1, 1), (1, 1, 1)]
+}
+def SkelAnimation "BlockedRotations" {
+    uniform token[] joints = ["A", "A/B"]
+    float3[] translations = [(0, 0, 0), (0, 0, 0)]
+    quatf[] rotations = None
+    half3[] scales = [(1, 1, 1), (1, 1, 1)]
+}
+def SkelAnimation "ShortScales" {
+    uniform token[] joints = ["A", "A/B"]
+    float3[] translations = [(0, 0, 0), (0, 0, 0)]
+    quatf[] rotations = [(1, 0, 0, 0), (1, 0, 0, 0)]
+    half3[] scales = [(1, 1, 1)]
+}
+class Skeleton "Rig" {
+    uniform token[] joints = ["A", "A/B"]
+    uniform matrix4d[] restTransforms = [
+        ( (2, 0, 0, 0), (0, 2, 0, 0), (0, 0, 2, 0), (1, 2, 3, 1) ),
+        ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 4, 0, 1) ),
+    ]
+}
+def Skeleton "NoTranslationsRig" (inherits = </Rig> prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:animationSource = </NoTranslations>
+}
+def Skeleton "BlockedRotationsRig" (inherits = </Rig> prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:animationSource = </BlockedRotations>
+}
+def Skeleton "ShortScalesRig" (inherits = </Rig> prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:animationSource = </ShortScales>
+}
+"#,
+    )?;
+    let rest = vec![
+        Mat4d::scale([2.0, 2.0, 2.0]) * Mat4d::translation([1.0, 2.0, 3.0]),
+        Mat4d::translation([0.0, 4.0, 0.0]),
+    ];
+    for rig in ["/NoTranslationsRig", "/BlockedRotationsRig", "/ShortScalesRig"] {
+        let skel = Skeleton::get(&stage, rig)?.expect("Skeleton");
+        let query = SkeletonQuery::new(&skel)?.expect("valid topology");
+        assert!(query.anim_query().is_some(), "{rig}");
+        assert_eq!(query.joint_local_transforms(None)?, Some(rest.clone()), "{rig}");
+    }
     Ok(())
 }

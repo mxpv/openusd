@@ -42,6 +42,16 @@ impl<T> Bound<T> {
     }
 }
 impl Skeleton {
+    /// The active animation the skeleton binds, inherited down namespace to
+    /// the Skeleton prim ([`BindingAPI::inherited_animation_source`]; C++
+    /// `UsdSkelCache` binds no animation from an inactive prim).
+    pub fn animation_source(&self) -> Result<Option<Animation>> {
+        match BindingAPI::from_prim_unchecked(self.prim().clone()).inherited_animation_source()? {
+            Some(anim) if anim.is_active()? => Ok(Some(anim)),
+            _ => Ok(None),
+        }
+    }
+
     /// The `joints` paths as text, which the topology is read from; empty when
     /// unauthored.
     pub fn joint_paths(&self) -> Result<Vec<String>> {

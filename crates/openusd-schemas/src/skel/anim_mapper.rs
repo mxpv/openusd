@@ -97,6 +97,13 @@ impl AnimMapper {
         self.full
     }
 
+    /// `true` when either joint order is empty, so nothing maps (C++
+    /// `IsNull`). A mapper between two non-empty orders that share no joint
+    /// is sparse, not null.
+    pub fn is_null(&self) -> bool {
+        self.source_len == 0 || self.indices.is_empty()
+    }
+
     /// `true` when at least one target joint is missing from the
     /// source — i.e. [`remap`](Self::remap) will fall back to the caller's
     /// `default` for some entries.

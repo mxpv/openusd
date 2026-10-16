@@ -23,8 +23,8 @@ pub struct SkelBinding {
     pub prim: Prim,
     /// The skeleton bound to `prim`.
     pub skeleton: Skeleton,
-    /// The animation bound to `skeleton`, inherited down namespace from the
-    /// skeleton prim (C++ `UsdSkelSkeletonQuery::GetAnimQuery`).
+    /// The active animation bound to `skeleton` ([`Skeleton::animation_source`];
+    /// C++ `UsdSkelSkeletonQuery::GetAnimQuery`).
     pub animation_source: Option<Animation>,
     pub(super) properties: BindingProperties,
 }
@@ -103,11 +103,7 @@ pub fn discover_bindings(root: &Root) -> Result<Vec<SkelBinding>> {
                 found.clone()
             } else {
                 let active = skeleton.is_active()?;
-                let animation_source = if active {
-                    BindingAPI::from_prim_unchecked(skeleton.prim().clone()).inherited_animation_source()?
-                } else {
-                    None
-                };
+                let animation_source = if active { skeleton.animation_source()? } else { None };
                 skeletons.insert(skeleton.path().clone(), (active, animation_source.clone()));
                 (active, animation_source)
             };
