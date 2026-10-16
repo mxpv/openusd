@@ -272,19 +272,22 @@ impl Dependencies {
     }
 
     /// Drop the registrations of every prim in `prims`. The first prim that
-    /// reaches a site drops all of the site's dependents in `prims`, so a
-    /// later prim reading the same site scans only the dependents that stay.
+    /// reaches a site drops all of the site's dependents in `prims`, so each
+    /// site's dependent list is filtered once.
     ///
     /// The prims are retracted in the order given. A namespace order keeps
     /// consecutive retractions in neighbouring sites.
-    // TODO(perf): a site keeping many dependents is still scanned once per
-    // removed prim that reads it. Filtering each distinct site once would
-    // bound that, at the cost of collecting the sites first.
     pub(super) fn remove_all(&mut self, prims: &[Path]) {
         let removed: sdf::PathSet = prims.iter().cloned().collect();
+        // The filtered sites that keep dependents outside `prims`. A site the
+        // filter empties leaves the table, so a later prim finds nothing
+        // there.
+        let mut kept: FxHashSet<(LayerStackId, Path)> = FxHashSet::default();
         for prim in prims {
-            for (stack, site) in self.retract(prim).into_iter().flatten() {
-                self.retain_dependents(stack, &site, |p| !removed.contains(p));
+            for site in self.retract(prim).into_iter().flatten() {
+                if !kept.contains(&site) && self.retain_dependents(site.0, &site.1, |p| !removed.contains(p)) {
+                    kept.insert(site);
+                }
             }
         }
     }
@@ -328,21 +331,24 @@ impl Dependencies {
     }
 
     /// Keeps the dependents of `(stack, site)` that `keep` accepts, dropping
-    /// the site, and then the stack's table, once empty.
-    fn retain_dependents(&mut self, stack: LayerStackId, site: &Path, keep: impl FnMut(&Path) -> bool) {
+    /// the site, and then the stack's table, once empty. Returns whether the
+    /// site keeps a dependent.
+    fn retain_dependents(&mut self, stack: LayerStackId, site: &Path, keep: impl FnMut(&Path) -> bool) -> bool {
         let Some(map) = self.per_stack.get_mut(&stack) else {
-            return;
+            return false;
         };
         let Some(deps) = map.get_mut(site) else {
-            return;
+            return false;
         };
         deps.retain(keep);
-        if deps.is_empty() {
-            map.remove(site);
-            if map.is_empty() {
-                self.per_stack.remove(&stack);
-            }
+        if !deps.is_empty() {
+            return true;
         }
+        map.remove(site);
+        if map.is_empty() {
+            self.per_stack.remove(&stack);
+        }
+        false
     }
 
     /// The registered `(site, dependent)` pairs a change at `(layer_id,
