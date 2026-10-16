@@ -262,7 +262,40 @@ impl Dependencies {
     }
 
     /// Drop all registered `(layer stack, site)` entries for `prim_index_path`.
+    // TODO(perf): each call scans the dependent list of every site the prim
+    // read. A round that drops many prims one by one, or many separate
+    // subtrees, sharing a site (an edit to a widely referenced asset) scans
+    // that list once per prim; collecting the round's victims first would
+    // filter each site once.
     pub(super) fn remove(&mut self, prim_index_path: &Path) {
+        let Some(sites) = self.retract(prim_index_path) else {
+            return;
+        };
+        for (stack, site) in sites {
+            self.retain_dependents(stack, &site, |p| p != prim_index_path);
+        }
+    }
+
+    /// Drop the registrations of `prims`, every registered prim at or below
+    /// `prefix`. The first victim that reaches a site drops all of the site's
+    /// dependents under `prefix`, so a later victim reading the same site
+    /// scans only the dependents outside the subtree.
+    pub(super) fn remove_subtree<'p>(&mut self, prefix: &Path, prims: impl IntoIterator<Item = &'p Path>) {
+        for prim in prims {
+            debug_assert!(
+                prim.has_prefix(prefix),
+                "{prim} lies outside the removed subtree {prefix}"
+            );
+            for (stack, site) in self.retract(prim).into_iter().flatten() {
+                self.retain_dependents(stack, &site, |p| !p.has_prefix(prefix));
+            }
+        }
+    }
+
+    /// Retracts every registration of `prim_index_path` except its entries in
+    /// the per-site dependent lists, and returns the sites whose lists name
+    /// it.
+    fn retract(&mut self, prim_index_path: &Path) -> Option<Vec<(LayerStackId, Path)>> {
         // Drop the prim's layer-agnostic self-registration so an eviction or
         // rebuild leaves no stale `by_path` entry.
         self.by_path.remove(prim_index_path);
@@ -294,20 +327,23 @@ impl Dependencies {
                 }
             }
         }
-        let Some(sites) = self.by_prim.remove(prim_index_path) else {
+        self.by_prim.remove(prim_index_path)
+    }
+
+    /// Keeps the dependents of `(stack, site)` that `keep` accepts, dropping
+    /// the site, and then the stack's table, once empty.
+    fn retain_dependents(&mut self, stack: LayerStackId, site: &Path, keep: impl FnMut(&Path) -> bool) {
+        let Some(map) = self.per_stack.get_mut(&stack) else {
             return;
         };
-        for (stack, site) in sites {
-            if let Some(map) = self.per_stack.get_mut(&stack)
-                && let Some(deps) = map.get_mut(&site)
-            {
-                deps.retain(|p| p != prim_index_path);
-                if deps.is_empty() {
-                    map.remove(&site);
-                    if map.is_empty() {
-                        self.per_stack.remove(&stack);
-                    }
-                }
+        let Some(deps) = map.get_mut(site) else {
+            return;
+        };
+        deps.retain(keep);
+        if deps.is_empty() {
+            map.remove(site);
+            if map.is_empty() {
+                self.per_stack.remove(&stack);
             }
         }
     }
@@ -860,5 +896,28 @@ mod tests {
         deps.remove(&here);
         assert!(dependents(&deps, &g, l0, &there).is_empty());
         assert!(!deps.has_path_ancestor(&here), "the self-registration goes too");
+    }
+
+    #[test]
+    fn remove_subtree_keeps_outside() {
+        let g = graph(1);
+        let l0 = g.all_ids()[0];
+        let mut deps = Dependencies::default();
+        let shared = p("/X");
+        let inside = [p("/A/B"), p("/A/C")];
+        let outside = p("/AB");
+        for prim in inside.iter().chain([&outside]) {
+            deps.add(
+                prim,
+                &make_index(&g, prim, vec![(ArcType::Reference, l0, shared.clone())]),
+                &g,
+                ExprVarDeps::default(),
+            );
+        }
+        deps.remove_subtree(&p("/A"), &inside);
+        assert_eq!(dependents(&deps, &g, l0, &shared), vec![outside.clone()]);
+        assert!(!deps.has_path_ancestor(&inside[0]), "the self-registration goes too");
+        deps.remove_subtree(&p("/AB"), [&outside]);
+        assert!(dependents(&deps, &g, l0, &shared).is_empty());
     }
 }

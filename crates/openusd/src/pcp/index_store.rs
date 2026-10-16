@@ -352,10 +352,12 @@ impl IndexStore {
             !prefix.is_empty(),
             "remove_subtree called with empty prefix — use Path::abs_root() to drop everything",
         );
+        let mut victims = Vec::new();
         for (victim, entry) in self.entries.remove_subtree(prefix) {
             self.release_owned(&entry.index);
-            self.deps.remove(&victim);
+            victims.push(victim);
         }
+        self.deps.remove_subtree(prefix, &victims);
     }
 
     /// Whether some stack lost its last cache owner since the last sweep.
