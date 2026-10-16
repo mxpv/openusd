@@ -194,7 +194,8 @@ pub fn rigid_skinning_transform(
 /// affects vertex `i`).
 #[derive(Debug, Clone)]
 pub struct BlendShapeWeighted<'a> {
-    /// Blended weight after inbetween resolution (typically `[0, 1]`).
+    /// The weight `offsets` are scaled by, as
+    /// [`sub_shape_weights`] answers it for one sub-shape.
     pub weight: f32,
     /// Per-affected-vertex position offsets, parallel to
     /// `point_indices` when sparse.
@@ -203,7 +204,8 @@ pub struct BlendShapeWeighted<'a> {
     pub point_indices: &'a [i32],
 }
 
-/// Apply a stack of blend shapes to a mesh's points.
+/// Apply a stack of blend shapes to a mesh's points (C++
+/// `UsdSkelApplyBlendShape`, once per shape).
 ///
 /// Per the canonical UsdSkel pipeline blend shapes are evaluated
 /// *before* skinning; the deformed mesh is then skinned through
@@ -211,120 +213,137 @@ pub struct BlendShapeWeighted<'a> {
 ///
 /// `p_morphed[i] = p[i] + Σ_s (weight_s * offset_s[i])`
 ///
-/// Caller supplies the per-shape weight already resolved through
-/// any inbetween interpolation — see [`resolve_inbetween_weight`].
-pub fn apply_blend_shapes(points: &[gf::Vec3f], shapes: &[BlendShapeWeighted<'_>]) -> Vec<gf::Vec3f> {
+/// A shape whose weight is within `1e-6` of zero is skipped. `None` when a
+/// dense shape holds other than one offset per point, a sparse shape holds
+/// other than one offset per point index, or a point index names no point.
+pub fn apply_blend_shapes(points: &[gf::Vec3f], shapes: &[BlendShapeWeighted<'_>]) -> Option<Vec<gf::Vec3f>> {
     let mut out = points.to_vec();
-    for s in shapes {
-        if s.weight == 0.0 {
+    for shape in shapes {
+        if is_close(shape.weight, 0.0) {
             continue;
         }
-        if s.point_indices.is_empty() {
-            for (i, &off) in s.offsets.iter().enumerate() {
-                if i >= out.len() {
-                    break;
-                }
-                out[i] += off * s.weight;
+        if shape.point_indices.is_empty() {
+            if shape.offsets.len() != out.len() {
+                return None;
+            }
+            for (point, &offset) in out.iter_mut().zip(shape.offsets) {
+                *point += offset * shape.weight;
             }
         } else {
-            for (slot, &vi) in s.point_indices.iter().enumerate() {
-                let i = vi as usize;
-                if i >= out.len() || slot >= s.offsets.len() {
-                    continue;
-                }
-                out[i] += s.offsets[slot] * s.weight;
+            if shape.offsets.len() != shape.point_indices.len() {
+                return None;
+            }
+            for (&index, &offset) in shape.point_indices.iter().zip(shape.offsets) {
+                *out.get_mut(usize::try_from(index).ok()?)? += offset * shape.weight;
             }
         }
     }
-    out
+    Some(out)
 }
 
-/// Resolve the effective offset contribution at a given weight for a
-/// blend shape that has inbetween shapes.
+/// One of the shapes a blend shape interpolates between: its primary shape
+/// at weight 1, or one of its inbetweens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubShape {
+    /// The blend shape's own `offsets`.
+    Primary,
+    /// The inbetween at this index of the weights given to
+    /// [`sub_shape_weights`].
+    Inbetween(usize),
+}
+
+/// The sub-shapes a blend shape driven at `weight` applies, each with the
+/// weight to scale its offsets by (C++
+/// `UsdSkelBlendShapeQuery::ComputeSubShapeWeights`, for one blend shape).
+/// `inbetween_weights` holds the `weight` of each of the blend shape's
+/// inbetweens.
 ///
-/// Implements UsdSkel's piecewise-linear interpolation along the
-/// `[0, 1]` weight axis: breakpoints are at `0` (rest, zero offset),
-/// each inbetween at its authored weight, and `1` (the primary
-/// `BlendShape.offsets`). Caller passes `(inbetween_weight,
-/// inbetween_offsets)` pairs **sorted ascending by weight** (this
-/// helper sorts internally so authoring order doesn't matter).
-///
-/// Returns `(effective_weight_on_segment, segment_offsets)` for the
-/// segment containing `w`, where `effective_weight_on_segment` is the
-/// `[0, 1]` interpolation parameter to apply to `segment_offsets` via
-/// `out[i] = lower + t * (segment_offsets[i] - lower[i])`. Since we
-/// don't have negative-weight semantics in the spec the result is
-/// clamped to `[0, 1]`.
-///
-/// For consumers that just want a single blended offset array
-/// directly, [`resolve_blend_shape_offsets`] does that in one shot.
-pub fn resolve_inbetween_weight<'a>(
-    w: f32,
-    inbetweens: &'a [(f32, &'a [gf::Vec3f])],
-    primary: &'a [gf::Vec3f],
-) -> (f32, &'a [gf::Vec3f]) {
-    let w = w.clamp(0.0, 1.0);
-    let mut breakpoints: Vec<(f32, &[gf::Vec3f])> = inbetweens.iter().map(|(w, o)| (*w, *o)).collect();
-    breakpoints.push((1.0, primary));
-    breakpoints.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut prev_w = 0.0f32;
-    for (bw, off) in breakpoints {
-        if w <= bw {
-            let span = bw - prev_w;
-            let t = if span > 0.0 { (w - prev_w) / span } else { 0.0 };
-            return (t, off);
-        }
-        prev_w = bw;
+/// The primary shape sits at weight 1 and an implicit rest shape at weight 0.
+/// Without inbetweens the primary shape takes `weight` as it is. Otherwise
+/// `weight` interpolates linearly between the two nearest sub-shapes by
+/// weight, and extrapolates from the two nearest ones beyond either end.
+/// An inbetween whose weight lies within `1e-6` of 0 or 1 is skipped, and so
+/// is a sub-shape whose share is within `1e-6` of zero.
+pub fn sub_shape_weights(weight: f32, inbetween_weights: &[f32]) -> Vec<(SubShape, f32)> {
+    // `None` stands for the rest shape, which contributes no offsets.
+    let mut shapes = vec![(Some(SubShape::Primary), 1.0), (None, 0.0)];
+    shapes.extend(
+        inbetween_weights
+            .iter()
+            .enumerate()
+            .filter(|&(_, &w)| !is_close(w, 0.0) && !is_close(w, 1.0))
+            .map(|(index, &w)| (Some(SubShape::Inbetween(index)), w)),
+    );
+    if shapes.len() < 3 {
+        return vec![(SubShape::Primary, weight)];
     }
-    (1.0, primary)
+    shapes.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (lower, upper) = match shapes.partition_point(|&(_, w)| w <= weight) {
+        0 => (0, 1),
+        end if end == shapes.len() => (end - 2, end - 1),
+        upper => (upper - 1, upper),
+    };
+    let ((lower_shape, lower_weight), (upper_shape, upper_weight)) = (shapes[lower], shapes[upper]);
+    let span = upper_weight - lower_weight;
+    if span <= EPS {
+        return Vec::new();
+    }
+    let alpha = (weight - lower_weight) / span;
+    let mut out = Vec::with_capacity(2);
+    if let Some(shape) = lower_shape
+        && !is_close(alpha, 1.0)
+    {
+        out.push((shape, 1.0 - alpha));
+    }
+    if let Some(shape) = upper_shape
+        && !is_close(alpha, 0.0)
+    {
+        out.push((shape, alpha));
+    }
+    out
 }
 
 /// One inbetween shape — its authored weight and its offsets.
 /// Inputs to [`resolve_blend_shape_offsets`].
 pub type InbetweenRef<'a> = (f32, &'a [gf::Vec3f]);
 
-/// Resolve a single blend shape (primary + optional inbetweens) at
-/// weight `w` into the effective per-vertex offset array. Returns a
-/// fresh `Vec` whose length matches whichever array is in play for
-/// the resolved segment (segments don't span shapes with different
-/// vertex counts in well-formed UsdSkel data).
-pub fn resolve_blend_shape_offsets(w: f32, inbetweens: &[InbetweenRef<'_>], primary: &[gf::Vec3f]) -> Vec<gf::Vec3f> {
-    let w = w.clamp(0.0, 1.0);
-    let mut bps: Vec<(f32, &[gf::Vec3f])> = inbetweens.iter().map(|(w, o)| (*w, *o)).collect();
-    bps.push((1.0, primary));
-    bps.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut lower_w = 0.0f32;
-    let lower_offsets: Vec<gf::Vec3f> = Vec::new();
-    let mut lower_offsets_slice: &[gf::Vec3f] = &lower_offsets;
-    for (bw, off) in &bps {
-        if w <= *bw {
-            let span = bw - lower_w;
-            let t = if span > 0.0 { (w - lower_w) / span } else { 0.0 };
-            return lerp_offsets(lower_offsets_slice, off, t, off.len());
+/// The offsets a single blend shape (primary + optional inbetweens) applies
+/// at `weight`: the offsets of each sub-shape [`sub_shape_weights`] picks,
+/// scaled by its share and summed. A sub-shape with no offsets contributes
+/// nothing; `None` when another holds a different number of offsets than
+/// `primary`.
+pub fn resolve_blend_shape_offsets(
+    weight: f32,
+    inbetweens: &[InbetweenRef<'_>],
+    primary: &[gf::Vec3f],
+) -> Option<Vec<gf::Vec3f>> {
+    let inbetween_weights: Vec<f32> = inbetweens.iter().map(|&(weight, _)| weight).collect();
+    let mut out = vec![gf::Vec3f::default(); primary.len()];
+    for (shape, share) in sub_shape_weights(weight, &inbetween_weights) {
+        let offsets = match shape {
+            SubShape::Primary => primary,
+            SubShape::Inbetween(index) => inbetweens[index].1,
+        };
+        if offsets.is_empty() {
+            continue;
         }
-        lower_w = *bw;
-        lower_offsets_slice = off;
+        if offsets.len() != out.len() {
+            return None;
+        }
+        for (total, &offset) in out.iter_mut().zip(offsets) {
+            *total += offset * share;
+        }
     }
-    primary.to_vec()
+    Some(out)
 }
 
-fn lerp_offsets(a: &[gf::Vec3f], b: &[gf::Vec3f], t: f32, len: usize) -> Vec<gf::Vec3f> {
-    (0..len)
-        .map(|i| {
-            let av = if a.is_empty() {
-                gf::Vec3f::default()
-            } else {
-                a[i.min(a.len() - 1)]
-            };
-            let bv = if b.is_empty() {
-                gf::Vec3f::default()
-            } else {
-                b[i.min(b.len() - 1)]
-            };
-            av.lerp(bv, t)
-        })
-        .collect()
+/// The tolerance C++ `UsdSkelBlendShapeQuery` and `UsdSkelApplyBlendShape`
+/// compare blend-shape weights with.
+const EPS: f32 = 1e-6;
+
+/// `true` when `a` lies within [`EPS`] of `b` (C++ `GfIsClose`).
+fn is_close(a: f32, b: f32) -> bool {
+    (a - b).abs() < EPS
 }
 
 #[cfg(test)]
@@ -388,7 +407,7 @@ mod tests {
             point_indices: &[],
         };
         let out = apply_blend_shapes(&pts, &[shape]);
-        assert_eq!(out, vec![gf::vec3f(1.0, 0.5, 0.0), gf::vec3f(0.0, 1.0, 0.0)]);
+        assert_eq!(out, Some(vec![gf::vec3f(1.0, 0.5, 0.0), gf::vec3f(0.0, 1.0, 0.0)]));
     }
 
     #[test]
@@ -402,28 +421,74 @@ mod tests {
         let out = apply_blend_shapes(&pts, &[shape]);
         assert_eq!(
             out,
-            vec![
+            Some(vec![
                 gf::Vec3f::default(),
                 gf::vec3f(1.0, 0.0, 0.0),
                 gf::Vec3f::default(),
                 gf::vec3f(0.0, 0.0, 5.0),
-            ]
+            ])
         );
     }
 
     #[test]
-    fn resolve_inbetween_weight_lands_on_segment() {
-        let inb_off = vec![gf::vec3f(0.0, 0.5, 0.0)];
-        let prim = vec![gf::vec3f(0.0, 1.0, 0.0)];
-        let inbetweens = [(0.5_f32, inb_off.as_slice())];
+    fn apply_blend_shape_rejects_mismatch() {
+        let pts = vec![gf::Vec3f::default(); 2];
+        let offsets = [gf::vec3f(0.0, 1.0, 0.0)];
+        let dense = BlendShapeWeighted {
+            weight: 1.0,
+            offsets: &offsets,
+            point_indices: &[],
+        };
+        assert!(apply_blend_shapes(&pts, &[dense]).is_none());
+        let out_of_range = BlendShapeWeighted {
+            weight: 1.0,
+            offsets: &offsets,
+            point_indices: &[2],
+        };
+        assert!(apply_blend_shapes(&pts, &[out_of_range]).is_none());
+        // A zero weight applies nothing, and so checks nothing.
+        let silent = BlendShapeWeighted {
+            weight: 0.0,
+            offsets: &offsets,
+            point_indices: &[2],
+        };
+        assert_eq!(apply_blend_shapes(&pts, &[silent]), Some(pts));
+    }
 
-        let (t, segment) = resolve_inbetween_weight(0.25, &inbetweens, &prim);
-        assert!((t - 0.5).abs() < 1e-6);
-        assert_eq!(segment, inb_off.as_slice());
+    #[test]
+    fn sub_shapes_without_inbetweens() {
+        assert_eq!(sub_shape_weights(1.5, &[]), vec![(SubShape::Primary, 1.5)]);
+        assert_eq!(sub_shape_weights(-0.5, &[]), vec![(SubShape::Primary, -0.5)]);
+    }
 
-        let (t, segment) = resolve_inbetween_weight(0.75, &inbetweens, &prim);
-        assert!((t - 0.5).abs() < 1e-6);
-        assert_eq!(segment, prim.as_slice());
+    #[test]
+    fn sub_shapes_interpolate() {
+        let inbetween = SubShape::Inbetween(0);
+        assert_eq!(sub_shape_weights(0.25, &[0.5]), vec![(inbetween, 0.5)]);
+        assert_eq!(sub_shape_weights(0.5, &[0.5]), vec![(inbetween, 1.0)]);
+        assert_eq!(
+            sub_shape_weights(0.75, &[0.5]),
+            vec![(inbetween, 0.5), (SubShape::Primary, 0.5)]
+        );
+    }
+
+    #[test]
+    fn sub_shapes_extrapolate() {
+        let inbetween = SubShape::Inbetween(0);
+        // Past the primary shape, from the inbetween and primary pair.
+        assert_eq!(
+            sub_shape_weights(1.5, &[0.5]),
+            vec![(inbetween, -1.0), (SubShape::Primary, 2.0)]
+        );
+        // Below the rest shape, from the rest and inbetween pair.
+        assert_eq!(sub_shape_weights(-0.5, &[0.5]), vec![(inbetween, -1.0)]);
+        // A negative inbetween sits below the rest shape.
+        assert_eq!(sub_shape_weights(-0.5, &[-1.0]), vec![(inbetween, 0.5)]);
+    }
+
+    #[test]
+    fn sub_shapes_skip_endpoint_inbetweens() {
+        assert_eq!(sub_shape_weights(0.5, &[0.0, 1.0]), vec![(SubShape::Primary, 0.5)]);
     }
 
     #[test]
@@ -433,10 +498,14 @@ mod tests {
         let inbetweens = [(0.5_f32, inb_off.as_slice())];
 
         let out = resolve_blend_shape_offsets(0.5, &inbetweens, &prim);
-        assert_eq!(out, vec![gf::vec3f(0.0, 1.0, 0.0)]);
+        assert_eq!(out, Some(vec![gf::vec3f(0.0, 1.0, 0.0)]));
 
         let out = resolve_blend_shape_offsets(0.75, &inbetweens, &prim);
-        assert_eq!(out, vec![gf::vec3f(0.0, 1.5, 0.0)]);
+        assert_eq!(out, Some(vec![gf::vec3f(0.0, 1.5, 0.0)]));
+
+        // Past the primary shape the offsets keep growing.
+        let out = resolve_blend_shape_offsets(1.5, &inbetweens, &prim);
+        assert_eq!(out, Some(vec![gf::vec3f(0.0, 3.0, 0.0)]));
     }
 
     #[test]
