@@ -122,13 +122,10 @@ pub fn skin_points_lbs(
 }
 
 /// Linear blend skinning of normals. Same per-vertex influence layout
-/// as [`skin_points_lbs`], but treats vectors as directions (no
-/// translation) and renormalises each result.
-///
-/// Note this uses the same per-joint matrix as [`skin_points_lbs`] —
-/// a strictly correct implementation would use the inverse-transpose
-/// when scale is non-uniform. For typical character rigs (rigid bone
-/// transforms) the two are equivalent and consumers don't notice.
+/// as [`skin_points_lbs`], but each normal goes through the
+/// inverse-transpose of the upper-left 3×3 of `geom_bind_transform` and of
+/// each skinning transform, and each result is renormalised (C++
+/// `UsdSkelSkinningQuery::ComputeSkinnedNormals`).
 pub fn skin_normals_lbs(
     normals: &[gf::Vec3f],
     joint_indices: &[i32],
@@ -138,6 +135,8 @@ pub fn skin_normals_lbs(
     skinning_xforms: &[gf::Mat4d],
 ) -> Vec<gf::Vec3f> {
     assert!(num_influences >= 1, "num_influences must be >= 1");
+    let geom_bind_transform = normal_transform(geom_bind_transform);
+    let skinning_xforms: Vec<gf::Mat4d> = skinning_xforms.iter().copied().map(normal_transform).collect();
     let mut out = Vec::with_capacity(normals.len());
     for (vi, &n) in normals.iter().enumerate() {
         let skel_n = geom_bind_transform.transform_dir(n.into());
@@ -337,6 +336,23 @@ pub fn resolve_blend_shape_offsets(
     Some(out)
 }
 
+/// The transform a normal takes through `transform`: the inverse-transpose of
+/// its upper-left 3×3 (C++ `ExtractRotationMatrix().GetInverse()
+/// .GetTranspose()`), held in a 4×4 for [`gf::Mat4d::transform_dir`]. A
+/// singular 3×3 gives `f32::MAX` times the identity, as C++
+/// `GfMatrix3d::GetInverse` does.
+fn normal_transform(transform: gf::Mat4d) -> gf::Mat4d {
+    let mut upper = gf::Mat4d::IDENTITY;
+    for row in 0..3 {
+        for column in 0..3 {
+            upper[(row, column)] = transform[(row, column)];
+        }
+    }
+    upper
+        .inverse_above(0.0)
+        .map_or(gf::Mat4d::scale([f64::from(f32::MAX); 3]), gf::Mat4d::transpose)
+}
+
 /// The tolerance C++ `UsdSkelBlendShapeQuery` and `UsdSkelApplyBlendShape`
 /// compare blend-shape weights with.
 const EPS: f32 = 1e-6;
@@ -348,6 +364,8 @@ fn is_close(a: f32, b: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_1_SQRT_2;
+
     use super::*;
     use crate::skel::NO_PARENT;
 
@@ -506,6 +524,27 @@ mod tests {
         // Past the primary shape the offsets keep growing.
         let out = resolve_blend_shape_offsets(1.5, &inbetweens, &prim);
         assert_eq!(out, Some(vec![gf::vec3f(0.0, 3.0, 0.0)]));
+    }
+
+    #[test]
+    fn normals_take_inverse_transpose() {
+        // A 45° normal on the plane x + y = 0, scaled 2× along x: the plane
+        // becomes x/2 + y = 0, whose normal is (1, 2) normalised.
+        let skin = [gf::Mat4d::scale([2.0, 1.0, 1.0])];
+        let n = FRAC_1_SQRT_2;
+        let out = skin_normals_lbs(&[gf::vec3f(n, n, 0.0)], &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin);
+        let expected = gf::vec3d(1.0, 2.0, 0.0).normalize().to_f32();
+        assert!((out[0] - expected).length() < 1e-6, "{:?}", out[0]);
+        // Translation does not move a normal.
+        let out = skin_normals_lbs(
+            &[gf::vec3f(0.0, 1.0, 0.0)],
+            &[0],
+            &[1.0],
+            1,
+            gf::Mat4d::translation([5.0, 0.0, 0.0]),
+            &[gf::Mat4d::translation([0.0, 3.0, 0.0])],
+        );
+        assert_eq!(out, vec![gf::vec3f(0.0, 1.0, 0.0)]);
     }
 
     #[test]

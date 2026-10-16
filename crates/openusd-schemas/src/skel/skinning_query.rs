@@ -170,9 +170,8 @@ impl SkinningResolver {
 
     /// Skin `normals` through the same influences as
     /// [`skinned_points`](Self::skinned_points), under the same conditions
-    /// (C++ `ComputeSkinnedNormals`). Each result is normalised; see
-    /// [`super::skinning::skin_normals_lbs`] for the caveat about the
-    /// inverse-transpose under non-uniform scale.
+    /// (C++ `ComputeSkinnedNormals`), through the inverse-transpose of each
+    /// transform. Each result is normalised.
     pub fn skinned_normals(&self, normals: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
         let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
         in_range(&self.joint_indices, &mesh_xforms)?;
