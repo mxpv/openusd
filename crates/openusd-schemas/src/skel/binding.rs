@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use openusd::usd::{Attribute, Prim, PrimPredicate, SchemaBase};
+use openusd::usd::{Attribute, Prim, PrimPredicate, Relationship, SchemaBase};
 use openusd::{Result, sdf, tf};
 
 use super::decode::Bound;
@@ -30,7 +30,8 @@ pub struct SkelBinding {
 }
 
 /// The binding properties in effect at a prim, each the nearest one with an
-/// authored value (C++ `UsdSkel_CacheImpl`'s `_SkinningQueryKey`).
+/// authored value (C++ `UsdSkel_CacheImpl`'s `_SkinningQueryKey`). The
+/// blend-shape bindings are read on the skinnable prim alone.
 #[derive(Clone, Default)]
 pub(super) struct BindingProperties {
     pub(super) joint_indices: Option<Attribute>,
@@ -38,6 +39,8 @@ pub(super) struct BindingProperties {
     pub(super) skinning_method: Option<Attribute>,
     pub(super) geom_bind_transform: Option<Attribute>,
     pub(super) joints: Option<Attribute>,
+    pub(super) blend_shapes: Option<Attribute>,
+    pub(super) blend_shape_targets: Option<Relationship>,
 }
 
 /// The skeleton and binding properties a prim passes down to the prims
@@ -50,8 +53,9 @@ struct Inherited {
 
 impl Inherited {
     /// The bindings in effect at `prim`: these, with each binding `prim`
-    /// authors through [`BindingAPI`] taking precedence.
-    fn under(mut self, prim: &Prim) -> Result<Self> {
+    /// authors through [`BindingAPI`] taking precedence. Only a `skinnable`
+    /// prim takes its blend-shape bindings.
+    fn under(mut self, prim: &Prim, skinnable: bool) -> Result<Self> {
         let Some(binding) = BindingAPI::from_prim(prim.clone())? else {
             return Ok(self);
         };
@@ -69,6 +73,16 @@ impl Inherited {
         for (slot, attribute) in attributes {
             if attribute.has_authored_value()? {
                 *slot = Some(attribute);
+            }
+        }
+        if skinnable {
+            let blend_shapes = binding.blend_shapes_attr();
+            if blend_shapes.has_authored_value()? {
+                properties.blend_shapes = Some(blend_shapes);
+            }
+            let targets = binding.blend_shape_targets_rel();
+            if targets.has_authored_targets()? {
+                properties.blend_shape_targets = Some(targets);
             }
         }
         Ok(self)
@@ -94,8 +108,9 @@ pub fn discover_bindings(root: &Root) -> Result<Vec<SkelBinding>> {
         if !is_a(geom::tokens::IMAGEABLE) {
             continue;
         }
-        let inherited = parent.under(&prim)?;
-        if skinnable_type(is_a) {
+        let skinnable = skinnable_type(is_a);
+        let inherited = parent.under(&prim, skinnable)?;
+        if skinnable {
             let Some(skeleton) = inherited.skeleton else {
                 continue;
             };

@@ -158,14 +158,22 @@ impl Primvar {
         self.attribute.has_authored_metadata(tokens::INTERPOLATION)
     }
 
+    /// The primvar's `interpolation` token as authored, whether or not it
+    /// names an interpolation, and `constant` where none is authored or the
+    /// metadata holds no token (C++ `GetInterpolation`).
+    /// [`interpolation`](Self::interpolation) answers the decoded token.
+    pub fn interpolation_token(&self) -> Result<tf::Token> {
+        Ok(match self.attribute.metadata::<sdf::Value>(tokens::INTERPOLATION)? {
+            Some(sdf::Value::Token(token)) => token,
+            _ => tf::Token::new(tokens::CONSTANT),
+        })
+    }
+
     /// Whether the primvar's `interpolation` token is `constant`, the one
     /// interpolation that inherits down namespace. An unauthored one is, and
     /// a token that names no interpolation is not.
     pub(super) fn is_constant(&self) -> Result<bool> {
-        Ok(self
-            .attribute
-            .metadata::<tf::Token>(tokens::INTERPOLATION)?
-            .is_none_or(|token| token == tokens::CONSTANT))
+        Ok(self.interpolation_token()? == tokens::CONSTANT)
     }
 
     /// How many consecutive values make up one element of the primvar (C++
@@ -338,11 +346,20 @@ impl Primvar {
     /// [`time_sample_times`](Self::time_sample_times) within `interval` (C++
     /// `GetTimeSamplesInInterval`).
     pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        usd::Attribute::unioned_time_samples_in(&self.sampled_attributes()?, interval)
+    }
+
+    /// The attributes whose samples are the primvar's: its own, and its
+    /// indices where it is indexed. A caller unioning the samples of several
+    /// primvars, or of a primvar and other attributes, passes these to
+    /// [`usd::Attribute::unioned_time_samples_in`].
+    pub fn sampled_attributes(&self) -> Result<Vec<usd::Attribute>> {
         let indices = self.indices_attr();
-        if indices.has_authored_value()? {
-            return usd::Attribute::unioned_time_samples_in(&[self.attribute.clone(), indices], interval);
-        }
-        self.attribute.time_samples_in(interval)
+        Ok(if indices.has_authored_value()? {
+            vec![self.attribute.clone(), indices]
+        } else {
+            vec![self.attribute.clone()]
+        })
     }
 
     /// Whether the flattened value may change over time (C++

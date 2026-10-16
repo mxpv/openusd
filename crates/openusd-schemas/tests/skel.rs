@@ -1,17 +1,17 @@
 //! Integration tests for the UsdSkel views against a fixture that exercises
 //! every schema family, plus the object-model layer (topology, AnimMapper,
-//! SkeletonQuery, SkinningResolver, binding discovery).
+//! SkeletonQuery, SkinningQuery, binding discovery).
 
 use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
-use openusd_schemas::geom::{BoundableSchema, XformCache, XformableExt};
+use openusd_schemas::geom::{BoundableSchema, Mesh, XformCache, XformableExt};
 use openusd_schemas::skel::{
     AnimMapper, AnimQuery, Animation, AnimationSchema, BindingAPI, BlendShape, BlendShapeSchema, NO_PARENT, Root,
-    SkelBinding, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningResolver, Topology,
-    discover_bindings, skinning,
+    SkelBinding, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningQuery, Topology, discover_bindings,
+    skinning,
 };
 
 mod common;
@@ -197,6 +197,12 @@ fn discover_bindings_walks_skel_root_subtree() -> Result<()> {
     Ok(())
 }
 
+/// The skinning query over `binding`, with the query of its skeleton.
+fn skinning_query(binding: &SkelBinding) -> Result<SkinningQuery, SchemaError> {
+    let skeleton = SkeletonQuery::new(&binding.skeleton)?;
+    SkinningQuery::new(binding, skeleton.as_ref())
+}
+
 fn root(stage: &Stage, path: &str) -> Result<Root> {
     Ok(Root::get(stage, path)?.expect("Root"))
 }
@@ -234,36 +240,49 @@ fn skeleton_query_rest_pose() -> Result<()> {
 }
 
 #[test]
-fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<(), SchemaError> {
+fn skinning_query_remaps_subset() -> Result<(), SchemaError> {
     let stage = open()?;
     let binding = binding_of(&stage, "/World/Character", "/World/Character/Body")?.expect("Body binding");
-    let resolver = SkinningResolver::new(&binding)?;
+    let query = skinning_query(&binding)?;
 
-    assert!(!resolver.is_rigidly_deformed());
-    assert!(resolver.has_joint_influences());
-    assert_eq!(resolver.influences_per_component(), 1);
+    assert!(!query.is_rigidly_deformed());
+    assert!(query.has_joint_influences());
+    assert_eq!(query.influences_per_component(), 1);
     // skel:joints subset = ["Root/Hip", "Root/Hip/Knee"] — two mesh-effective
     // joints out of the skeleton's three.
-    assert_eq!(resolver.joint_order_len(), 2);
-    assert_eq!(resolver.skinning_method(), SkinningMethod::ClassicLinear);
+    assert_eq!(query.joint_order().map(<[_]>::len), Some(2));
+    assert_eq!(query.skinning_method(), Some(SkinningMethod::ClassicLinear));
+    assert_eq!(query.blend_shape_order(), Some(&["smile".to_string()][..]));
+    assert!(query.has_blend_shapes());
 
-    // Skeleton joints 1 and 2 land at mesh joints 0 and 1.
+    // Skeleton joints 1 and 2 land at mesh joints 0 and 1: the Body's points
+    // 0 and 1 follow joint 1, points 2 and 3 joint 2.
     let skel_xforms: Vec<_> = (0..3).map(|i| Mat4d::translation([f64::from(i), 0.0, 0.0])).collect();
-    let mesh_xforms = resolver
-        .remap_transforms(&skel_xforms)
-        .expect("one transform per joint");
-    assert_eq!(mesh_xforms, skel_xforms[1..]);
-    // Too few skeleton transforms are rejected.
-    assert!(resolver.remap_transforms(&[]).is_none());
-    assert!(resolver.skinned_points(&[Vec3f::default(); 4], &[]).is_none());
+    let points = [Vec3f::default(); 4];
+    let skinned = query
+        .skinned_points(&skel_xforms, &points, None)?
+        .expect("per-vertex influences");
+    assert_eq!(
+        skinned,
+        vec![
+            gf::vec3f(1.0, 0.0, 0.0),
+            gf::vec3f(1.0, 0.0, 0.0),
+            gf::vec3f(2.0, 0.0, 0.0),
+            gf::vec3f(2.0, 0.0, 0.0)
+        ]
+    );
+    // Too few skeleton transforms are rejected, and so is a point count the
+    // vertex influences do not fit.
+    assert!(query.skinned_points(&[], &points, None)?.is_none());
+    assert!(query.skinned_points(&skel_xforms, &points[..3], None)?.is_none());
     Ok(())
 }
 
 #[test]
-fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(), SchemaError> {
+fn identity_xforms_keep_points() -> Result<(), SchemaError> {
     let stage = open()?;
     let binding = binding_of(&stage, "/World/Character", "/World/Character/Body")?.expect("Body binding");
-    let resolver = SkinningResolver::new(&binding)?;
+    let query = skinning_query(&binding)?;
 
     let pts = [
         Vec3f {
@@ -285,8 +304,8 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
     ];
     let identity = Mat4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
-    let out = resolver
-        .skinned_points(&pts, &skel_xforms)
+    let out = query
+        .skinned_points(&skel_xforms, &pts, None)?
         .expect("per-vertex influences");
     // Identity geom-bind + identity joints + weight 1.0 = no movement.
     for (i, p) in out.iter().enumerate() {
@@ -491,19 +510,19 @@ def SkelRoot "R" {
     )?;
     let binding = binding_of(&stage, "/R", "/R/G/M")?.expect("M binding");
     assert_eq!(binding.skeleton.path().as_str(), "/R/Rig");
-    let resolver = SkinningResolver::new(&binding)?;
-    assert!(resolver.has_joint_influences());
-    assert!(resolver.is_rigidly_deformed());
-    assert_eq!(resolver.joint_order_len(), 1);
-    assert_eq!(resolver.geom_bind_transform(), Mat4d::translation([1.0, 0.0, 0.0]));
+    let query = skinning_query(&binding)?;
+    assert!(query.has_joint_influences());
+    assert!(query.is_rigidly_deformed());
+    assert_eq!(query.joint_order().map(<[_]>::len), Some(1));
+    assert_eq!(query.geom_bind_transform(None)?, Mat4d::translation([1.0, 0.0, 0.0]));
 
     // Joint `A/B` is skeleton joint 1; the constant influence applies to every
     // point, after the geom bind transform.
     let xforms = [Mat4d::IDENTITY, Mat4d::translation([0.0, 2.0, 0.0])];
-    let rigid = resolver.rigid_transform(&xforms).expect("constant influences");
+    let rigid = query.skinned_transform(&xforms, None)?.expect("constant influences");
     assert_eq!(rigid, Mat4d::translation([1.0, 2.0, 0.0]));
-    let points = resolver
-        .skinned_points(&[Vec3f::default(), gf::vec3f(1.0, 0.0, 0.0)], &xforms)
+    let points = query
+        .skinned_points(&xforms, &[Vec3f::default(), gf::vec3f(1.0, 0.0, 0.0)], None)?
         .expect("constant influences");
     assert_eq!(points, vec![gf::vec3f(1.0, 2.0, 0.0), gf::vec3f(2.0, 2.0, 0.0)]);
     Ok(())
@@ -635,13 +654,13 @@ def SkelRoot "R" {
 "#,
     )?;
     let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let resolver = SkinningResolver::new(&binding)?;
-    assert!(!resolver.has_joint_influences());
-    assert!(resolver.is_rigidly_deformed());
-    assert!(resolver.rigid_transform(&[Mat4d::IDENTITY]).is_none());
+    let query = skinning_query(&binding)?;
+    assert!(!query.has_joint_influences());
+    assert!(query.is_rigidly_deformed());
+    assert!(query.skinned_transform(&[Mat4d::IDENTITY], None)?.is_none());
     assert!(
-        resolver
-            .skinned_points(&[Vec3f::default(); 2], &[Mat4d::IDENTITY])
+        query
+            .skinned_points(&[Mat4d::IDENTITY], &[Vec3f::default(); 2], None)?
             .is_none()
     );
     Ok(())
@@ -664,7 +683,7 @@ def SkelRoot "R" {
 "#,
     )?;
     let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    assert!(!SkinningResolver::new(&binding)?.has_joint_influences());
+    assert!(!skinning_query(&binding)?.has_joint_influences());
     Ok(())
 }
 
@@ -685,17 +704,11 @@ def SkelRoot "R" {
 "#,
     )?;
     let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let resolver = SkinningResolver::new(&binding)?;
-    assert!(resolver.has_joint_influences());
+    let query = skinning_query(&binding)?;
+    assert!(query.has_joint_influences());
     assert!(
-        resolver
-            .skinned_points(&[Vec3f::default(); 2], &[Mat4d::IDENTITY])
-            .is_none()
-    );
-    // The influences fit three points no better than they name joints.
-    assert!(
-        resolver
-            .skinned_points(&[Vec3f::default(); 3], &[Mat4d::IDENTITY; 4])
+        query
+            .skinned_points(&[Mat4d::IDENTITY], &[Vec3f::default(); 2], None)?
             .is_none()
     );
     Ok(())
@@ -828,9 +841,9 @@ def SkelRoot "R" {
 "#,
     )?;
     let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let resolver = SkinningResolver::new(&binding)?;
-    assert_eq!(resolver.joint_order_len(), 0);
-    assert!(resolver.rigid_transform(&[Mat4d::IDENTITY]).is_none());
+    let query = skinning_query(&binding)?;
+    assert_eq!(query.joint_order().map(<[_]>::len), Some(0));
+    assert!(query.skinned_transform(&[Mat4d::IDENTITY], None)?.is_none());
     Ok(())
 }
 
@@ -1117,5 +1130,174 @@ def Skeleton "ShortScalesRig" (inherits = </Rig> prepend apiSchemas = ["SkelBind
         assert!(query.anim_query().is_some(), "{rig}");
         assert_eq!(query.joint_local_transforms(None)?, Some(rest.clone()), "{rig}");
     }
+    Ok(())
+}
+
+/// The query reads the influences and the geom bind transform at the time
+/// it is asked for, and an indexed primvar's indices count among its samples.
+#[test]
+fn skinning_query_time_varying() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "B"]
+        uniform matrix4d[] bindTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+        ]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        int[] primvars:skel:jointIndices = [0, 1] (interpolation = "constant")
+        int[] primvars:skel:jointIndices:indices.timeSamples = {
+            2: [0],
+            7: [1],
+        }
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        matrix4d primvars:skel:geomBindTransform.timeSamples = {
+            1: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            4: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) ),
+        }
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let query = skinning_query(&binding)?;
+    assert_eq!(query.time_samples()?, vec![1.0, 2.0, 4.0, 7.0]);
+    assert_eq!(query.time_samples_in(3.0..=7.0)?, vec![4.0, 7.0]);
+
+    // The indexed indices select joint A before frame 7 and joint B after.
+    assert_eq!(query.joint_influences(TimeCode::new(2.0))?, Some((vec![0], vec![1.0])));
+    assert_eq!(query.joint_influences(TimeCode::new(7.0))?, Some((vec![1], vec![1.0])));
+
+    let xforms = [Mat4d::IDENTITY, Mat4d::translation([0.0, 5.0, 0.0])];
+    assert_eq!(
+        query.geom_bind_transform(TimeCode::new(4.0))?,
+        Mat4d::translation([3.0, 0.0, 0.0])
+    );
+    assert_eq!(
+        query.skinned_transform(&xforms, TimeCode::new(7.0))?,
+        Some(Mat4d::translation([3.0, 5.0, 0.0]))
+    );
+    // Without `skel:joints` the transforms still need one per skeleton joint.
+    assert!(query.skinned_transform(&xforms[..1], TimeCode::new(7.0))?.is_none());
+    Ok(())
+}
+
+/// An unknown skinning method token, or `dualQuaternion`, constructs a query
+/// whose skinning methods answer nothing.
+#[test]
+fn unknown_skinning_method() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A"]
+        uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]
+    }
+    def Mesh "Bogus" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        uniform token primvars:skel:skinningMethod = "bogus"
+    }
+    def Mesh "Dual" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        uniform token primvars:skel:skinningMethod = "dualQuaternion"
+    }
+}
+"#,
+    )?;
+    let xforms = [Mat4d::IDENTITY];
+    let points = [Vec3f::default()];
+    let bogus = skinning_query(&binding_of(&stage, "/R", "/R/Bogus")?.expect("Bogus binding"))?;
+    assert_eq!(bogus.skinning_method(), None);
+    assert!(bogus.has_joint_influences());
+    assert!(bogus.skinned_points(&xforms, &points, None)?.is_none());
+    assert!(bogus.skinned_normals(&xforms, &points, None)?.is_none());
+    assert!(bogus.skinned_transform(&xforms, None)?.is_none());
+
+    let dual = skinning_query(&binding_of(&stage, "/R", "/R/Dual")?.expect("Dual binding"))?;
+    assert_eq!(dual.skinning_method(), Some(SkinningMethod::DualQuaternion));
+    assert!(dual.skinned_points(&xforms, &points, None)?.is_none());
+    Ok(())
+}
+
+/// A prim whose skeleton has no query still gets one, with empty skeleton
+/// and animation orders: its joint subset and blend shapes map nothing.
+#[test]
+fn skinning_without_skeleton() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A/B", "A"]
+    }
+    def BlendShape "Smile" {
+        uniform vector3f[] offsets = [(0, 1, 0)]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["A"]
+        uniform token[] skel:blendShapes = ["smile"]
+        rel skel:blendShapeTargets = </R/Smile>
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    // The skeleton's joints are misordered, so it has no query.
+    assert!(SkeletonQuery::new(&binding.skeleton)?.is_none());
+    let query = SkinningQuery::new(&binding, None)?;
+    assert!(query.has_blend_shapes());
+    assert_eq!(query.blend_shape_order(), Some(&["smile".to_string()][..]));
+    assert!(query.blend_shape_mapper().is_some_and(AnimMapper::is_null));
+    assert!(query.joint_mapper().is_some_and(AnimMapper::is_null));
+    assert_eq!(
+        query.blend_shape_targets().map(|rel| rel.targets()).transpose()?,
+        Some(vec![sdf::path("/R/Smile")?])
+    );
+    Ok(())
+}
+
+/// The padding is how far the prim's bound, carried through its geom bind
+/// transform, reaches past the box around the rest pose's joints.
+#[test]
+fn extents_padding_reach() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "A/B"]
+        uniform matrix4d[] restTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1) ),
+        ]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        float3[] extent = [(-1, 0, -0.5), (1, 2, 0.5)]
+        matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0.5, 0, 1) )
+    }
+    def Mesh "Bare" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+    }
+}
+"#,
+    )?;
+    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let skeleton = SkeletonQuery::new(&binding.skeleton)?.expect("valid topology");
+    let query = SkinningQuery::new(&binding, Some(&skeleton))?;
+    let rest = skeleton.rest_skel_transforms().expect("rest pose");
+    let mesh = Mesh::get(&stage, "/R/M")?.expect("Mesh");
+    // The joints span (0, 0, 0) to (0, 2, 0); the bound, raised by 0.5,
+    // spans (-1, 0.5, -0.5) to (1, 2.5, 0.5), reaching 1 past them in x.
+    assert_eq!(query.extents_padding(rest, &mesh)?, 1.0);
+    let bare = Mesh::get(&stage, "/R/Bare")?.expect("Mesh");
+    assert_eq!(query.extents_padding(rest, &bare)?, 0.0);
     Ok(())
 }

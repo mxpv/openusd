@@ -28,7 +28,7 @@ doc-valid-idents = [
     "SkelBindingAPI",
     "SkelRoot",
     "SkeletonQuery",
-    "SkinningResolver",
+    "SkinningQuery",
     "UsdGeom",
     "UsdGeomPrimvar",
     "UsdLux",

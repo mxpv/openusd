@@ -1,111 +1,100 @@
-//! Per-mesh skinning resolver — the static (time-independent) data
-//! every skinning pipeline needs for one skinnable prim.
+//! A skinnable prim's resolved binding, skinned at any time (C++
+//! `UsdSkelSkinningQuery`).
 //!
-//! Mirrors the static surface of Pixar's `UsdSkelSkinningQuery`. The
-//! caller still owns the per-frame joint pose (in the bound
-//! skeleton's joint order); this object handles the per-mesh details:
-//!
-//! - Remapping the skeleton-order skinning transforms through the
-//!   mesh's `skel:joints` subset (when authored) via
-//!   [`super::AnimMapper`].
-//! - Telling skinning code whether the binding is rigid or per-vertex.
-//! - Holding the `geomBindTransform` and `skinningMethod` so the
-//!   caller doesn't have to re-read them per frame.
-//! - Driving the [`super::skinning`] math against the right inputs.
+//! The query holds the binding properties the prim resolves, inherited or its
+//! own, and reads the joint influences and the geom bind transform at
+//! whatever time it is asked for. What it decides at construction is a
+//! snapshot: which properties are bound, the skinning method, the influence
+//! interpolation and element size, and the joint and blend-shape mappers
+//! built from `skel:joints`, `skel:blendShapes` and the bound skeleton's and
+//! animation's orders. After an edit to any of those, build a new query.
 
 use std::borrow::Cow;
 
-use openusd::usd::Attribute;
-use openusd::{Error, Result, gf, sdf};
+use openusd::usd::{Attribute, Prim, Relationship, TimeCode};
+use openusd::{Result, gf, sdf};
 
 use super::anim_mapper::AnimMapper;
 use super::binding::SkelBinding;
-use super::skinning::{has_shape, skin_normals, skin_points, skin_transform};
+use super::skeleton_query::SkeletonQuery;
+use super::skinning::{has_shape, joints_extent, skin_normals, skin_points, skin_transform};
 use super::{InfluenceInterpolation, SkinningMethod};
 use crate::SchemaError;
-use crate::geom::{self, Primvar};
+use crate::geom::{BoundableSchema, Primvar};
 
-/// Resolver bundle for one skinnable prim.
+/// Joint indices and weights, one run of
+/// [`SkinningQuery::influences_per_component`] pairs per point. Answered by
+/// [`SkinningQuery::joint_influences`].
+pub type JointInfluences = (Vec<i32>, Vec<f32>);
+
+/// One skinnable prim's resolved binding.
 ///
-/// Build with [`SkinningResolver::new`] from a [`SkelBinding`], which also
-/// pre-computes the joint-subset remapping ([`AnimMapper`]) from the bound
-/// skeleton's joint order. After construction the resolver is read-only and
-/// can be reused across frames.
+/// Build with [`SkinningQuery::new`] from a [`SkelBinding`] and the query of
+/// the skeleton bound to it.
 #[derive(Debug, Clone)]
-pub struct SkinningResolver {
-    prim: sdf::Path,
-    joint_indices: Vec<i32>,
-    joint_weights: Vec<f32>,
+pub struct SkinningQuery {
+    prim: Prim,
+    joint_indices: Option<Primvar>,
+    joint_weights: Option<Primvar>,
+    geom_bind_transform: Option<Attribute>,
+    blend_shape_targets: Option<Relationship>,
+    /// The skinning method, or `None` for a token that names no method this
+    /// crate knows.
+    skinning_method: Option<SkinningMethod>,
     /// The interpolation and `elementSize` the joint-influence primvars share,
     /// or `None` when they are not bound consistently.
     influences: Option<(InfluenceInterpolation, usize)>,
-    skinning_method: SkinningMethod,
-    /// Mapper from the bound skeleton's joint order into the mesh's effective
-    /// joint order. Identity (with `is_identity() == true`) when `skel:joints`
-    /// isn't authored. Its `target_len()` is the effective mesh-side joint
-    /// count (`skel:joints.len()` when a subset was authored, else the
-    /// skeleton's joint count).
-    mapper: AnimMapper,
-    /// Cached `geomBindTransform`. Spec default = identity.
-    geom_bind_transform: gf::Mat4d,
+    /// The number of joints of the bound skeleton, zero without one.
+    skeleton_joints: usize,
+    /// `skel:joints` and the mapping from the skeleton's joint order onto it,
+    /// where `skel:joints` is authored.
+    joints: Option<(Vec<String>, AnimMapper)>,
+    /// `skel:blendShapes` and the mapping from the animation's blend-shape
+    /// order onto it, where `skel:blendShapes` is authored.
+    blend_shapes: Option<(Vec<String>, AnimMapper)>,
 }
 
-impl SkinningResolver {
-    /// Build a resolver from the binding properties `binding` resolved for its
-    /// prim. The joint influences count only when both primvars are bound, with
+impl SkinningQuery {
+    /// The query over the binding properties `binding` resolved for its prim
+    /// (C++ `UsdSkelSkinningQuery`'s constructor). `skeleton` is the query of
+    /// `binding.skeleton`, for its joint order and its animation's blend-shape
+    /// order, where that skeleton has one; without it both orders are empty,
+    /// as C++ passes them, so a joint subset maps no joints and the
+    /// blend-shape mapper maps nothing from the animation.
+    ///
+    /// The joint influences count only when both primvars are bound, with
     /// equal positive `elementSize` and equal `constant` or `vertex`
-    /// interpolation (C++ `UsdSkelSkinningQuery`'s constructor).
-    pub fn new(binding: &SkelBinding) -> Result<Self, SchemaError> {
-        let properties = &binding.properties;
-        // TODO(perf): every prim bound to one skeleton re-reads its joint order.
-        let skeleton_joint_order = binding.skeleton.joint_paths()?;
-        let joint_subset: Option<Vec<String>> = properties.joints.as_ref().map(Attribute::cast).transpose()?.flatten();
-        // No subset authored → skinning transforms feed straight through; an
-        // identity mapper keeps callers on one code path. An authored empty
-        // subset maps no joints.
-        let mapper = AnimMapper::new(
-            &skeleton_joint_order,
-            joint_subset.as_ref().unwrap_or(&skeleton_joint_order),
+    /// interpolation. The skinning method is read once, at the default time,
+    /// as C++ reads it.
+    pub fn new(binding: &SkelBinding, skeleton: Option<&SkeletonQuery>) -> Result<Self, SchemaError> {
+        debug_assert!(
+            skeleton.is_none_or(|skeleton| skeleton.skeleton().path() == binding.skeleton.path()),
+            "the skeleton query must be the query of the binding's skeleton"
         );
-        let indices = properties.joint_indices.clone().map(Primvar::new);
-        let weights = properties.joint_weights.clone().map(Primvar::new);
+        let properties = &binding.properties;
+        let skeleton_joints = skeleton.map_or(&[][..], SkeletonQuery::joint_order);
+        let anim_blend_shapes = skeleton
+            .and_then(SkeletonQuery::anim_query)
+            .map_or(&[][..], |anim| anim.blend_shape_order());
+        let joint_indices = properties.joint_indices.clone().map(Primvar::new);
+        let joint_weights = properties.joint_weights.clone().map(Primvar::new);
         Ok(Self {
-            prim: binding.prim.path().clone(),
-            joint_indices: match &indices {
-                Some(indices) => indices.flattened::<Vec<i32>>(None)?.unwrap_or_default(),
-                None => Vec::new(),
-            },
-            joint_weights: match &weights {
-                Some(weights) => joint_weights(weights)?,
-                None => Vec::new(),
-            },
-            influences: influences(indices.as_ref(), weights.as_ref())?,
-            skinning_method: value(properties.skinning_method.as_ref())?.unwrap_or_default(),
-            mapper,
-            geom_bind_transform: value(properties.geom_bind_transform.as_ref())?.unwrap_or(gf::Mat4d::IDENTITY),
+            prim: binding.prim.clone(),
+            influences: influences(joint_indices.as_ref(), joint_weights.as_ref())?,
+            joint_indices,
+            joint_weights,
+            geom_bind_transform: properties.geom_bind_transform.clone(),
+            blend_shape_targets: properties.blend_shape_targets.clone(),
+            skinning_method: skinning_method(properties.skinning_method.as_ref())?,
+            skeleton_joints: skeleton_joints.len(),
+            joints: order(properties.joints.as_ref(), skeleton_joints)?,
+            blend_shapes: order(properties.blend_shapes.as_ref(), anim_blend_shapes)?,
         })
     }
 
-    /// Borrow the path of the skinned prim.
-    pub fn prim(&self) -> &sdf::Path {
+    /// The skinned prim.
+    pub fn prim(&self) -> &Prim {
         &self.prim
-    }
-
-    /// `true` unless the joint influences are bound with `vertex`
-    /// interpolation (C++ `IsRigidlyDeformed`): every point shares one set of
-    /// influences, and the prim can be skinned by a single 4×4 (see
-    /// [`rigid_transform`](Self::rigid_transform)). A prim without joint
-    /// influences is rigid too, and skins through none of the methods here.
-    pub fn is_rigidly_deformed(&self) -> bool {
-        self.influences
-            .is_none_or(|(interpolation, _)| interpolation == InfluenceInterpolation::Constant)
-    }
-
-    /// Number of `(joint, weight)` pairs per skinned element. For per-vertex
-    /// bindings, "element" is a vertex; for rigid bindings, the count applies
-    /// to the mesh as a whole.
-    pub fn influences_per_component(&self) -> usize {
-        self.influences.map_or(1, |(_, element_size)| element_size)
     }
 
     /// `true` when the prim's joint influences are bound and their primvar
@@ -114,135 +103,323 @@ impl SkinningResolver {
         self.influences.is_some()
     }
 
-    /// Effective joint order length on the mesh side. Equal to the bound
-    /// `Skeleton.joints` count when `skel:joints` isn't authored; otherwise the
-    /// `skel:joints` length.
-    pub fn joint_order_len(&self) -> usize {
-        self.mapper.target_len()
+    /// `true` when the prim binds blend shapes: `skel:blendShapes` and
+    /// `skel:blendShapeTargets` are both authored (C++ `HasBlendShapes`).
+    pub fn has_blend_shapes(&self) -> bool {
+        self.blend_shapes.is_some() && self.blend_shape_targets.is_some()
     }
 
-    /// Cached `geomBindTransform` — identity when unauthored.
-    pub fn geom_bind_transform(&self) -> gf::Mat4d {
-        self.geom_bind_transform
+    /// The interpolation of the joint influences: `constant` where they are
+    /// not bound consistently, as for any primvar without one (C++
+    /// `GetInterpolation`).
+    pub fn interpolation(&self) -> InfluenceInterpolation {
+        self.influences
+            .map_or(InfluenceInterpolation::Constant, |(interpolation, _)| interpolation)
     }
 
-    /// Authored skinning method. Spec default is
-    /// [`SkinningMethod::ClassicLinear`]. The skinning methods answer `None`
-    /// for `dualQuaternion`, which is not ported yet.
-    pub fn skinning_method(&self) -> SkinningMethod {
+    /// `true` unless the joint influences are bound with `vertex`
+    /// interpolation (C++ `IsRigidlyDeformed`): every point shares one set of
+    /// influences, and the prim can be skinned by a single 4×4 (see
+    /// [`skinned_transform`](Self::skinned_transform)). A prim without joint
+    /// influences is rigid too, and skins through none of the methods here.
+    pub fn is_rigidly_deformed(&self) -> bool {
+        self.interpolation() == InfluenceInterpolation::Constant
+    }
+
+    /// Number of `(joint, weight)` pairs per skinned element (C++
+    /// `GetNumInfluencesPerComponent`). For per-vertex bindings, "element" is
+    /// a vertex; for rigid bindings, the count applies to the mesh as a whole.
+    pub fn influences_per_component(&self) -> usize {
+        self.influences.map_or(1, |(_, element_size)| element_size)
+    }
+
+    /// The skinning method `primvars:skel:skinningMethod` names (C++
+    /// `GetSkinningMethod`). An unauthored method, or a value that is not a
+    /// token, is `classicLinear`, as C++ falls back. `None` for a token that
+    /// names no method this crate knows, for which the skinning methods
+    /// answer `None`.
+    pub fn skinning_method(&self) -> Option<SkinningMethod> {
         self.skinning_method
     }
 
-    /// Remap skinning transforms from the bound skeleton's joint order into the
-    /// mesh's effective order. A copy when no `skel:joints` subset was
-    /// authored. Missing joints (a target joint that isn't in the bound
-    /// skeleton — rare but legal) get [`gf::Mat4d::IDENTITY`]. `None` unless
-    /// `skel_skinning_xforms` holds one transform per skeleton joint.
-    pub fn remap_transforms(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Mat4d>> {
-        let mut mesh_xforms = vec![gf::Mat4d::IDENTITY; self.mapper.target_len()];
-        self.mapper
-            .remap_into(skel_skinning_xforms, &mut mesh_xforms)
-            .then_some(mesh_xforms)
+    /// The geom bind transform at `time`, `None` being the default time, and
+    /// the identity where it is unbound (C++ `GetGeomBindTransform`).
+    pub fn geom_bind_transform(&self, time: impl Into<Option<TimeCode>>) -> Result<gf::Mat4d> {
+        // TODO(perf): a geom bind transform that is not time-varying could be
+        // read once.
+        let time = time.into();
+        Ok(self
+            .geom_bind_transform
+            .as_ref()
+            .map(|transform| transform.get_at(time))
+            .transpose()?
+            .flatten()
+            .unwrap_or(gf::Mat4d::IDENTITY))
     }
 
-    /// Skin `points` through this binding's joint influences, using
-    /// `skel_skinning_xforms` in the bound skeleton's joint order (C++
+    /// `skel:joints`, where it is authored (C++ `GetJointOrder`).
+    pub fn joint_order(&self) -> Option<&[String]> {
+        self.joints.as_ref().map(|(names, _)| names.as_slice())
+    }
+
+    /// The mapping from the skeleton's joint order onto `skel:joints`, where
+    /// `skel:joints` is authored (C++ `GetJointMapper`).
+    pub fn joint_mapper(&self) -> Option<&AnimMapper> {
+        self.joints.as_ref().map(|(_, mapper)| mapper)
+    }
+
+    /// `skel:blendShapes`, where it is authored (C++ `GetBlendShapeOrder`).
+    pub fn blend_shape_order(&self) -> Option<&[String]> {
+        self.blend_shapes.as_ref().map(|(names, _)| names.as_slice())
+    }
+
+    /// The mapping from the bound animation's blend-shape order onto
+    /// `skel:blendShapes`, where `skel:blendShapes` is authored (C++
+    /// `GetBlendShapeMapper`). It remaps the animation's weights into the
+    /// order of `skel:blendShapeTargets`.
+    pub fn blend_shape_mapper(&self) -> Option<&AnimMapper> {
+        self.blend_shapes.as_ref().map(|(_, mapper)| mapper)
+    }
+
+    /// `skel:blendShapeTargets`, where it authors targets on the prim (C++
+    /// `GetBlendShapeTargetsRel`).
+    pub fn blend_shape_targets(&self) -> Option<&Relationship> {
+        self.blend_shape_targets.as_ref()
+    }
+
+    /// Every time at which the joint influences or the geom bind transform
+    /// are authored, ascending and without repeats (C++ `GetTimeSamples`).
+    pub fn time_samples(&self) -> Result<Vec<f64>> {
+        self.time_samples_in(f64::NEG_INFINITY..=f64::INFINITY)
+    }
+
+    /// The [`time_samples`](Self::time_samples) within `interval` (C++
+    /// `GetTimeSamplesInInterval`). An indexed influence primvar contributes
+    /// its indices' samples too.
+    pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        let mut attributes = Vec::new();
+        for primvar in [&self.joint_indices, &self.joint_weights].into_iter().flatten() {
+            attributes.extend(primvar.sampled_attributes()?);
+        }
+        attributes.extend(self.geom_bind_transform.clone());
+        Attribute::unioned_time_samples_in(&attributes, interval)
+    }
+
+    /// The joint indices and weights at `time`, flattened through their
+    /// primvar indices (C++ `ComputeJointInfluences`). `None` when the
+    /// influences are not bound consistently, either has no value at `time`,
+    /// or their arrays differ in length, do not split into runs of
+    /// [`influences_per_component`](Self::influences_per_component), or hold
+    /// other than one run when constant.
+    pub fn joint_influences(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<JointInfluences>, SchemaError> {
+        // TODO(perf): influences that are not time-varying could be read and
+        // flattened once; skinning points and then normals reads them twice.
+        let (Some((interpolation, element_size)), Some(indices), Some(weights)) =
+            (self.influences, &self.joint_indices, &self.joint_weights)
+        else {
+            return Ok(None);
+        };
+        let time = time.into();
+        let (Some(indices), Some(weights)) = (indices.flattened::<Vec<i32>>(time)?, joint_weights(weights, time)?)
+        else {
+            return Ok(None);
+        };
+        let fits = indices.len() == weights.len()
+            && has_shape(indices.len(), element_size)
+            && (interpolation == InfluenceInterpolation::Vertex || indices.len() == element_size);
+        Ok(fits.then_some((indices, weights)))
+    }
+
+    /// The joint influences at `time` for `count` points, constant influences
+    /// repeated for each point (C++ `ComputeVaryingJointInfluences`). `None`
+    /// where [`joint_influences`](Self::joint_influences) is, or when vertex
+    /// influences hold other than one run per point.
+    pub fn varying_joint_influences(
+        &self,
+        count: usize,
+        time: impl Into<Option<TimeCode>>,
+    ) -> Result<Option<JointInfluences>, SchemaError> {
+        let Some((indices, weights)) = self.joint_influences(time)? else {
+            return Ok(None);
+        };
+        Ok(if self.is_rigidly_deformed() {
+            // TODO(perf): constant influences skin every point through one
+            // blended transform, the one `skinned_transform` answers;
+            // repeating them repeats the same blend per point.
+            Some((indices.repeat(count), weights.repeat(count)))
+        } else {
+            (indices.len() == count * self.influences_per_component()).then_some((indices, weights))
+        })
+    }
+
+    /// Skin `points` at `time` through the joint influences, using
+    /// `skinning_xforms` in the bound skeleton's joint order (C++
     /// `ComputeSkinnedPoints`). Constant influences apply to every point.
     ///
-    /// `None` where the influences cannot skin `points`: they are not bound,
-    /// their arrays do not fit `points`, or an index names no joint. `None`
-    /// also when `skel_skinning_xforms` holds other than one transform per
-    /// skeleton joint, and for a `dualQuaternion` skinning method.
-    pub fn skinned_points(&self, points: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
-        let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
-        let (indices, weights) = self.varying_influences(points.len())?;
-        skin_points(
-            self.skinning_method,
-            points,
-            &indices,
-            &weights,
-            self.influences_per_component(),
-            self.geom_bind_transform,
-            &mesh_xforms,
-        )
+    /// `None` where [`varying_joint_influences`](Self::varying_joint_influences)
+    /// is, when `skinning_xforms` holds other than one transform per skeleton
+    /// joint, when an influence names no joint, and for a skinning method
+    /// other than `classicLinear`.
+    pub fn skinned_points(
+        &self,
+        skinning_xforms: &[gf::Mat4d],
+        points: &[gf::Vec3f],
+        time: impl Into<Option<TimeCode>>,
+    ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
+        self.skin_elements(skin_points, skinning_xforms, points, time.into())
     }
 
-    /// Skin `normals` through the same influences as
+    /// Skin `normals` at `time` through the same influences as
     /// [`skinned_points`](Self::skinned_points), under the same conditions
     /// (C++ `ComputeSkinnedNormals`), through the inverse-transpose of each
     /// transform. Each result is normalised.
-    pub fn skinned_normals(&self, normals: &[gf::Vec3f], skel_skinning_xforms: &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>> {
-        let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
-        let (indices, weights) = self.varying_influences(normals.len())?;
-        skin_normals(
-            self.skinning_method,
-            normals,
-            &indices,
-            &weights,
-            self.influences_per_component(),
-            self.geom_bind_transform,
-            &mesh_xforms,
-        )
+    pub fn skinned_normals(
+        &self,
+        skinning_xforms: &[gf::Mat4d],
+        normals: &[gf::Vec3f],
+        time: impl Into<Option<TimeCode>>,
+    ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
+        self.skin_elements(skin_normals, skinning_xforms, normals, time.into())
     }
 
     /// The single 4×4 to apply to a rigidly deformed prim's local-to-world
-    /// transform (C++ `ComputeSkinnedTransform`).
+    /// transform at `time` (C++ `ComputeSkinnedTransform`), skinned as
+    /// [`skin_transform_lbs`](super::skinning::skin_transform_lbs) describes.
     ///
-    /// `None` for a prim whose influences are not constant, not bound, sized to
-    /// other than one element, or name a joint that does not exist, when
-    /// `skel_skinning_xforms` holds other than one transform per skeleton
-    /// joint, and for a `dualQuaternion` skinning method. The transform is
-    /// skinned as [`skin_transform_lbs`](super::skinning::skin_transform_lbs)
-    /// describes.
-    pub fn rigid_transform(&self, skel_skinning_xforms: &[gf::Mat4d]) -> Option<gf::Mat4d> {
-        let (InfluenceInterpolation::Constant, _) = self.joint_influences()? else {
-            return None;
-        };
-        let mesh_xforms = self.remap_transforms(skel_skinning_xforms)?;
-        skin_transform(
-            self.skinning_method,
-            &self.joint_indices,
-            &self.joint_weights,
-            self.geom_bind_transform,
-            &mesh_xforms,
-        )
-    }
-
-    /// The bound influences, where their arrays agree in length, hold whole
-    /// elements, and hold exactly one element when constant (C++
-    /// `ComputeJointInfluences`).
-    fn joint_influences(&self) -> Option<(InfluenceInterpolation, usize)> {
-        let (interpolation, element_size) = self.influences?;
-        let len = self.joint_indices.len();
-        let fits = len == self.joint_weights.len()
-            && has_shape(len, element_size)
-            && (interpolation == InfluenceInterpolation::Vertex || len == element_size);
-        fits.then_some((interpolation, element_size))
-    }
-
-    /// The joint indices and weights for `count` points, with constant
-    /// influences repeated for each point (C++
-    /// `ComputeVaryingJointInfluences`), or `None` where they do not fit.
-    fn varying_influences(&self, count: usize) -> Option<Influences<'_>> {
-        match self.joint_influences()? {
-            // TODO(perf): constant influences skin every point through one
-            // blended transform; expanding them repeats the same blend per
-            // point.
-            (InfluenceInterpolation::Constant, _) => Some((
-                Cow::Owned(self.joint_indices.repeat(count)),
-                Cow::Owned(self.joint_weights.repeat(count)),
-            )),
-            (InfluenceInterpolation::Vertex, element_size) => (self.joint_indices.len() == count * element_size)
-                .then_some((
-                    Cow::Borrowed(&self.joint_indices[..]),
-                    Cow::Borrowed(&self.joint_weights[..]),
-                )),
+    /// `None` for a prim whose influences are not constant, where
+    /// [`joint_influences`](Self::joint_influences) is, when `skinning_xforms`
+    /// holds other than one transform per skeleton joint, when an influence
+    /// names no joint, and for a skinning method other than `classicLinear`.
+    /// A joint of `skel:joints` the skeleton lacks takes the identity, where
+    /// C++ leaves the skeleton's transform at that index.
+    pub fn skinned_transform(
+        &self,
+        skinning_xforms: &[gf::Mat4d],
+        time: impl Into<Option<TimeCode>>,
+    ) -> Result<Option<gf::Mat4d>, SchemaError> {
+        if !self.is_rigidly_deformed() {
+            return Ok(None);
         }
+        let time = time.into();
+        let Some(method) = self.skinning_method else {
+            return Ok(None);
+        };
+        let Some((indices, weights)) = self.joint_influences(time)? else {
+            return Ok(None);
+        };
+        let Some(xforms) = self.remap_transforms(skinning_xforms) else {
+            return Ok(None);
+        };
+        Ok(skin_transform(
+            method,
+            &indices,
+            &weights,
+            self.geom_bind_transform(time)?,
+            &xforms,
+        ))
+    }
+
+    /// How far the skinned prim may reach past its skeleton's joints at
+    /// rest (C++ `ComputeExtentsPadding`): the largest distance, on any axis,
+    /// by which `boundable`'s extent carried through the geom bind transform
+    /// lies outside the box around `rest_skel_xforms`' pivots. Both are read
+    /// at the earliest time. Zero where `boundable` authors no extent, where
+    /// the prim lies within the joints' box, and for no joints, where C++
+    /// pads by the width of an empty range.
+    pub fn extents_padding(&self, rest_skel_xforms: &[gf::Mat4d], boundable: &impl BoundableSchema) -> Result<f32> {
+        let Some(extent) = boundable.extent_at(TimeCode::EARLIEST)? else {
+            return Ok(0.0);
+        };
+        let ([min, max], Some([joints_min, joints_max])) =
+            (extent.as_slice(), joints_extent(rest_skel_xforms, 0.0, None))
+        else {
+            return Ok(0.0);
+        };
+        let prim = gf::Range3d::from([*min, *max]).transformed(self.geom_bind_transform(TimeCode::EARLIEST)?);
+        let (prim_min, prim_max) = (prim.min().to_f32(), prim.max().to_f32());
+        let below = joints_min - prim_min;
+        let above = prim_max - joints_max;
+        Ok([below.x, below.y, below.z, above.x, above.y, above.z]
+            .into_iter()
+            .fold(0.0, f32::max))
+    }
+
+    /// Skin `elements`, points or normals, at `time` through `skin` with the
+    /// influences varying over them.
+    fn skin_elements(
+        &self,
+        skin: SkinFn,
+        skinning_xforms: &[gf::Mat4d],
+        elements: &[gf::Vec3f],
+        time: Option<TimeCode>,
+    ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
+        let Some(method) = self.skinning_method else {
+            return Ok(None);
+        };
+        let Some((indices, weights)) = self.varying_joint_influences(elements.len(), time)? else {
+            return Ok(None);
+        };
+        let Some(xforms) = self.remap_transforms(skinning_xforms) else {
+            return Ok(None);
+        };
+        Ok(skin(
+            method,
+            elements,
+            &indices,
+            &weights,
+            self.influences_per_component(),
+            self.geom_bind_transform(time)?,
+            &xforms,
+        ))
+    }
+
+    /// Remap skinning transforms from the bound skeleton's joint order into
+    /// the order of `skel:joints`, where it is authored. A joint of
+    /// `skel:joints` the skeleton lacks gets [`gf::Mat4d::IDENTITY`]. `None`
+    /// unless `skinning_xforms` holds one transform per skeleton joint.
+    fn remap_transforms<'a>(&self, skinning_xforms: &'a [gf::Mat4d]) -> Option<Cow<'a, [gf::Mat4d]>> {
+        if skinning_xforms.len() != self.skeleton_joints {
+            return None;
+        }
+        let Some((_, mapper)) = &self.joints else {
+            return Some(Cow::Borrowed(skinning_xforms));
+        };
+        // TODO(perf): the remapped transforms could go into a buffer the
+        // caller keeps across frames.
+        let mut xforms = vec![gf::Mat4d::IDENTITY; mapper.target_len()];
+        mapper
+            .remap_into(skinning_xforms, &mut xforms)
+            .then_some(Cow::Owned(xforms))
     }
 }
 
-/// Joint indices and weights, one run of `elementSize` pairs per point.
-type Influences<'a> = (Cow<'a, [i32]>, Cow<'a, [f32]>);
+/// [`skin_points`] or [`skin_normals`].
+type SkinFn =
+    fn(SkinningMethod, &[gf::Vec3f], &[i32], &[f32], usize, gf::Mat4d, &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>>;
+
+/// The skinning method `attribute` names, `classicLinear` where it is unbound
+/// or holds no token, and `None` for a token that names no method.
+fn skinning_method(attribute: Option<&Attribute>) -> Result<Option<SkinningMethod>> {
+    Ok(
+        match attribute.map(Attribute::get::<sdf::Value>).transpose()?.flatten() {
+            Some(sdf::Value::Token(token)) => SkinningMethod::from_token(token),
+            _ => Some(SkinningMethod::ClassicLinear),
+        },
+    )
+}
+
+/// The names `attribute` holds, where it is bound and holds them, with the
+/// mapping from `source` onto them.
+fn order(attribute: Option<&Attribute>, source: &[String]) -> Result<Option<(Vec<String>, AnimMapper)>> {
+    Ok(attribute
+        .map(Attribute::cast)
+        .transpose()?
+        .flatten()
+        .map(|names: Vec<String>| {
+            let mapper = AnimMapper::new(source, &names);
+            (names, mapper)
+        }))
+}
 
 /// The interpolation and `elementSize` the joint-influence primvars share, or
 /// `None` when either is unbound or the two disagree, the element size is not
@@ -255,45 +432,20 @@ fn influences(indices: Option<&Primvar>, weights: Option<&Primvar>) -> Result<Op
     if element_size <= 0 || element_size != weights.element_size()? {
         return Ok(None);
     }
-    let interpolation = interpolation_of(indices)?;
-    if interpolation != interpolation_of(weights)? {
+    let interpolation = indices.interpolation_token()?;
+    if interpolation != weights.interpolation_token()? {
         return Ok(None);
     }
-    Ok(interpolation.map(|interpolation| (interpolation, element_size as usize)))
+    Ok(InfluenceInterpolation::from_token(interpolation).map(|interpolation| (interpolation, element_size as usize)))
 }
 
-/// The influence interpolation the `interpolation` metadata on `primvar` names,
-/// `constant` where none is authored, and `None` for any other token (C++
-/// `UsdGeomPrimvar::GetInterpolation`, which answers the authored token).
-fn interpolation_of(primvar: &Primvar) -> Result<Option<InfluenceInterpolation>> {
-    Ok(
-        match primvar
-            .attribute()
-            .metadata::<sdf::Value>(geom::tokens::INTERPOLATION)?
-        {
-            None => Some(InfluenceInterpolation::Constant),
-            Some(sdf::Value::Token(token)) => InfluenceInterpolation::from_token(token),
-            Some(_) => None,
-        },
-    )
-}
-
-/// The value `attribute` holds, where it is bound and holds one.
-fn value<T>(attribute: Option<&Attribute>) -> Result<Option<T>>
-where
-    T: sdf::FromValue,
-    T::Error: Into<Error>,
-{
-    Ok(attribute.map(Attribute::get).transpose()?.flatten())
-}
-
-/// The joint weights `weights` holds, flattened through its indices, and empty
-/// when unauthored. The schema declares `float[]`. Weights authored as
-/// `double[]` are narrowed to `f32`.
-fn joint_weights(weights: &Primvar) -> Result<Vec<f32>, SchemaError> {
-    Ok(match weights.flattened::<sdf::Value>(None)? {
-        Some(sdf::Value::FloatVec(weights)) => weights,
-        Some(sdf::Value::DoubleVec(weights)) => weights.into_iter().map(|weight| weight as f32).collect(),
-        _ => Vec::new(),
+/// The joint weights `weights` holds at `time`, flattened through its
+/// indices, where it holds an array of weights. The schema declares
+/// `float[]`. Weights authored as `double[]` are narrowed to `f32`.
+fn joint_weights(weights: &Primvar, time: Option<TimeCode>) -> Result<Option<Vec<f32>>, SchemaError> {
+    Ok(match weights.flattened::<sdf::Value>(time)? {
+        Some(sdf::Value::FloatVec(weights)) => Some(weights),
+        Some(sdf::Value::DoubleVec(weights)) => Some(weights.into_iter().map(|weight| weight as f32).collect()),
+        _ => None,
     })
 }

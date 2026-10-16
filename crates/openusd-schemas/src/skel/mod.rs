@@ -3,7 +3,7 @@
 //! Typed value-views over a composed [`openusd::usd::Stage`], mirroring Pixar's
 //! `UsdSkel` family, plus Pixar's UsdSkel object model: topology,
 //! animation-to-skeleton mappers, the skeleton query, per-mesh skinning
-//! resolvers, and pure-math helpers for linear blend skinning and blend-shape
+//! queries, and pure-math helpers for linear blend skinning and blend-shape
 //! application.
 //!
 //! ```text
@@ -22,7 +22,7 @@
 //! [`openusd::usd::Attribute::get`] and inherits the stage's interpolation mode
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
 //! [`SkeletonQuery`] binds a skeleton to the animation it inherits and poses
-//! it at any time; [`SkinningResolver`] takes the skinning transforms it
+//! it at any time; [`SkinningQuery`] takes the skinning transforms it
 //! answers. [`discover_bindings`] walks a `Root` subtree and
 //! resolves every skinnable prim's inherited skeleton and binding properties,
 //! with the animation bound to that skeleton
@@ -70,7 +70,7 @@ pub use anim_query::AnimQuery;
 pub use binding::{SkelBinding, discover_bindings, is_skinnable};
 pub use decode::{INBETWEENS_NAMESPACE, Inbetween};
 pub use skeleton_query::SkeletonQuery;
-pub use skinning_query::SkinningResolver;
+pub use skinning_query::{JointInfluences, SkinningQuery};
 pub use topology::{NO_PARENT, Topology, TopologyError};
 
 /// The `interpolation` of the joint-influence primvars. `Constant` encodes
