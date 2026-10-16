@@ -10,11 +10,12 @@
 //! engine can just hold the table as a plain field.
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::mem;
 use std::ops::Bound;
 
-use crate::sdf::Path;
+use crate::sdf::{self, Path};
 
 #[cfg(test)]
 use super::VariantFallbackMap;
@@ -261,17 +262,12 @@ impl LoadRules {
     /// descendants once it has been inspected, so an intervening explicit
     /// rule shadows whatever is beneath it.
     fn has_loaded_descendant(&self, path: &Path) -> bool {
-        let descendants: Vec<(&Path, &Rule)> = self.strict_subtree(path).collect();
-        let mut i = 0;
-        while i < descendants.len() {
-            let (cur_path, cur_rule) = descendants[i];
+        let mut descendants = self.strict_subtree(path).peekable();
+        while let Some((cur_path, cur_rule)) = descendants.next() {
             if matches!(cur_rule, Rule::All | Rule::Only) {
                 return true;
             }
-            i += 1;
-            while i < descendants.len() && descendants[i].0.has_prefix(cur_path) {
-                i += 1;
-            }
+            while descendants.next_if(|(p, _)| p.has_prefix(cur_path)).is_some() {}
         }
         false
     }
@@ -283,32 +279,54 @@ impl LoadRules {
     /// already accounts for whatever a shallower entry's own lookahead
     /// (step 4) sees through it.
     ///
-    /// Verifies safety empirically, recomputing every authored path's
-    /// effective rule after each tentative removal, because an authored
-    /// entry's raw rule can differ from its own effective rule (an authored
-    /// [`Rule::None`] shadowing a loaded descendant still resolves to
-    /// [`Rule::Only`]), and a removal can change a shallower ancestor's
-    /// decision through that same lookahead, not just the removed entry's
-    /// own path. Rule tables are small (authored entries, not one per prim),
-    /// so this stays cheap.
-    // TODO(perf): O(candidates² · effective_rule cost) — every candidate's
-    // removal re-verifies the whole `expected` set. Called on every
-    // `IndexCache::set_load_rules` and every `make_relative_to` (so once per
-    // instance registration); scoping the re-verification to entries near
-    // each candidate, rather than the full table, would help if a profile
-    // ever shows a stage with many authored rules paying for this.
+    /// Verifies safety empirically, recomputing after each tentative removal
+    /// the effective rule of every authored path the removal can reach,
+    /// because an authored entry's raw rule can differ from its own effective
+    /// rule (an authored [`Rule::None`] shadowing a loaded descendant still
+    /// resolves to [`Rule::Only`]), and a removal can change a shallower
+    /// ancestor's decision through that same lookahead, not just the removed
+    /// entry's own path. Those are the removed path and its nearest authored
+    /// ancestor.
+    ///
+    /// C++ `UsdStageLoadRules::Minimize` drops an entry whose nearest
+    /// ancestor entry has the same rule. That changes the ancestor's
+    /// effective rule when the dropped entry shadowed a loaded descendant,
+    /// so this table keeps such an entry.
     pub fn minimize(&mut self) {
         let mut candidates: Vec<Path> = self.rules.keys().cloned().collect();
-        candidates.sort_by_key(|p| std::cmp::Reverse(p.prim_element_count()));
-        let expected: Vec<(Path, Rule)> = candidates.iter().map(|p| (p.clone(), self.effective_rule(p))).collect();
+        candidates.sort_by_key(|p| Reverse(p.prim_element_count()));
+        let expected: sdf::PathMap<Rule> = candidates.iter().map(|p| (p.clone(), self.effective_rule(p))).collect();
         for candidate in candidates {
-            let rule = self.rules[&candidate];
-            self.rules.remove(&candidate);
-            let safe = expected.iter().all(|(p, r)| self.effective_rule(p) == *r);
-            if !safe {
+            let rule = self.rules.remove(&candidate).expect("a candidate is an authored entry");
+            if !self.removal_keeps(&candidate, &expected) {
                 self.rules.insert(candidate, rule);
             }
         }
+    }
+
+    /// Whether every authored path still resolves to its `expected` rule
+    /// after [`minimize`](Self::minimize) dropped the entry at `removed`.
+    ///
+    /// A path's effective rule reads its nearest entry at or above it and,
+    /// through the lookahead, the entries beneath it that no other entry
+    /// shadows. Candidates go deepest first, so every authored ancestor of
+    /// `removed` still has its entry, and two authored paths read the removed
+    /// entry: `removed` itself and, through its lookahead, its nearest
+    /// authored ancestor.
+    ///
+    /// An entry dropped earlier beneath `removed` may have resolved through
+    /// it too. Such a path resolves to [`Rule::All`] when its nearest entry
+    /// is [`Rule::All`] and through its own lookahead otherwise, so it changes
+    /// only when the removed entry and the next one up disagree on
+    /// [`Rule::All`]. The effective rule at `removed` then changes as well.
+    fn removal_keeps(&self, removed: &Path, expected: &sdf::PathMap<Rule>) -> bool {
+        let holds = |path: &Path| self.effective_rule(path) == expected[path];
+        holds(removed)
+            && removed
+                .ancestors()
+                .skip(1)
+                .find(|p| self.rules.contains_key(p))
+                .is_none_or(|ancestor| holds(&ancestor))
     }
 
     /// Re-roots this table at `path`: `path`'s own effective rule becomes the
@@ -721,6 +739,58 @@ mod tests {
                 rules.effective_rule(&path),
                 before.effective_rule(&path),
                 "minimize must not change the effective rule at {path}"
+            );
+        }
+    }
+
+    /// The reduction `minimize` makes when every tentative removal
+    /// re-verifies every authored path.
+    fn minimize_by_full_check(rules: &LoadRules) -> LoadRules {
+        let mut rules = rules.clone();
+        let mut candidates: Vec<Path> = rules.rules.keys().cloned().collect();
+        candidates.sort_by_key(|p| Reverse(p.prim_element_count()));
+        let expected: Vec<(Path, Rule)> = candidates
+            .iter()
+            .map(|p| (p.clone(), rules.effective_rule(p)))
+            .collect();
+        for candidate in candidates {
+            let rule = rules.rules.remove(&candidate).expect("authored");
+            if !expected.iter().all(|(p, r)| rules.effective_rule(p) == *r) {
+                rules.rules.insert(candidate, rule);
+            }
+        }
+        rules
+    }
+
+    /// Every table over a small namespace, drawn from a fixed-seed
+    /// generator, reduces as a full re-verification reduces it.
+    #[test]
+    fn minimize_matches_full_check() {
+        let paths = ["/", "/A", "/A/B", "/A/B/C", "/A/B/D", "/A/E", "/A/E/F", "/G", "/G/H"].map(p);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..5000 {
+            let mut rules = LoadRules::all();
+            for path in &paths {
+                match next() % 5 {
+                    0 => rules.add_rule(path.clone(), Rule::All),
+                    1 => rules.add_rule(path.clone(), Rule::Only),
+                    2 => rules.add_rule(path.clone(), Rule::None),
+                    _ => {}
+                }
+            }
+            let mut minimized = rules.clone();
+            minimized.minimize();
+            assert_eq!(
+                minimized,
+                minimize_by_full_check(&rules),
+                "reducing {:?}",
+                rules.rules()
             );
         }
     }
