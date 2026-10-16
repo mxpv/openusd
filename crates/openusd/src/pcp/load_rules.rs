@@ -400,7 +400,7 @@ impl IndexCache {
     /// reaches here, so a repeated `load`/`unload` call costs nothing, and
     /// installing a caller-supplied table that resolves identically to the
     /// current one now costs nothing either. For each touched path,
-    /// [`drop_index_subtree`](Self::drop_index_subtree) covers every
+    /// [`drop_index_subtrees`](Self::drop_index_subtrees) covers every
     /// descendant whose effective rule could change because an entry inside
     /// that subtree moved; walking its strict ancestors while their current
     /// effective rule is not [`Rule::All`] covers every ancestor

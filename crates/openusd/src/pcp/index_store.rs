@@ -29,8 +29,8 @@ use super::{CompositionDiagnostic, LayerId, QueryError};
 #[derive(Default)]
 pub(super) struct IndexStore {
     /// Per-prim composition records, keyed by composed path. A [`sdf::PathTable`]
-    /// so [`remove_subtree`](Self::remove_subtree) erases an invalidated subtree
-    /// by a namespace walk.
+    /// so [`remove_subtrees`](Self::remove_subtrees) erases an invalidated
+    /// subtree by a namespace walk.
     entries: sdf::PathTable<PrimEntry>,
     /// Reverse `(layer, site) → prim-index-path` map for surgical invalidation,
     /// kept in lockstep with `entries`.
@@ -331,33 +331,40 @@ impl IndexStore {
         }
     }
 
-    /// Drops the entry at `path`, retracting its dependency registrations and
-    /// releasing its stack ownership.
-    pub(super) fn remove(&mut self, path: &Path) {
-        if let Some(entry) = self.entries.remove(path) {
-            self.release_owned(&entry.index);
+    /// Drops the entry at each of `paths`, retracting their dependency
+    /// registrations together and releasing their stack ownership.
+    pub(super) fn remove_all<'p>(&mut self, paths: impl IntoIterator<Item = &'p Path>) {
+        let mut victims = Vec::new();
+        for path in paths {
+            if let Some(entry) = self.entries.remove(path) {
+                self.release_owned(&entry.index);
+                victims.push(path.clone());
+            }
         }
-        self.deps.remove(path);
+        self.deps.remove_all(&victims);
     }
 
-    /// Drops `prefix` and every namespace descendant, retracting each removed
-    /// entry's dependencies and releasing its stack ownership.
-    pub(super) fn remove_subtree(&mut self, prefix: &Path) {
-        // `Path::has_prefix("")` returns `true` for every absolute path, so a
-        // default-constructed `Path` would silently wipe the whole store without
-        // any layer-stack rebuild — almost certainly a caller bug. Catch it loudly
-        // in debug builds; the absolute root (`/`) is the legitimate "blow
-        // everything" prefix.
-        debug_assert!(
-            !prefix.is_empty(),
-            "remove_subtree called with empty prefix — use Path::abs_root() to drop everything",
-        );
+    /// Drops each of `prefixes` and every namespace descendant, retracting the
+    /// removed entries' dependencies together and releasing their stack
+    /// ownership.
+    pub(super) fn remove_subtrees<'p>(&mut self, prefixes: impl IntoIterator<Item = &'p Path>) {
         let mut victims = Vec::new();
-        for (victim, entry) in self.entries.remove_subtree(prefix) {
-            self.release_owned(&entry.index);
-            victims.push(victim);
+        for prefix in prefixes {
+            // `Path::has_prefix("")` returns `true` for every absolute path, so a
+            // default-constructed `Path` would silently wipe the whole store without
+            // any layer-stack rebuild — almost certainly a caller bug. Catch it loudly
+            // in debug builds; the absolute root (`/`) is the legitimate "blow
+            // everything" prefix.
+            debug_assert!(
+                !prefix.is_empty(),
+                "remove_subtrees called with empty prefix — use Path::abs_root() to drop everything",
+            );
+            for (victim, entry) in self.entries.remove_subtree(prefix) {
+                self.release_owned(&entry.index);
+                victims.push(victim);
+            }
         }
-        self.deps.remove_subtree(prefix, &victims);
+        self.deps.remove_all(&victims);
     }
 
     /// Whether some stack lost its last cache owner since the last sweep.

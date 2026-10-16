@@ -262,11 +262,6 @@ impl Dependencies {
     }
 
     /// Drop all registered `(layer stack, site)` entries for `prim_index_path`.
-    // TODO(perf): each call scans the dependent list of every site the prim
-    // read. A round that drops many prims one by one, or many separate
-    // subtrees, sharing a site (an edit to a widely referenced asset) scans
-    // that list once per prim; collecting the round's victims first would
-    // filter each site once.
     pub(super) fn remove(&mut self, prim_index_path: &Path) {
         let Some(sites) = self.retract(prim_index_path) else {
             return;
@@ -276,18 +271,20 @@ impl Dependencies {
         }
     }
 
-    /// Drop the registrations of `prims`, every registered prim at or below
-    /// `prefix`. The first victim that reaches a site drops all of the site's
-    /// dependents under `prefix`, so a later victim reading the same site
-    /// scans only the dependents outside the subtree.
-    pub(super) fn remove_subtree<'p>(&mut self, prefix: &Path, prims: impl IntoIterator<Item = &'p Path>) {
+    /// Drop the registrations of every prim in `prims`. The first prim that
+    /// reaches a site drops all of the site's dependents in `prims`, so a
+    /// later prim reading the same site scans only the dependents that stay.
+    ///
+    /// The prims are retracted in the order given. A namespace order keeps
+    /// consecutive retractions in neighbouring sites.
+    // TODO(perf): a site keeping many dependents is still scanned once per
+    // removed prim that reads it. Filtering each distinct site once would
+    // bound that, at the cost of collecting the sites first.
+    pub(super) fn remove_all(&mut self, prims: &[Path]) {
+        let removed: sdf::PathSet = prims.iter().cloned().collect();
         for prim in prims {
-            debug_assert!(
-                prim.has_prefix(prefix),
-                "{prim} lies outside the removed subtree {prefix}"
-            );
             for (stack, site) in self.retract(prim).into_iter().flatten() {
-                self.retain_dependents(stack, &site, |p| !p.has_prefix(prefix));
+                self.retain_dependents(stack, &site, |p| !removed.contains(p));
             }
         }
     }
@@ -404,7 +401,7 @@ impl Dependencies {
     /// `prefix` in `layer_index`.
     ///
     /// Used to fan out an invalidation downward to the cross-namespace
-    /// dependents a [`drop_index_subtree`](super::IndexCache::drop_index_subtree)
+    /// dependents a [`drop_index_subtrees`](super::IndexCache::drop_index_subtrees)
     /// of `prefix` misses: a prim like `/World/Inst` whose own path lies outside
     /// `prefix` but whose graph references `/Foo/Model` under it. Walks the
     /// `prefix` subtree of the dependency [`sdf::PathTable`] of each stack
@@ -899,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_subtree_keeps_outside() {
+    fn remove_all_keeps_others() {
         let g = graph(1);
         let l0 = g.all_ids()[0];
         let mut deps = Dependencies::default();
@@ -914,10 +911,10 @@ mod tests {
                 ExprVarDeps::default(),
             );
         }
-        deps.remove_subtree(&p("/A"), &inside);
+        deps.remove_all(&inside);
         assert_eq!(dependents(&deps, &g, l0, &shared), vec![outside.clone()]);
         assert!(!deps.has_path_ancestor(&inside[0]), "the self-registration goes too");
-        deps.remove_subtree(&p("/AB"), [&outside]);
+        deps.remove_all(&[outside]);
         assert!(dependents(&deps, &g, l0, &shared).is_empty());
     }
 }

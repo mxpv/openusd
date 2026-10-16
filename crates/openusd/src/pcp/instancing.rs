@@ -461,19 +461,11 @@ impl IndexCache {
         // materialized index, descendants by deepening it; see
         // [`Self::redirect_anchor`]), so each affected root's entire subtree must
         // be dropped, not just the root spec.
-        //
-        // TODO(perf): `drop_index_subtree` is an O(n) cache scan per affected
-        // root; batching the affected roots into one prefix-filtered pass (or an
-        // `SdfPathTable`-like trie) would bound it by the change set. A change
-        // reaching a nested instance drops its whole prototype chain, so the
-        // per-root cost is paid once per level.
         // The dropped roots owned redirections and eligibility answers of their
         // own, so those memos go with them.
         self.clear_population_memos();
         let retired = self.prototypes.remove_affected(changed);
-        for root in &retired {
-            self.drop_index_subtree(root);
-        }
+        self.drop_index_subtrees(&retired);
         retired
     }
 

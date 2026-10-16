@@ -945,18 +945,10 @@ impl Changes {
             resynced.extend(cache.invalidate_prototypes(&changed));
         }
 
-        for path in self.cache.all_significant() {
-            cache.drop_index_subtree(path);
-        }
-        for path in &self.cache.did_change_prims {
-            // Subsumed by an ancestor whose subtree just went? Only the stage half
-            // can answer: this tier holds composed paths, and a prefix test against
-            // an authored spelling could match by coincidence and skip a live drop.
-            if self.cache.did_change_significantly.iter().any(|p| path.has_prefix(p)) {
-                continue;
-            }
-            cache.drop_index(path);
-        }
+        cache.drop_index_subtrees(self.cache.all_significant());
+        // A prim under a dropped subtree has no entry left. Dropping it again
+        // does nothing.
+        cache.drop_indices(&self.cache.did_change_prims);
         // Batch the spec-tier rescan: an index reached by several of this round's
         // changed sites refreshes its `has_specs` flags per site but finalizes its
         // spec stack once. Sites subsumed by an ancestor whose subtree was already

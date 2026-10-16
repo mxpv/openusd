@@ -2038,15 +2038,15 @@ impl IndexCache {
         self.store.insert(graph, path, index, context, errors, expr_var_deps);
     }
 
-    /// Drop a single prim's cached entry (its index, child context, and build
-    /// errors) along with its dependency registrations.
+    /// Drop the cached entry (index, child context, and build errors) of each
+    /// of `paths`, along with its dependency registrations. Descendants stay.
     ///
     /// The transient query errors are left alone: dropping an index is not by
     /// itself an invalidation — a lazy prototype materialization drops one
     /// mid-query — and [`Self::retire_query_errors`] is what retires them, at every
     /// edit seam.
-    pub(super) fn drop_index(&mut self, path: &Path) {
-        self.store.remove(path);
+    pub(super) fn drop_indices<'p>(&mut self, paths: impl IntoIterator<Item = &'p Path>) {
+        self.store.remove_all(paths);
     }
 
     /// Drops every cached index that recorded a failed target, a
@@ -2064,9 +2064,7 @@ impl IndexCache {
         }
         // The prims beneath one composed without the target too, and
         // recompose with it.
-        for path in failed {
-            self.store.remove_subtree(&path);
-        }
+        self.store.remove_subtrees(&failed);
         self.retire_query_errors();
         // A target that failed to read hid whatever it would have composed, so
         // repairing it can reveal prims — and instances — the population never
@@ -2111,9 +2109,7 @@ impl IndexCache {
             self.store
                 .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild, &mut rekeyed);
         }
-        for prim in &rebuild {
-            self.store.remove(prim);
-        }
+        self.store.remove_all(&rebuild);
         // An index condemned after an earlier site had already refreshed it kept
         // its runs out of the map, so the two sets are disjoint by construction.
         let touched = self.store.splice_spec_stacks(graph, refreshed);
@@ -2131,13 +2127,14 @@ impl IndexCache {
         rebuild.into_iter().chain(touched).chain(retired).collect()
     }
 
-    /// Drop a prim's cached index and every namespace descendant. Used by
-    /// [`change::Changes`](super::change::Changes) when a significant change
-    /// touches `prefix` — the topology may have changed for the entire subtree,
-    /// so every dependent index is invalidated. The transient query errors are
-    /// left to [`Self::retire_query_errors`], as in [`Self::drop_index`].
-    pub(super) fn drop_index_subtree(&mut self, prefix: &Path) {
-        self.store.remove_subtree(prefix);
+    /// Drop the cached index of each of `prefixes` and of every namespace
+    /// descendant. Used by [`change::Changes`](super::change::Changes) when a
+    /// significant change touches a prefix — the topology may have changed for
+    /// the entire subtree, so every dependent index is invalidated. The
+    /// transient query errors are left to [`Self::retire_query_errors`], as in
+    /// [`Self::drop_indices`].
+    pub(super) fn drop_index_subtrees<'p>(&mut self, prefixes: impl IntoIterator<Item = &'p Path>) {
+        self.store.remove_subtrees(prefixes);
     }
 
     /// Invalidates the cache after a layer-set change restructures only some
@@ -2213,9 +2210,7 @@ impl IndexCache {
         // Evict prototypes whose instances or roots are among the victims, as the
         // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
         let retired = self.invalidate_prototypes(&victims);
-        for path in &victims {
-            self.drop_index_subtree(path);
-        }
+        self.drop_index_subtrees(&victims);
         victims.extend(retired);
         victims
     }
@@ -4657,7 +4652,7 @@ def "A" (
 
         // Drop and rebuild — the bookkeeping a SIGNIFICANT layer-stack edit
         // performs (a scoped drop then a re-query). The error must not double.
-        cache.drop_index(&a);
+        cache.drop_indices([&a]);
         settled_index(&mut graph, &mut cache, &a)?;
         assert_eq!(
             unresolved(&cache),
