@@ -395,9 +395,10 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     // Hip's local at t=0 carries the (0,1,0) translation (row-major [12..15]).
     assert_eq!(locals[1].0[12..15], [0.0, 1.0, 0.0]);
 
-    let identity_world = Mat4d::IDENTITY;
-    let skinning = resolver.skinning_transforms_from_local(&locals, identity_world);
-    assert_eq!(skinning.len(), 3);
+    // At t=0 the animated pose matches the bind pose, so every skinning
+    // transform is the identity.
+    let skinning = resolver.skinning_transforms_from_local(&locals);
+    assert_eq!(skinning, vec![Mat4d::IDENTITY; 3]);
     Ok(())
 }
 

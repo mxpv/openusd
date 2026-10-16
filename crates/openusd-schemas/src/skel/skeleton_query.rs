@@ -17,9 +17,7 @@ use openusd::Result;
 
 use openusd::gf;
 
-use super::skinning::{
-    inverse_bind_transforms, joint_local_to_skel_space, joint_skel_to_world, skinning_transforms as math_skin_xforms,
-};
+use super::skinning::{inverse_bind_transforms, joint_local_to_skel_space, skinning_transforms as math_skin_xforms};
 use super::topology::Topology;
 use super::{Skeleton, SkeletonSchema};
 
@@ -73,8 +71,8 @@ impl SkeletonResolver {
     }
 
     /// Pre-computed `inverse(bindTransform)` per joint. Used by
-    /// [`skinning_transforms_from_world`](Self::skinning_transforms_from_world)
-    /// / [`skinning_transforms_from_local`](Self::skinning_transforms_from_local).
+    /// [`skinning_transforms`](Self::skinning_transforms) and
+    /// [`skinning_transforms_from_local`](Self::skinning_transforms_from_local).
     pub fn inverse_bind_transforms(&self) -> &[gf::Mat4d] {
         &self.inverse_bind_transforms
     }
@@ -84,30 +82,18 @@ impl SkeletonResolver {
         joint_local_to_skel_space(local, &self.topology)
     }
 
-    /// Lift skel-space joint transforms into world space using the supplied
-    /// Root local-to-world matrix.
-    pub fn joint_skel_to_world(&self, skel: &[gf::Mat4d], skel_local_to_world: gf::Mat4d) -> Vec<gf::Mat4d> {
-        joint_skel_to_world(skel, skel_local_to_world)
+    /// Skinning transforms (`inverse(bind) · joint_skel`) from skel-space joint
+    /// transforms (C++ `UsdSkelSkeletonQuery::ComputeSkinningTransforms`). The
+    /// skinned points they produce are in skeleton space.
+    pub fn skinning_transforms(&self, joint_skel: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+        math_skin_xforms(joint_skel, &self.inverse_bind_transforms)
     }
 
-    /// Compute skinning transforms (`inverse(bind) · joint_world`) from
-    /// world-space joint transforms.
-    pub fn skinning_transforms_from_world(&self, joint_world: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
-        math_skin_xforms(joint_world, &self.inverse_bind_transforms)
-    }
-
-    /// Compute skinning transforms from joint-local transforms in one step:
-    /// compose to skel-space, lift to world, then multiply by the inverse-bind.
-    /// Use when you have only local poses (typical after evaluating a
-    /// Animation).
-    pub fn skinning_transforms_from_local(
-        &self,
-        joint_local: &[gf::Mat4d],
-        skel_local_to_world: gf::Mat4d,
-    ) -> Vec<gf::Mat4d> {
-        let skel = self.joint_local_to_skel_space(joint_local);
-        let world = self.joint_skel_to_world(&skel, skel_local_to_world);
-        math_skin_xforms(&world, &self.inverse_bind_transforms)
+    /// Skinning transforms from joint-local transforms: composed into skel
+    /// space, then multiplied by the inverse bind transforms, as
+    /// [`skinning_transforms`](Self::skinning_transforms) does.
+    pub fn skinning_transforms_from_local(&self, joint_local: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
+        self.skinning_transforms(&self.joint_local_to_skel_space(joint_local))
     }
 
     /// The rest-pose joint-local transforms a caller can hand to

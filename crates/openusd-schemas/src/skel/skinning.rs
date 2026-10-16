@@ -50,10 +50,8 @@ pub fn joint_skel_to_world(skel: &[gf::Mat4d], skel_local_to_world: gf::Mat4d) -
 /// the bind-pose inverses.
 ///
 /// Per Pixar's `UsdSkelSkeletonQuery::ComputeSkinningTransforms`:
-/// `skinningTransform = inverse(bindTransform) · jointTransform`. The
-/// caller decides which space `jointTransform` is in (skel-space when
-/// `geomBindTransform` is the identity, world-space otherwise — they
-/// must match the space of the bind transforms).
+/// `skinningTransform = inverse(bindTransform) · jointSkelTransform`, with
+/// `joint` in skeleton space.
 pub fn skinning_transforms(joint: &[gf::Mat4d], inverse_bind: &[gf::Mat4d]) -> Vec<gf::Mat4d> {
     assert_eq!(
         joint.len(),
