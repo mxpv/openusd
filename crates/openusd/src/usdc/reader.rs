@@ -1103,6 +1103,11 @@ impl<'a> Decoder<'a> {
             Type::Uint => sdf::Value::Uint(self.unpack_value(value)?),
 
             Type::Int64 if value.is_array() => sdf::Value::Int64Vec(self.read_ints(value)?),
+            Type::Int64 if value.is_inlined() => {
+                // Stored as i32, which widens sign-extended (C++ `_DecodeInline`)
+                let value = self.unpack_value::<i32>(value)?;
+                sdf::Value::Int64(value.into())
+            }
             Type::Int64 => sdf::Value::Int64(self.unpack_value(value)?),
 
             Type::Uint64 if value.is_array() => sdf::Value::Uint64Vec(self.read_ints(value)?),

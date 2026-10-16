@@ -1,0 +1,16 @@
+#usda 1.0
+
+def "Prim"
+{
+    int64 minus_one = -1
+    int64 minus_five = -5
+    int64 plus_five = 5
+    int64 int32_min = -2147483648
+    int64 int32_max = 2147483647
+    int64 below_int32_min = -2147483649
+    int64 above_int32_max = 2147483648
+    int64 animated.timeSamples = {
+        0: -5,
+        1: 5,
+    }
+}

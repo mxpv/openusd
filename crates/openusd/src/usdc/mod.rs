@@ -1127,6 +1127,40 @@ mod tests {
         Ok(())
     }
 
+    /// OpenUSD inlines an `int64` that fits in 32 bits as an `int32`, so a
+    /// negative one reads sign-extended. The fixture is written by OpenUSD.
+    #[test]
+    fn test_read_int64_inline() -> Result<()> {
+        let data = read_file("fixtures/int64.usdc")?;
+
+        for (name, expected) in [
+            ("minus_one", -1),
+            ("minus_five", -5),
+            ("plus_five", 5),
+            ("int32_min", i64::from(i32::MIN)),
+            ("int32_max", i64::from(i32::MAX)),
+            ("below_int32_min", i64::from(i32::MIN) - 1),
+            ("above_int32_max", i64::from(i32::MAX) + 1),
+        ] {
+            let value = data
+                .field(&sdf::path(format!("/Prim.{name}"))?, "default")?
+                .into_owned()
+                .try_as_int_64()
+                .expect("an int64 default");
+            assert_eq!(value, expected, "{name}");
+        }
+
+        let samples = data
+            .field(&sdf::path("/Prim.animated")?, "timeSamples")?
+            .into_owned()
+            .try_as_time_samples()
+            .expect("time samples");
+        let values: Vec<sdf::Value> = samples.into_iter().map(|(_, value)| value).collect();
+        assert_eq!(values, vec![sdf::Value::Int64(-5), sdf::Value::Int64(5)]);
+
+        Ok(())
+    }
+
     #[test]
     fn test_read_ints_i32() -> Result<()> {
         let data = read_file("fixtures/ints.usdc")?;
