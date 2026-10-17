@@ -5,7 +5,7 @@ use std::{fs, slice};
 
 use openusd::gf::{self, Vec3f};
 use openusd::sdf::{self, Value};
-use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
+use openusd::usd::{self, PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{PointBasedSchema, XformCache};
 use openusd_schemas::skel::{
@@ -351,6 +351,156 @@ fn bake_update_extents() -> Result<(), SchemaError> {
             assert_eq!(times, [7.0]);
         }
     }
+    Ok(())
+}
+
+/// Linear curves at `/Root/Group/Hair` beside the mesh, with its points and
+/// influences, two units wide, and a stale authored extent.
+const HAIR: &str = r#"def BasisCurves "Hair" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:skeleton = </Root/Skel>
+            uniform token type = "linear"
+            int[] curveVertexCounts = [2]
+            point3f[] points = [(1, 0, 0), (0, 1, 0)]
+            float[] widths = [2, 2] (interpolation = "vertex")
+            float3[] extent = [(0, 0, 0), (0.5, 0.5, 0)]
+            int[] primvars:skel:jointIndices = [0, 0] (interpolation = "vertex", elementSize = 1)
+            float[] primvars:skel:jointWeights = [1, 1] (interpolation = "vertex", elementSize = 1)
+        }"#;
+
+/// The curves' extent at time 2, the baked points widened by one unit.
+const HAIR_EXTENT: [[f32; 3]; 2] = [[-1.0, 4.0, -4.0], [2.0, 7.0, -2.0]];
+
+#[test]
+fn bake_curves_extent() -> Result<(), SchemaError> {
+    let off = BakeOptions {
+        update_extents: false,
+        ..BakeOptions::default()
+    };
+    for (options, baked) in [(off, false), (BakeOptions::default(), true)] {
+        let stage = from_usda(&rig("", LIFT, "", HAIR))?;
+        let layer = root_layer(&stage);
+        bake_into(&bindings(&root(&stage)?, PrimPredicate::DEFAULT)?, &layer, &options)?;
+        let (default, samples) = authored(&stage, &layer, "/Root/Group/Hair.extent");
+        assert_eq!(default, Some(vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(0.5, 0.5, 0.0)]));
+        if baked {
+            assert_eq!(sample_times(&samples), [1.0, 2.0]);
+            assert!(near(&samples[1].1, &HAIR_EXTENT), "{samples:?}");
+        } else {
+            assert!(samples.is_empty());
+        }
+    }
+    Ok(())
+}
+
+/// `usda` with the SkelRoot of [`rig`] made a model of `kind`, its Group a
+/// component, and each holding a stale `extentsHint`.
+fn hinted(usda: &str, kind: &str) -> String {
+    let hint = "float3[] extentsHint = [(0, 0, 0), (0.1, 0.1, 0.1)]";
+    usda.replace(
+        "def SkelRoot \"Root\" {",
+        &format!("def SkelRoot \"Root\" (kind = \"{kind}\") {{\n    {hint}"),
+    )
+    .replace(
+        "def Xform \"Group\" {",
+        &format!("def Xform \"Group\" (kind = \"component\") {{\n        {hint}"),
+    )
+}
+
+#[test]
+fn bake_extent_hints() -> Result<(), SchemaError> {
+    let stage = from_usda(&hinted(&rig("", LIFT, "", HAIR), "assembly"))?;
+    let layer = root_layer(&stage);
+    bake_into(
+        &bindings(&root(&stage)?, PrimPredicate::DEFAULT)?,
+        &layer,
+        &BakeOptions::default(),
+    )?;
+    // Each model's hint is its own, and bounds the curves' new extent, not
+    // the stale one: the Group's in its own space, the root's with the
+    // Group's translation.
+    let [low, high] = HAIR_EXTENT;
+    for (model, lift) in [("/Root/Group", 0.0), ("/Root", 3.0)] {
+        let (default, samples) = authored(&stage, &layer, &format!("{model}.extentsHint"));
+        assert_eq!(default, None, "{model}");
+        assert_eq!(sample_times(&samples), [1.0, 2.0], "{model}");
+        let lifted = |[x, y, z]: [f32; 3]| [x, y, z + lift];
+        assert!(
+            near(&samples[1].1, &[lifted(low), lifted(high)]),
+            "{model}: {samples:?}"
+        );
+    }
+
+    // With the hints off they stay as they were.
+    let stage = from_usda(&hinted(&rig("", LIFT, "", HAIR), "assembly"))?;
+    let options = BakeOptions {
+        update_extent_hints: false,
+        ..BakeOptions::default()
+    };
+    let layer = root_layer(&stage);
+    bake_into(&bindings(&root(&stage)?, PrimPredicate::DEFAULT)?, &layer, &options)?;
+    let (default, samples) = authored(&stage, &layer, "/Root.extentsHint");
+    assert!(default.is_some() && samples.is_empty());
+    Ok(())
+}
+
+#[test]
+fn bake_hint_edit_target() -> Result<(), SchemaError> {
+    // A hint goes through the edit target's namespace mapping.
+    let variant = hinted(&rig("", LIFT, "", ""), "component").replace(
+        "def SkelRoot \"Root\" (kind = \"component\") {",
+        r#"def SkelRoot "Root" (kind = "component" variants = { string look = "a" } prepend variantSets = "look") {
+    variantSet "look" = { "a" { } }"#,
+    );
+    let stage = from_usda(&variant)?;
+    let layer = root_layer(&stage);
+    stage.set_edit_target(usd::EditTarget::for_local_direct_variant(&layer, "/Root{look=a}")?)?;
+    bake_into(
+        &bindings(&root(&stage)?, PrimPredicate::DEFAULT)?,
+        &layer,
+        &BakeOptions::default(),
+    )?;
+    let (_, samples) = authored(&stage, &layer, "/Root{look=a}.extentsHint");
+    assert_eq!(sample_times(&samples), [1.0, 2.0]);
+    let (default, samples) = authored(&stage, &layer, "/Root.extentsHint");
+    assert!(default.is_some() && samples.is_empty());
+
+    // And through its time offset, as the geometry does.
+    let rig = hinted(&rig("", LIFT, "", ""), "component");
+    let (_dir, stage) = open_files(
+        &[
+            ("rig.usda", &rig),
+            ("shot.usda", "#usda 1.0\n(subLayers = [@./rig.usda@])\n"),
+        ],
+        "shot.usda",
+    )?;
+    let bake = sdf::Layer::new_anonymous("bake");
+    let bake_id = bake.identifier().to_owned();
+    stage.insert_layer(&root_layer(&stage), 0, bake, sdf::LayerOffset::new(10.0, 2.0))?;
+    stage.set_edit_target(stage.edit_target_for_local_layer(&bake_id).expect("local"))?;
+    bake_roots(&[root(&stage)?], ..)?;
+    let (_, samples) = authored(&stage, &bake_id, "/Root.extentsHint");
+    assert_eq!(sample_times(&samples), [-4.5, -4.0]);
+    Ok(())
+}
+
+#[test]
+fn bake_hint_failure() -> Result<(), SchemaError> {
+    let usda = rig("", LIFT, "", "").replace(
+        "def SkelRoot \"Root\" {",
+        "def SkelRoot \"Root\" (kind = \"component\") {\n    double extentsHint = 1",
+    );
+    let stage = from_usda(&usda)?;
+    let layer = root_layer(&stage);
+    let error = bake_into(
+        &bindings(&root(&stage)?, PrimPredicate::DEFAULT)?,
+        &layer,
+        &BakeOptions::default(),
+    )
+    .expect_err("a `double` hint takes no extents");
+    assert!(matches!(error, SchemaError::BakeExtentHints(_)), "{error:?}");
+    // The geometry committed, and the hint is as it was.
+    assert_eq!(sample_times(&baked(&stage, "points").1), [1.0, 2.0]);
+    assert_eq!(stage.attribute("/Root.extentsHint")?.get::<f64>()?, Some(1.0));
     Ok(())
 }
 

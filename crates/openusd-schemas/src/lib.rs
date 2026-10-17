@@ -448,6 +448,16 @@ pub enum SchemaError {
         prim: sdf::Path,
     },
 
+    /// A skinning bake failing to compute or write the extents of the
+    /// point-based prims other than meshes, after its geometry committed.
+    #[error("a skinning bake committed its geometry but failed to update extents")]
+    BakeExtents(#[source] Box<SchemaError>),
+
+    /// A skinning bake failing to compute or write the extents hints of the
+    /// models above its prims, after its geometry and extents committed.
+    #[error("a skinning bake committed its geometry and extents but failed to update extents hints")]
+    BakeExtentHints(#[source] Box<SchemaError>),
+
     /// A geom subset query names an element type the geometry has no
     /// elements of, such as the segments of a mesh.
     #[error("{prim} has no `{element_type}` elements for a GeomSubset to index")]

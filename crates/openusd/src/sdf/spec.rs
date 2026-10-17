@@ -1048,14 +1048,27 @@ where
     /// the stage tier, which validates against the composed declaration
     /// before it writes.
     pub(crate) fn set_time_sample_raw(&mut self, time: f64, value: sdf::Value) -> Result<(), sdf::AuthoringError> {
+        self.insert_time_samples_raw([(time, value)])
+    }
+
+    /// Inserts or replaces each of `samples` as given, with no coercion, in
+    /// one write of the sample map, the later of two at one time winning. A
+    /// whole-field block starts a fresh map, as in
+    /// [`set_time_sample_raw`](Self::set_time_sample_raw).
+    pub(crate) fn insert_time_samples_raw(
+        &mut self,
+        samples: impl IntoIterator<Item = (f64, sdf::Value)>,
+    ) -> Result<(), sdf::AuthoringError> {
         // TODO(perf): the upsert reads, clones and rewrites the whole map, so
-        // authoring n samples is quadratic; an in-place sample insert on
-        // `AbstractData` would make it linear.
+        // authoring n samples one call at a time is quadratic; an in-place
+        // sample insert on `AbstractData` would make it linear.
         let mut map = match self.time_samples_field()? {
             TimeSamplesField::Samples(map) => map,
             TimeSamplesField::Absent | TimeSamplesField::Blocked => Vec::new(),
         };
-        upsert_time_sample(&mut map, time, value);
+        for (time, value) in samples {
+            upsert_time_sample(&mut map, time, value);
+        }
         self.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(map));
         Ok(())
     }

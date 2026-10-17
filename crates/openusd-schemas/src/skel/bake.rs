@@ -9,6 +9,7 @@
 //! [`bake_roots`] bakes every binding beneath some roots into the edit
 //! target's layer.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use bitflags::bitflags;
@@ -22,8 +23,8 @@ use super::{
 };
 use crate::SchemaError;
 use crate::geom::{
-    self, Extent, Interpolation, Mesh, MeshSchema, PointBased, PointBasedExt, PointBasedSchema, XformCache,
-    XformOpKind, Xformable,
+    self, BBoxCache, Extent, Interpolation, Mesh, MeshSchema, ModelAPI, PointBased, PointBasedExt, PointBasedSchema,
+    Purpose, XformCache, XformOpKind, Xformable,
 };
 
 bitflags! {
@@ -64,17 +65,22 @@ bitflags! {
 pub struct BakeOptions {
     /// The deformations to bake.
     pub deform: Deform,
-    /// Whether a `Mesh` whose points are baked gets an `extent` baked from
-    /// them. Without it the bake leaves every `extent` alone.
+    /// Whether a point-based prim whose points are baked gets an `extent`
+    /// baked from them. Without it the bake leaves every `extent` alone.
     pub update_extents: bool,
+    /// Whether each model above a baked prim that has an `extentsHint` gets
+    /// it recomputed. Without it the bake leaves every hint alone.
+    pub update_extent_hints: bool,
 }
 
 impl Default for BakeOptions {
-    /// Every deformation, and extents updated, as C++ defaults.
+    /// Every deformation, and extents and extents hints updated, as C++
+    /// defaults.
     fn default() -> Self {
         Self {
             deform: Deform::ALL,
             update_extents: true,
+            update_extent_hints: true,
         }
     }
 }
@@ -187,6 +193,22 @@ pub fn bake_roots(roots: &[Root], interval: impl Into<gf::Interval>) -> Result<(
 /// prim that cannot be deformed at a time, its influences out of range say,
 /// gets no sample there.
 ///
+/// Two stages follow, each reading what the stages before it committed and
+/// writing in one transaction of its own:
+///
+/// - With [`BakeOptions::update_extents`], each other point-based prim whose
+///   points baked gets its `extent` from its type's extent function at each
+///   time they baked, into the binding's layer, keyed and replaced as the
+///   other outputs are. C++ authors these through the stage's edit target,
+///   and clears their default too.
+/// - With [`BakeOptions::update_extent_hints`], each model at or above a
+///   baked prim whose `extentsHint` is defined gets the hint a [`BBoxCache`]
+///   computes at every time a skeleton of its prims baked. The hint is
+///   authored through the stage's edit target, as C++ authors it, its
+///   namespace mapping and time offset included, and its old value and
+///   samples there are cleared first. Without updated extents, a deformed
+///   prim that authors an `extent` is bounded by the one it had.
+///
 /// Fails, before anything is written:
 ///
 /// - [`SchemaError::BakeInstanced`] for a skinned prim that is an instance or
@@ -195,7 +217,12 @@ pub fn bake_roots(roots: &[Root], interval: impl Into<gf::Interval>) -> Result<(
 /// - [`SchemaError::BakeLayer`] for a layer outside the stage's root layer
 ///   stack;
 /// - [`SchemaError::BakeSpecType`] for an output whose layer holds a spec of
-///   another type, where C++ skips that output.
+///   another type, `extent` among them, where C++ skips that output.
+///
+/// Fails after the geometry committed, with [`SchemaError::BakeExtents`]
+/// where the extents stage fails and leaves every extent of the other
+/// prims as it was, and with [`SchemaError::BakeExtentHints`] where the
+/// hint stage fails and leaves every hint as it was.
 pub fn bake_skinning(
     bindings: &[(Binding, &str)],
     options: &BakeOptions,
@@ -268,15 +295,24 @@ pub fn bake_skinning(
     // TODO(rayon): each skeleton and its prims bake independently of the
     // others, and so do the prims of one skeleton at one time, once the
     // transform cache is read for them first.
+    let mut followups = Vec::new();
     for skel in &mut skels {
-        let times = skel.time_samples(&mut xforms)?;
-        for time in bake_times(times, &playback, interval) {
+        let times = bake_times(skel.time_samples(&mut xforms)?, &playback, interval);
+        for &time in &times {
             xforms.set_time(time);
             let frame = skel.frame(time, &mut xforms)?;
             for prim in &mut skel.prims {
                 prim.bake(&frame, time, &mut xforms)?;
             }
         }
+        for prim in &skel.prims {
+            followups.push(Followup::new(prim, &times, options)?);
+        }
+    }
+    for followup in followups.iter().filter(|followup| !followup.extent_times.is_empty()) {
+        let attribute = followup.prim.path().append_property(geom::tokens::EXTENT)?;
+        let layer = layers[followup.layer].layer_identifier();
+        check_type(&stage, layer, &attribute, &sdf::ValueTypeName::FLOAT3_ARRAY)?;
     }
 
     // TODO(perf): every output is held until the one transaction below; a
@@ -316,6 +352,11 @@ pub fn bake_skinning(
         }
         Ok(())
     })?;
+
+    bake_extents(&stage, &layers, &followups).map_err(|err| SchemaError::BakeExtents(Box::new(err)))?;
+    if options.update_extent_hints {
+        bake_extent_hints(&stage, &followups).map_err(|err| SchemaError::BakeExtentHints(Box::new(err)))?;
+    }
     Ok(())
 }
 
@@ -813,6 +854,146 @@ impl Write {
             spec.set_default(value)?;
         }
         Ok(())
+    }
+}
+
+/// What the extents and extents-hint stages need of one baked prim.
+struct Followup {
+    prim: Prim,
+    /// The index of the layer it bakes into.
+    layer: usize,
+    /// The times its points baked at, where its extent is computed from them
+    /// once they commit: a point-based prim other than a `Mesh`, with
+    /// [`BakeOptions::update_extents`] set.
+    extent_times: Vec<Option<TimeCode>>,
+    /// The times its skeleton baked at.
+    times: Vec<Option<TimeCode>>,
+}
+
+impl Followup {
+    /// The followup of `prim`, whose skeleton baked at `times`.
+    fn new(prim: &PrimAdapter<'_>, times: &[Option<TimeCode>], options: &BakeOptions) -> Result<Self, SchemaError> {
+        let query_prim = prim.query.prim();
+        let post_extent = options.update_extents
+            && prim.flags.intersects(Deform::MODIFIES_POINTS)
+            && Mesh::from_prim(query_prim.clone())?.is_none();
+        let extent_times = match post_extent {
+            true => prim.baked.points.iter().map(|(time, _)| *time).collect(),
+            false => Vec::new(),
+        };
+        Ok(Self {
+            prim: query_prim.clone(),
+            layer: prim.layer,
+            extent_times,
+            times: times.to_vec(),
+        })
+    }
+}
+
+/// Bake the extent of each prim in `followups` that takes one after the
+/// geometry commits, computed by its type's extent function from its baked
+/// points at each time they baked, into its layer among `layers` in one
+/// transaction (C++ `_PostUpdateExtents`). A time at which the function
+/// computes no extent gets no sample.
+fn bake_extents(stage: &usd::Stage, layers: &[EditTarget], followups: &[Followup]) -> Result<(), SchemaError> {
+    let extents = crate::extent_registry();
+    let mut writes = Vec::new();
+    // TODO(rayon): each prim's extents compute independently of the others'.
+    for followup in followups.iter().filter(|followup| !followup.extent_times.is_empty()) {
+        let mut values = Vec::new();
+        for &time in &followup.extent_times {
+            if let Some(extent) = extents.shape_extent(&followup.prim, time, None)? {
+                values.push((time, sdf::Value::Vec3fVec(extent.to_vec())));
+            }
+        }
+        if !values.is_empty() {
+            writes.push(Write {
+                layer: followup.layer,
+                attribute: followup.prim.path().append_property(geom::tokens::EXTENT)?,
+                type_name: sdf::ValueTypeName::FLOAT3_ARRAY,
+                variability: sdf::Variability::Varying,
+                values,
+            });
+        }
+    }
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let identifiers: Vec<&str> = layers.iter().map(EditTarget::layer_identifier).collect();
+    stage.batch_edit(&identifiers, |edits| {
+        for write in writes {
+            let layer = write.layer;
+            write.apply(&mut edits[layer], &layers[layer])?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Recompute the `extentsHint` of each model at or above a prim in
+/// `followups` that has one, at every time a skeleton of its prims baked,
+/// and author the hints through the stage's edit target in one transaction,
+/// each hint's own values there cleared first (C++ `_UpdateExtentHints`).
+fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<(), SchemaError> {
+    let mut models: Vec<(ModelAPI, Vec<Option<TimeCode>>)> = Vec::new();
+    for followup in followups {
+        let mut at = Some(followup.prim.clone());
+        // The walk stops below the pseudo-root, the one prim with no parent.
+        while let Some(prim) = at.filter(|prim| prim.parent().is_some()) {
+            if prim.is_model()? {
+                let model = ModelAPI::from_prim_unchecked(prim.clone());
+                if model.extents_hint_attr().is_defined()? {
+                    match models.iter_mut().find(|(known, _)| known.prim() == model.prim()) {
+                        Some((_, times)) => times.extend(&followup.times),
+                        None => models.push((model, followup.times.clone())),
+                    }
+                }
+            }
+            at = prim.parent();
+        }
+    }
+    if models.is_empty() {
+        return Ok(());
+    }
+
+    let mut times: Vec<Option<TimeCode>> = models.iter().flat_map(|(_, times)| times.iter().copied()).collect();
+    times.sort_by(compare_times);
+    times.dedup();
+    let mut hints: Vec<Vec<(Option<TimeCode>, Vec<Extent>)>> = models.iter().map(|_| Vec::new()).collect();
+    let mut cache = BBoxCache::new(None, Purpose::ORDERED);
+    // TODO(rayon): the times are independent of each other, each chunk of
+    // them with a cache of its own.
+    for time in times {
+        cache.set_time(time);
+        for ((model, model_times), hints) in models.iter().zip(&mut hints) {
+            if model_times.contains(&time) {
+                hints.push((time, model.compute_extents_hint(&mut cache)?));
+            }
+        }
+    }
+
+    stage.edit(|edit| {
+        for ((model, _), hints) in models.iter().zip(hints) {
+            let mut builder = model
+                .prim()
+                .attribute_builder(geom::tokens::EXTENTS_HINT, sdf::ValueTypeName::FLOAT3_ARRAY)
+                .custom(false)
+                .in_edit(edit)
+                .clear();
+            for (time, extents) in hints {
+                builder = builder.set_at(extents.as_flattened().to_vec(), time);
+            }
+            builder.build()?;
+        }
+        Ok::<_, SchemaError>(())
+    })
+}
+
+/// The order of baked times: the default time first, then by time.
+fn compare_times(a: &Option<TimeCode>, b: &Option<TimeCode>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => sdf::compare_sample_times(a.value(), b.value()),
+        _ => a.is_some().cmp(&b.is_some()),
     }
 }
 

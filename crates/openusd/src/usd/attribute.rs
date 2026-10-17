@@ -24,9 +24,10 @@ use crate::tf;
 
 /// An attribute to author, and everything it is authored with.
 ///
-/// Creating an attribute, declaring it and giving it a value are one edit of
+/// Creating an attribute, declaring it and giving it values are one edit of
 /// the target layer: nothing reaches the stage until [`build`](Self::build),
-/// which is where the value is validated against the declaration that wins.
+/// which is where the values are validated against the declaration that
+/// wins.
 ///
 /// [`custom`](Self::custom) and [`variability`](Self::variability) are C++
 /// `UsdPrim::CreateAttribute`'s arguments of those names: the declaration to
@@ -45,19 +46,21 @@ pub struct AttributeBuilder<'a> {
     type_name: sdf::ValueTypeName,
     variability: sdf::Variability,
     custom: bool,
-    /// The value opinion to author in the same edit.
+    /// The value opinions to author in the same edit.
     value: Option<BuilderValue>,
+    /// Whether the edit target's own value opinions are removed first.
+    clear: bool,
     /// The metadata fields to author in the same edit, in the order given.
     metadata: Vec<(&'static str, sdf::Value)>,
     /// The transaction to join, where the builder came from one.
     batch: Option<&'a StageEdit>,
 }
 
-/// The value opinion an [`AttributeBuilder`] authors with its attribute.
+/// The value opinions an [`AttributeBuilder`] authors with its attribute.
 #[derive(Debug)]
 enum BuilderValue {
-    /// A value, and when it is for.
-    Set(sdf::Value, Option<super::TimeCode>),
+    /// Values, each with when it is for, one at most for each time.
+    Set(Vec<(sdf::Value, Option<super::TimeCode>)>),
     /// A block of every weaker value opinion.
     Block,
 }
@@ -72,6 +75,7 @@ impl<'a> AttributeBuilder<'a> {
             variability: sdf::Variability::Varying,
             custom: true,
             value: None,
+            clear: false,
             metadata: Vec::new(),
             batch: None,
         }
@@ -116,17 +120,37 @@ impl<'a> AttributeBuilder<'a> {
         self.set_at(value, None)
     }
 
-    /// The value to author at `time`, or the default where `time` is `None`.
+    /// A value to author at `time`, or the default where `time` is `None`.
+    ///
+    /// The builder authors every value it is given, one for each time. A
+    /// second value at a time replaces the first, and a value replaces a
+    /// [`block`](Self::block).
     pub fn set_at(mut self, value: impl Into<sdf::Value>, time: impl Into<Option<super::TimeCode>>) -> Self {
-        self.value = Some(BuilderValue::Set(value.into(), time.into()));
+        let (value, time) = (value.into(), time.into());
+        match &mut self.value {
+            Some(BuilderValue::Set(values)) => match values.iter_mut().find(|(_, at)| *at == time) {
+                Some(slot) => slot.0 = value,
+                None => values.push((value, time)),
+            },
+            _ => self.value = Some(BuilderValue::Set(vec![(value, time)])),
+        }
+        self
+    }
+
+    /// Removes the edit target's own value opinions, its `default` and its
+    /// `timeSamples`, in the same edit and ahead of the values given through
+    /// [`set_at`](Self::set_at), as [`Attribute::clear`] followed by a write
+    /// of each would. The attribute is declared all the same.
+    pub fn clear(mut self) -> Self {
+        self.clear = true;
         self
     }
 
     /// Blocks every weaker value opinion in the same edit, as
     /// [`Attribute::block`] does: the edit target's own samples are erased and
-    /// its `default` becomes a value block. Replaces a value given through
-    /// [`set`](Self::set), which authoring a [`sdf::Value::ValueBlock`] does
-    /// not match, since that leaves the target's samples standing.
+    /// its `default` becomes a value block. Replaces the values given through
+    /// [`set_at`](Self::set_at), which authoring a [`sdf::Value::ValueBlock`]
+    /// does not match, since that leaves the target's samples standing.
     pub fn block(mut self) -> Self {
         self.value = Some(BuilderValue::Block);
         self
@@ -211,19 +235,23 @@ impl<'a> AttributeBuilder<'a> {
         // A value write stamps the spec itself, so declaring and setting is
         // the one edit rather than two.
         let attribute = Attribute::new(&stage, path);
-        let value = match self.value {
-            None => authoring::AttributeWrite::Declare(authoring::plan_property_spec(
+        let value = match (self.value, self.clear) {
+            (None, false) => authoring::AttributeWrite::Declare(authoring::plan_property_spec(
                 &stage,
                 &attribute.path,
                 sdf::SpecType::Attribute,
                 Some(declaration),
             )?),
-            Some(BuilderValue::Set(value, time)) => {
-                let plan = attribute.plan_authoring(value, time, Some(declaration))?;
+            (None, true) => {
+                let plan = attribute.plan_authoring(Vec::new(), true, Some(declaration))?;
                 authoring::AttributeWrite::Set(Box::new(plan))
             }
-            Some(BuilderValue::Block) => {
-                let plan = attribute.plan_authoring(sdf::Value::ValueBlock, None, Some(declaration))?;
+            (Some(BuilderValue::Set(values)), clear) => {
+                let plan = attribute.plan_authoring(values, clear, Some(declaration))?;
+                authoring::AttributeWrite::Set(Box::new(plan))
+            }
+            (Some(BuilderValue::Block), _) => {
+                let plan = attribute.plan_authoring(Vec::new(), false, Some(declaration))?;
                 authoring::AttributeWrite::Block(Box::new(plan))
             }
         };
@@ -338,7 +366,7 @@ impl Attribute {
         value: impl Into<sdf::Value>,
         time: impl Into<Option<super::TimeCode>>,
     ) -> Result<Self, StageAuthoringError> {
-        let plan = self.plan_authoring(value.into(), time.into(), None)?;
+        let plan = self.plan_authoring(vec![(value.into(), time.into())], false, None)?;
         self.stage
             .with_target_layer_at(&self.path, |layer, spec_path| plan.write(layer.data_mut(), &spec_path))?;
         Ok(self)
@@ -351,7 +379,7 @@ impl Attribute {
     /// lacks it, its local declaration read fallibly — and the `timeSamples`
     /// field is erased whole, without decoding samples the block discards.
     pub fn block(self) -> Result<Self, StageAuthoringError> {
-        let plan = self.plan_authoring(sdf::Value::ValueBlock, None, None)?;
+        let plan = self.plan_authoring(Vec::new(), false, None)?;
         self.stage
             .with_target_layer_at(&self.path, |layer, spec_path| plan.block(layer.data_mut(), &spec_path))?;
         Ok(self)
@@ -747,10 +775,11 @@ impl Attribute {
         }
     }
 
-    /// The read phase of a value write (see [`AttributeAuthoringPlan`]): the
-    /// value validated against the composed declaration, the spec plan, and
-    /// the value and time mapped for the edit target. Runs outside any
-    /// transaction, so every composition query happens here.
+    /// The read phase of a value write (see [`AttributeAuthoringPlan`]): each
+    /// of `values` validated against the composed declaration, the spec plan,
+    /// and each value and its time mapped for the edit target, with the
+    /// target's own values cleared first where `clear` is set. Runs outside
+    /// any transaction, so every composition query happens here.
     ///
     /// The spec plan resolves first because a plan that stamps a spec has
     /// already found the declaration to stamp it from, which is the composed
@@ -759,25 +788,32 @@ impl Attribute {
     /// that one case reads it.
     fn plan_authoring(
         &self,
-        value: sdf::Value,
-        time: Option<super::TimeCode>,
+        values: Vec<(sdf::Value, Option<super::TimeCode>)>,
+        clear: bool,
         fallback: Option<authoring::PropertyDeclaration>,
     ) -> Result<AttributeAuthoringPlan, StageAuthoringError> {
         let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, fallback)?;
-        let effective = if value.is_value_block() {
+        let effective = if values.iter().all(|(value, _)| value.is_value_block()) {
             None
         } else {
             let declared = self.composed_type(&ensure)?;
-            declared.validate(&value)?;
+            for (value, _) in &values {
+                declared.validate(value)?;
+            }
             Some(declared)
         };
-        let value = self.stage.map_to_spec_value(&self.path, value);
-        let spec_time = time.map(|time| self.stage.map_to_spec_time(time.value()));
+        let values = values
+            .into_iter()
+            .map(|(value, time)| {
+                let spec_time = time.map(|time| self.stage.map_to_spec_time(time.value()));
+                (self.stage.map_to_spec_value(&self.path, value), spec_time)
+            })
+            .collect();
         Ok(AttributeAuthoringPlan {
             effective,
             ensure,
-            value,
-            spec_time,
+            values,
+            clear,
         })
     }
 
@@ -1287,17 +1323,19 @@ impl Attribute {
 }
 
 /// The read phase of a value write ([`Attribute::set_at`],
-/// [`Attribute::block`]), resolved before the transaction: the composed
-/// declaration the value was validated against (`None` only for a block,
-/// which every declaration takes), the spec plan, and the value and time
-/// already mapped for the edit target. The transaction closure receives only
-/// this, which is what keeps a composition query out of it.
+/// [`Attribute::block`], [`AttributeBuilder::build`]), resolved before the
+/// transaction: the composed declaration the values were validated against
+/// (`None` where it writes no value other than a block, which every
+/// declaration takes), the spec plan, each value and its time already mapped
+/// for the edit target, and whether the target's own values are cleared
+/// first. The transaction closure receives only this, which is what keeps a
+/// composition query out of it.
 #[derive(Debug)]
 pub(super) struct AttributeAuthoringPlan {
     effective: Option<sdf::ValueTypeName>,
     ensure: authoring::EnsurePlan,
-    value: sdf::Value,
-    spec_time: Option<f64>,
+    values: Vec<(sdf::Value, Option<f64>)>,
+    clear: bool,
 }
 
 impl AttributeAuthoringPlan {
@@ -1328,12 +1366,24 @@ impl AttributeAuthoringPlan {
     }
 
     /// The write itself, once [`prepare`](Self::prepare) has the spec: the
-    /// default opinion, or the sample at the time the plan mapped.
+    /// target's own values cleared where the plan says so, then each default
+    /// opinion, and each sample at the time the plan mapped in one write of
+    /// the sample map.
     pub(super) fn write(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
         let mut spec = self.prepare(data, path)?;
-        match self.spec_time {
-            None => spec.set_default_raw(self.value),
-            Some(time) => spec.set_time_sample_raw(time, self.value)?,
+        if self.clear {
+            spec.clear_default();
+            spec.erase(sdf::FieldKey::TimeSamples.as_str());
+        }
+        let mut samples = Vec::new();
+        for (value, time) in self.values {
+            match time {
+                None => spec.set_default_raw(value),
+                Some(time) => samples.push((time, value)),
+            }
+        }
+        if !samples.is_empty() {
+            spec.insert_time_samples_raw(samples)?;
         }
         Ok(())
     }
@@ -2948,6 +2998,55 @@ class Marker "Marker"
         let attr = stage.attribute_builder("/A.x", "double").block().build()?;
         assert_eq!(root_field(&stage, "/A.x", "timeSamples"), None);
         assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert!(!attr.has_authored_value()?);
+        Ok(())
+    }
+
+    /// A builder authors each of its values, the later of two at one time
+    /// winning, in one edit.
+    #[test]
+    fn builder_several_samples() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        let (commits, _token) = counted(&stage);
+        let attr = stage
+            .attribute_builder("/A.x", "double")
+            .set(0.0_f64)
+            .set_at(1.0_f64, TimeCode::new(1.0))
+            .set_at(2.0_f64, TimeCode::new(2.0))
+            .set_at(3.0_f64, TimeCode::new(1.0))
+            .build()?;
+
+        assert_eq!(commits.get(), 1);
+        assert_eq!(attr.get::<f64>()?, Some(0.0));
+        assert_eq!(attr.time_samples_in(..)?, [1.0, 2.0]);
+        assert_eq!(attr.get_at::<f64>(TimeCode::new(1.0))?, Some(3.0));
+        Ok(())
+    }
+
+    /// A clearing builder drops the target's own default and samples before
+    /// it writes its values.
+    #[test]
+    fn builder_clear_replaces() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/A")?;
+        stage
+            .create_attribute("/A.x", "double")?
+            .set(9.0_f64)?
+            .set_at(1.0_f64, TimeCode::new(1.0))?
+            .set_at(2.0_f64, TimeCode::new(2.0))?;
+
+        let attr = stage
+            .attribute_builder("/A.x", "double")
+            .clear()
+            .set_at(5.0_f64, TimeCode::new(5.0))
+            .build()?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), None);
+        assert_eq!(attr.time_samples_in(..)?, [5.0]);
+
+        // Clearing alone leaves the declared spec with no value.
+        let attr = stage.attribute_builder("/A.x", "double").clear().build()?;
+        assert!(root_has_spec(&stage, "/A.x"));
         assert!(!attr.has_authored_value()?);
         Ok(())
     }
