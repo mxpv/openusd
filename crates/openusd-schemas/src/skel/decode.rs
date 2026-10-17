@@ -1,23 +1,16 @@
 //! What a `UsdSkel` view's properties decode to.
 //!
 //! A skeleton's joints are a `token[]` of paths that the object model reads as
-//! a topology; a blend shape's inbetweens are prims beneath it. These are the
-//! readers the rest of the family is built on, over the generated views.
+//! a topology; a binding's skeleton and animation are relationship targets
+//! inherited down namespace. These are the readers the rest of the family is
+//! built on, over the generated views.
 
 use openusd::Result;
-use openusd::gf;
-use openusd::sdf::{self, Value};
+use openusd::sdf;
 use openusd::usd::{Prim, Relationship, SchemaBase};
 
-use super::tokens;
-use super::{Animation, AnimationSchema, BindingAPI, BlendShape, Skeleton, SkeletonSchema};
+use super::{Animation, AnimationSchema, BindingAPI, Skeleton, SkeletonSchema};
 use crate::geom;
-
-/// The namespace an inbetween shape is authored under (C++'s own
-/// `inbetweensPrefix`), which names no property and so has no token. The
-/// primvar metadata beside it does: `interpolation` and `elementSize` are
-/// `usdGeom`'s, which this family builds on.
-pub const INBETWEENS_NAMESPACE: &str = "inbetweens:";
 
 /// What a binding relationship (`skel:skeleton`, `skel:animationSource`)
 /// authors on one prim (C++ `UsdSkelBindingAPI::GetSkeleton` and
@@ -85,65 +78,6 @@ impl Skeleton {
         let joints = self.joint_paths()?;
         let by_path = super::topology::joint_index_map(&joints);
         Ok(anim_joints.iter().map(|p| by_path.get(p.as_str()).copied()).collect())
-    }
-}
-
-/// One in-between shape authored on a [`BlendShape`] (C++
-/// `UsdSkelInbetweenShape`). Spec: `0 < weight < 1`; the endpoints (rest at 0,
-/// the primary shape at 1) are implicit and not authored as inbetweens.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Inbetween {
-    /// Inbetween name — the segment after `inbetweens:`.
-    pub name: String,
-    /// `weight` metadata. Required by spec; `None` flags malformed authoring.
-    pub weight: Option<f32>,
-    /// Position offsets, parallel to the parent's `pointIndices` layout.
-    pub offsets: Vec<gf::Vec3f>,
-    /// Optional `inbetweens:<name>:normalOffsets`. Empty when unauthored.
-    pub normal_offsets: Vec<gf::Vec3f>,
-}
-
-/// Per-vertex position / normal offsets defining a deformation target (C++
-/// `UsdSkelBlendShape`), optionally with inbetween shapes. Sparse via
-/// `pointIndices` (`offsets[i]` applies to vertex `pointIndices[i]`), dense
-/// when `pointIndices` is empty.
-impl BlendShape {
-    /// The authored `inbetweens:<name>` shapes, in authoring order (C++
-    /// `UsdSkelBlendShape::GetInbetweens`). Each carries its `weight` metadata,
-    /// `offsets`, and optional `inbetweens:<name>:normalOffsets`.
-    pub fn inbetweens(&self) -> Result<Vec<Inbetween>> {
-        let mut out = Vec::new();
-        let props = self.stage().prim(self.path().clone())?.authored_property_names()?;
-        for name in &props {
-            let Some(rest) = name.strip_prefix(INBETWEENS_NAMESPACE) else {
-                continue;
-            };
-            // Skip the per-inbetween `normalOffsets` siblings — folded into the
-            // inbetween that names them.
-            if rest.contains(':') {
-                continue;
-            }
-            let attr = self.attribute(name);
-            let offsets = attr.cast()?.unwrap_or_default();
-            let weight = match attr.metadata::<Value>(tokens::WEIGHT)? {
-                Some(Value::Float(f)) => Some(f),
-                Some(Value::Double(d)) => Some(d as f32),
-                _ => None,
-            };
-            let normal_offsets_name = format!("{INBETWEENS_NAMESPACE}{rest}:{}", tokens::NORMAL_OFFSETS);
-            let normal_offsets = if props.iter().any(|n| n.as_str() == normal_offsets_name) {
-                self.attribute(&normal_offsets_name).cast()?.unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            out.push(Inbetween {
-                name: rest.to_string(),
-                weight,
-                offsets,
-                normal_offsets,
-            });
-        }
-        Ok(out)
     }
 }
 
@@ -235,12 +169,11 @@ fn inherited<T>(binding: &BindingAPI, bound: fn(&BindingAPI) -> Result<Bound<T>>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::skel::{BlendShapeSchema, SkinningMethod};
-
     use openusd::Result;
+    use openusd::sdf::Value;
 
-    use crate::skel::{BindingAPI, BlendShape};
+    use super::*;
+    use crate::skel::{BindingAPI, SkinningMethod};
 
     #[test]
     fn binding_roundtrip_and_inheritance() -> Result<()> {
@@ -267,31 +200,6 @@ mod tests {
         assert_eq!(body.joint_indices()?, Some(vec![0, 1]));
         assert_eq!(body.joint_weights()?, Some(vec![1.0, 1.0]));
         assert_eq!(body.skinning_method()?, Some(SkinningMethod::ClassicLinear));
-        Ok(())
-    }
-
-    #[test]
-    fn blend_shape_inbetween() -> Result<()> {
-        let stage = crate::tests::stage("anon.usda")?;
-        let bs = BlendShape::define(&stage, "/Smile")?;
-        bs.create_offsets_attr()?
-            .set(Value::Vec3fVec(vec![[0.0_f32, 0.1, 0.0].into()]))?;
-        bs.create_point_indices_attr()?.set(Value::IntVec(vec![0]))?;
-        // Author an inbetween at weight 0.5.
-        bs.attribute_builder("inbetweens:half", "vector3f[]")
-            .custom(false)
-            .set(Value::Vec3fVec(vec![[0.0_f32, 0.04, 0.0].into()]))
-            .build()?
-            .set_metadata(tokens::WEIGHT, Value::Float(0.5))?;
-
-        let bs = BlendShape::get(&stage, "/Smile")?.expect("BlendShape");
-        assert_eq!(bs.offsets()?, Some(vec![gf::vec3f(0.0, 0.1, 0.0)]));
-        assert_eq!(bs.point_indices()?, Some(vec![0]));
-        let inbetweens = bs.inbetweens()?;
-        assert_eq!(inbetweens.len(), 1);
-        assert_eq!(inbetweens[0].name, "half");
-        assert_eq!(inbetweens[0].weight, Some(0.5));
-        assert_eq!(inbetweens[0].offsets, vec![gf::vec3f(0.0, 0.04, 0.0)]);
         Ok(())
     }
 }

@@ -9,9 +9,9 @@ use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{BoundableSchema, Mesh, XformCache, XformableExt};
 use openusd_schemas::skel::{
-    AnimMapper, AnimQuery, Animation, AnimationSchema, BindingAPI, BlendShape, BlendShapeSchema, NO_PARENT, Root,
-    SkelBinding, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningQuery, Topology, discover_bindings,
-    skinning,
+    AnimMapper, AnimQuery, Animation, AnimationSchema, BindingAPI, BlendShape, BlendShapeQuery, BlendShapeSchema,
+    NO_PARENT, Root, SkelBinding, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningQuery, Topology,
+    discover_bindings, skinning,
 };
 
 mod common;
@@ -117,23 +117,10 @@ fn reads_blend_shape_with_inbetween() -> Result<()> {
     let inbetweens = bs.inbetweens()?;
     assert_eq!(inbetweens.len(), 1);
     let inb = &inbetweens[0];
-    assert_eq!(inb.name, "half");
-    assert_eq!(inb.weight, Some(0.5));
-    assert_eq!(
-        inb.offsets,
-        vec![
-            Vec3f {
-                x: 0.0,
-                y: 0.04,
-                z: 0.0
-            },
-            Vec3f {
-                x: 0.0,
-                y: 0.04,
-                z: 0.0
-            }
-        ]
-    );
+    assert_eq!(inb.attribute().name(), "inbetweens:half");
+    assert_eq!(inb.weight()?, Some(0.5));
+    assert_eq!(inb.offsets()?, Some(vec![gf::vec3f(0.0, 0.04, 0.0); 2]));
+    assert_eq!(inb.normal_offsets()?, None);
     Ok(())
 }
 
@@ -1299,5 +1286,210 @@ def SkelRoot "R" {
     assert_eq!(query.extents_padding(rest, &mesh)?, 1.0);
     let bare = Mesh::get(&stage, "/R/Bare")?.expect("Mesh");
     assert_eq!(query.extents_padding(rest, &bare)?, 0.0);
+    Ok(())
+}
+
+/// The fixture's Body binds the Smile blend shape, whose sub-shapes are the
+/// rest shape, its `half` inbetween at 0.5 and the primary shape.
+#[test]
+fn blend_shape_query_layout() -> Result<()> {
+    let stage = open()?;
+    let body = BindingAPI::get(&stage, "/World/Character/Body")?.expect("BindingAPI");
+    let query = BlendShapeQuery::new(&body)?;
+    assert_eq!(query.num_blend_shapes(), 1);
+    assert_eq!(query.num_sub_shapes(), 3);
+    assert_eq!(
+        query.blend_shape(0).map(|shape| shape.path().as_str()),
+        Some("/World/Character/Smile")
+    );
+    assert_eq!(
+        query.inbetween(1).map(|inbetween| inbetween.attribute().name()),
+        Some("inbetweens:half")
+    );
+    assert!(query.inbetween(2).is_none());
+    assert_eq!(query.blend_shape_index(2), 0);
+
+    // Between the inbetween and the primary shape, halfway.
+    let weights = query.sub_shape_weights(&[0.75]).expect("one weight per shape");
+    assert_eq!(weights.iter().map(|w| w.sub_shape).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(weights.iter().map(|w| w.weight).collect::<Vec<_>>(), vec![0.5, 0.5]);
+    assert_eq!(query.flattened_sub_shape_weights(&[0.75]), Some(vec![0.0, 0.5, 0.5]));
+    assert!(query.sub_shape_weights(&[]).is_none());
+
+    let indices = query.blend_shape_point_indices()?;
+    assert_eq!(indices, vec![vec![0, 1]]);
+    let offsets = query.sub_shape_point_offsets()?;
+    assert_eq!(
+        offsets,
+        vec![
+            vec![],
+            vec![gf::vec3f(0.0, 0.04, 0.0); 2],
+            vec![gf::vec3f(0.0, 0.1, 0.0); 2]
+        ]
+    );
+    assert_eq!(query.sub_shape_normal_offsets()?[2], vec![Vec3f::default(); 2]);
+
+    // At full weight only the primary shape applies, to points 0 and 1.
+    let full = query.sub_shape_weights(&[1.0]).expect("one weight per shape");
+    let points = vec![Vec3f::default(); 4];
+    let deformed = BlendShapeQuery::deformed_points(&full, &indices, &offsets, &points).expect("offsets fit");
+    assert_eq!(
+        deformed,
+        vec![
+            gf::vec3f(0.0, 0.1, 0.0),
+            gf::vec3f(0.0, 0.1, 0.0),
+            Vec3f::default(),
+            Vec3f::default()
+        ]
+    );
+    // A sub-shape index past the offsets is rejected.
+    assert!(BlendShapeQuery::deformed_points(&full, &indices, &offsets[..1], &points).is_none());
+    Ok(())
+}
+
+/// A target that is not a blend shape, or is inactive, keeps its place in
+/// the layout with no sub-shapes, so its weight applies nothing.
+#[test]
+fn blend_shape_query_skips() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def BlendShape "Up" {
+    uniform vector3f[] offsets = [(0, 1, 0), (0, 2, 0)]
+    uniform vector3f[] normalOffsets = [(0, 1, 0), (0, 1, 0)]
+}
+def BlendShape "Off" (active = false) {
+    uniform vector3f[] offsets = [(1, 0, 0), (1, 0, 0)]
+}
+def Xform "NotAShape" {}
+def BlendShape "Side" {
+    uniform vector3f[] offsets = [(0, 0, 3)]
+    uniform int[] pointIndices = [1]
+    uniform vector3f[] inbetweens:bad (weight = 1) = [(0, 0, 9)]
+}
+def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:blendShapeTargets = [</Up>, </Off>, </NotAShape>, </Side>, </Up.offsets>]
+}
+"#,
+    )?;
+    let mesh = BindingAPI::get(&stage, "/M")?.expect("BindingAPI");
+    let query = BlendShapeQuery::new(&mesh)?;
+    // The property-path target keeps its place as no blend shape.
+    assert_eq!(query.num_blend_shapes(), 5);
+    assert!(query.blend_shape(4).is_none());
+    // Up and Side each have a rest and a primary shape; Side's inbetween at
+    // weight 1 is left out.
+    assert_eq!(query.num_sub_shapes(), 4);
+    assert!(query.blend_shape(1).is_some());
+    assert!(query.blend_shape(2).is_none());
+
+    let weights = query
+        .sub_shape_weights(&[0.5, 1.0, 1.0, 2.0, 1.0])
+        .expect("one weight per shape");
+    assert_eq!(weights.iter().map(|w| w.blend_shape).collect::<Vec<_>>(), vec![0, 3]);
+    assert_eq!(weights.iter().map(|w| w.weight).collect::<Vec<_>>(), vec![0.5, 2.0]);
+
+    // Up's primary shape, sub-shape 1, is dense over points 0 and 1; Side's,
+    // sub-shape 3, adds to point 1 alone. The table covers one point past the
+    // largest offset count, as C++ lays it out.
+    let (table, ranges) = query.packed_shape_table()?.expect("valid indices");
+    assert_eq!(ranges, vec![gf::vec2i(0, 1), gf::vec2i(1, 3), gf::vec2i(3, 4)]);
+    assert_eq!(
+        table,
+        vec![
+            gf::vec4f(0.0, 1.0, 0.0, 1.0),
+            gf::vec4f(0.0, 2.0, 0.0, 1.0),
+            gf::vec4f(0.0, 0.0, 3.0, 3.0),
+            gf::Vec4f::default(),
+        ]
+    );
+
+    // Normals deform by the normal offsets, which only Up authors, and come
+    // back normalized.
+    let indices = query.blend_shape_point_indices()?;
+    let offsets = query.sub_shape_normal_offsets()?;
+    let normals = BlendShapeQuery::deformed_normals(&weights, &indices, &offsets, &[gf::vec3f(1.0, 0.0, 0.0); 2])
+        .expect("offsets fit");
+    assert!(
+        (normals[1] - gf::vec3f(1.0, 0.5, 0.0).normalize()).length() < 1e-6,
+        "{normals:?}"
+    );
+    Ok(())
+}
+
+/// A negative point index has no slot in the packed table.
+#[test]
+fn packed_table_negative_index() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def BlendShape "Bad" {
+    uniform vector3f[] offsets = [(0, 1, 0)]
+    uniform int[] pointIndices = [-1]
+}
+def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:blendShapeTargets = </Bad>
+}
+"#,
+    )?;
+    let mesh = BindingAPI::get(&stage, "/M")?.expect("BindingAPI");
+    assert!(BlendShapeQuery::new(&mesh)?.packed_shape_table()?.is_none());
+    Ok(())
+}
+
+/// The asset's skinned meshes declare `skel:blendShapes`, with no value, and
+/// no `skel:blendShapeTargets`, so their queries lay out no blend shapes, and
+/// weigh and pack nothing.
+#[test]
+fn blend_shapes_on_asset() -> Result<()> {
+    let stage = Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open("../../vendor/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
+    let mut paths = Vec::new();
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| paths.push(path.clone()))?;
+    let mut named = 0;
+    for path in paths {
+        let Some(binding) = BindingAPI::get(&stage, path)? else {
+            continue;
+        };
+        if binding
+            .authored_property_names()?
+            .iter()
+            .any(|name| name == "skel:blendShapes")
+        {
+            named += 1;
+        }
+        let query = BlendShapeQuery::new(&binding)?;
+        assert_eq!(query.num_blend_shapes(), 0);
+        assert_eq!(query.sub_shape_weights(&[]), Some(Vec::new()));
+        assert_eq!(query.packed_shape_table()?, Some((Vec::new(), Vec::new())));
+    }
+    assert_eq!(named, 2, "the elephant and the monochord author skel:blendShapes");
+    Ok(())
+}
+
+/// A target that is another relationship stands for the blend shapes that
+/// relationship forwards to.
+#[test]
+fn forwarded_blend_shape_targets() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def BlendShape "Up" {
+    uniform vector3f[] offsets = [(0, 1, 0)]
+}
+def BlendShape "Side" {
+    uniform vector3f[] offsets = [(1, 0, 0)]
+}
+def Scope "Shapes" {
+    custom rel all = [</Up>, </Side>]
+}
+def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:blendShapeTargets = </Shapes.all>
+}
+"#,
+    )?;
+    let mesh = BindingAPI::get(&stage, "/M")?.expect("BindingAPI");
+    let query = BlendShapeQuery::new(&mesh)?;
+    assert_eq!(query.num_blend_shapes(), 2);
+    assert_eq!(query.blend_shape(0).map(|shape| shape.path().as_str()), Some("/Up"));
+    assert_eq!(query.blend_shape(1).map(|shape| shape.path().as_str()), Some("/Side"));
     Ok(())
 }

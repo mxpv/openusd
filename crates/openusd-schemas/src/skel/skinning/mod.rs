@@ -375,25 +375,49 @@ pub enum SubShape {
 /// An inbetween whose weight lies within `1e-6` of 0 or 1 is skipped, and so
 /// is a sub-shape whose share is within `1e-6` of zero.
 pub fn sub_shape_weights(weight: f32, inbetween_weights: &[f32]) -> Vec<(SubShape, f32)> {
-    // `None` stands for the rest shape, which contributes no offsets.
-    let mut shapes = vec![(Some(SubShape::Primary), 1.0), (None, 0.0)];
-    shapes.extend(
-        inbetween_weights
-            .iter()
-            .enumerate()
-            .filter(|&(_, &w)| !is_close(w, 0.0) && !is_close(w, 1.0))
-            .map(|(index, &w)| (Some(SubShape::Inbetween(index)), w)),
+    let inbetweens = inbetween_weights
+        .iter()
+        .enumerate()
+        .map(|(index, &weight)| (SubShape::Inbetween(index), weight));
+    interpolate_run(weight, &sub_shape_run(SubShape::Primary, inbetweens))
+}
+
+/// One blend shape's sub-shapes sorted by weight, as C++
+/// `UsdSkelBlendShapeQuery` lays them out: `primary` at weight 1, the rest
+/// shape (`None`) at weight 0, and each of `inbetweens` whose weight does not
+/// lie within `1e-6` of 0 or 1.
+pub(crate) fn sub_shape_run<T>(primary: T, inbetweens: impl IntoIterator<Item = (T, f32)>) -> Vec<(Option<T>, f32)> {
+    let mut run = vec![(Some(primary), 1.0), (None, 0.0)];
+    run.extend(
+        inbetweens
+            .into_iter()
+            .filter(|&(_, weight)| !is_close(weight, 0.0) && !is_close(weight, 1.0))
+            .map(|(shape, weight)| (Some(shape), weight)),
     );
-    if shapes.len() < 3 {
-        return vec![(SubShape::Primary, weight)];
+    run.sort_by(|a, b| a.1.total_cmp(&b.1));
+    run
+}
+
+/// The sub-shapes of one blend shape that `weight` applies, each with its
+/// share (the per-shape step of C++
+/// `UsdSkelBlendShapeQuery::ComputeSubShapeWeights`). `run` holds the blend
+/// shape's sub-shapes sorted by weight, `None` standing for the rest shape.
+/// A run of fewer than three sub-shapes applies `weight` as it is to its
+/// sub-shape other than the rest shape, and an empty run applies nothing.
+pub(crate) fn interpolate_run<T: Copy>(weight: f32, run: &[(Option<T>, f32)]) -> Vec<(T, f32)> {
+    if run.len() < 3 {
+        return run
+            .iter()
+            .filter_map(|&(shape, _)| shape)
+            .map(|shape| (shape, weight))
+            .collect();
     }
-    shapes.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let (lower, upper) = match shapes.partition_point(|&(_, w)| w <= weight) {
+    let (lower, upper) = match run.partition_point(|&(_, w)| w <= weight) {
         0 => (0, 1),
-        end if end == shapes.len() => (end - 2, end - 1),
+        end if end == run.len() => (end - 2, end - 1),
         upper => (upper - 1, upper),
     };
-    let ((lower_shape, lower_weight), (upper_shape, upper_weight)) = (shapes[lower], shapes[upper]);
+    let ((lower_shape, lower_weight), (upper_shape, upper_weight)) = (run[lower], run[upper]);
     let span = upper_weight - lower_weight;
     if span <= EPS {
         return Vec::new();
@@ -530,7 +554,7 @@ fn normal_transform(transform: gf::Mat4d) -> gf::Mat4d {
 const EPS: f32 = 1e-6;
 
 /// `true` when `a` lies within [`EPS`] of `b` (C++ `GfIsClose`).
-fn is_close(a: f32, b: f32) -> bool {
+pub(crate) fn is_close(a: f32, b: f32) -> bool {
     (a - b).abs() < EPS
 }
 
