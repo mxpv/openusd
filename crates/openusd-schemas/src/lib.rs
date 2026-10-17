@@ -589,10 +589,6 @@ pub fn schema_registry() -> Arc<SchemaRegistry> {
 ///
 /// A clone of it is the starting point for a registry that also bounds types
 /// declared elsewhere.
-// TODO: `skel` adds none. A `Skeleton` is bounded by its joints in skeleton
-// space and a `SkelRoot` by the skeletons and skinned prims below it (C++
-// `UsdSkelComputeJointsExtent` and `UsdSkelCache`), neither of which is
-// ported.
 #[cfg(feature = "geom")]
 pub fn extent_registry() -> &'static geom::ExtentRegistry {
     static REGISTRY: OnceLock<geom::ExtentRegistry> = OnceLock::new();
@@ -601,6 +597,8 @@ pub fn extent_registry() -> &'static geom::ExtentRegistry {
         geom::boundable::register_extents(&mut registry);
         #[cfg(feature = "lux")]
         lux::register_extents(&mut registry);
+        #[cfg(feature = "skel")]
+        skel::register_extents(&mut registry);
         registry
     })
 }

@@ -9,7 +9,9 @@ use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
-use openusd_schemas::geom::{BoundableSchema, Mesh, XformCache, XformableExt};
+use openusd_schemas::geom::{
+    BBoxCache, BoundableExt, BoundableSchema, Extent, Mesh, Purpose, XformCache, XformableExt,
+};
 use openusd_schemas::skel::{
     AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BlendShape, BlendShapeQuery,
     BlendShapeSchema, Cache, NO_PARENT, Pose, Root, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod,
@@ -1891,12 +1893,13 @@ def SkelRoot "R" {
 }
 
 /// Populate a cache from every Root on `stage` and skin each bound mesh at
-/// the default time. Answers the number of prims bound and the number
-/// skinned.
+/// the default time, checking that each Root computes an extent. Answers
+/// the number of prims bound and the number skinned.
 fn skin_everything(stage: &Stage) -> Result<(usize, usize), SchemaError> {
     let mut cache = Cache::new();
     let (mut bound, mut skinned) = (0, 0);
     for root in typed(stage, Root::get)? {
+        assert!(root.shape_extent(None, None)?.is_some(), "{} extent", root.path());
         cache.populate(&root, PrimPredicate::DEFAULT_PROXIES)?;
         for binding in cache.skel_bindings(&root, PrimPredicate::DEFAULT_PROXIES)? {
             let skel = cache.skel_query(binding.skeleton())?.expect("valid topology");
@@ -1945,5 +1948,132 @@ class SkelRoot "R" {
     assert!(cache.skinning_query(&mesh).is_none());
     cache.populate(&root, PrimPredicate::ALL)?;
     assert!(cache.skinning_query(&mesh).is_some());
+    Ok(())
+}
+
+/// `extent`'s corners, for comparing against a box written out.
+fn corners(extent: Option<Extent>) -> Option<[[f32; 3]; 2]> {
+    extent.map(|[min, max]| [min.into(), max.into()])
+}
+
+#[test]
+fn skeleton_extent_posed() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token[] joints = ["A", "A/B"]
+        uniform matrix4d[] restTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)), ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1))]
+        rel skel:animationSource = </R/Anim>
+        double3 xformOp:translate.timeSamples = { 1: (0, 0, 0), 2: (0, 0, 3) }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SkelAnimation "Anim" {
+        uniform token[] joints = ["A/B"]
+        float3[] translations.timeSamples = { 1: [(0, 2, 0)], 2: [(4, 0, 0)] }
+        quatf[] rotations = [(1, 0, 0, 0)]
+        half3[] scales = [(1, 1, 1)]
+    }
+}
+"#,
+    )?;
+    let rig = Skeleton::get(&stage, "/R/Rig")?.expect("Rig");
+    let root = root(&stage, "/R")?;
+    let (one, two) = (TimeCode::new(1.0), TimeCode::new(2.0));
+    assert_eq!(corners(rig.shape_extent(one, None)?), Some([[0.0; 3], [0.0, 2.0, 0.0]]));
+    assert_eq!(corners(rig.shape_extent(two, None)?), Some([[0.0; 3], [4.0, 0.0, 0.0]]));
+    let shifted = Mat4d::translation([1.0, 0.0, 0.0]);
+    assert_eq!(
+        corners(rig.shape_extent(two, shifted)?),
+        Some([[1.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
+    );
+    // The root places the skeleton by its transform at the time asked for.
+    assert_eq!(
+        corners(root.shape_extent(two, None)?),
+        Some([[0.0, 0.0, 3.0], [4.0, 0.0, 3.0]])
+    );
+    Ok(())
+}
+
+#[test]
+fn root_extent_bindings() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "Bound" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "A/B"]
+        uniform matrix4d[] restTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)), ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1))]
+    }
+    def Mesh "Body" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Bound/Rig>
+        float3[] extent = [(-1, 0, 0), (1, 3, 0)]
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+    }
+}
+def SkelRoot "Unbound" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "A/B"]
+        uniform matrix4d[] restTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)), ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1))]
+    }
+    def Mesh "Body" {
+        float3[] extent = [(-1, 0, 0), (1, 3, 0)]
+    }
+}
+def SkelRoot "Empty" {
+}
+"#,
+    )?;
+    // Body reaches one unit past the joints' box, on X below and above and
+    // on Y above, and pads the box by that on every side.
+    assert_eq!(
+        corners(root(&stage, "/Bound")?.shape_extent(None, None)?),
+        Some([[-1.0; 3], [1.0, 3.0, 1.0]])
+    );
+    assert_eq!(
+        corners(root(&stage, "/Unbound")?.shape_extent(None, None)?),
+        Some([[0.0; 3], [0.0, 2.0, 0.0]])
+    );
+    assert_eq!(root(&stage, "/Empty")?.shape_extent(None, None)?, None);
+    Ok(())
+}
+
+#[test]
+fn root_extent_reset() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Xform "World" {
+    double3 xformOp:translate = (0, 5, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def SkelRoot "R" {
+        def Skeleton "Kept" {
+            uniform token[] joints = ["A"]
+            uniform matrix4d[] restTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1))]
+            double3 xformOp:translate = (0, 0, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Skeleton "Reset" {
+            uniform token[] joints = ["A"]
+            uniform matrix4d[] restTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1, 0, 0, 1))]
+            uniform token[] xformOpOrder = ["!resetXformStack!"]
+        }
+    }
+}
+"#,
+    )?;
+    let root = root(&stage, "/World/R")?;
+    let shifted = Mat4d::translation([10.0, 0.0, 0.0]);
+    assert_eq!(
+        corners(root.shape_extent(None, shifted)?),
+        Some([[-1.0, 0.0, 0.0], [11.0, 0.0, 1.0]])
+    );
+    let bound = BBoxCache::new(None, [Purpose::Default])
+        .world_bound(root.prim())?
+        .aligned_range();
+    assert_eq!(
+        (bound.min(), bound.max()),
+        (gf::vec3d(-1.0, 5.0, 0.0), gf::vec3d(1.0, 5.0, 1.0))
+    );
     Ok(())
 }

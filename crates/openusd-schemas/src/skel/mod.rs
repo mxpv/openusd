@@ -27,7 +27,8 @@
 //! [`Cache`] walks a `Root` subtree, builds a skinning query for
 //! every skinnable prim from the skeleton and binding properties it inherits,
 //! and groups the prims by the skeleton bound to them
-//! (C++ `UsdSkelCache`).
+//! (C++ `UsdSkelCache`). A `Skeleton` and a `Root` compute their extents from
+//! the pivots of their joints, through [`extent_registry`](crate::extent_registry).
 //!
 //! # Conventions
 //!
@@ -63,6 +64,7 @@ mod binding;
 mod blend_shape_query;
 mod cache;
 mod decode;
+mod extent;
 mod inbetween;
 mod skeleton_query;
 pub mod skinning;
@@ -74,6 +76,7 @@ pub use anim_query::AnimQuery;
 pub use binding::{Binding, is_skinnable};
 pub use blend_shape_query::{BlendShapeQuery, SubShapeWeight};
 pub use cache::Cache;
+pub(crate) use extent::register_extents;
 pub use inbetween::{INBETWEENS_NAMESPACE, InbetweenShape};
 pub use skeleton_query::SkeletonQuery;
 pub use skinning::Pose;
