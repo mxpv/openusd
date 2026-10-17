@@ -178,10 +178,6 @@ mod tests {
         gf::Mat4d::translation([x, y, z])
     }
 
-    fn close_mat(a: gf::Mat4d, b: gf::Mat4d) -> bool {
-        a.0.iter().zip(b.0.iter()).all(|(a, b)| (a - b).abs() < 1e-4)
-    }
-
     #[test]
     fn joint_local_to_skel_chains_translations() {
         let topo = Topology::from_parents(vec![NO_PARENT, 0]);
@@ -217,7 +213,7 @@ mod tests {
         let skel = joint_local_to_skel_space(&local, &topo, Some(root)).expect("ordered");
         let back = joint_skel_to_local(&skel, &topo, root.inverse()).expect("ordered");
         for (a, b) in back.iter().zip(&local) {
-            assert!(close_mat(*a, *b), "{a:?} != {b:?}");
+            assert!(a.is_close(*b, 1e-4), "{a:?} != {b:?}");
         }
     }
 
@@ -265,7 +261,7 @@ mod tests {
         }
         let rebuilt = make_transforms(&t, &r, &s).expect("one of each per joint");
         for (a, b) in rebuilt.iter().zip(&xforms) {
-            assert!(close_mat(*a, *b), "{a:?} != {b:?}");
+            assert!(a.is_close(*b, 1e-4), "{a:?} != {b:?}");
         }
 
         // Decomposing singular matrices fails.

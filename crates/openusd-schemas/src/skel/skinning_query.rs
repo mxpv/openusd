@@ -258,8 +258,8 @@ impl SkinningQuery {
     ///
     /// `None` where [`varying_joint_influences`](Self::varying_joint_influences)
     /// is, when `skinning_xforms` holds other than one transform per skeleton
-    /// joint, when an influence names no joint, and for a skinning method
-    /// other than `classicLinear`.
+    /// joint, when an influence names no joint, and for an unknown skinning
+    /// method.
     pub fn skinned_points(
         &self,
         skinning_xforms: &[gf::Mat4d],
@@ -284,12 +284,13 @@ impl SkinningQuery {
 
     /// The single 4×4 to apply to a rigidly deformed prim's local-to-world
     /// transform at `time` (C++ `ComputeSkinnedTransform`), skinned as
-    /// [`skin_transform_lbs`](super::skinning::skin_transform_lbs) describes.
+    /// [`skin_transform`](super::skinning::skin_transform) describes for the
+    /// skinning method.
     ///
     /// `None` for a prim whose influences are not constant, where
     /// [`joint_influences`](Self::joint_influences) is, when `skinning_xforms`
     /// holds other than one transform per skeleton joint, when an influence
-    /// names no joint, and for a skinning method other than `classicLinear`.
+    /// names no joint, and for an unknown skinning method.
     /// A joint of `skel:joints` the skeleton lacks takes the identity, where
     /// C++ leaves the skeleton's transform at that index.
     pub fn skinned_transform(

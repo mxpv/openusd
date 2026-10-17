@@ -43,7 +43,7 @@ impl Rotation {
     /// angle. A quaternion is the identity when its imaginary part is at
     /// most [`MIN_VECTOR_LENGTH`] long or that length is NaN.
     pub fn from_quat(q: Quatd) -> Self {
-        let imaginary = Vec3d { x: q.x, y: q.y, z: q.z };
+        let imaginary = q.imaginary();
         let length = imaginary.length();
         if length > MIN_VECTOR_LENGTH {
             let half_angle = q.w.clamp(-1.0, 1.0).acos();
@@ -118,14 +118,7 @@ impl Rotation {
     /// The rotation as a unit quaternion (C++ `GetQuat`).
     pub fn quat(self) -> Quatd {
         let (sin, cos) = (self.angle.to_radians() / 2.0).sin_cos();
-        let axis = self.axis * sin;
-        Quatd {
-            w: cos,
-            x: axis.x,
-            y: axis.y,
-            z: axis.z,
-        }
-        .normalize()
+        Quatd::new(cos, self.axis * sin).normalize()
     }
 }
 

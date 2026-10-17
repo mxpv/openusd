@@ -2,6 +2,8 @@
 //! every schema family, plus the object-model layer (topology, AnimMapper,
 //! SkeletonQuery, SkinningQuery, binding discovery).
 
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+
 use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
@@ -1173,16 +1175,21 @@ def SkelRoot "R" {
     Ok(())
 }
 
-/// An unknown skinning method token, or `dualQuaternion`, constructs a query
-/// whose skinning methods answer nothing.
+/// An unknown skinning method token constructs a query whose skinning methods
+/// answer nothing, and `dualQuaternion` skins by dual quaternions: halfway
+/// through a quarter-turn twist, a point turns by an eighth and keeps its
+/// length.
 #[test]
-fn unknown_skinning_method() -> Result<(), SchemaError> {
+fn skinning_method_dispatch() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def SkelRoot "R" {
     def Skeleton "Rig" {
-        uniform token[] joints = ["A"]
-        uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]
+        uniform token[] joints = ["A", "A/B"]
+        uniform matrix4d[] bindTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        ]
     }
     def Mesh "Bogus" (prepend apiSchemas = ["SkelBindingAPI"]) {
         rel skel:skeleton = </R/Rig>
@@ -1192,14 +1199,14 @@ def SkelRoot "R" {
     }
     def Mesh "Dual" (prepend apiSchemas = ["SkelBindingAPI"]) {
         rel skel:skeleton = </R/Rig>
-        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
-        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        int[] primvars:skel:jointIndices = [0, 1] (interpolation = "constant", elementSize = 2)
+        float[] primvars:skel:jointWeights = [0.5, 0.5] (interpolation = "constant", elementSize = 2)
         uniform token primvars:skel:skinningMethod = "dualQuaternion"
     }
 }
 "#,
     )?;
-    let xforms = [Mat4d::IDENTITY];
+    let xforms = [Mat4d::IDENTITY; 2];
     let points = [Vec3f::default()];
     let bogus = skinning_query(&binding_of(&stage, "/R", "/R/Bogus")?.expect("Bogus binding"))?;
     assert_eq!(bogus.skinning_method(), None);
@@ -1210,7 +1217,15 @@ def SkelRoot "R" {
 
     let dual = skinning_query(&binding_of(&stage, "/R", "/R/Dual")?.expect("Dual binding"))?;
     assert_eq!(dual.skinning_method(), Some(SkinningMethod::DualQuaternion));
-    assert!(dual.skinned_points(&xforms, &points, None)?.is_none());
+    let twist = [Mat4d::IDENTITY, Mat4d::rotation_x(FRAC_PI_2)];
+    let eighth = Mat4d::rotation_x(FRAC_PI_4);
+    let skinned = dual
+        .skinned_points(&twist, &[gf::vec3f(0.0, 1.0, 0.0)], None)?
+        .expect("constant influences");
+    let expected = eighth.transform_dir(gf::Vec3d::Y_AXIS);
+    assert!((gf::Vec3d::from(skinned[0]) - expected).length() < 1e-6, "{skinned:?}");
+    let xform = dual.skinned_transform(&twist, None)?.expect("rigid influences");
+    assert!(xform.is_close(eighth, 1e-6), "{xform:?}");
     Ok(())
 }
 

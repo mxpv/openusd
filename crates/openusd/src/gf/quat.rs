@@ -7,8 +7,12 @@
 //! `From<[T; 4]>` and `From<Quat*> for [T; 4]` bridge to the raw array
 //! representation used by `sdf::Value`.
 
-use super::MIN_VECTOR_LENGTH;
+use std::ops::Mul;
+
+use derive_more::{Add, AddAssign, Sub};
+
 use super::f16;
+use super::{MIN_VECTOR_LENGTH, Vec3d};
 
 /// Single-precision quaternion (`GfQuatf`). Layout: `(w, x, y, z)`.
 #[repr(C)]
@@ -90,7 +94,7 @@ impl From<Quatf> for [f32; 4] {
 
 /// Double-precision quaternion (`GfQuatd`). Layout: `(w, x, y, z)`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, bytemuck::Pod, bytemuck::Zeroable)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f64; 4]", into = "[f64; 4]"))]
 pub struct Quatd {
@@ -107,6 +111,60 @@ impl Quatd {
         y: 0.0,
         z: 0.0,
     };
+
+    /// The quaternion with every component zero (C++ `GetZero`).
+    pub const ZERO: Quatd = Quatd {
+        w: 0.0,
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+
+    /// The quaternion with real part `real` and imaginary part `imaginary`.
+    pub fn new(real: f64, imaginary: Vec3d) -> Self {
+        Self {
+            w: real,
+            x: imaginary.x,
+            y: imaginary.y,
+            z: imaginary.z,
+        }
+    }
+
+    /// The imaginary part, `(x, y, z)` (C++ `GetImaginary`).
+    pub fn imaginary(self) -> Vec3d {
+        Vec3d {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        }
+    }
+
+    /// The dot product of the two quaternions' four components (C++
+    /// `GfDot`).
+    pub fn dot(self, other: Self) -> f64 {
+        self.w * other.w + self.imaginary().dot(other.imaginary())
+    }
+
+    /// The length (C++ `GetLength`).
+    pub fn length(self) -> f64 {
+        self.dot(self).sqrt()
+    }
+
+    /// The quaternion with its imaginary part negated (C++ `GetConjugate`).
+    pub fn conjugate(self) -> Self {
+        Self::new(self.w, -self.imaginary())
+    }
+
+    /// `point` rotated by the quaternion, `q · (0, point) · q⁻¹` (C++
+    /// `Transform`). A quaternion of any nonzero length rotates without
+    /// scaling: the result is divided by its squared length.
+    pub fn transform(self, point: Vec3d) -> Vec3d {
+        let imaginary = self.imaginary();
+        let dot = imaginary.dot(imaginary);
+        let square = self.w * self.w;
+        (imaginary * (2.0 * imaginary.dot(point)) + point * (square - dot) + imaginary.cross(point) * (2.0 * self.w))
+            * (1.0 / (square + dot))
+    }
 
     /// Returns a normalized copy, or the identity quaternion if the
     /// magnitude is below [`MIN_VECTOR_LENGTH`] (C++ `GetNormalized`).
@@ -166,6 +224,25 @@ impl From<Quatd> for [f64; 4] {
     #[inline]
     fn from(q: Quatd) -> Self {
         [q.w, q.x, q.y, q.z]
+    }
+}
+
+/// The Hamilton product (C++ `GfQuatd::operator*`): rotating by the product
+/// rotates by `other` and then by `self`.
+impl Mul for Quatd {
+    type Output = Quatd;
+
+    fn mul(self, other: Quatd) -> Quatd {
+        let (i1, i2) = (self.imaginary(), other.imaginary());
+        Quatd::new(self.w * other.w - i1.dot(i2), i2 * self.w + i1 * other.w + i1.cross(i2))
+    }
+}
+
+impl Mul<f64> for Quatd {
+    type Output = Quatd;
+
+    fn mul(self, s: f64) -> Quatd {
+        Quatd::new(self.w * s, self.imaginary() * s)
     }
 }
 
@@ -287,7 +364,10 @@ fn slerp(a: [f64; 4], b: [f64; 4], t: f64) -> [f64; 4] {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::FRAC_PI_2;
+
     use super::*;
+    use crate::gf::Mat4d;
 
     #[test]
     fn slerp_90deg() {
@@ -420,5 +500,26 @@ mod tests {
         }
         assert_eq!(quatd(4e-11, 4e-11, 4e-11, 4e-11).normalize(), Quatd::IDENTITY);
         assert_eq!(quatd(5e-11, 5e-11, 5e-11, 5e-11).normalize(), quatd(0.5, 0.5, 0.5, 0.5));
+    }
+
+    #[test]
+    fn quatd_rotates_like_matrix() {
+        // The quarter turn about z a matrix extracts rotates as the matrix
+        // does, and a product rotates by its right operand first.
+        let matrix = Mat4d::rotation_z(FRAC_PI_2);
+        let quarter = matrix.extract_rotation_quat();
+        let x = Vec3d::X_AXIS;
+        assert!((quarter.transform(x) - matrix.transform_dir(x)).length() < 1e-12);
+        let half = quarter * quarter;
+        assert!((half.transform(x) + x).length() < 1e-12);
+        let tilt = Mat4d::rotation_x(0.3).extract_rotation_quat();
+        let point = Vec3d { x: 1.0, y: 2.0, z: 3.0 };
+        assert!(((quarter * tilt).transform(point) - quarter.transform(tilt.transform(point))).length() < 1e-12);
+        // A scaled quaternion rotates the same.
+        assert!(((quarter * 3.0).transform(point) - quarter.transform(point)).length() < 1e-12);
+        let unit = quarter * quarter.conjugate();
+        assert!((unit.w - 1.0).abs() < 1e-12 && unit.imaginary().length() < 1e-12);
+        assert_eq!(quarter.dot(Quatd::ZERO), 0.0);
+        assert!((quarter.length() - 1.0).abs() < 1e-12);
     }
 }

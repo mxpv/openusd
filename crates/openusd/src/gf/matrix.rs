@@ -102,6 +102,108 @@ impl Mat3d {
     pub fn lerp(self, other: Self, t: f64) -> Self {
         Self(array::from_fn(|i| self.0[i] + (other.0[i] - self.0[i]) * t))
     }
+
+    /// The determinant (C++ `GetDeterminant`).
+    pub fn determinant(self) -> f64 {
+        let m = |r: usize, c: usize| self[(r, c)];
+        m(0, 0) * m(1, 1) * m(2, 2) + m(0, 1) * m(1, 2) * m(2, 0) + m(0, 2) * m(1, 0) * m(2, 1)
+            - m(0, 0) * m(1, 2) * m(2, 1)
+            - m(0, 1) * m(1, 0) * m(2, 2)
+            - m(0, 2) * m(1, 1) * m(2, 0)
+    }
+
+    /// The inverse of a matrix whose determinant is greater than `epsilon`
+    /// in magnitude, by cofactors, and `None` for any other (C++
+    /// `GetInverse` with its `eps` argument).
+    pub fn inverse_above(self, epsilon: f64) -> Option<Mat3d> {
+        let m = |r: usize, c: usize| self[(r, c)];
+        let det = -(m(0, 2) * m(1, 1) * m(2, 0)) + m(0, 1) * m(1, 2) * m(2, 0) + m(0, 2) * m(1, 0) * m(2, 1)
+            - m(0, 0) * m(1, 2) * m(2, 1)
+            - m(0, 1) * m(1, 0) * m(2, 2)
+            + m(0, 0) * m(1, 1) * m(2, 2);
+        if det.abs() <= epsilon {
+            return None;
+        }
+        let rcp = 1.0 / det;
+        Some(Mat3d([
+            (-(m(1, 2) * m(2, 1)) + m(1, 1) * m(2, 2)) * rcp,
+            (m(0, 2) * m(2, 1) - m(0, 1) * m(2, 2)) * rcp,
+            (-(m(0, 2) * m(1, 1)) + m(0, 1) * m(1, 2)) * rcp,
+            (m(1, 2) * m(2, 0) - m(1, 0) * m(2, 2)) * rcp,
+            (-(m(0, 2) * m(2, 0)) + m(0, 0) * m(2, 2)) * rcp,
+            (m(0, 2) * m(1, 0) - m(0, 0) * m(1, 2)) * rcp,
+            (-(m(1, 1) * m(2, 0)) + m(1, 0) * m(2, 1)) * rcp,
+            (m(0, 1) * m(2, 0) - m(0, 0) * m(2, 1)) * rcp,
+            (-(m(0, 1) * m(1, 0)) + m(0, 0) * m(1, 1)) * rcp,
+        ]))
+    }
+
+    /// The inverse, or `f32::MAX` times the identity for a matrix whose
+    /// determinant is zero (C++ `GetInverse` at its default `eps` of zero).
+    pub fn inverse_or_max(self) -> Mat3d {
+        self.inverse_above(0.0).unwrap_or_else(|| {
+            let max = f64::from(f32::MAX);
+            Mat3d([max, 0.0, 0.0, 0.0, max, 0.0, 0.0, 0.0, max])
+        })
+    }
+
+    /// The transpose (C++ `GetTranspose`).
+    pub fn transpose(self) -> Mat3d {
+        Mat3d(array::from_fn(|i| self.0[(i % 3) * 3 + i / 3]))
+    }
+
+    /// Make the rows orthogonal and of unit length (C++ `Orthonormalize`).
+    ///
+    /// Returns `false` when the rows did not settle on an orthonormal basis,
+    /// in which case the matrix holds the closest estimate reached.
+    pub fn orthonormalize(&mut self) -> bool {
+        let [mut r0, mut r1, mut r2] = [0, 1, 2].map(|r| Vec3d {
+            x: self[(r, 0)],
+            y: self[(r, 1)],
+            z: self[(r, 2)],
+        });
+        let converged = Vec3d::orthogonalize_basis(&mut r0, &mut r1, &mut r2, true, MIN_ORTHO_TOLERANCE);
+        for (r, v) in [r0, r1, r2].into_iter().enumerate() {
+            self[(r, 0)] = v.x;
+            self[(r, 1)] = v.y;
+            self[(r, 2)] = v.z;
+        }
+        converged
+    }
+
+    /// The rotation as a quaternion (C++ `ExtractRotationQuaternion`). The
+    /// matrix is taken to be a pure rotation: scale or shear in it skews the
+    /// answer.
+    pub fn extract_rotation_quat(self) -> Quatd {
+        rotation_quat(|r, c| self[(r, c)], 1.0)
+    }
+
+    /// The row vector `v` through the matrix, `v · M` (C++
+    /// `GfVec3d * GfMatrix3d`).
+    pub fn transform(self, v: Vec3d) -> Vec3d {
+        let column = |c: usize| v.x * self[(0, c)] + v.y * self[(1, c)] + v.z * self[(2, c)];
+        Vec3d {
+            x: column(0),
+            y: column(1),
+            z: column(2),
+        }
+    }
+
+    /// `true` when each entry lies within `tolerance` of the same entry of
+    /// `other` (C++ `GfIsClose`).
+    pub fn is_close(self, other: Mat3d, tolerance: f64) -> bool {
+        self.0.iter().zip(other.0).all(|(a, b)| (a - b).abs() < tolerance)
+    }
+}
+
+impl Mul for Mat3d {
+    type Output = Mat3d;
+    fn mul(self, rhs: Mat3d) -> Mat3d {
+        Mat3d(array::from_fn(|i| {
+            let (r, c) = (i / 3, i % 3);
+            (0..3).map(|k| self[(r, k)] * rhs[(k, c)]).sum()
+        }))
+    }
 }
 
 impl Default for Mat3d {
@@ -474,39 +576,19 @@ impl Mat4d {
     /// `ExtractRotationQuat`). The 3×3 is taken to be a pure rotation: scale
     /// or shear in it skews the answer.
     pub fn extract_rotation_quat(self) -> Quatd {
-        let m = |r: usize, c: usize| self[(r, c)];
-        // The largest diagonal entry keeps the divisor away from zero.
-        let i = if m(0, 0) > m(1, 1) {
-            if m(0, 0) > m(2, 2) { 0 } else { 2 }
-        } else if m(1, 1) > m(2, 2) {
-            1
-        } else {
-            2
-        };
+        rotation_quat(|r, c| self[(r, c)], self[(3, 3)])
+    }
 
-        let mut im = [0.0; 3];
-        let real;
-        if m(0, 0) + m(1, 1) + m(2, 2) > m(i, i) {
-            real = 0.5 * (m(0, 0) + m(1, 1) + m(2, 2) + m(3, 3)).sqrt();
-            im = [
-                (m(1, 2) - m(2, 1)) / (4.0 * real),
-                (m(2, 0) - m(0, 2)) / (4.0 * real),
-                (m(0, 1) - m(1, 0)) / (4.0 * real),
-            ];
-        } else {
-            let (j, k) = ((i + 1) % 3, (i + 2) % 3);
-            let q = 0.5 * (m(i, i) - m(j, j) - m(k, k) + m(3, 3)).sqrt();
-            im[i] = q;
-            im[j] = (m(i, j) + m(j, i)) / (4.0 * q);
-            im[k] = (m(k, i) + m(i, k)) / (4.0 * q);
-            real = (m(j, k) - m(k, j)) / (4.0 * q);
-        }
-        Quatd {
-            w: real.clamp(-1.0, 1.0),
-            x: im[0],
-            y: im[1],
-            z: im[2],
-        }
+    /// The upper-left 3×3 (C++ `ExtractRotationMatrix`). Scale and shear in
+    /// it stay.
+    pub fn extract_rotation_matrix(self) -> Mat3d {
+        Mat3d(array::from_fn(|i| self[(i / 3, i % 3)]))
+    }
+
+    /// `true` when each entry lies within `tolerance` of the same entry of
+    /// `other` (C++ `GfIsClose`).
+    pub fn is_close(self, other: Mat4d, tolerance: f64) -> bool {
+        self.0.iter().zip(other.0).all(|(a, b)| (a - b).abs() < tolerance)
     }
 
     /// The rotation of the upper-left 3×3 (C++ `ExtractRotation`), on the
@@ -522,17 +604,12 @@ impl Mat4d {
     /// Returns `false` when the rows did not settle on an orthonormal basis,
     /// in which case the matrix holds the closest estimate reached.
     pub fn orthonormalize(&mut self) -> bool {
-        let row = |m: &Mat4d, r: usize| Vec3d {
-            x: m[(r, 0)],
-            y: m[(r, 1)],
-            z: m[(r, 2)],
-        };
-        let (mut r0, mut r1, mut r2) = (row(self, 0), row(self, 1), row(self, 2));
-        let converged = Vec3d::orthogonalize_basis(&mut r0, &mut r1, &mut r2, true, MIN_ORTHO_TOLERANCE);
-        for (r, v) in [r0, r1, r2].into_iter().enumerate() {
-            self[(r, 0)] = v.x;
-            self[(r, 1)] = v.y;
-            self[(r, 2)] = v.z;
+        let mut upper = self.extract_rotation_matrix();
+        let converged = upper.orthonormalize();
+        for r in 0..3 {
+            for c in 0..3 {
+                self[(r, c)] = upper[(r, c)];
+            }
         }
 
         let w = self.0[15];
@@ -552,12 +629,7 @@ impl Mat4d {
     /// singular matrix still factors; [`Factors::singular`] reports it.
     pub fn factor(self, eps: f64) -> Factors {
         // The upper-left 3×3 on its own, and the translation beside it.
-        let mut a = self;
-        for i in 0..3 {
-            a[(3, i)] = 0.0;
-            a[(i, 3)] = 0.0;
-        }
-        a[(3, 3)] = 1.0;
+        let a = Mat4d::from(self.extract_rotation_matrix());
 
         let det = a.determinant3();
         let det_sign = if det < 0.0 { -1.0 } else { 1.0 };
@@ -787,6 +859,20 @@ impl From<Quatf> for [f64; 4] {
 }
 
 /// The matrix that turns as `rotation` does (C++ `GfMatrix4d::SetRotate`).
+/// The 3×3 as the upper-left of a 4×4 with no translation (C++
+/// `GfMatrix4d::SetRotate(const GfMatrix3d&)` on the identity).
+impl From<Mat3d> for Mat4d {
+    fn from(m: Mat3d) -> Self {
+        let mut out = Mat4d::IDENTITY;
+        for r in 0..3 {
+            for c in 0..3 {
+                out[(r, c)] = m[(r, c)];
+            }
+        }
+        out
+    }
+}
+
 impl From<Rotation> for Mat4d {
     fn from(rotation: Rotation) -> Self {
         Mat4d::from_quat(rotation.quat())
@@ -870,12 +956,75 @@ impl IndexMut<(usize, usize)> for Mat4d {
     }
 }
 
+/// The rotation the 3×3 `m` holds, as a quaternion (the Open Inventor
+/// algorithm behind C++ `ExtractRotationQuat` and
+/// `ExtractRotationQuaternion`). `w` is the homogeneous entry of a 4×4, one
+/// for a 3×3.
+fn rotation_quat(m: impl Fn(usize, usize) -> f64, w: f64) -> Quatd {
+    // The largest diagonal entry keeps the divisor away from zero.
+    let i = if m(0, 0) > m(1, 1) {
+        if m(0, 0) > m(2, 2) { 0 } else { 2 }
+    } else if m(1, 1) > m(2, 2) {
+        1
+    } else {
+        2
+    };
+
+    let mut im = [0.0; 3];
+    let real;
+    if m(0, 0) + m(1, 1) + m(2, 2) > m(i, i) {
+        real = 0.5 * (m(0, 0) + m(1, 1) + m(2, 2) + w).sqrt();
+        im = [
+            (m(1, 2) - m(2, 1)) / (4.0 * real),
+            (m(2, 0) - m(0, 2)) / (4.0 * real),
+            (m(0, 1) - m(1, 0)) / (4.0 * real),
+        ];
+    } else {
+        let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+        let q = 0.5 * (m(i, i) - m(j, j) - m(k, k) + w).sqrt();
+        im[i] = q;
+        im[j] = (m(i, j) + m(j, i)) / (4.0 * q);
+        im[k] = (m(k, i) + m(i, k)) / (4.0 * q);
+        real = (m(j, k) - m(k, j)) / (4.0 * q);
+    }
+    Quatd {
+        w: real.clamp(-1.0, 1.0),
+        x: im[0],
+        y: im[1],
+        z: im[2],
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
     fn translation(x: f64, y: f64, z: f64) -> Mat4d {
         Mat4d::translation([x, y, z])
+    }
+
+    #[test]
+    fn mat3d_arithmetic() {
+        // The upper-left of a scaled rotation, its inverse and transpose.
+        let scaled = Mat4d::scale([2.0, 1.0, 1.0]) * Mat4d::rotation_z(0.7) * Mat4d::translation([4.0, 5.0, 6.0]);
+        let upper = scaled.extract_rotation_matrix();
+        assert_eq!(Mat4d::from(upper).extract_translation(), Vec3d::default());
+        assert!((upper.determinant() - scaled.determinant3()).abs() < 1e-12);
+        assert!((upper * upper.inverse_or_max()).is_close(Mat3d::IDENTITY, 1e-12));
+        assert_eq!(upper.transpose().transpose(), upper);
+        assert_eq!(upper.transpose()[(0, 1)], upper[(1, 0)]);
+        let v = Vec3d { x: 1.0, y: 2.0, z: 3.0 };
+        assert!((upper.transform(v) - scaled.transform_dir(v)).length() < 1e-12);
+        // A singular matrix inverts to `f32::MAX` times the identity.
+        let flat = Mat3d([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!(flat.inverse_above(0.0).is_none());
+        assert_eq!(flat.inverse_or_max()[(1, 1)], f64::from(f32::MAX));
+        // Orthonormalizing strips the scale and keeps the rotation.
+        let mut rotation = upper;
+        assert!(rotation.orthonormalize());
+        assert!(rotation.is_close(Mat4d::rotation_z(0.7).extract_rotation_matrix(), 1e-9));
+        let quat = rotation.extract_rotation_quat();
+        assert!((quat.transform(v) - rotation.transform(v)).length() < 1e-9);
     }
 
     #[test]
@@ -1032,9 +1181,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn assert_close(got: Mat4d, want: Mat4d) {
-        for i in 0..16 {
-            assert!((got[i] - want[i]).abs() < 1e-9, "{got:?} != {want:?}");
-        }
+        assert!(got.is_close(want, 1e-9), "{got:?} != {want:?}");
     }
 
     /// The inverse exists for a determinant above the threshold asked for.

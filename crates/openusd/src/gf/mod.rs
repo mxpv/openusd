@@ -40,6 +40,7 @@
 
 mod bbox;
 mod camera;
+mod dual_quat;
 mod frustum;
 mod interval;
 mod matrix;
@@ -53,6 +54,7 @@ mod vec;
 
 pub use bbox::BBox3d;
 pub use camera::{Camera, FovDirection};
+pub use dual_quat::DualQuatd;
 pub use frustum::{Frustum, FrustumPlanes};
 pub use half::f16;
 pub use interval::Interval;

@@ -134,8 +134,10 @@ source of truth for specifics.
   quaternion / matrix types for bulk binary serialization, row-major /
   row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`;
   `gf::Rotation` (C++ `GfRotation`), the axis-and-angle rotation the xformOp
-  rotations are built through; `gf::Interval` (C++ `GfInterval`), the
-  open-or-closed-ended span a time-sample query is asked over;
+  rotations are built through; `gf::DualQuatd` (C++ `GfDualQuatd`), the
+  rigid transform dual-quaternion skinning blends; `gf::Interval` (C++
+  `GfInterval`), the open-or-closed-ended span a time-sample query is asked
+  over;
   `gf::Range3d` and `gf::BBox3d` (C++ `GfRange3d`, `GfBBox3d`), the
   axis-aligned box and the box-with-a-matrix that bounds are computed in; and
   `gf::Camera` and `gf::Frustum` (C++ `GfCamera`, `GfFrustum`), a camera
