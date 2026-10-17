@@ -8,11 +8,26 @@ use std::ops::{AddAssign, Mul};
 use openusd::gf;
 
 use super::{
-    blend, face_varying_points, has_vertex_influences, names_joints, normal_transform, single_joint, skin_frame,
-    skin_normals_with, skin_points_with,
+    blend, face_varying_points, has_vertex_influences, normal_transform, skin_frame, skin_normals_with,
+    skin_points_with,
 };
+use crate::skel::AnimMapper;
 
-/// Dual-quaternion skinning of a point cloud (C++ `_SkinPointsDQS`), as
+/// Skinning transforms taken apart for dual-quaternion skinning: the rigid
+/// part of each, and the scale and shear left over.
+#[derive(Debug, Clone)]
+pub(super) struct Joints<R> {
+    /// Each joint's rotation, with its translation for points.
+    rigid: Vec<R>,
+    /// Each joint's leftover scale and shear. `None` when every one lies
+    /// within `1e-6` of the identity in each entry. As in C++, the leftover
+    /// scales blend for every point where any joint skinned scales, including
+    /// the joints no point names.
+    scales: Option<Vec<gf::Mat3d>>,
+}
+
+/// Dual-quaternion skinning of a point cloud (C++ `_SkinPointsDQS`) through
+/// `joints`, the [`Joints::rigid`] factors of its skinning transforms, as
 /// [`skin_points`](super::skin_points) describes it.
 pub(super) fn skin_points_dqs(
     points: &[gf::Vec3f],
@@ -20,18 +35,11 @@ pub(super) fn skin_points_dqs(
     joint_weights: &[f32],
     num_influences: usize,
     geom_bind_transform: gf::Mat4d,
-    skinning_xforms: &[gf::Mat4d],
+    joints: &Joints<gf::DualQuatd>,
 ) -> Option<Vec<gf::Vec3f>> {
-    if !has_vertex_influences(
-        points.len(),
-        joint_indices,
-        joint_weights,
-        num_influences,
-        skinning_xforms,
-    ) {
+    if !has_vertex_influences(points.len(), joint_indices, joint_weights, num_influences, joints.len()) {
         return None;
     }
-    let joints = Joints::rigid(skinning_xforms);
     Some(skin_points_with(
         points,
         joint_indices,
@@ -42,7 +50,8 @@ pub(super) fn skin_points_dqs(
     ))
 }
 
-/// Dual-quaternion skinning of normals (C++ `_SkinNormalsDQS`), as
+/// Dual-quaternion skinning of normals (C++ `_SkinNormalsDQS`) through
+/// `joints`, the [`Joints::rotations`] of their skinning transforms, as
 /// [`skin_normals`](super::skin_normals) describes it.
 pub(super) fn skin_normals_dqs(
     normals: &[gf::Vec3f],
@@ -50,18 +59,17 @@ pub(super) fn skin_normals_dqs(
     joint_weights: &[f32],
     num_influences: usize,
     geom_bind_transform: gf::Mat4d,
-    skinning_xforms: &[gf::Mat4d],
+    joints: &Joints<gf::Quatd>,
 ) -> Option<Vec<gf::Vec3f>> {
     if !has_vertex_influences(
         normals.len(),
         joint_indices,
         joint_weights,
         num_influences,
-        skinning_xforms,
+        joints.len(),
     ) {
         return None;
     }
-    let joints = Joints::rotations(skinning_xforms);
     Some(skin_normals_with(
         normals,
         |normal| normal,
@@ -84,7 +92,7 @@ pub(super) fn skin_face_varying_normals_dqs(
     joint_weights: &[f32],
     num_influences: usize,
     geom_bind_transform: gf::Mat4d,
-    skinning_xforms: &[gf::Mat4d],
+    joints: &Joints<gf::Quatd>,
 ) -> Option<Vec<gf::Vec3f>> {
     let point_of = face_varying_points(
         normals.len(),
@@ -92,9 +100,8 @@ pub(super) fn skin_face_varying_normals_dqs(
         joint_indices,
         joint_weights,
         num_influences,
-        skinning_xforms,
+        joints.len(),
     )?;
-    let joints = Joints::rotations(skinning_xforms);
     Some(skin_normals_with(
         normals,
         point_of,
@@ -107,38 +114,21 @@ pub(super) fn skin_face_varying_normals_dqs(
 }
 
 /// Dual-quaternion skinning of one rigid transform (C++
-/// `UsdSkel_SkinTransformDQS`), as [`skin_transform`](super::skin_transform)
-/// describes it.
+/// `UsdSkel_SkinTransformDQS`) through `joints`, the [`Joints::rigid`]
+/// factors of its skinning transforms: the frame
+/// [`skin_transform`](super::skin_transform) describes, skinned by one blended
+/// dual quaternion. The influences must agree in length and name only
+/// `joints`, and be other than a lone influence of weight one.
 pub(super) fn skin_transform_dqs(
     joint_indices: &[i32],
     joint_weights: &[f32],
     geom_bind_transform: gf::Mat4d,
-    skinning_xforms: &[gf::Mat4d],
-) -> Option<gf::Mat4d> {
-    if joint_indices.len() != joint_weights.len() || !names_joints(joint_indices, skinning_xforms) {
-        return None;
-    }
-    if let Some(xform) = single_joint(joint_indices, joint_weights, geom_bind_transform, skinning_xforms) {
-        return Some(xform);
-    }
-    // TODO(perf): share the factored joints of one pose across prims. Every
-    // joint is factored, not only those `joint_indices` names: whether any
-    // joint scales decides whether the leftover scales blend, as in C++.
-    let joints = Joints::rigid(skinning_xforms);
+    joints: &Joints<gf::DualQuatd>,
+) -> gf::Mat4d {
     let rigid = joints.blend(joint_indices, joint_weights);
-    Some(skin_frame(geom_bind_transform, |point| {
+    skin_frame(geom_bind_transform, |point| {
         rigid.transform(joints.scale(point, joint_indices, joint_weights))
-    }))
-}
-
-/// Skinning transforms taken apart for dual-quaternion skinning: the rigid
-/// part of each, and the scale and shear left over.
-struct Joints<R> {
-    /// Each joint's rotation, with its translation for points.
-    rigid: Vec<R>,
-    /// Each joint's leftover scale and shear. `None` when every one lies
-    /// within `1e-6` of the identity in each entry.
-    scales: Option<Vec<gf::Mat3d>>,
+    })
 }
 
 impl Joints<gf::DualQuatd> {
@@ -147,7 +137,7 @@ impl Joints<gf::DualQuatd> {
     /// The scale is what remains once the rigid part is divided out. A
     /// transform with no inverse takes the zero dual quaternion and the
     /// identity scale.
-    fn rigid(skinning_xforms: &[gf::Mat4d]) -> Self {
+    pub(super) fn rigid(skinning_xforms: &[gf::Mat4d]) -> Self {
         let (rigid, scales) = skinning_xforms
             .iter()
             .map(|&xform| {
@@ -175,7 +165,7 @@ impl Joints<gf::Quatd> {
     /// The [`normal_transform`] of each skinning transform, split into its
     /// orthonormalized rotation and the scale that remains once the rotation
     /// is divided out (C++ `_ConvertToQuaternions`).
-    fn rotations(skinning_xforms: &[gf::Mat4d]) -> Self {
+    pub(super) fn rotations(skinning_xforms: &[gf::Mat4d]) -> Self {
         let (rigid, scales) = skinning_xforms
             .iter()
             .map(|&xform| {
@@ -195,6 +185,23 @@ impl<R: Rigid> Joints<R> {
         Self {
             rigid,
             scales: scaled.then_some(scales),
+        }
+    }
+
+    /// The number of joints.
+    pub(super) fn len(&self) -> usize {
+        self.rigid.len()
+    }
+
+    /// These joints in the target order of `mapper`, a joint the source
+    /// lacks taking the identity. Whether any joint scales is decided anew
+    /// over the joints remapped. Panics unless `mapper` maps from as many
+    /// joints as these.
+    pub(super) fn remap(&self, mapper: &AnimMapper) -> Self {
+        let rigid = mapper.remap(&self.rigid, R::IDENTITY);
+        match &self.scales {
+            Some(scales) => Self::new(rigid, mapper.remap(scales, gf::Mat3d::IDENTITY)),
+            None => Self { rigid, scales: None },
         }
     }
 
@@ -234,7 +241,10 @@ impl<R: Rigid> Joints<R> {
 /// A joint's rigid part as dual-quaternion skinning blends it: a dual
 /// quaternion for points and transforms, and a quaternion for normals, which
 /// C++ blends without a translation.
-trait Rigid: Copy + Default + AddAssign + Mul<f64, Output = Self> {
+pub(super) trait Rigid: Copy + Default + AddAssign + Mul<f64, Output = Self> {
+    /// The rigid part of the identity transform.
+    const IDENTITY: Self;
+
     /// The rotation, whose hemisphere the blend aligns.
     fn rotation(self) -> gf::Quatd;
 
@@ -246,6 +256,8 @@ trait Rigid: Copy + Default + AddAssign + Mul<f64, Output = Self> {
 }
 
 impl Rigid for gf::DualQuatd {
+    const IDENTITY: Self = gf::DualQuatd::IDENTITY;
+
     fn rotation(self) -> gf::Quatd {
         self.real
     }
@@ -260,6 +272,8 @@ impl Rigid for gf::DualQuatd {
 }
 
 impl Rigid for gf::Quatd {
+    const IDENTITY: Self = gf::Quatd::IDENTITY;
+
     fn rotation(self) -> gf::Quatd {
         self
     }
@@ -289,8 +303,21 @@ fn pivot(indices: &[i32], weights: &[f32]) -> Option<usize> {
 mod tests {
     use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 
-    use super::super::{skin_normals_lbs, skin_points_lbs, skin_transform_lbs};
+    use super::super::{skin_normals_lbs, skin_points_lbs, skin_transform, skin_transform_lbs};
     use super::*;
+    use crate::skel::SkinningMethod;
+
+    /// [`skin_transform`] by dual quaternions, with the identity geom bind
+    /// transform.
+    fn transform_dqs(indices: &[i32], weights: &[f32], xforms: &[gf::Mat4d]) -> Option<gf::Mat4d> {
+        skin_transform(
+            SkinningMethod::DualQuaternion,
+            indices,
+            weights,
+            gf::Mat4d::IDENTITY,
+            xforms,
+        )
+    }
 
     fn assert_near(a: gf::Vec3f, b: gf::Vec3d) {
         assert!((gf::Vec3d::from(a) - b).length() < 1e-6, "{a:?} != {b:?}");
@@ -304,7 +331,8 @@ mod tests {
             * gf::Mat4d::translation([1.0, 0.0, 0.0]);
         let bind = gf::Mat4d::translation([0.0, 0.0, 1.0]);
         let points = [gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 2.0, 0.0)];
-        let dqs = skin_points_dqs(&points, &[0, 0], &[1.0, 1.0], 1, bind, &[xform]).expect("valid influences");
+        let dqs = skin_points_dqs(&points, &[0, 0], &[1.0, 1.0], 1, bind, &Joints::rigid(&[xform]))
+            .expect("valid influences");
         let lbs = skin_points_lbs(&points, &[0, 0], &[1.0, 1.0], 1, bind, &[xform]).expect("valid influences");
         for (dqs, lbs) in dqs.into_iter().zip(lbs) {
             assert_near(dqs, lbs.into());
@@ -312,7 +340,15 @@ mod tests {
         // A non-uniform scale bends normals the same way under both.
         let skin = [gf::Mat4d::scale([2.0, 1.0, 1.0])];
         let normals = [gf::vec3f(1.0, 1.0, 0.0).normalize()];
-        let dqs = skin_normals_dqs(&normals, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin).expect("valid influences");
+        let dqs = skin_normals_dqs(
+            &normals,
+            &[0],
+            &[1.0],
+            1,
+            gf::Mat4d::IDENTITY,
+            &Joints::rotations(&skin),
+        )
+        .expect("valid influences");
         let lbs = skin_normals_lbs(&normals, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin).expect("valid influences");
         assert_near(dqs[0], lbs[0].into());
     }
@@ -323,16 +359,32 @@ mod tests {
         // turns by an eighth, where linear blending would shrink it.
         let skin = [gf::Mat4d::IDENTITY, gf::Mat4d::rotation_x(FRAC_PI_2)];
         let points = [gf::vec3f(0.0, 1.0, 0.0)];
-        let dqs = skin_points_dqs(&points, &[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin).expect("valid");
+        let dqs = skin_points_dqs(
+            &points,
+            &[0, 1],
+            &[0.5, 0.5],
+            2,
+            gf::Mat4d::IDENTITY,
+            &Joints::rigid(&skin),
+        )
+        .expect("valid");
         let eighth = gf::Mat4d::rotation_x(FRAC_PI_4).transform_dir(gf::Vec3d::Y_AXIS);
         assert_near(dqs[0], eighth);
-        let normals = skin_normals_dqs(&points, &[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin).expect("valid");
+        let normals = skin_normals_dqs(
+            &points,
+            &[0, 1],
+            &[0.5, 0.5],
+            2,
+            gf::Mat4d::IDENTITY,
+            &Joints::rotations(&skin),
+        )
+        .expect("valid");
         assert_near(normals[0], eighth);
         let lbs = skin_points_lbs(&points, &[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin).expect("valid");
         assert!(lbs[0].length() < 0.8);
 
         // A transform skins rigidly too: the frame turns by the same eighth.
-        let xform = skin_transform_dqs(&[0, 1], &[0.5, 0.5], gf::Mat4d::IDENTITY, &skin).expect("valid");
+        let xform = transform_dqs(&[0, 1], &[0.5, 0.5], &skin).expect("valid");
         let expected = gf::Mat4d::rotation_x(FRAC_PI_4);
         assert!(xform.is_close(expected, 1e-9), "{xform:?}");
         // Translations alone blend as linear skinning blends them.
@@ -340,7 +392,7 @@ mod tests {
             gf::Mat4d::translation([1.0, 0.0, 0.0]),
             gf::Mat4d::translation([0.0, 1.0, 0.0]),
         ];
-        let dqs = skin_transform_dqs(&[0, 1], &[0.5, 0.5], gf::Mat4d::IDENTITY, &moves).expect("valid");
+        let dqs = transform_dqs(&[0, 1], &[0.5, 0.5], &moves).expect("valid");
         let lbs = skin_transform_lbs(&[0, 1], &[0.5, 0.5], gf::Mat4d::IDENTITY, &moves).expect("valid");
         assert!(dqs.is_close(lbs, 1e-9), "{dqs:?}");
     }
@@ -353,7 +405,15 @@ mod tests {
         let skin = [gf::Mat4d::IDENTITY, gf::Mat4d::rotation_x(200f64.to_radians())];
         assert!(skin[1].extract_rotation_quat().w < 0.0);
         let points = [gf::vec3f(0.0, 1.0, 0.0)];
-        let dqs = skin_points_dqs(&points, &[0, 1], &[0.6, 0.4], 2, gf::Mat4d::IDENTITY, &skin).expect("valid");
+        let dqs = skin_points_dqs(
+            &points,
+            &[0, 1],
+            &[0.6, 0.4],
+            2,
+            gf::Mat4d::IDENTITY,
+            &Joints::rigid(&skin),
+        )
+        .expect("valid");
         let half = 100f64.to_radians();
         let angle = 2.0 * (-0.4 * half.sin()).atan2(0.6 - 0.4 * half.cos());
         assert!(angle < 0.0);
@@ -366,7 +426,7 @@ mod tests {
         // which normalizes to the identity: the point stays where it is.
         let skin = [gf::Mat4d::scale([0.0, 0.0, 0.0])];
         let points = [gf::vec3f(1.0, 2.0, 3.0)];
-        let dqs = skin_points_dqs(&points, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin);
+        let dqs = skin_points_dqs(&points, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &Joints::rigid(&skin));
         assert_eq!(dqs, Some(points.to_vec()));
     }
 
@@ -374,13 +434,34 @@ mod tests {
     fn rejects_bad_input() {
         let skin = [gf::Mat4d::IDENTITY];
         let pts = [gf::Vec3f::default(); 2];
-        assert!(skin_points_dqs(&pts, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin).is_none());
-        assert!(skin_points_dqs(&pts, &[0, 1], &[1.0, 1.0], 1, gf::Mat4d::IDENTITY, &skin).is_none());
-        assert!(skin_points_dqs(&pts, &[], &[], 0, gf::Mat4d::IDENTITY, &skin).is_none());
-        assert!(skin_normals_dqs(&pts, &[], &[], 0, gf::Mat4d::IDENTITY, &skin).is_none());
-        assert!(skin_face_varying_normals_dqs(&pts, &[0], &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin).is_none());
-        assert!(skin_transform_dqs(&[1], &[1.0], gf::Mat4d::IDENTITY, &skin).is_none());
-        assert!(skin_transform_dqs(&[0, 0], &[1.0], gf::Mat4d::IDENTITY, &skin).is_none());
+        assert!(skin_points_dqs(&pts, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &Joints::rigid(&skin)).is_none());
+        assert!(
+            skin_points_dqs(
+                &pts,
+                &[0, 1],
+                &[1.0, 1.0],
+                1,
+                gf::Mat4d::IDENTITY,
+                &Joints::rigid(&skin)
+            )
+            .is_none()
+        );
+        assert!(skin_points_dqs(&pts, &[], &[], 0, gf::Mat4d::IDENTITY, &Joints::rigid(&skin)).is_none());
+        assert!(skin_normals_dqs(&pts, &[], &[], 0, gf::Mat4d::IDENTITY, &Joints::rotations(&skin)).is_none());
+        assert!(
+            skin_face_varying_normals_dqs(
+                &pts,
+                &[0],
+                &[0],
+                &[1.0],
+                1,
+                gf::Mat4d::IDENTITY,
+                &Joints::rotations(&skin)
+            )
+            .is_none()
+        );
+        assert!(transform_dqs(&[1], &[1.0], &skin).is_none());
+        assert!(transform_dqs(&[0, 0], &[1.0], &skin).is_none());
     }
 
     #[test]
@@ -396,7 +477,7 @@ mod tests {
             &[1.0, 1.0],
             1,
             gf::Mat4d::IDENTITY,
-            &skin,
+            &Joints::rotations(&skin),
         )
         .expect("one face-vertex index per normal");
         assert_near(out[0], gf::Vec3d::X_AXIS);

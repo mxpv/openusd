@@ -12,8 +12,8 @@ use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{BoundableSchema, Mesh, XformCache, XformableExt};
 use openusd_schemas::skel::{
     AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BlendShape, BlendShapeQuery,
-    BlendShapeSchema, Cache, NO_PARENT, Root, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningQuery,
-    Topology, skinning,
+    BlendShapeSchema, Cache, NO_PARENT, Pose, Root, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod,
+    SkinningQuery, Topology, skinning,
 };
 
 mod common;
@@ -264,7 +264,11 @@ fn skinning_query_remaps_subset() -> Result<(), SchemaError> {
 
     // Skeleton joints 1 and 2 land at mesh joints 0 and 1: the Body's points
     // 0 and 1 follow joint 1, points 2 and 3 joint 2.
-    let skel_xforms: Vec<_> = (0..3).map(|i| Mat4d::translation([f64::from(i), 0.0, 0.0])).collect();
+    let skel_xforms = Pose::from(
+        (0..3)
+            .map(|i| Mat4d::translation([f64::from(i), 0.0, 0.0]))
+            .collect::<Vec<_>>(),
+    );
     let points = [Vec3f::default(); 4];
     let skinned = query
         .skinned_points(&skel_xforms, &points, None)?
@@ -280,7 +284,7 @@ fn skinning_query_remaps_subset() -> Result<(), SchemaError> {
     );
     // Too few skeleton transforms are rejected, and so is a point count the
     // vertex influences do not fit.
-    assert!(query.skinned_points(&[], &points, None)?.is_none());
+    assert!(query.skinned_points(&Pose::default(), &points, None)?.is_none());
     assert!(query.skinned_points(&skel_xforms, &points[..3], None)?.is_none());
     Ok(())
 }
@@ -309,7 +313,7 @@ fn identity_xforms_keep_points() -> Result<(), SchemaError> {
         },
     ];
     let identity = Mat4d::IDENTITY;
-    let skel_xforms = vec![identity; 3];
+    let skel_xforms = Pose::from(vec![identity; 3]);
     let out = query
         .skinned_points(&skel_xforms, &pts, None)?
         .expect("per-vertex influences");
@@ -526,7 +530,7 @@ def SkelRoot "R" {
 
     // Joint `A/B` is skeleton joint 1; the constant influence applies to every
     // point, after the geom bind transform.
-    let xforms = [Mat4d::IDENTITY, Mat4d::translation([0.0, 2.0, 0.0])];
+    let xforms = Pose::from(vec![Mat4d::IDENTITY, Mat4d::translation([0.0, 2.0, 0.0])]);
     let rigid = query.skinned_transform(&xforms, None)?.expect("constant influences");
     assert_eq!(rigid, Mat4d::translation([1.0, 2.0, 0.0]));
     let points = query
@@ -664,10 +668,14 @@ def SkelRoot "R" {
     let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
     assert!(!query.has_joint_influences());
     assert!(query.is_rigidly_deformed());
-    assert!(query.skinned_transform(&[Mat4d::IDENTITY], None)?.is_none());
     assert!(
         query
-            .skinned_points(&[Mat4d::IDENTITY], &[Vec3f::default(); 2], None)?
+            .skinned_transform(&Pose::from(vec![Mat4d::IDENTITY]), None)?
+            .is_none()
+    );
+    assert!(
+        query
+            .skinned_points(&Pose::from(vec![Mat4d::IDENTITY]), &[Vec3f::default(); 2], None)?
             .is_none()
     );
     Ok(())
@@ -714,7 +722,7 @@ def SkelRoot "R" {
     assert!(query.has_joint_influences());
     assert!(
         query
-            .skinned_points(&[Mat4d::IDENTITY], &[Vec3f::default(); 2], None)?
+            .skinned_points(&Pose::from(vec![Mat4d::IDENTITY]), &[Vec3f::default(); 2], None)?
             .is_none()
     );
     Ok(())
@@ -848,7 +856,11 @@ def SkelRoot "R" {
     )?;
     let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
     assert_eq!(query.joint_order().map(<[_]>::len), Some(0));
-    assert!(query.skinned_transform(&[Mat4d::IDENTITY], None)?.is_none());
+    assert!(
+        query
+            .skinned_transform(&Pose::from(vec![Mat4d::IDENTITY]), None)?
+            .is_none()
+    );
     Ok(())
 }
 
@@ -1176,7 +1188,7 @@ def SkelRoot "R" {
     assert_eq!(query.joint_influences(TimeCode::new(2.0))?, Some((vec![0], vec![1.0])));
     assert_eq!(query.joint_influences(TimeCode::new(7.0))?, Some((vec![1], vec![1.0])));
 
-    let xforms = [Mat4d::IDENTITY, Mat4d::translation([0.0, 5.0, 0.0])];
+    let xforms = Pose::from(vec![Mat4d::IDENTITY, Mat4d::translation([0.0, 5.0, 0.0])]);
     assert_eq!(
         query.geom_bind_transform(TimeCode::new(4.0))?,
         Mat4d::translation([3.0, 0.0, 0.0])
@@ -1186,7 +1198,8 @@ def SkelRoot "R" {
         Some(Mat4d::translation([3.0, 5.0, 0.0]))
     );
     // Without `skel:joints` the transforms still need one per skeleton joint.
-    assert!(query.skinned_transform(&xforms[..1], TimeCode::new(7.0))?.is_none());
+    let short = Pose::from(vec![Mat4d::IDENTITY]);
+    assert!(query.skinned_transform(&short, TimeCode::new(7.0))?.is_none());
     Ok(())
 }
 
@@ -1221,7 +1234,7 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let xforms = [Mat4d::IDENTITY; 2];
+    let xforms = Pose::from(vec![Mat4d::IDENTITY; 2]);
     let points = [Vec3f::default()];
     let bogus = skinning_query(&stage, "/R", "/R/Bogus")?.expect("Bogus query");
     assert_eq!(bogus.skinning_method(), None);
@@ -1232,7 +1245,7 @@ def SkelRoot "R" {
 
     let dual = skinning_query(&stage, "/R", "/R/Dual")?.expect("Dual query");
     assert_eq!(dual.skinning_method(), Some(SkinningMethod::DualQuaternion));
-    let twist = [Mat4d::IDENTITY, Mat4d::rotation_x(FRAC_PI_2)];
+    let twist = Pose::from(vec![Mat4d::IDENTITY, Mat4d::rotation_x(FRAC_PI_2)]);
     let eighth = Mat4d::rotation_x(FRAC_PI_4);
     let skinned = dual
         .skinned_points(&twist, &[gf::vec3f(0.0, 1.0, 0.0)], None)?
@@ -1241,6 +1254,90 @@ def SkelRoot "R" {
     assert!((gf::Vec3d::from(skinned[0]) - expected).length() < 1e-6, "{skinned:?}");
     let xform = dual.skinned_transform(&twist, None)?.expect("rigid influences");
     assert!(xform.is_close(eighth, 1e-6), "{xform:?}");
+    Ok(())
+}
+
+/// A pose shared by prims whose `skel:joints` reorders the skeleton's joints,
+/// drops one and names one the skeleton lacks skins each prim as its own
+/// remapped transforms do. The dropped joint scales, and no joint in the
+/// subset does, so no point is carried through the leftover scales: under
+/// weights that sum to 0.8 a point turned by pure rotations keeps its length.
+#[test]
+fn pose_remaps_subset() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "A/B", "A/B/C"]
+    }
+    def Mesh "Dual" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["A/B/C", "A", "Missing"]
+        int[] primvars:skel:jointIndices = [0, 1, 1, 2] (interpolation = "vertex", elementSize = 2)
+        float[] primvars:skel:jointWeights = [0.5, 0.3, 0.5, 0.3] (interpolation = "vertex", elementSize = 2)
+        uniform token primvars:skel:skinningMethod = "dualQuaternion"
+    }
+    def Mesh "Linear" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["A/B/C", "A", "Missing"]
+        int[] primvars:skel:jointIndices = [0, 1, 1, 2] (interpolation = "vertex", elementSize = 2)
+        float[] primvars:skel:jointWeights = [0.5, 0.3, 0.5, 0.3] (interpolation = "vertex", elementSize = 2)
+    }
+    def Mesh "Rigid" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["A/B/C", "A", "Missing"]
+        int[] primvars:skel:jointIndices = [0, 1] (interpolation = "constant", elementSize = 2)
+        float[] primvars:skel:jointWeights = [0.5, 0.3] (interpolation = "constant", elementSize = 2)
+        uniform token primvars:skel:skinningMethod = "dualQuaternion"
+    }
+}
+"#,
+    )?;
+    let xforms = vec![
+        Mat4d::rotation_x(FRAC_PI_2),
+        Mat4d::scale([2.0, 3.0, 4.0]),
+        Mat4d::rotation_z(FRAC_PI_4),
+    ];
+    let remapped = [xforms[2], xforms[0], Mat4d::IDENTITY];
+    let pose = Pose::from(xforms);
+    let points = [gf::vec3f(1.0, 2.0, 3.0), gf::vec3f(0.0, 1.0, 0.0)];
+    let (indices, weights) = ([0, 1, 1, 2], [0.5, 0.3, 0.5, 0.3]);
+    let near = |a: &[Vec3f], b: &[Vec3f]| a.iter().zip(b).all(|(a, b)| (*a - *b).length() < 1e-6);
+    let bind = Mat4d::IDENTITY;
+
+    let dual = skinning_query(&stage, "/R", "/R/Dual")?.expect("Dual query");
+    let method = SkinningMethod::DualQuaternion;
+    let skinned = dual.skinned_points(&pose, &points, None)?.expect("vertex influences");
+    let expected = skinning::skin_points(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
+    for (skinned, point) in skinned.iter().zip(points) {
+        assert!((skinned.length() - point.length()).abs() < 1e-5, "{skinned:?}");
+    }
+    let skinned = dual.skinned_normals(&pose, &points, None)?.expect("vertex influences");
+    let expected = skinning::skin_normals(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
+
+    let linear = skinning_query(&stage, "/R", "/R/Linear")?.expect("Linear query");
+    let method = SkinningMethod::ClassicLinear;
+    let skinned = linear.skinned_points(&pose, &points, None)?.expect("vertex influences");
+    let expected = skinning::skin_points(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
+    let skinned = linear
+        .skinned_normals(&pose, &points, None)?
+        .expect("vertex influences");
+    let expected = skinning::skin_normals(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
+
+    let rigid = skinning_query(&stage, "/R", "/R/Rigid")?.expect("Rigid query");
+    let skinned = rigid.skinned_transform(&pose, None)?.expect("constant influences");
+    let expected =
+        skinning::skin_transform(SkinningMethod::DualQuaternion, &[0, 1], &[0.5, 0.3], bind, &remapped).expect("valid");
+    assert!(skinned.is_close(expected, 1e-9), "{skinned:?} != {expected:?}");
+    // Through pure rotations the frame stays orthonormal.
+    assert!(
+        (skinned.extract_rotation_matrix().determinant() - 1.0).abs() < 1e-9,
+        "{skinned:?}"
+    );
     Ok(())
 }
 
@@ -1803,12 +1900,12 @@ fn skin_everything(stage: &Stage) -> Result<(usize, usize), SchemaError> {
         cache.populate(&root, PrimPredicate::DEFAULT_PROXIES)?;
         for binding in cache.skel_bindings(&root, PrimPredicate::DEFAULT_PROXIES)? {
             let skel = cache.skel_query(binding.skeleton())?.expect("valid topology");
-            let xforms = skel.skinning_transforms(None)?.expect("bind pose");
+            let pose = Pose::from(skel.skinning_transforms(None)?.expect("bind pose"));
             for query in binding.skinning_targets() {
                 bound += 1;
                 let points: Option<Vec<Vec3f>> = query.prim().attribute("points").cast()?;
                 if let Some(points) = points
-                    && query.skinned_points(&xforms, &points, None)?.is_some()
+                    && query.skinned_points(&pose, &points, None)?.is_some()
                 {
                     skinned += 1;
                 }

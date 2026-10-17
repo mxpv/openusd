@@ -22,8 +22,9 @@
 //! [`openusd::usd::Attribute::get`] and inherits the stage's interpolation mode
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
 //! [`SkeletonQuery`] binds a skeleton to the animation it inherits and poses
-//! it at any time; [`SkinningQuery`] takes the skinning transforms it
-//! answers. A [`Cache`] walks a `Root` subtree, builds a skinning query for
+//! it at any time; [`SkinningQuery`] skins a prim through the
+//! [`Pose`] built from the skinning transforms it answers. A
+//! [`Cache`] walks a `Root` subtree, builds a skinning query for
 //! every skinnable prim from the skeleton and binding properties it inherits,
 //! and groups the prims by the skeleton bound to them
 //! (C++ `UsdSkelCache`).
@@ -75,6 +76,7 @@ pub use blend_shape_query::{BlendShapeQuery, SubShapeWeight};
 pub use cache::Cache;
 pub use inbetween::{INBETWEENS_NAMESPACE, InbetweenShape};
 pub use skeleton_query::SkeletonQuery;
+pub use skinning::Pose;
 pub use skinning_query::{JointInfluences, SkinningQuery};
 pub use topology::{NO_PARENT, Topology, TopologyError};
 

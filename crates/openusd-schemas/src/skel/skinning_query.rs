@@ -9,15 +9,13 @@
 //! built from `skel:joints`, `skel:blendShapes` and the bound skeleton's and
 //! animation's orders. After an edit to any of those, build a new query.
 
-use std::borrow::Cow;
-
 use openusd::usd::{Attribute, Prim, Relationship, TimeCode};
 use openusd::{Result, gf, sdf};
 
 use super::anim_mapper::AnimMapper;
 use super::binding::BindingProperties;
 use super::skeleton_query::SkeletonQuery;
-use super::skinning::{has_shape, joints_extent, skin_normals, skin_points, skin_transform};
+use super::skinning::{Pose, PrimPose, has_shape, joints_extent};
 use super::{InfluenceInterpolation, SkinningMethod};
 use crate::SchemaError;
 use crate::geom::{BoundableSchema, Primvar};
@@ -251,21 +249,24 @@ impl SkinningQuery {
         })
     }
 
-    /// Skin `points` at `time` through the joint influences, using
-    /// `skinning_xforms` in the bound skeleton's joint order (C++
+    /// Skin `points` at `time` through the joint influences and `pose`, the
+    /// skinning transforms in the bound skeleton's joint order (C++
     /// `ComputeSkinnedPoints`). Constant influences apply to every point.
     ///
+    /// C++ takes the skinning transforms as an array. A [`Pose`] also keeps
+    /// what each skinning method derives from them, made once for every prim
+    /// skinned through it.
+    ///
     /// `None` where [`varying_joint_influences`](Self::varying_joint_influences)
-    /// is, when `skinning_xforms` holds other than one transform per skeleton
-    /// joint, when an influence names no joint, and for an unknown skinning
-    /// method.
+    /// is, when `pose` holds other than one transform per skeleton joint,
+    /// when an influence names no joint, and for an unknown skinning method.
     pub fn skinned_points(
         &self,
-        skinning_xforms: &[gf::Mat4d],
+        pose: &Pose,
         points: &[gf::Vec3f],
         time: impl Into<Option<TimeCode>>,
     ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
-        self.skin_elements(skin_points, skinning_xforms, points, time.into())
+        self.skin_elements(PrimPose::skin_points, pose, points, time.into())
     }
 
     /// Skin `normals` at `time` through the same influences as
@@ -274,49 +275,40 @@ impl SkinningQuery {
     /// transform. Each result is normalised.
     pub fn skinned_normals(
         &self,
-        skinning_xforms: &[gf::Mat4d],
+        pose: &Pose,
         normals: &[gf::Vec3f],
         time: impl Into<Option<TimeCode>>,
     ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
-        self.skin_elements(skin_normals, skinning_xforms, normals, time.into())
+        self.skin_elements(PrimPose::skin_normals, pose, normals, time.into())
     }
 
     /// The single 4×4 to apply to a rigidly deformed prim's local-to-world
-    /// transform at `time` (C++ `ComputeSkinnedTransform`), skinned as
-    /// [`skin_transform`](super::skinning::skin_transform) describes for the
-    /// skinning method.
+    /// transform at `time` through `pose` (C++ `ComputeSkinnedTransform`),
+    /// skinned as [`skin_transform`](super::skinning::skin_transform)
+    /// describes for the skinning method.
     ///
     /// `None` for a prim whose influences are not constant, where
-    /// [`joint_influences`](Self::joint_influences) is, when `skinning_xforms`
-    /// holds other than one transform per skeleton joint, when an influence
-    /// names no joint, and for an unknown skinning method.
+    /// [`joint_influences`](Self::joint_influences) is, when `pose` holds
+    /// other than one transform per skeleton joint, when an influence names
+    /// no joint, and for an unknown skinning method.
     /// A joint of `skel:joints` the skeleton lacks takes the identity, where
     /// C++ leaves the skeleton's transform at that index.
     pub fn skinned_transform(
         &self,
-        skinning_xforms: &[gf::Mat4d],
+        pose: &Pose,
         time: impl Into<Option<TimeCode>>,
     ) -> Result<Option<gf::Mat4d>, SchemaError> {
         if !self.is_rigidly_deformed() {
             return Ok(None);
         }
         let time = time.into();
-        let Some(method) = self.skinning_method else {
+        let (Some(method), Some(pose)) = (self.skinning_method, self.prim_pose(pose)) else {
             return Ok(None);
         };
         let Some((indices, weights)) = self.joint_influences(time)? else {
             return Ok(None);
         };
-        let Some(xforms) = self.remap_transforms(skinning_xforms) else {
-            return Ok(None);
-        };
-        Ok(skin_transform(
-            method,
-            &indices,
-            &weights,
-            self.geom_bind_transform(time)?,
-            &xforms,
-        ))
+        Ok(pose.skin_transform(method, &indices, &weights, self.geom_bind_transform(time)?))
     }
 
     /// How far the skinned prim may reach past its skeleton's joints at
@@ -346,56 +338,44 @@ impl SkinningQuery {
 
     /// Skin `elements`, points or normals, at `time` through `skin` with the
     /// influences varying over them.
-    fn skin_elements(
-        &self,
-        skin: SkinFn,
-        skinning_xforms: &[gf::Mat4d],
+    fn skin_elements<'a>(
+        &'a self,
+        skin: SkinFn<'a>,
+        pose: &'a Pose,
         elements: &[gf::Vec3f],
         time: Option<TimeCode>,
     ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
-        let Some(method) = self.skinning_method else {
+        let (Some(method), Some(pose)) = (self.skinning_method, self.prim_pose(pose)) else {
             return Ok(None);
         };
         let Some((indices, weights)) = self.varying_joint_influences(elements.len(), time)? else {
             return Ok(None);
         };
-        let Some(xforms) = self.remap_transforms(skinning_xforms) else {
-            return Ok(None);
-        };
         Ok(skin(
+            &pose,
             method,
             elements,
             &indices,
             &weights,
             self.influences_per_component(),
             self.geom_bind_transform(time)?,
-            &xforms,
         ))
     }
 
-    /// Remap skinning transforms from the bound skeleton's joint order into
-    /// the order of `skel:joints`, where it is authored. A joint of
-    /// `skel:joints` the skeleton lacks gets [`gf::Mat4d::IDENTITY`]. `None`
-    /// unless `skinning_xforms` holds one transform per skeleton joint.
-    fn remap_transforms<'a>(&self, skinning_xforms: &'a [gf::Mat4d]) -> Option<Cow<'a, [gf::Mat4d]>> {
-        if skinning_xforms.len() != self.skeleton_joints {
+    /// `pose` in the order of `skel:joints`, where it is authored. A joint of
+    /// `skel:joints` the skeleton lacks takes the identity. `None` unless
+    /// `pose` holds one transform per skeleton joint.
+    fn prim_pose<'a>(&'a self, pose: &'a Pose) -> Option<PrimPose<'a>> {
+        if pose.xforms().len() != self.skeleton_joints {
             return None;
         }
-        let Some((_, mapper)) = &self.joints else {
-            return Some(Cow::Borrowed(skinning_xforms));
-        };
-        // TODO(perf): the remapped transforms could go into a buffer the
-        // caller keeps across frames.
-        let mut xforms = vec![gf::Mat4d::IDENTITY; mapper.target_len()];
-        mapper
-            .remap_into(skinning_xforms, &mut xforms)
-            .then_some(Cow::Owned(xforms))
+        PrimPose::new(pose, self.joints.as_ref().map(|(_, mapper)| mapper))
     }
 }
 
-/// [`skin_points`] or [`skin_normals`].
-type SkinFn =
-    fn(SkinningMethod, &[gf::Vec3f], &[i32], &[f32], usize, gf::Mat4d, &[gf::Mat4d]) -> Option<Vec<gf::Vec3f>>;
+/// [`PrimPose::skin_points`] or [`PrimPose::skin_normals`].
+type SkinFn<'a> =
+    fn(&PrimPose<'a>, SkinningMethod, &[gf::Vec3f], &[i32], &[f32], usize, gf::Mat4d) -> Option<Vec<gf::Vec3f>>;
 
 /// The skinning method `attribute` names, `classicLinear` where it is unbound
 /// or holds no token, and `None` for a token that names no method.

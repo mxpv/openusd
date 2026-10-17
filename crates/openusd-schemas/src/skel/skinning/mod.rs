@@ -1,20 +1,23 @@
 //! The skinning math (C++ `usdSkel/utils.h`): linear blend and
 //! dual-quaternion skinning of points, normals and rigid transforms,
 //! blend-shape application, and the joint-transform and joint-influence
-//! utilities they consume. Every function takes pre-resolved arrays and reads
-//! nothing from a stage.
+//! utilities they consume, and the [`Pose`] a skinning query skins through.
+//! Every function takes pre-resolved arrays and reads nothing from a stage.
 
 mod dual_quat;
 mod influences;
+mod pose;
 mod transforms;
 
 use std::ops::{AddAssign, Mul, Range};
 
 use openusd::gf;
 
-use dual_quat::{skin_face_varying_normals_dqs, skin_normals_dqs, skin_points_dqs, skin_transform_dqs};
+use dual_quat::{Joints, skin_face_varying_normals_dqs};
 pub(crate) use influences::has_shape;
 pub use influences::{interleave_influences, normalize_weights, resize_influences, resize_weights, sort_influences};
+pub use pose::Pose;
+pub(crate) use pose::PrimPose;
 pub use transforms::{
     JointTransformComponents, decompose_transform, decompose_transforms, inverse_transforms, joint_local_to_skel_space,
     joint_skel_to_local, joints_extent, make_transforms, skinning_transforms,
@@ -41,24 +44,14 @@ pub fn skin_points(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<Vec<gf::Vec3f>> {
-    match method {
-        SkinningMethod::ClassicLinear => skin_points_lbs(
-            points,
-            joint_indices,
-            joint_weights,
-            num_influences,
-            geom_bind_transform,
-            skinning_xforms,
-        ),
-        SkinningMethod::DualQuaternion => skin_points_dqs(
-            points,
-            joint_indices,
-            joint_weights,
-            num_influences,
-            geom_bind_transform,
-            skinning_xforms,
-        ),
-    }
+    PrimPose::new(&Pose::from(skinning_xforms.to_vec()), None)?.skin_points(
+        method,
+        points,
+        joint_indices,
+        joint_weights,
+        num_influences,
+        geom_bind_transform,
+    )
 }
 
 /// Skin `normals` by `method` (C++ `UsdSkelSkinNormals`): [`skin_normals_lbs`]
@@ -80,24 +73,14 @@ pub fn skin_normals(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<Vec<gf::Vec3f>> {
-    match method {
-        SkinningMethod::ClassicLinear => skin_normals_lbs(
-            normals,
-            joint_indices,
-            joint_weights,
-            num_influences,
-            geom_bind_transform,
-            skinning_xforms,
-        ),
-        SkinningMethod::DualQuaternion => skin_normals_dqs(
-            normals,
-            joint_indices,
-            joint_weights,
-            num_influences,
-            geom_bind_transform,
-            skinning_xforms,
-        ),
-    }
+    PrimPose::new(&Pose::from(skinning_xforms.to_vec()), None)?.skin_normals(
+        method,
+        normals,
+        joint_indices,
+        joint_weights,
+        num_influences,
+        geom_bind_transform,
+    )
 }
 
 /// Skin face-varying `normals` by `method` (C++
@@ -133,7 +116,7 @@ pub fn skin_face_varying_normals(
             joint_weights,
             num_influences,
             geom_bind_transform,
-            skinning_xforms,
+            &Joints::rotations(skinning_xforms),
         ),
     }
 }
@@ -154,14 +137,12 @@ pub fn skin_transform(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<gf::Mat4d> {
-    match method {
-        SkinningMethod::ClassicLinear => {
-            skin_transform_lbs(joint_indices, joint_weights, geom_bind_transform, skinning_xforms)
-        }
-        SkinningMethod::DualQuaternion => {
-            skin_transform_dqs(joint_indices, joint_weights, geom_bind_transform, skinning_xforms)
-        }
-    }
+    PrimPose::new(&Pose::from(skinning_xforms.to_vec()), None)?.skin_transform(
+        method,
+        joint_indices,
+        joint_weights,
+        geom_bind_transform,
+    )
 }
 
 /// Linear blend skinning of a point cloud — the canonical UsdSkel
@@ -201,7 +182,7 @@ pub fn skin_points_lbs(
         joint_indices,
         joint_weights,
         num_influences,
-        skinning_xforms,
+        skinning_xforms.len(),
     ) {
         return None;
     }
@@ -229,25 +210,14 @@ pub fn skin_normals_lbs(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<Vec<gf::Vec3f>> {
-    if !has_vertex_influences(
-        normals.len(),
-        joint_indices,
-        joint_weights,
-        num_influences,
-        skinning_xforms,
-    ) {
-        return None;
-    }
-    let normal_xforms = normal_transforms(skinning_xforms);
-    Some(skin_normals_with(
+    skin_normals_lbs_with(
         normals,
-        |normal| normal,
         joint_indices,
         joint_weights,
         num_influences,
         geom_bind_transform,
-        |normal, indices, weights| blend(indices, weights, &normal_xforms, |xform| xform.transform(normal)),
-    ))
+        &normal_transforms(skinning_xforms),
+    )
 }
 
 /// [`skin_normals_lbs`] over face-varying `normals`, each taking the
@@ -274,7 +244,7 @@ pub fn skin_face_varying_normals_lbs(
         joint_indices,
         joint_weights,
         num_influences,
-        skinning_xforms,
+        skinning_xforms.len(),
     )?;
     let normal_xforms = normal_transforms(skinning_xforms);
     Some(skin_normals_with(
@@ -302,7 +272,7 @@ pub fn skin_transform_lbs(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<gf::Mat4d> {
-    if joint_indices.len() != joint_weights.len() || !names_joints(joint_indices, skinning_xforms) {
+    if joint_indices.len() != joint_weights.len() || !names_joints(joint_indices, skinning_xforms.len()) {
         return None;
     }
     if let Some(xform) = single_joint(joint_indices, joint_weights, geom_bind_transform, skinning_xforms) {
@@ -487,20 +457,51 @@ pub fn resolve_blend_shape_offsets(
     Some(out)
 }
 
+/// Linear blend skinning of normals through `normal_xforms`, the
+/// [`normal_transform`] of each skinning transform, as [`skin_normals_lbs`]
+/// describes it.
+fn skin_normals_lbs_with(
+    normals: &[gf::Vec3f],
+    joint_indices: &[i32],
+    joint_weights: &[f32],
+    num_influences: usize,
+    geom_bind_transform: gf::Mat4d,
+    normal_xforms: &[gf::Mat3d],
+) -> Option<Vec<gf::Vec3f>> {
+    if !has_vertex_influences(
+        normals.len(),
+        joint_indices,
+        joint_weights,
+        num_influences,
+        normal_xforms.len(),
+    ) {
+        return None;
+    }
+    Some(skin_normals_with(
+        normals,
+        |normal| normal,
+        joint_indices,
+        joint_weights,
+        num_influences,
+        geom_bind_transform,
+        |normal, indices, weights| blend(indices, weights, normal_xforms, |xform| xform.transform(normal)),
+    ))
+}
+
 /// `true` when the index and weight arrays agree in length and hold
 /// `num_influences`, a positive count, entries for each of `count` vertices,
-/// and every index names one of `skinning_xforms`.
+/// and every index names one of `joints` joints.
 fn has_vertex_influences(
     count: usize,
     joint_indices: &[i32],
     joint_weights: &[f32],
     num_influences: usize,
-    skinning_xforms: &[gf::Mat4d],
+    joints: usize,
 ) -> bool {
     num_influences != 0
         && joint_indices.len() == joint_weights.len()
         && joint_indices.len() == count * num_influences
-        && names_joints(joint_indices, skinning_xforms)
+        && names_joints(joint_indices, joints)
 }
 
 /// The point each of `normals` face-varying normals reads its influences
@@ -509,14 +510,14 @@ fn has_vertex_influences(
 /// and weight arrays differ in length or do not split into runs of
 /// `num_influences`, `face_vertex_indices` holds other than one index per
 /// normal, there are normals but no points, or a joint index of a point some
-/// normal reads names no skinning transform.
+/// normal reads names none of `joints` joints.
 fn face_varying_points(
     normals: usize,
     face_vertex_indices: &[i32],
     joint_indices: &[i32],
     joint_weights: &[f32],
     num_influences: usize,
-    skinning_xforms: &[gf::Mat4d],
+    joints: usize,
 ) -> Option<impl Fn(usize) -> usize> {
     if joint_indices.len() != joint_weights.len()
         || !has_shape(joint_indices.len(), num_influences)
@@ -535,12 +536,7 @@ fn face_varying_points(
             .unwrap_or(0)
     };
     (0..normals)
-        .all(|normal| {
-            names_joints(
-                &joint_indices[influence_run(point_of(normal), num_influences)],
-                skinning_xforms,
-            )
-        })
+        .all(|normal| names_joints(&joint_indices[influence_run(point_of(normal), num_influences)], joints))
         .then_some(point_of)
 }
 
@@ -660,12 +656,12 @@ where
     sum
 }
 
-/// `true` when every index, whatever its weight, names one of
-/// `skinning_xforms`, as C++ requires of each influence.
-fn names_joints(indices: &[i32], skinning_xforms: &[gf::Mat4d]) -> bool {
+/// `true` when every index, whatever its weight, names one of `joints`
+/// joints, as C++ requires of each influence.
+fn names_joints(indices: &[i32], joints: usize) -> bool {
     indices
         .iter()
-        .all(|&index| usize::try_from(index).is_ok_and(|index| index < skinning_xforms.len()))
+        .all(|&index| usize::try_from(index).is_ok_and(|index| index < joints))
 }
 
 /// The transform a normal takes through `transform`: the inverse-transpose of
@@ -678,8 +674,6 @@ fn normal_transform(transform: gf::Mat4d) -> gf::Mat3d {
 
 /// The [`normal_transform`] of each of `skinning_xforms`.
 fn normal_transforms(skinning_xforms: &[gf::Mat4d]) -> Vec<gf::Mat3d> {
-    // TODO(perf): the normal transforms depend only on the pose, so one pose
-    // could share them across prims, and with points.
     skinning_xforms.iter().copied().map(normal_transform).collect()
 }
 
