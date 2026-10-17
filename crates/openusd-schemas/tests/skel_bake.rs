@@ -866,3 +866,143 @@ fn bake_playback_rounding() -> Result<(), SchemaError> {
     assert_eq!(sample_times(&samples).len(), 5, "0, 0.1, 0.2, 0.3 and the key at 1");
     Ok(())
 }
+
+/// A second skeleton at `/Root/Group/Skel2`, posed by the rig's animation,
+/// skinning a mesh at `/Root/Group/Arm`.
+const SECOND: &str = r#"def Skeleton "Skel2" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            uniform token[] joints = ["A"]
+            uniform matrix4d[] bindTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))]
+            uniform matrix4d[] restTransforms = [((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))]
+            rel skel:animationSource = </Root/Anim>
+        }
+        def Mesh "Arm" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:skeleton = </Root/Group/Skel2>
+            point3f[] points = [(1, 0, 0)]
+            int[] primvars:skel:jointIndices = [0] (interpolation = "vertex", elementSize = 1)
+            float[] primvars:skel:jointWeights = [1] (interpolation = "vertex", elementSize = 1)
+        }"#;
+
+/// The stage of `shot.usda`, which sublayers `a.usda` with an offset of 10
+/// and a scale of 2, then `b.usda` with an offset of 5, then the rig of
+/// `rig`, with the identifiers of the first two.
+fn shot(rig: &str) -> Result<(tempfile::TempDir, Stage, String, String), SchemaError> {
+    let empty = "#usda 1.0\n";
+    let shot = r#"#usda 1.0
+(subLayers = [@./a.usda@ (offset = 10; scale = 2), @./b.usda@ (offset = 5), @./rig.usda@])
+"#;
+    let (dir, stage) = open_files(
+        &[
+            ("rig.usda", rig),
+            ("a.usda", empty),
+            ("b.usda", empty),
+            ("shot.usda", shot),
+        ],
+        "shot.usda",
+    )?;
+    let layers = stage.sub_layers(&root_layer(&stage));
+    Ok((dir, stage, layers[1].clone(), layers[2].clone()))
+}
+
+/// The stage of `shot.usda` in `dir`, opened afresh from disk.
+fn reopen(dir: &tempfile::TempDir) -> Result<Stage, SchemaError> {
+    Ok(Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open(dir.path().join("shot.usda").to_str().expect("utf-8"))?)
+}
+
+#[test]
+fn bake_two_layers() -> Result<(), SchemaError> {
+    let (dir, stage, a, b) = shot(&rig("", LIFT, "", SECOND))?;
+    let bindings = bindings(&root(&stage)?, PrimPredicate::DEFAULT)?;
+    assert_eq!(bindings.len(), 2);
+    let paired: Vec<_> = bindings
+        .into_iter()
+        .map(|binding| {
+            let layer = match binding.skeleton().path().as_str() {
+                "/Root/Skel" => a.as_str(),
+                _ => b.as_str(),
+            };
+            (binding, layer)
+        })
+        .collect();
+    bake_skinning(&paired, &BakeOptions::default(), ..)?;
+
+    // Each layer holds its own binding's outputs, keyed through its own
+    // offset: (t - 10) / 2 and t - 5.
+    let arm = "/Root/Group/Arm.points";
+    assert_eq!(
+        sample_times(&authored(&stage, &a, &format!("{BODY}.points")).1),
+        [-4.5, -4.0]
+    );
+    assert!(authored(&stage, &a, arm).1.is_empty());
+    assert_eq!(sample_times(&authored(&stage, &b, arm).1), [-4.0, -3.0]);
+    assert!(authored(&stage, &b, &format!("{BODY}.points")).1.is_empty());
+
+    // Both layers were saved.
+    let stage = reopen(&dir)?;
+    let points: Option<Vec<Vec3f>> = stage.attribute(arm)?.get_at(TimeCode::new(2.0))?;
+    assert!(near(&points.expect("baked"), &[[1.0, 5.0, 0.0]]));
+    let points: Option<Vec<Vec3f>> = stage.attribute(format!("{BODY}.points"))?.get_at(TimeCode::new(2.0))?;
+    assert!(near(&points.expect("baked"), &[[1.0, 5.0, -3.0], [0.0, 6.0, -3.0]]));
+    Ok(())
+}
+
+#[test]
+fn bake_roots_unsaved() -> Result<(), SchemaError> {
+    let (dir, stage, a, _) = shot(&rig("", LIFT, "", ""))?;
+    stage.set_edit_target(stage.edit_target_for_local_layer(&a).expect("local"))?;
+    bake_roots(&[root(&stage)?], ..)?;
+    assert!(!authored(&stage, &a, &format!("{BODY}.points")).1.is_empty());
+    let stage = reopen(&dir)?;
+    assert!(
+        stage
+            .attribute(format!("{BODY}.points"))?
+            .time_samples_in(..)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn bake_saves_hint_layer() -> Result<(), SchemaError> {
+    let (dir, stage, a, b) = shot(&hinted(&rig("", LIFT, "", ""), "component"))?;
+    stage.set_edit_target(stage.edit_target_for_local_layer(&b).expect("local"))?;
+    bake_into(
+        &bindings(&root(&stage)?, PrimPredicate::DEFAULT)?,
+        &a,
+        &BakeOptions::default(),
+    )?;
+    // The hints went to the edit target's layer, which was saved beside the
+    // bindings' layer.
+    let stage = reopen(&dir)?;
+    let hint = stage.attribute("/Root.extentsHint")?;
+    assert_eq!(hint.time_samples_in(..)?, [1.0, 2.0]);
+    assert!(
+        !stage
+            .attribute(format!("{BODY}.points"))?
+            .time_samples_in(..)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn bake_anonymous_unsaved() -> Result<(), SchemaError> {
+    let stage = from_usda(&rig("", LIFT, "", ""))?;
+    let bake = sdf::Layer::new_anonymous("bake");
+    let bake_id = bake.identifier().to_owned();
+    stage.insert_layer(&root_layer(&stage), 0, bake, sdf::LayerOffset::default())?;
+    let error = bake_into(
+        &bindings(&root(&stage)?, PrimPredicate::DEFAULT)?,
+        &bake_id,
+        &BakeOptions::default(),
+    )
+    .expect_err("an anonymous layer has nowhere to save to");
+    assert!(
+        matches!(&error, SchemaError::Core(openusd::Error::Export(_))),
+        "{error:?}"
+    );
+    // The bake is on the stage all the same.
+    assert!(!authored(&stage, &bake_id, &format!("{BODY}.points")).1.is_empty());
+    Ok(())
+}

@@ -71,22 +71,26 @@ pub struct BakeOptions {
     /// Whether each model above a baked prim that has an `extentsHint` gets
     /// it recomputed. Without it the bake leaves every hint alone.
     pub update_extent_hints: bool,
+    /// Whether every layer the bake wrote to is saved once the bake is done.
+    pub save_layers: bool,
 }
 
 impl Default for BakeOptions {
-    /// Every deformation, and extents and extents hints updated, as C++
-    /// defaults.
+    /// Every deformation, extents and extents hints updated, and the layers
+    /// saved, as C++ defaults.
     fn default() -> Self {
         Self {
             deform: Deform::ALL,
             update_extents: true,
             update_extent_hints: true,
+            save_layers: true,
         }
     }
 }
 
 /// Bake every binding beneath `roots` over `interval` into the layer of the
-/// stage's edit target, with the default [`BakeOptions`] (C++
+/// stage's edit target, with the default [`BakeOptions`] but for
+/// [`save_layers`](BakeOptions::save_layers), which is off (C++
 /// `UsdSkelBakeSkinning` over a `UsdSkelRoot` or a `UsdPrimRange`). The
 /// bindings are found as [`Cache::skel_bindings`] finds them with
 /// [`PrimPredicate::DEFAULT`], which leaves out instance proxies. A prim that
@@ -132,7 +136,11 @@ pub fn bake_roots(roots: &[Root], interval: impl Into<gf::Interval>) -> Result<(
         .into_iter()
         .map(|binding| (binding, target.layer_identifier()))
         .collect();
-    bake_skinning(&paired, &BakeOptions::default(), interval)
+    let options = BakeOptions {
+        save_layers: false,
+        ..BakeOptions::default()
+    };
+    bake_skinning(&paired, &options, interval)
 }
 
 /// Bake each binding's skinned prims into the layer paired with it, over
@@ -218,6 +226,12 @@ pub fn bake_roots(roots: &[Root], interval: impl Into<gf::Interval>) -> Result<(
 ///   stack;
 /// - [`SchemaError::BakeSpecType`] for an output whose layer holds a spec of
 ///   another type, `extent` among them, where C++ skips that output.
+///
+/// With [`BakeOptions::save_layers`], each layer the bindings name is saved
+/// last, and so is the edit target's layer where a hint was authored there,
+/// where C++ saves only the bindings' layers. A layer that fails to save,
+/// an anonymous one among them, fails the bake with its export error, the
+/// layers saved before it staying saved.
 ///
 /// Fails after the geometry committed, with [`SchemaError::BakeExtents`]
 /// where the extents stage fails and leaves every extent of the other
@@ -354,8 +368,22 @@ pub fn bake_skinning(
     })?;
 
     bake_extents(&stage, &layers, &followups).map_err(|err| SchemaError::BakeExtents(Box::new(err)))?;
+    let mut saves: Vec<String> = layers.iter().map(|layer| layer.layer_identifier().to_owned()).collect();
     if options.update_extent_hints {
-        bake_extent_hints(&stage, &followups).map_err(|err| SchemaError::BakeExtentHints(Box::new(err)))?;
+        let target = stage.edit_target();
+        let hinted =
+            bake_extent_hints(&stage, &followups).map_err(|err| SchemaError::BakeExtentHints(Box::new(err)))?;
+        if hinted && !saves.iter().any(|layer| layer == target.layer_identifier()) {
+            saves.push(target.layer_identifier().to_owned());
+        }
+    }
+    if options.save_layers {
+        // TODO(rayon): each layer saves independently of the others.
+        for identifier in &saves {
+            if let Some(mut layer) = stage.layer_mut(identifier) {
+                layer.save().map_err(openusd::Error::from)?;
+            }
+        }
     }
     Ok(())
 }
@@ -934,7 +962,8 @@ fn bake_extents(stage: &usd::Stage, layers: &[EditTarget], followups: &[Followup
 /// `followups` that has one, at every time a skeleton of its prims baked,
 /// and author the hints through the stage's edit target in one transaction,
 /// each hint's own values there cleared first (C++ `_UpdateExtentHints`).
-fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<(), SchemaError> {
+/// `true` where a hint was authored.
+fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<bool, SchemaError> {
     let mut models: Vec<(ModelAPI, Vec<Option<TimeCode>>)> = Vec::new();
     for followup in followups {
         let mut at = Some(followup.prim.clone());
@@ -953,7 +982,7 @@ fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<(), S
         }
     }
     if models.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut times: Vec<Option<TimeCode>> = models.iter().flat_map(|(_, times)| times.iter().copied()).collect();
@@ -986,7 +1015,8 @@ fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<(), S
             builder.build()?;
         }
         Ok::<_, SchemaError>(())
-    })
+    })?;
+    Ok(true)
 }
 
 /// The order of baked times: the default time first, then by time.
