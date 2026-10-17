@@ -19,8 +19,8 @@
 
 use std::collections::HashMap;
 
-use openusd::gf;
 use openusd::usd;
+use openusd::{gf, sdf};
 
 use super::XformQuery;
 use crate::SchemaError;
@@ -201,6 +201,34 @@ impl XformCache {
         }
     }
 
+    /// The times within `interval` at which `prim`'s local-to-world transform
+    /// is sampled, ascending and without repeats: those of its own ops and of
+    /// each ancestor's, up to the first that resets the transform stack, the
+    /// climb [`local_to_world_transform`](Self::local_to_world_transform)
+    /// folds. Empty for a prim that does not exist.
+    pub fn world_time_samples_in(
+        &mut self,
+        prim: &usd::Prim,
+        interval: impl Into<gf::Interval>,
+    ) -> Result<Vec<f64>, SchemaError> {
+        let interval = interval.into();
+        let mut times = Vec::new();
+        let mut current = Some(prim.clone());
+        while let Some(p) = current.filter(|p| !p.path().is_abs_root()) {
+            let Some(entry) = self.admit(&p)? else {
+                break;
+            };
+            times.extend(entry.query.time_samples_in(interval)?);
+            current = match entry.query.resets_xform_stack() {
+                true => None,
+                false => p.parent(),
+            };
+        }
+        times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
+        times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
+        Ok(times)
+    }
+
     /// `true` when the attribute named `name` is one of `prim`'s ops (C++
     /// `IsAttributeIncludedInLocalTransform`).
     pub fn affects_transform(&mut self, prim: &usd::Prim, name: &str) -> Result<bool, SchemaError> {
@@ -276,6 +304,54 @@ mod tests {
     use crate::geom::{Xform, XformableExt};
     use openusd::gf;
     use openusd::usd;
+
+    /// The world transform's samples climb through the ancestors and stop at
+    /// one that resets the stack.
+    #[test]
+    fn world_time_samples_climb() -> Result<(), SchemaError> {
+        let (_dir, stage) = crate::tests::from_usda(
+            r#"#usda 1.0
+
+def Xform "Outer"
+{
+    double3 xformOp:translate.timeSamples = { 1: (0, 0, 0), 5: (1, 0, 0) }
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Xform "Reset"
+    {
+        double3 xformOp:translate.timeSamples = { 3: (0, 0, 0) }
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]
+
+        def Xform "Leaf"
+        {
+            double3 xformOp:translate.timeSamples = { 2: (0, 0, 0), 3: (0, 0, 1) }
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Xform "Child"
+    {
+        double3 xformOp:translate.timeSamples = { 2: (0, 0, 0), 9: (0, 0, 1) }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"#,
+        )?;
+        let mut cache = XformCache::default();
+        assert_eq!(
+            cache.world_time_samples_in(&stage.prim("/Outer/Child")?, ..)?,
+            [1.0, 2.0, 5.0, 9.0]
+        );
+        assert_eq!(
+            cache.world_time_samples_in(&stage.prim("/Outer/Child")?, 2.0..=5.0)?,
+            [2.0, 5.0]
+        );
+        assert_eq!(
+            cache.world_time_samples_in(&stage.prim("/Outer/Reset/Leaf")?, ..)?,
+            [2.0, 3.0]
+        );
+        Ok(())
+    }
 
     /// Each instance proxy of one prototype prim sits under its own
     /// instance's transform.

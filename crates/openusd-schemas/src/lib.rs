@@ -414,6 +414,40 @@ pub enum SchemaError {
         joint: usize,
     },
 
+    /// A skinning bake reaching a SkelRoot or skinned prim that is an
+    /// instance or an instance proxy, which the bake cannot write into.
+    #[error("{prim} is instanced, and a skinning bake cannot write into an instance")]
+    BakeInstanced {
+        /// The instanced prim.
+        prim: sdf::Path,
+    },
+
+    /// A skinning bake output whose destination layer already holds a spec
+    /// of another type for it.
+    #[error("{attribute} is `{found}` in the bake's layer, not the `{expected}` the bake writes")]
+    BakeSpecType {
+        /// The output attribute.
+        attribute: sdf::Path,
+        /// The type its spec has.
+        found: tf::Token,
+        /// The type the bake writes.
+        expected: tf::Token,
+    },
+
+    /// A skinning bake destination outside the stage's root layer stack.
+    #[error("layer {layer} is not in the stage's root layer stack, so a skinning bake cannot write to it")]
+    BakeLayer {
+        /// The destination layer's identifier.
+        layer: String,
+    },
+
+    /// A skinning bake given roots or bindings from more than one stage.
+    #[error("{prim} belongs to another stage than the rest of the skinning bake")]
+    BakeStages {
+        /// The first prim from a second stage.
+        prim: sdf::Path,
+    },
+
     /// A geom subset query names an element type the geometry has no
     /// elements of, such as the segments of a mesh.
     #[error("{prim} has no `{element_type}` elements for a GeomSubset to index")]

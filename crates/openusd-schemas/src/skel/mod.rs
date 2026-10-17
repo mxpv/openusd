@@ -29,6 +29,9 @@
 //! and groups the prims by the skeleton bound to them
 //! (C++ `UsdSkelCache`). A `Skeleton` and a `Root` compute their extents from
 //! the pivots of their joints, through [`extent_registry`](crate::extent_registry).
+//! [`bake_skinning`] writes the deformed geometry into a layer as plain time
+//! samples, so the prims draw posed with no UsdSkel evaluation (C++
+//! `UsdSkelBakeSkinning`).
 //!
 //! # Conventions
 //!
@@ -60,6 +63,7 @@ openusd::include_schema!("usdSkel");
 
 mod anim_mapper;
 mod anim_query;
+mod bake;
 mod binding;
 mod blend_shape_query;
 mod cache;
@@ -74,6 +78,7 @@ mod topology;
 
 pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::AnimQuery;
+pub use bake::{BakeOptions, Deform, bake_roots, bake_skinning};
 pub use binding::{Binding, is_skinnable};
 pub use blend_shape_query::{BlendShapeQuery, SubShapeWeight};
 pub use cache::Cache;

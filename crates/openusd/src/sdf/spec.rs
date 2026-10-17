@@ -990,6 +990,22 @@ where
         self.set_time_sample_raw(time, value)
     }
 
+    /// Replace every time sample with `samples`, each coerced like
+    /// [`set_default`](Self::set_default), in one write (C++
+    /// `SdfLayer::SetField` of `timeSamples`). Where two samples share a time
+    /// the later wins. No sample is written when one does not fit.
+    pub fn set_time_samples(
+        &mut self,
+        samples: impl IntoIterator<Item = (f64, sdf::Value)>,
+    ) -> Result<(), sdf::AuthoringError> {
+        let mut map = Vec::new();
+        for (time, value) in samples {
+            upsert_time_sample(&mut map, time, self.coerce_for_declared(value)?);
+        }
+        self.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(map));
+        Ok(())
+    }
+
     /// Redeclare the value type (C++ `SdfAttributeSpec::SetTypeName`). An
     /// empty spelling is rejected, and the spec's `default` and every time
     /// sample must pass the new type's
@@ -2281,6 +2297,38 @@ mod tests {
         let default = field_of(&data, &path, sdf::FieldKey::Default).expect("default authored");
         let expr = default.try_as_path_expression().expect("a path expression");
         assert_eq!(expr.to_string(), "/A/Child");
+    }
+
+    #[test]
+    fn time_samples_replaced() {
+        let (mut data, path) = typed_attr("float");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_time_sample(9.0, sdf::Value::Float(9.0)).expect("fits");
+        attr.set_time_samples([
+            (2.0, sdf::Value::Double(2.0)),
+            (1.0, sdf::Value::Float(1.0)),
+            (2.0, sdf::Value::Float(3.0)),
+        ])
+        .expect("each fits");
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::TimeSamples),
+            Some(sdf::Value::TimeSamples(vec![
+                (1.0, sdf::Value::Float(1.0)),
+                (2.0, sdf::Value::Float(3.0)),
+            ]))
+        );
+
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_time_samples([(4.0, sdf::Value::Float(4.0)), (5.0, sdf::Value::String("no".into()))])
+            .expect_err("a string is no float");
+        assert_eq!(
+            field_of(&data, &path, sdf::FieldKey::TimeSamples),
+            Some(sdf::Value::TimeSamples(vec![
+                (1.0, sdf::Value::Float(1.0)),
+                (2.0, sdf::Value::Float(3.0)),
+            ])),
+            "nothing is written"
+        );
     }
 
     #[test]

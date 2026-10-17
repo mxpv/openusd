@@ -1252,10 +1252,17 @@ impl Stage {
     /// Whether the layer `identifier` names is in the stage's root layer stack
     /// (C++ `UsdStage::HasLocalLayer`).
     fn is_local_layer(&self, identifier: &str) -> bool {
+        self.local_layer(identifier).is_some()
+    }
+
+    /// The canonical identifier of the layer `identifier` names and its
+    /// composed offset in the stage's root layer stack, the strongest where
+    /// the stack holds it twice. `None` when the stack does not hold it.
+    fn local_layer(&self, identifier: &str) -> Option<(String, sdf::LayerOffset)> {
         let layers = self.layers();
-        layers
-            .id_of(identifier)
-            .is_some_and(|id| layers.root_layer_stack().iter().any(|&(member, _)| member == id))
+        let id = layers.id_of(identifier)?;
+        let &(_, offset) = layers.root_layer_stack().iter().find(|&&(member, _)| member == id)?;
+        Some((layers.identifier(id).to_string(), offset))
     }
 
     /// Read the current edit target's layer at the spec path `scene_path`
@@ -1336,6 +1343,18 @@ impl Stage {
         let layers = self.layers();
         let &id = layers.session_layers().first()?;
         Some(self.bound_target(layers.identifier(id).to_string(), pcp::MapFunction::identity()))
+    }
+
+    /// Edit target for `identifier`, a layer of the stage's root layer stack,
+    /// carrying the layer's composed offset in that stack (C++
+    /// `GetEditTargetForLocalLayer`). A time sample authored through it is
+    /// keyed at the layer time that composes to the stage time it was authored
+    /// at ([`EditTarget::map_to_spec_time`]). `None` when the layer is not in
+    /// the root layer stack. A layer the stack holds twice takes its strongest
+    /// offset.
+    pub fn edit_target_for_local_layer(&self, identifier: &str) -> Option<EditTarget> {
+        let (identifier, offset) = self.local_layer(identifier)?;
+        Some(self.bound_target(identifier, pcp::MapFunction::identity().with_time_offset(offset)))
     }
 
     /// Edit target that authors into the source layer of the strongest `arc`
@@ -5145,6 +5164,37 @@ pub(crate) mod tests {
             Some(sdf::Value::Double(5.0)),
             "the already-loaded mid layer's child edge to leaf must survive re-insertion"
         );
+        Ok(())
+    }
+
+    /// A local edit target keys a sample at the time its sublayer's offset
+    /// composes to the stage time asked for, and a layer outside the root
+    /// layer stack has none.
+    #[test]
+    fn local_layer_target_offset() -> Result<()> {
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        let sub = opinion_layer("sub.usda", 1.0)?;
+        let sub_id = sub.identifier().to_string();
+        stage.insert_layer(&root_id, 0, sub, sdf::LayerOffset::new(10.0, 2.0))?;
+
+        let target = stage.edit_target_for_local_layer(&sub_id).expect("sub is local");
+        assert_eq!(target.layer_identifier(), sub_id);
+        assert_eq!(target.map_to_spec_time(30.0), 10.0);
+        stage.set_edit_target(target)?;
+        stage.attribute("/A.x")?.set_at(2.0, usd::TimeCode::new(30.0))?;
+        let layer = stage.layer(&sub_id).expect("sub is loaded");
+        let samples = layer.attribute("/A.x")?.expect("spec").time_samples();
+        assert_eq!(samples, Some(vec![(10.0, sdf::Value::Double(2.0))]));
+        drop(layer);
+        assert_eq!(
+            stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(30.0))?,
+            Some(2.0)
+        );
+
+        let root_target = stage.edit_target_for_local_layer(&root_id).expect("root is local");
+        assert_eq!(root_target.map_to_spec_time(30.0), 30.0);
+        assert!(stage.edit_target_for_local_layer("elsewhere.usda").is_none());
         Ok(())
     }
 

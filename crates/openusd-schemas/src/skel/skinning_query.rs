@@ -282,6 +282,46 @@ impl SkinningQuery {
         self.skin_elements(PrimPose::skin_normals, pose, normals, time.into())
     }
 
+    /// Skin face-varying `normals` at `time` through the joint influences and
+    /// `pose`, each normal taking the influences of the point
+    /// `face_vertex_indices` names for it, as
+    /// [`skin_face_varying_normals`](super::skinning::skin_face_varying_normals)
+    /// describes, through the factors `pose` shares. C++ has no query method
+    /// for it; `UsdSkelBakeSkinning` calls `UsdSkelSkinFaceVaryingNormals`
+    /// with the transforms remapped to the prim's joints.
+    ///
+    /// `None` for constant influences, where
+    /// [`joint_influences`](Self::joint_influences) is, when `pose` holds
+    /// other than one transform per skeleton joint, and where the free
+    /// function answers `None`.
+    pub fn skinned_face_varying_normals(
+        &self,
+        pose: &Pose,
+        normals: &[gf::Vec3f],
+        face_vertex_indices: &[i32],
+        time: impl Into<Option<TimeCode>>,
+    ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
+        let (Some(method), Some(pose)) = (self.skinning_method, self.prim_pose(pose)) else {
+            return Ok(None);
+        };
+        if self.is_rigidly_deformed() {
+            return Ok(None);
+        }
+        let time = time.into();
+        let Some((indices, weights)) = self.joint_influences(time)? else {
+            return Ok(None);
+        };
+        Ok(pose.skin_face_varying_normals(
+            method,
+            normals,
+            face_vertex_indices,
+            &indices,
+            &weights,
+            self.influences_per_component(),
+            self.geom_bind_transform(time)?,
+        ))
+    }
+
     /// The single 4×4 to apply to a rigidly deformed prim's local-to-world
     /// transform at `time` through `pose` (C++ `ComputeSkinnedTransform`),
     /// skinned as [`skin_transform`](super::skinning::skin_transform)

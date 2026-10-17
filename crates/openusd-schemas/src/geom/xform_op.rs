@@ -14,7 +14,7 @@ use crate::SchemaError;
 /// The prefix an `xformOpOrder` entry carries to apply its op inverted.
 pub(super) const TOKEN_INVERT_PREFIX: &str = "!invert!";
 /// The `xformOpOrder` entry that opts a prim out of its parent's transform.
-pub(super) const TOKEN_RESET_XFORM_STACK: &str = "!resetXformStack!";
+pub(crate) const TOKEN_RESET_XFORM_STACK: &str = "!resetXformStack!";
 /// The namespace every op attribute lives in.
 pub(super) const NS_XFORM_OP: &str = "xformOp:";
 

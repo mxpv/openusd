@@ -32,7 +32,7 @@ semantics = []
 shade = []
 # UsdSkelRoot and UsdSkelSkeleton are UsdGeomBoundable-derived prims, so the
 # skel views build on the geom schema traits.
-skel = ["geom"]
+skel = ["geom", "dep:bitflags"]
 ui = []
 # UsdVolVolume is a UsdGeomGprim and the field prims are UsdGeomXformable, so
 # the vol views build on the geom schema traits.
@@ -49,6 +49,8 @@ openusd-build.workspace = true
 
 [dependencies]
 openusd.workspace = true
+# The deformations `skel::bake_skinning` bakes.
+bitflags = { workspace = true, optional = true }
 derive_more.workspace = true
 thiserror.workspace = true
 
@@ -95,6 +97,10 @@ required-features = ["shade"]
 
 [[test]]
 name = "skel"
+required-features = ["skel"]
+
+[[test]]
+name = "skel_bake"
 required-features = ["skel"]
 
 [[test]]

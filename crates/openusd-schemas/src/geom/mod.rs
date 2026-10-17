@@ -219,6 +219,8 @@ pub use primvars_api::PrimvarBuilder;
 pub use subset::FamilyType;
 pub use xform::{CommonXformOp, CommonXformOps, RotationOrder, XformVectors};
 pub use xform_cache::XformCache;
+#[cfg(feature = "skel")]
+pub(crate) use xform_op::TOKEN_RESET_XFORM_STACK;
 pub use xform_op::{XformOp, XformOpKind};
 pub use xformable::{XformOpPrecision, XformQuery, XformableExt};
 

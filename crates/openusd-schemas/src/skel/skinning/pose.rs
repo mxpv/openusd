@@ -5,9 +5,12 @@ use std::sync::OnceLock;
 
 use openusd::gf;
 
-use super::dual_quat::{Joints, Rigid, skin_normals_dqs, skin_points_dqs, skin_transform_dqs};
+use super::dual_quat::{
+    Joints, Rigid, skin_face_varying_normals_dqs, skin_normals_dqs, skin_points_dqs, skin_transform_dqs,
+};
 use super::{
-    names_joints, normal_transforms, single_joint, skin_normals_lbs_with, skin_points_lbs, skin_transform_lbs,
+    names_joints, normal_transforms, single_joint, skin_face_varying_normals_lbs_with, skin_normals_lbs_with,
+    skin_points_lbs, skin_transform_lbs,
 };
 use crate::skel::{AnimMapper, SkinningMethod};
 
@@ -143,6 +146,42 @@ impl<'a> PrimPose<'a> {
         }
     }
 
+    /// Skin face-varying `normals` by `method`, as
+    /// [`skin_face_varying_normals`](super::skin_face_varying_normals)
+    /// describes.
+    #[allow(clippy::too_many_arguments)] // C++ `UsdSkelSkinFaceVaryingNormals`'s inputs, one per argument.
+    pub(crate) fn skin_face_varying_normals(
+        &self,
+        method: SkinningMethod,
+        normals: &[gf::Vec3f],
+        face_vertex_indices: &[i32],
+        joint_indices: &[i32],
+        joint_weights: &[f32],
+        num_influences: usize,
+        geom_bind_transform: gf::Mat4d,
+    ) -> Option<Vec<gf::Vec3f>> {
+        match method {
+            SkinningMethod::ClassicLinear => skin_face_varying_normals_lbs_with(
+                normals,
+                face_vertex_indices,
+                joint_indices,
+                joint_weights,
+                num_influences,
+                geom_bind_transform,
+                &self.remap(self.pose.normals(), gf::Mat3d::IDENTITY),
+            ),
+            SkinningMethod::DualQuaternion => skin_face_varying_normals_dqs(
+                normals,
+                face_vertex_indices,
+                joint_indices,
+                joint_weights,
+                num_influences,
+                geom_bind_transform,
+                &self.remap_joints(self.pose.rotations()),
+            ),
+        }
+    }
+
     /// Skin a rigid transform by `method`, as
     /// [`skin_transform`](super::skin_transform) describes.
     pub(crate) fn skin_transform(
@@ -152,7 +191,7 @@ impl<'a> PrimPose<'a> {
         joint_weights: &[f32],
         geom_bind_transform: gf::Mat4d,
     ) -> Option<gf::Mat4d> {
-        let xforms = self.remap(self.pose.xforms(), gf::Mat4d::IDENTITY);
+        let xforms = self.xforms();
         match method {
             SkinningMethod::ClassicLinear => {
                 skin_transform_lbs(joint_indices, joint_weights, geom_bind_transform, &xforms)
@@ -172,6 +211,12 @@ impl<'a> PrimPose<'a> {
                 ))
             }
         }
+    }
+
+    /// The skinning transforms in the prim's joint order, with the identity
+    /// for a joint the skeleton lacks.
+    pub(crate) fn xforms(&self) -> Cow<'a, [gf::Mat4d]> {
+        self.remap(self.pose.xforms(), gf::Mat4d::IDENTITY)
     }
 
     /// `source`, one element per skeleton joint, in the prim's joint order,

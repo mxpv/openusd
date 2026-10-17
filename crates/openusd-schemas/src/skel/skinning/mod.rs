@@ -13,7 +13,6 @@ use std::ops::{AddAssign, Mul, Range};
 
 use openusd::gf;
 
-use dual_quat::{Joints, skin_face_varying_normals_dqs};
 pub(crate) use influences::has_shape;
 pub use influences::{interleave_influences, normalize_weights, resize_influences, resize_weights, sort_influences};
 pub use pose::Pose;
@@ -99,26 +98,15 @@ pub fn skin_face_varying_normals(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<Vec<gf::Vec3f>> {
-    match method {
-        SkinningMethod::ClassicLinear => skin_face_varying_normals_lbs(
-            normals,
-            face_vertex_indices,
-            joint_indices,
-            joint_weights,
-            num_influences,
-            geom_bind_transform,
-            skinning_xforms,
-        ),
-        SkinningMethod::DualQuaternion => skin_face_varying_normals_dqs(
-            normals,
-            face_vertex_indices,
-            joint_indices,
-            joint_weights,
-            num_influences,
-            geom_bind_transform,
-            &Joints::rotations(skinning_xforms),
-        ),
-    }
+    PrimPose::new(&Pose::from(skinning_xforms.to_vec()), None)?.skin_face_varying_normals(
+        method,
+        normals,
+        face_vertex_indices,
+        joint_indices,
+        joint_weights,
+        num_influences,
+        geom_bind_transform,
+    )
 }
 
 /// Skin a rigid transform by `method` (C++ `UsdSkelSkinTransform`):
@@ -238,15 +226,36 @@ pub fn skin_face_varying_normals_lbs(
     geom_bind_transform: gf::Mat4d,
     skinning_xforms: &[gf::Mat4d],
 ) -> Option<Vec<gf::Vec3f>> {
+    skin_face_varying_normals_lbs_with(
+        normals,
+        face_vertex_indices,
+        joint_indices,
+        joint_weights,
+        num_influences,
+        geom_bind_transform,
+        &normal_transforms(skinning_xforms),
+    )
+}
+
+/// [`skin_face_varying_normals_lbs`] through `normal_xforms`, the
+/// [`normal_transform`] of each skinning transform.
+fn skin_face_varying_normals_lbs_with(
+    normals: &[gf::Vec3f],
+    face_vertex_indices: &[i32],
+    joint_indices: &[i32],
+    joint_weights: &[f32],
+    num_influences: usize,
+    geom_bind_transform: gf::Mat4d,
+    normal_xforms: &[gf::Mat3d],
+) -> Option<Vec<gf::Vec3f>> {
     let point_of = face_varying_points(
         normals.len(),
         face_vertex_indices,
         joint_indices,
         joint_weights,
         num_influences,
-        skinning_xforms.len(),
+        normal_xforms.len(),
     )?;
-    let normal_xforms = normal_transforms(skinning_xforms);
     Some(skin_normals_with(
         normals,
         point_of,
@@ -254,7 +263,7 @@ pub fn skin_face_varying_normals_lbs(
         joint_weights,
         num_influences,
         geom_bind_transform,
-        |normal, indices, weights| blend(indices, weights, &normal_xforms, |xform| xform.transform(normal)),
+        |normal, indices, weights| blend(indices, weights, normal_xforms, |xform| xform.transform(normal)),
     ))
 }
 
@@ -668,7 +677,7 @@ fn names_joints(indices: &[i32], joints: usize) -> bool {
 /// its upper-left 3×3 (C++ `ExtractRotationMatrix().GetInverse()
 /// .GetTranspose()`). A singular 3×3 inverts as
 /// [`gf::Mat3d::inverse_or_max`] does.
-fn normal_transform(transform: gf::Mat4d) -> gf::Mat3d {
+pub(crate) fn normal_transform(transform: gf::Mat4d) -> gf::Mat3d {
     transform.extract_rotation_matrix().inverse_or_max().transpose()
 }
 
