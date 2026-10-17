@@ -1,32 +1,22 @@
-//! Binding discovery: the skinnable prims beneath a `Root`, each with the
-//! skeleton and the binding properties it inherits down namespace (C++
-//! `UsdSkelCache::Populate` and `UsdSkelCache::ComputeSkelBindings`).
+//! Bindings: a skeleton with the skinnable prims bound to it (C++
+//! `UsdSkelBinding`), and the walk beneath a `Root` that resolves the skeleton
+//! and binding properties each prim inherits down namespace (C++
+//! `UsdSkel_CacheImpl`'s populate walk and `_SkinningQueryKey`).
 
-use std::collections::HashMap;
-
-use openusd::usd::{Attribute, Prim, PrimPredicate, Relationship, SchemaBase};
-use openusd::{Result, sdf, tf};
+use openusd::usd::{Attribute, Prim, PrimPredicate, Relationship};
+use openusd::{Result, tf};
 
 use super::decode::Bound;
-use super::{Animation, BindingAPI, Root, Skeleton, tokens};
-use crate::geom;
+use super::skinning_query::SkinningQuery;
+use super::{BindingAPI, Skeleton, tokens};
+use crate::{SchemaError, geom};
 
-/// A skinnable prim beneath a [`Root`] and the skeleton bound to it.
-///
-/// Each binding property is the one authored nearest to `prim`, on `prim`
-/// itself or on an ancestor at or below the `Root` that carries
-/// [`BindingAPI`].
-#[derive(Clone)]
-pub struct SkelBinding {
-    /// The skinnable prim: a boundable prim that is neither a [`Skeleton`] nor
-    /// a [`Root`] (C++ `UsdSkelIsSkinnablePrim`).
-    pub prim: Prim,
-    /// The skeleton bound to `prim`.
-    pub skeleton: Skeleton,
-    /// The active animation bound to `skeleton` ([`Skeleton::animation_source`];
-    /// C++ `UsdSkelSkeletonQuery::GetAnimQuery`).
-    pub animation_source: Option<Animation>,
-    pub(super) properties: BindingProperties,
+/// A skeleton and the skinnable prims bound to it (C++ `UsdSkelBinding`),
+/// as [`Cache::skel_bindings`](super::Cache::skel_bindings) groups them.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub(super) skeleton: Skeleton,
+    pub(super) skinning_targets: Vec<SkinningQuery>,
 }
 
 /// The binding properties in effect at a prim, each the nearest one with an
@@ -46,22 +36,41 @@ pub(super) struct BindingProperties {
 /// The skeleton and binding properties a prim passes down to the prims
 /// beneath it.
 #[derive(Clone, Default)]
-struct Inherited {
-    skeleton: Option<Skeleton>,
-    properties: BindingProperties,
+pub(super) struct Inherited {
+    pub(super) skeleton: Option<Skeleton>,
+    pub(super) properties: BindingProperties,
+}
+
+/// The schema types the walk tells prims apart by, interned once per walk.
+struct SkelTypes {
+    imageable: tf::Token,
+    boundable: tf::Token,
+    skeleton: tf::Token,
+    skel_root: tf::Token,
+}
+
+impl Binding {
+    /// The bound skeleton (C++ `GetSkeleton`).
+    pub fn skeleton(&self) -> &Skeleton {
+        &self.skeleton
+    }
+
+    /// The queries of the skinnable prims bound to the skeleton, in walk
+    /// order (C++ `GetSkinningTargets`).
+    pub fn skinning_targets(&self) -> &[SkinningQuery] {
+        &self.skinning_targets
+    }
 }
 
 impl Inherited {
     /// The bindings in effect at `prim`: these, with each binding `prim`
     /// authors through [`BindingAPI`] taking precedence. Only a `skinnable`
     /// prim takes its blend-shape bindings.
-    fn under(mut self, prim: &Prim, skinnable: bool) -> Result<Self> {
+    pub(super) fn under(mut self, prim: &Prim, skinnable: bool) -> Result<Self> {
         let Some(binding) = BindingAPI::from_prim(prim.clone())? else {
             return Ok(self);
         };
-        if let Bound::Authored(skeleton) = binding.bound_skeleton()? {
-            self.skeleton = skeleton;
-        }
+        self.skeleton = skeleton_under(Some(&binding), self.skeleton.take())?;
         let properties = &mut self.properties;
         let attributes = [
             (&mut properties.joint_indices, binding.joint_indices_attr()),
@@ -89,73 +98,92 @@ impl Inherited {
     }
 }
 
-/// Every skinnable prim beneath `root` that has an active skeleton bound to
-/// it, in depth-first order (C++ `UsdSkelCache::ComputeSkelBindings`, without
-/// the grouping by skeleton).
-///
-/// The walk skips each prim that is not imageable, along with its subtree, and
-/// stops below each skinnable prim. Bindings authored above `root` do not
-/// reach the prims beneath it.
-pub fn discover_bindings(root: &Root) -> Result<Vec<SkelBinding>> {
-    let mut out = Vec::new();
-    // Whether each skeleton reached is active, and the animation bound to it.
-    let mut skeletons: HashMap<sdf::Path, (bool, Option<Animation>)> = HashMap::new();
-    let mut stack = vec![(root.prim().clone(), None, Inherited::default())];
-    while let Some((prim, composed, parent)) = stack.pop() {
+impl SkelTypes {
+    fn new() -> Self {
+        Self {
+            imageable: tf::Token::new(geom::tokens::IMAGEABLE),
+            boundable: tf::Token::new(geom::tokens::BOUNDABLE),
+            skeleton: tf::Token::new(tokens::SKELETON),
+            skel_root: tf::Token::new(tokens::SKEL_ROOT),
+        }
+    }
+
+    /// `None` for a prim that is not imageable, and otherwise whether it is
+    /// skinnable.
+    fn classify(&self, prim: &Prim) -> Result<Option<bool>> {
         let info = prim.prim_type_info()?;
         let registry = prim.stage().schema_registry();
-        let is_a = |schema: &'static str| registry.is_a(info.schema_type_name(), &tf::Token::new(schema));
-        if !is_a(geom::tokens::IMAGEABLE) {
+        let is_a = |schema: &tf::Token| registry.is_a(info.schema_type_name(), schema);
+        Ok(is_a(&self.imageable).then(|| self.skinnable(is_a)))
+    }
+
+    /// Whether a type `is_a` answers for is skinnable: boundable and neither
+    /// a skeleton nor a skel root.
+    fn skinnable(&self, is_a: impl Fn(&tf::Token) -> bool) -> bool {
+        is_a(&self.boundable) && !is_a(&self.skeleton) && !is_a(&self.skel_root)
+    }
+}
+
+/// The skeleton in effect at a prim: the one `binding`, the prim's
+/// [`BindingAPI`] if it has one, binds or blocks, and `parent`, the one in
+/// effect above it, where it authors no binding.
+pub(super) fn skeleton_under(binding: Option<&BindingAPI>, parent: Option<Skeleton>) -> Result<Option<Skeleton>> {
+    if let Some(binding) = binding
+        && let Bound::Authored(skeleton) = binding.bound_skeleton()?
+    {
+        return Ok(skeleton);
+    }
+    Ok(parent)
+}
+
+/// Visit each prim at or beneath `root` that `predicate` lets through, each
+/// before the prims beneath it, skipping a prim that is not imageable along
+/// with its subtree (the walk of C++ `UsdSkelCache::Populate` and
+/// `ComputeSkelBindings`). A `root` that `predicate` does not let through
+/// visits nothing; a `root` that is an instance proxy lets its instance
+/// proxies through, as C++ `UsdPrimRange` does. `visit` takes the prim,
+/// whether it is skinnable ([`is_skinnable`]), and the state its parent
+/// handed down, and answers the state to hand to its children, or `None` to
+/// skip them.
+pub(super) fn walk<T: Clone>(
+    root: &Prim,
+    predicate: PrimPredicate,
+    state: T,
+    mut visit: impl FnMut(&Prim, bool, T) -> Result<Option<T>, SchemaError>,
+) -> Result<(), SchemaError> {
+    let predicate = if root.is_instance_proxy()? {
+        predicate.with_instance_proxies(true)
+    } else {
+        predicate
+    };
+    if !root.stage().prim_matches(root.path(), predicate)? {
+        return Ok(());
+    }
+    let types = SkelTypes::new();
+    let mut stack = vec![(root.clone(), None, state)];
+    while let Some((prim, composed, parent)) = stack.pop() {
+        let Some(skinnable) = types.classify(&prim)? else {
             continue;
-        }
-        let skinnable = skinnable_type(is_a);
-        let inherited = parent.under(&prim, skinnable)?;
-        if skinnable {
-            let Some(skeleton) = inherited.skeleton else {
-                continue;
-            };
-            let (active, animation_source) = if let Some(found) = skeletons.get(skeleton.path()) {
-                found.clone()
-            } else {
-                let active = skeleton.is_active()?;
-                let animation_source = if active { skeleton.animation_source()? } else { None };
-                skeletons.insert(skeleton.path().clone(), (active, animation_source.clone()));
-                (active, animation_source)
-            };
-            if active {
-                out.push(SkelBinding {
-                    prim,
-                    skeleton,
-                    animation_source,
-                    properties: inherited.properties,
-                });
-            }
+        };
+        let Some(state) = visit(&prim, skinnable, parent)? else {
             continue;
-        }
+        };
         // TODO(rayon): sibling subtrees resolve independently of each other.
-        let children = prim.filtered_children_from(PrimPredicate::DEFAULT_PROXIES, composed)?;
+        let children = prim.filtered_children_from(predicate, composed)?;
         stack.extend(
             children
                 .into_iter()
                 .rev()
-                .map(|(child, composed)| (child, Some(composed), inherited.clone())),
+                .map(|(child, composed)| (child, Some(composed), state.clone())),
         );
     }
-    Ok(out)
+    Ok(())
 }
 
-/// `true` for a boundable prim that is neither a [`Skeleton`] nor a [`Root`]
-/// (C++ `UsdSkelIsSkinnablePrim`).
+/// `true` for a boundable prim that is neither a [`Skeleton`] nor a
+/// [`Root`](super::Root) (C++ `UsdSkelIsSkinnablePrim`).
 pub fn is_skinnable(prim: &Prim) -> Result<bool> {
     let info = prim.prim_type_info()?;
     let registry = prim.stage().schema_registry();
-    Ok(skinnable_type(|schema| {
-        registry.is_a(info.schema_type_name(), &tf::Token::new(schema))
-    }))
-}
-
-/// `true` for a prim type that `is_a` reports boundable and neither a skeleton
-/// nor a skel root.
-fn skinnable_type(is_a: impl Fn(&'static str) -> bool) -> bool {
-    is_a(geom::tokens::BOUNDABLE) && !is_a(tokens::SKELETON) && !is_a(tokens::SKEL_ROOT)
+    Ok(SkelTypes::new().skinnable(|schema| registry.is_a(info.schema_type_name(), schema)))
 }

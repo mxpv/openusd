@@ -11,13 +11,13 @@ use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{BoundableSchema, Mesh, XformCache, XformableExt};
 use openusd_schemas::skel::{
-    AnimMapper, AnimQuery, Animation, AnimationSchema, BindingAPI, BlendShape, BlendShapeQuery, BlendShapeSchema,
-    NO_PARENT, Root, SkelBinding, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningQuery, Topology,
-    discover_bindings, skinning,
+    AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BlendShape, BlendShapeQuery,
+    BlendShapeSchema, Cache, NO_PARENT, Root, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod, SkinningQuery,
+    Topology, skinning,
 };
 
 mod common;
-use common::from_usda;
+use common::{from_usda, vendor};
 
 const FIXTURE: &str = "fixtures/usdSkel_scene.usda";
 
@@ -170,37 +170,56 @@ fn finds_skel_roots_on_stage() -> Result<()> {
 }
 
 #[test]
-fn discover_bindings_walks_skel_root_subtree() -> Result<()> {
+fn cache_groups_bindings() -> Result<(), SchemaError> {
     let stage = open()?;
-    let bindings = discover_bindings(&root(&stage, "/World/Character")?)?;
+    let mut cache = populated(&stage, "/World/Character")?;
+    let bindings = cache.skel_bindings(&root(&stage, "/World/Character")?, PrimPredicate::DEFAULT_PROXIES)?;
     // The Root carries BindingAPI too, but only the Body mesh is skinnable.
     assert_eq!(bindings.len(), 1);
-    let body = &bindings[0];
-    assert_eq!(body.prim.path().as_str(), "/World/Character/Body");
     // The Body doesn't author skel:skeleton; it's inherited from the Root.
-    assert_eq!(body.skeleton.path().as_str(), "/World/Character/Rig");
+    let rig = &bindings[0];
+    assert_eq!(rig.skeleton().path().as_str(), "/World/Character/Rig");
+    assert_eq!(target_paths(rig), ["/World/Character/Body"]);
+    let query = cache.skel_query(rig.skeleton())?.expect("valid topology");
     assert_eq!(
-        body.animation_source.as_ref().map(|a| a.path().as_str()),
+        query.anim_query().map(|anim| anim.animation().path().as_str()),
         Some("/World/Character/Anim")
     );
     Ok(())
-}
-
-/// The skinning query over `binding`, with the query of its skeleton.
-fn skinning_query(binding: &SkelBinding) -> Result<SkinningQuery, SchemaError> {
-    let skeleton = SkeletonQuery::new(&binding.skeleton)?;
-    SkinningQuery::new(binding, skeleton.as_ref())
 }
 
 fn root(stage: &Stage, path: &str) -> Result<Root> {
     Ok(Root::get(stage, path)?.expect("Root"))
 }
 
-/// The binding `discover_bindings` finds for `prim` beneath the Root at
-/// `root_path`.
-fn binding_of(stage: &Stage, root_path: &str, prim: &str) -> Result<Option<SkelBinding>> {
-    let bindings = discover_bindings(&root(stage, root_path)?)?;
-    Ok(bindings.into_iter().find(|b| b.prim.path().as_str() == prim))
+/// A cache populated from the Root at `root_path`, through instance proxies.
+fn populated(stage: &Stage, root_path: &str) -> Result<Cache, SchemaError> {
+    let mut cache = Cache::new();
+    cache.populate(&root(stage, root_path)?, PrimPredicate::DEFAULT_PROXIES)?;
+    Ok(cache)
+}
+
+/// The skinning query a cache populated from the Root at `root_path` holds
+/// for `prim`.
+fn skinning_query(stage: &Stage, root_path: &str, prim: &str) -> Result<Option<SkinningQuery>, SchemaError> {
+    Ok(populated(stage, root_path)?.skinning_query(&stage.prim(prim)?).cloned())
+}
+
+/// The bindings beneath the Root at `root_path`, through instance proxies.
+fn bindings(stage: &Stage, root_path: &str) -> Result<Vec<Binding>, SchemaError> {
+    let root = root(stage, root_path)?;
+    let mut cache = Cache::new();
+    cache.populate(&root, PrimPredicate::DEFAULT_PROXIES)?;
+    cache.skel_bindings(&root, PrimPredicate::DEFAULT_PROXIES)
+}
+
+/// The paths of the prims bound in `binding`.
+fn target_paths(binding: &Binding) -> Vec<&str> {
+    binding
+        .skinning_targets()
+        .iter()
+        .map(|query| query.prim().path().as_str())
+        .collect()
 }
 
 #[test]
@@ -231,8 +250,7 @@ fn skeleton_query_rest_pose() -> Result<()> {
 #[test]
 fn skinning_query_remaps_subset() -> Result<(), SchemaError> {
     let stage = open()?;
-    let binding = binding_of(&stage, "/World/Character", "/World/Character/Body")?.expect("Body binding");
-    let query = skinning_query(&binding)?;
+    let query = skinning_query(&stage, "/World/Character", "/World/Character/Body")?.expect("Body query");
 
     assert!(!query.is_rigidly_deformed());
     assert!(query.has_joint_influences());
@@ -270,8 +288,7 @@ fn skinning_query_remaps_subset() -> Result<(), SchemaError> {
 #[test]
 fn identity_xforms_keep_points() -> Result<(), SchemaError> {
     let stage = open()?;
-    let binding = binding_of(&stage, "/World/Character", "/World/Character/Body")?.expect("Body binding");
-    let query = skinning_query(&binding)?;
+    let query = skinning_query(&stage, "/World/Character", "/World/Character/Body")?.expect("Body query");
 
     let pts = [
         Vec3f {
@@ -331,7 +348,7 @@ fn anim_mapper_remap_with_missing_joints() {
 /// The query over the fixture's animation.
 fn anim_query(stage: &Stage) -> Result<AnimQuery> {
     let anim = Animation::get(stage, "/World/Character/Anim")?.expect("Animation");
-    Ok(AnimQuery::new(anim)?.expect("joints and blend shapes"))
+    AnimQuery::new(anim)
 }
 
 #[test]
@@ -426,13 +443,15 @@ fn anim_drives_skinning() -> Result<()> {
     Ok(())
 }
 
-/// An animation naming neither joints nor blend shapes has nothing to
-/// animate, so no query is built over it.
+/// An animation naming neither joints nor blend shapes has a query with empty
+/// orders, as in C++.
 #[test]
-fn skel_anim_query_none_when_empty() -> Result<()> {
+fn anim_query_when_empty() -> Result<()> {
     let stage = memory()?;
-    let empty = Animation::define(&stage, "/Empty")?;
-    assert!(AnimQuery::new(empty)?.is_none());
+    let empty = AnimQuery::new(Animation::define(&stage, "/Empty")?)?;
+    assert!(empty.joint_order().is_empty());
+    assert!(empty.blend_shape_order().is_empty());
+    assert!(empty.joint_local_transforms(None)?.is_none());
     Ok(())
 }
 
@@ -497,9 +516,9 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/G/M")?.expect("M binding");
-    assert_eq!(binding.skeleton.path().as_str(), "/R/Rig");
-    let query = skinning_query(&binding)?;
+    let bound = bindings(&stage, "/R")?;
+    assert_eq!(bound[0].skeleton().path().as_str(), "/R/Rig");
+    let query = skinning_query(&stage, "/R", "/R/G/M")?.expect("M query");
     assert!(query.has_joint_influences());
     assert!(query.is_rigidly_deformed());
     assert_eq!(query.joint_order().map(<[_]>::len), Some(1));
@@ -518,7 +537,7 @@ def SkelRoot "R" {
 }
 
 #[test]
-fn binding_above_root_ignored() -> Result<()> {
+fn binding_above_root_ignored() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def Xform "W" (prepend apiSchemas = ["SkelBindingAPI"]) {
@@ -537,12 +556,12 @@ def Xform "W" (prepend apiSchemas = ["SkelBindingAPI"]) {
         mesh.inherited_skeleton()?.map(|s| s.path().clone()),
         Some(sdf::path("/W/Rig")?)
     );
-    assert!(discover_bindings(&root(&stage, "/W/R")?)?.is_empty());
+    assert!(bindings(&stage, "/W/R")?.is_empty());
     Ok(())
 }
 
 #[test]
-fn empty_skeleton_rel_blocks() -> Result<()> {
+fn empty_skeleton_rel_blocks() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
@@ -557,12 +576,12 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
     )?;
     let mesh = BindingAPI::get(&stage, "/R/G/M")?.expect("BindingAPI");
     assert!(mesh.inherited_skeleton()?.is_none());
-    assert!(discover_bindings(&root(&stage, "/R")?)?.is_empty());
+    assert!(bindings(&stage, "/R")?.is_empty());
     Ok(())
 }
 
 #[test]
-fn non_api_rel_ignored() -> Result<()> {
+fn non_api_rel_ignored() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
@@ -581,13 +600,14 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
         mesh.inherited_skeleton()?.map(|s| s.path().clone()),
         Some(sdf::path("/R/Rig")?)
     );
-    let binding = binding_of(&stage, "/R", "/R/G/M")?.expect("M binding");
-    assert_eq!(binding.skeleton.path().as_str(), "/R/Rig");
+    let bound = bindings(&stage, "/R")?;
+    assert_eq!(bound[0].skeleton().path().as_str(), "/R/Rig");
+    assert_eq!(target_paths(&bound[0]), ["/R/G/M"]);
     Ok(())
 }
 
 #[test]
-fn discovery_prunes_subtrees() -> Result<()> {
+fn discovery_prunes_subtrees() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
@@ -605,14 +625,13 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
 }
 "#,
     )?;
-    let bindings = discover_bindings(&root(&stage, "/R")?)?;
-    let prims: Vec<_> = bindings.iter().map(|b| b.prim.path().as_str().to_string()).collect();
-    assert_eq!(prims, vec!["/R/M", "/R/S/Found"]);
+    let bound = bindings(&stage, "/R")?;
+    assert_eq!(target_paths(&bound[0]), ["/R/M", "/R/S/Found"]);
     Ok(())
 }
 
 #[test]
-fn inactive_skeleton_skipped() -> Result<()> {
+fn inactive_skeleton_skipped() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
@@ -622,7 +641,7 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
 }
 "#,
     )?;
-    assert!(discover_bindings(&root(&stage, "/R")?)?.is_empty());
+    assert!(bindings(&stage, "/R")?.is_empty());
     Ok(())
 }
 
@@ -642,8 +661,7 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let query = skinning_query(&binding)?;
+    let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
     assert!(!query.has_joint_influences());
     assert!(query.is_rigidly_deformed());
     assert!(query.skinned_transform(&[Mat4d::IDENTITY], None)?.is_none());
@@ -671,8 +689,8 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    assert!(!skinning_query(&binding)?.has_joint_influences());
+    let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
+    assert!(!query.has_joint_influences());
     Ok(())
 }
 
@@ -692,8 +710,7 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let query = skinning_query(&binding)?;
+    let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
     assert!(query.has_joint_influences());
     assert!(
         query
@@ -704,7 +721,7 @@ def SkelRoot "R" {
 }
 
 #[test]
-fn anim_source_from_skeleton() -> Result<()> {
+fn anim_source_from_skeleton() -> Result<(), SchemaError> {
     let stage = from_usda(
         r#"#usda 1.0
 def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
@@ -719,10 +736,10 @@ def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let bound = bindings(&stage, "/R")?;
     assert_eq!(
-        binding.animation_source.as_ref().map(|a| a.path().as_str()),
-        Some("/R/RigAnim")
+        bound[0].skeleton().animation_source()?.map(|anim| anim.path().clone()),
+        Some(sdf::path("/R/RigAnim")?)
     );
     Ok(())
 }
@@ -829,8 +846,7 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let query = skinning_query(&binding)?;
+    let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
     assert_eq!(query.joint_order().map(<[_]>::len), Some(0));
     assert!(query.skinned_transform(&[Mat4d::IDENTITY], None)?.is_none());
     Ok(())
@@ -871,7 +887,7 @@ def SkelAnimation "Mismatched" {
     )?;
     let query = |path: &str| -> Result<AnimQuery> {
         let anim = Animation::get(&stage, path)?.expect("SkelAnimation");
-        Ok(AnimQuery::new(anim)?.expect("joints authored"))
+        AnimQuery::new(anim)
     };
     for path in ["/NoScales", "/Blocked"] {
         let q = query(path)?;
@@ -1152,8 +1168,7 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let query = skinning_query(&binding)?;
+    let query = skinning_query(&stage, "/R", "/R/M")?.expect("M query");
     assert_eq!(query.time_samples()?, vec![1.0, 2.0, 4.0, 7.0]);
     assert_eq!(query.time_samples_in(3.0..=7.0)?, vec![4.0, 7.0]);
 
@@ -1208,14 +1223,14 @@ def SkelRoot "R" {
     )?;
     let xforms = [Mat4d::IDENTITY; 2];
     let points = [Vec3f::default()];
-    let bogus = skinning_query(&binding_of(&stage, "/R", "/R/Bogus")?.expect("Bogus binding"))?;
+    let bogus = skinning_query(&stage, "/R", "/R/Bogus")?.expect("Bogus query");
     assert_eq!(bogus.skinning_method(), None);
     assert!(bogus.has_joint_influences());
     assert!(bogus.skinned_points(&xforms, &points, None)?.is_none());
     assert!(bogus.skinned_normals(&xforms, &points, None)?.is_none());
     assert!(bogus.skinned_transform(&xforms, None)?.is_none());
 
-    let dual = skinning_query(&binding_of(&stage, "/R", "/R/Dual")?.expect("Dual binding"))?;
+    let dual = skinning_query(&stage, "/R", "/R/Dual")?.expect("Dual query");
     assert_eq!(dual.skinning_method(), Some(SkinningMethod::DualQuaternion));
     let twist = [Mat4d::IDENTITY, Mat4d::rotation_x(FRAC_PI_2)];
     let eighth = Mat4d::rotation_x(FRAC_PI_4);
@@ -1251,10 +1266,11 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
+    let mut cache = populated(&stage, "/R")?;
     // The skeleton's joints are misordered, so it has no query.
-    assert!(SkeletonQuery::new(&binding.skeleton)?.is_none());
-    let query = SkinningQuery::new(&binding, None)?;
+    let rig = Skeleton::get(&stage, "/R/Rig")?.expect("Skeleton");
+    assert!(cache.skel_query(&rig)?.is_none());
+    let query = cache.skinning_query(&stage.prim("/R/M")?).expect("M query");
     assert!(query.has_blend_shapes());
     assert_eq!(query.blend_shape_order(), Some(&["smile".to_string()][..]));
     assert!(query.blend_shape_mapper().is_some_and(AnimMapper::is_null));
@@ -1291,9 +1307,10 @@ def SkelRoot "R" {
 }
 "#,
     )?;
-    let binding = binding_of(&stage, "/R", "/R/M")?.expect("M binding");
-    let skeleton = SkeletonQuery::new(&binding.skeleton)?.expect("valid topology");
-    let query = SkinningQuery::new(&binding, Some(&skeleton))?;
+    let mut cache = populated(&stage, "/R")?;
+    let rig = Skeleton::get(&stage, "/R/Rig")?.expect("Skeleton");
+    let skeleton = cache.skel_query(&rig)?.expect("valid topology");
+    let query = cache.skinning_query(&stage.prim("/R/M")?).expect("M query");
     let rest = skeleton.rest_skel_transforms().expect("rest pose");
     let mesh = Mesh::get(&stage, "/R/M")?.expect("Mesh");
     // The joints span (0, 0, 0) to (0, 2, 0); the bound, raised by 0.5,
@@ -1455,9 +1472,7 @@ def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
 /// weigh and pack nothing.
 #[test]
 fn blend_shapes_on_asset() -> Result<()> {
-    let stage = Stage::builder()
-        .schema_registry(openusd_schemas::schema_registry())
-        .open("../../vendor/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
+    let stage = vendor("usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
     let mut paths = Vec::new();
     stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| paths.push(path.clone()))?;
     let mut named = 0;
@@ -1506,5 +1521,332 @@ def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
     assert_eq!(query.num_blend_shapes(), 2);
     assert_eq!(query.blend_shape(0).map(|shape| shape.path().as_str()), Some("/Up"));
     assert_eq!(query.blend_shape(1).map(|shape| shape.path().as_str()), Some("/Side"));
+    Ok(())
+}
+
+/// A skeleton binds the animation it inherits, across instancing too (the
+/// cases of C++ `testUsdSkelCache.py`'s `test_InheritedAnimBinding`).
+#[test]
+fn cache_inherited_anim() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelAnimation "Anim1" {}
+def SkelAnimation "Anim2" {}
+def SkelAnimation "Off" (active = false) {}
+def Scope "Model" (instanceable = true) {
+    def SkelAnimation "Anim" {}
+    def Skeleton "Inherit" {}
+    def Skeleton "Override" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:animationSource = </Model/Anim>
+    }
+}
+def SkelRoot "R" {
+    def Scope "Scope" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:animationSource = </Anim1>
+        def Skeleton "Inherit" {}
+        def Skeleton "Override" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:animationSource = </Anim2>
+        }
+        def Skeleton "Block" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:animationSource = []
+        }
+    }
+    def Skeleton "Unbound" {}
+    def Skeleton "ToInactive" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:animationSource = </Off>
+    }
+    def Scope "Instance" (prepend references = </Model> prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:animationSource = </Anim1>
+    }
+}
+"#,
+    )?;
+    let mut cache = Cache::new();
+    let mut anim_of = |path: &str| -> Result<Option<String>, SchemaError> {
+        let skeleton = Skeleton::get(&stage, path)?.expect("Skeleton");
+        let query = cache.skel_query(&skeleton)?.expect("valid topology");
+        assert_eq!(query.skeleton().path().as_str(), path);
+        Ok(query.anim_query().map(|anim| anim.animation().path().to_string()))
+    };
+    assert_eq!(anim_of("/R/Scope/Inherit")?.as_deref(), Some("/Anim1"));
+    assert_eq!(anim_of("/R/Scope/Override")?.as_deref(), Some("/Anim2"));
+    assert_eq!(anim_of("/R/Scope/Block")?, None);
+    assert_eq!(anim_of("/R/Unbound")?, None);
+    assert_eq!(anim_of("/R/ToInactive")?, None);
+    // The binding reaches an instance proxy from above the instance.
+    assert_eq!(anim_of("/R/Instance/Inherit")?.as_deref(), Some("/Anim1"));
+    // An animation inside the instance is read through its prototype.
+    let overridden = anim_of("/R/Instance/Override")?.expect("an animation");
+    assert!(stage.prim(overridden.as_str())?.is_in_prototype()?);
+    Ok(())
+}
+
+/// Each skinnable prim joins the binding of the skeleton in effect at it, with
+/// the binding properties it inherits (C++ `testUsdSkelCache.py`'s
+/// `test_InheritedSkeletonBinding`).
+#[test]
+fn cache_skeleton_bindings() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Skeleton "Skel1" {}
+def Skeleton "Skel2" {}
+def Skeleton "Off" (active = false) {}
+def SkelRoot "R" {
+    def Scope "Scope" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Skel1>
+        uniform token[] skel:joints = ["scope"]
+        uniform token[] skel:blendShapes = ["ignored"]
+        def Mesh "Inherit" {}
+        def Mesh "Override" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:skeleton = </Skel2>
+            uniform token[] skel:joints = ["override"]
+            uniform token[] skel:blendShapes = ["shape"]
+        }
+        def Mesh "Block" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:skeleton = []
+        }
+    }
+    def Mesh "Unbound" {}
+    def Mesh "ToInactive" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Off>
+    }
+}
+"#,
+    )?;
+    let root = root(&stage, "/R")?;
+    let mut cache = Cache::new();
+    cache.populate(&root, PrimPredicate::DEFAULT)?;
+    let skeleton = |path: &str| -> Result<Skeleton> { Ok(Skeleton::get(&stage, path)?.expect("Skeleton")) };
+
+    let first = cache.skel_binding(&root, &skeleton("/Skel1")?, PrimPredicate::DEFAULT)?;
+    assert_eq!(target_paths(&first), ["/R/Scope/Inherit"]);
+    let inherit = &first.skinning_targets()[0];
+    assert_eq!(inherit.joint_order(), Some(&["scope".to_string()][..]));
+    // The blend-shape bindings are not inherited.
+    assert_eq!(inherit.blend_shape_order(), None);
+
+    let second = cache.skel_binding(&root, &skeleton("/Skel2")?, PrimPredicate::DEFAULT)?;
+    assert_eq!(target_paths(&second), ["/R/Scope/Override"]);
+    let overridden = &second.skinning_targets()[0];
+    assert_eq!(overridden.joint_order(), Some(&["override".to_string()][..]));
+    assert_eq!(overridden.blend_shape_order(), Some(&["shape".to_string()][..]));
+
+    // Only the active skeletons have bindings, ordered by path.
+    let all = cache.skel_bindings(&root, PrimPredicate::DEFAULT)?;
+    let skeletons: Vec<_> = all.iter().map(|binding| binding.skeleton().path().as_str()).collect();
+    assert_eq!(skeletons, ["/Skel1", "/Skel2"]);
+    assert_eq!(target_paths(&all[0]), target_paths(&first));
+    // Asked for by name, an inactive skeleton still finds its prims.
+    let off = cache.skel_binding(&root, &skeleton("/Off")?, PrimPredicate::DEFAULT)?;
+    assert_eq!(target_paths(&off), ["/R/ToInactive"]);
+    // Every skinnable prim has a query, bound or not.
+    for path in ["/R/Scope/Block", "/R/Unbound", "/R/ToInactive"] {
+        assert!(cache.skinning_query(&stage.prim(path)?).is_some(), "{path}");
+    }
+    Ok(())
+}
+
+/// Instance proxies are populated only through a predicate that traverses
+/// them, and bind as their prototype's prims do (C++ `testUsdSkelCache.py`'s
+/// `test_InstancedSkeletonBinding` and `test_InstancedBlendShape`).
+#[test]
+fn cache_instanced_bindings() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelAnimation "Anim1" {
+    uniform token[] blendShapes = ["override", "shape"]
+}
+def Skeleton "Skel1" {}
+def Scope "Model" (instanceable = true) {
+    def Skeleton "Skel" {}
+    def BlendShape "Shape" {}
+    def Mesh "Inherit" {}
+    def Mesh "Override" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Model/Skel>
+        uniform token[] skel:joints = ["override"]
+        uniform token[] skel:blendShapes = ["override"]
+        rel skel:blendShapeTargets = </Model/Shape>
+    }
+}
+def SkelRoot "R" (prepend apiSchemas = ["SkelBindingAPI"]) {
+    rel skel:animationSource = </Anim1>
+    def Scope "Scope" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Skel1>
+        uniform token[] skel:joints = ["scope"]
+        def Mesh "Inherit" {}
+    }
+    def Scope "Instance" (prepend references = </Model> prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Skel1>
+        uniform token[] skel:joints = ["instance"]
+    }
+}
+"#,
+    )?;
+    let root = root(&stage, "/R")?;
+    let inherit = stage.prim("/R/Instance/Inherit")?;
+    let overridden = stage.prim("/R/Instance/Override")?;
+    let mut cache = Cache::new();
+    cache.populate(&root, PrimPredicate::DEFAULT)?;
+    assert!(cache.skinning_query(&inherit).is_none());
+    assert!(cache.skinning_query(&overridden).is_none());
+
+    let proxies = PrimPredicate::DEFAULT_PROXIES;
+    cache.populate(&root, proxies)?;
+    let skel1 = Skeleton::get(&stage, "/Skel1")?.expect("Skeleton");
+    let first = cache.skel_binding(&root, &skel1, proxies)?;
+    assert_eq!(target_paths(&first), ["/R/Scope/Inherit", "/R/Instance/Inherit"]);
+    let instanced = &first.skinning_targets()[1];
+    assert_eq!(instanced.joint_order(), Some(&["instance".to_string()][..]));
+    assert_eq!(instanced.blend_shape_order(), None);
+
+    // The skeleton inside the instance binds too, and sorts first by path.
+    let all = cache.skel_bindings(&root, proxies)?;
+    let skeletons: Vec<_> = all.iter().map(|binding| binding.skeleton().path().as_str()).collect();
+    assert_eq!(skeletons, ["/R/Instance/Skel", "/Skel1"]);
+    assert_eq!(target_paths(&all[0]), ["/R/Instance/Override"]);
+
+    // The instance's skeleton binds the animation the root names, whose
+    // blend-shape order differs from the prim's, so the mapper remaps.
+    let query = cache.skinning_query(&overridden).expect("Override query");
+    assert_eq!(query.joint_order(), Some(&["override".to_string()][..]));
+    assert_eq!(query.blend_shape_order(), Some(&["override".to_string()][..]));
+    assert!(query.has_blend_shapes());
+    assert!(query.blend_shape_mapper().is_some_and(|mapper| !mapper.is_null()));
+    let skel = cache.skel_query(all[0].skeleton())?.expect("valid topology");
+    assert_eq!(
+        skel.anim_query().map(AnimQuery::blend_shape_order),
+        Some(&["override".to_string(), "shape".to_string()][..])
+    );
+    Ok(())
+}
+
+/// One cache populated from two stages that hold the same paths keeps their
+/// queries apart.
+#[test]
+fn cache_two_stages() -> Result<(), SchemaError> {
+    let scene = |joint: &str| {
+        from_usda(&format!(
+            r#"#usda 1.0
+def SkelRoot "R" {{
+    def Skeleton "Rig" {{
+        uniform token[] joints = ["{joint}"]
+    }}
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {{
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["{joint}"]
+    }}
+}}
+"#
+        ))
+    };
+    let (first, second) = (scene("A")?, scene("B")?);
+    let mut cache = Cache::new();
+    for stage in [&first, &second] {
+        cache.populate(&root(stage, "/R")?, PrimPredicate::DEFAULT)?;
+    }
+    for (stage, joint) in [(&first, "A"), (&second, "B")] {
+        let query = cache.skinning_query(&stage.prim("/R/M")?).expect("M query");
+        assert_eq!(query.joint_order(), Some(&[joint.to_string()][..]));
+        let rig = Skeleton::get(stage, "/R/Rig")?.expect("Skeleton");
+        let skel = cache.skel_query(&rig)?.expect("valid topology");
+        assert_eq!(skel.joint_order(), [joint.to_string()]);
+    }
+    Ok(())
+}
+
+/// The cache keeps what it built until it is cleared: a populate after an edit
+/// keeps the stale query, and a populate after `clear` picks the edit up.
+#[test]
+fn cache_clear_repopulates() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Skeleton "Rig" {
+        uniform token[] joints = ["A", "B"]
+    }
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Rig>
+        uniform token[] skel:joints = ["A"]
+    }
+}
+"#,
+    )?;
+    let root = root(&stage, "/R")?;
+    let mesh = stage.prim("/R/M")?;
+    let mut cache = Cache::new();
+    cache.populate(&root, PrimPredicate::DEFAULT)?;
+    BindingAPI::get(&stage, "/R/M")?
+        .expect("BindingAPI")
+        .joints_attr()
+        .set(Value::TokenVec(vec!["B".into()]))?;
+    let order = |cache: &Cache| {
+        cache
+            .skinning_query(&mesh)
+            .and_then(|query| query.joint_order().map(<[_]>::to_vec))
+    };
+    cache.populate(&root, PrimPredicate::DEFAULT)?;
+    assert_eq!(order(&cache), Some(vec!["A".to_string()]));
+    cache.clear();
+    assert!(cache.skinning_query(&mesh).is_none());
+    cache.populate(&root, PrimPredicate::DEFAULT)?;
+    assert_eq!(order(&cache), Some(vec!["B".to_string()]));
+    Ok(())
+}
+
+/// Populate a cache from every Root on `stage` and skin each bound mesh at
+/// the default time. Answers the number of prims bound and the number
+/// skinned.
+fn skin_everything(stage: &Stage) -> Result<(usize, usize), SchemaError> {
+    let mut cache = Cache::new();
+    let (mut bound, mut skinned) = (0, 0);
+    for root in typed(stage, Root::get)? {
+        cache.populate(&root, PrimPredicate::DEFAULT_PROXIES)?;
+        for binding in cache.skel_bindings(&root, PrimPredicate::DEFAULT_PROXIES)? {
+            let skel = cache.skel_query(binding.skeleton())?.expect("valid topology");
+            let xforms = skel.skinning_transforms(None)?.expect("bind pose");
+            for query in binding.skinning_targets() {
+                bound += 1;
+                let points: Option<Vec<Vec3f>> = query.prim().attribute("points").cast()?;
+                if let Some(points) = points
+                    && query.skinned_points(&xforms, &points, None)?.is_some()
+                {
+                    skinned += 1;
+                }
+            }
+        }
+    }
+    Ok((bound, skinned))
+}
+
+#[test]
+fn cache_skins_assets() -> Result<(), SchemaError> {
+    let biplane =
+        vendor("core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary/toy_biplane_idle.usdc")?;
+    // The biplane binds its 15 skinnable meshes to one skeleton.
+    assert_eq!(skin_everything(&biplane)?, (15, 15));
+    let elephant = vendor("usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
+    let (bound, skinned) = skin_everything(&elephant)?;
+    assert!(bound > 0 && skinned == bound, "{bound} bound, {skinned} skinned");
+    Ok(())
+}
+
+/// A Root the predicate rejects, here an abstract one, populates nothing, as
+/// a C++ `UsdPrimRange` that starts at it is empty.
+#[test]
+fn cache_root_predicate() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+class SkelRoot "R" {
+    def Mesh "M" {}
+}
+"#,
+    )?;
+    let root = root(&stage, "/R")?;
+    let mesh = stage.prim("/R/M")?;
+    let mut cache = Cache::new();
+    cache.populate(&root, PrimPredicate::DEFAULT)?;
+    assert!(cache.skinning_query(&mesh).is_none());
+    cache.populate(&root, PrimPredicate::ALL)?;
+    assert!(cache.skinning_query(&mesh).is_some());
     Ok(())
 }

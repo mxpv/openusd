@@ -15,7 +15,7 @@ use openusd::usd::{Attribute, Prim, Relationship, TimeCode};
 use openusd::{Result, gf, sdf};
 
 use super::anim_mapper::AnimMapper;
-use super::binding::SkelBinding;
+use super::binding::BindingProperties;
 use super::skeleton_query::SkeletonQuery;
 use super::skinning::{has_shape, joints_extent, skin_normals, skin_points, skin_transform};
 use super::{InfluenceInterpolation, SkinningMethod};
@@ -29,8 +29,8 @@ pub type JointInfluences = (Vec<i32>, Vec<f32>);
 
 /// One skinnable prim's resolved binding.
 ///
-/// Build with [`SkinningQuery::new`] from a [`SkelBinding`] and the query of
-/// the skeleton bound to it.
+/// A [`Cache`](super::Cache) builds one for each skinnable prim it populates
+/// ([`Cache::skinning_query`](super::Cache::skinning_query)).
 #[derive(Debug, Clone)]
 pub struct SkinningQuery {
     prim: Prim,
@@ -55,23 +55,22 @@ pub struct SkinningQuery {
 }
 
 impl SkinningQuery {
-    /// The query over the binding properties `binding` resolved for its prim
-    /// (C++ `UsdSkelSkinningQuery`'s constructor). `skeleton` is the query of
-    /// `binding.skeleton`, for its joint order and its animation's blend-shape
-    /// order, where that skeleton has one; without it both orders are empty,
-    /// as C++ passes them, so a joint subset maps no joints and the
-    /// blend-shape mapper maps nothing from the animation.
+    /// The query over the binding `properties` resolved for `prim` (C++
+    /// `UsdSkelSkinningQuery`'s constructor). `skeleton` is the query of the
+    /// skeleton bound to `prim`, for its joint order and its animation's
+    /// blend-shape order, where that skeleton has one; without it both orders
+    /// are empty, as C++ passes them, so a joint subset maps no joints and
+    /// the blend-shape mapper maps nothing from the animation.
     ///
     /// The joint influences count only when both primvars are bound, with
     /// equal positive `elementSize` and equal `constant` or `vertex`
     /// interpolation. The skinning method is read once, at the default time,
     /// as C++ reads it.
-    pub fn new(binding: &SkelBinding, skeleton: Option<&SkeletonQuery>) -> Result<Self, SchemaError> {
-        debug_assert!(
-            skeleton.is_none_or(|skeleton| skeleton.skeleton().path() == binding.skeleton.path()),
-            "the skeleton query must be the query of the binding's skeleton"
-        );
-        let properties = &binding.properties;
+    pub(super) fn new(
+        prim: Prim,
+        properties: &BindingProperties,
+        skeleton: Option<&SkeletonQuery>,
+    ) -> Result<Self, SchemaError> {
         let skeleton_joints = skeleton.map_or(&[][..], SkeletonQuery::joint_order);
         let anim_blend_shapes = skeleton
             .and_then(SkeletonQuery::anim_query)
@@ -79,7 +78,7 @@ impl SkinningQuery {
         let joint_indices = properties.joint_indices.clone().map(Primvar::new);
         let joint_weights = properties.joint_weights.clone().map(Primvar::new);
         Ok(Self {
-            prim: binding.prim.clone(),
+            prim,
             influences: influences(joint_indices.as_ref(), joint_weights.as_ref())?,
             joint_indices,
             joint_weights,

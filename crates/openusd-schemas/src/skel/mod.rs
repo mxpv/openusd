@@ -23,10 +23,10 @@
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
 //! [`SkeletonQuery`] binds a skeleton to the animation it inherits and poses
 //! it at any time; [`SkinningQuery`] takes the skinning transforms it
-//! answers. [`discover_bindings`] walks a `Root` subtree and
-//! resolves every skinnable prim's inherited skeleton and binding properties,
-//! with the animation bound to that skeleton
-//! (C++ `UsdSkelCache::ComputeSkelBindings`).
+//! answers. A [`Cache`] walks a `Root` subtree, builds a skinning query for
+//! every skinnable prim from the skeleton and binding properties it inherits,
+//! and groups the prims by the skeleton bound to them
+//! (C++ `UsdSkelCache`).
 //!
 //! # Conventions
 //!
@@ -60,6 +60,7 @@ mod anim_mapper;
 mod anim_query;
 mod binding;
 mod blend_shape_query;
+mod cache;
 mod decode;
 mod inbetween;
 mod skeleton_query;
@@ -69,8 +70,9 @@ mod topology;
 
 pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::AnimQuery;
-pub use binding::{SkelBinding, discover_bindings, is_skinnable};
+pub use binding::{Binding, is_skinnable};
 pub use blend_shape_query::{BlendShapeQuery, SubShapeWeight};
+pub use cache::Cache;
 pub use inbetween::{INBETWEENS_NAMESPACE, InbetweenShape};
 pub use skeleton_query::SkeletonQuery;
 pub use skinning_query::{JointInfluences, SkinningQuery};

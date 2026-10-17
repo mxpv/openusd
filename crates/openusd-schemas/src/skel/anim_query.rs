@@ -38,20 +38,17 @@ pub struct AnimQuery {
 }
 
 impl AnimQuery {
-    /// Build a query over an `Animation`. Returns `None` when neither
-    /// joints nor blend shapes are authored on it, there being nothing to
-    /// animate.
-    pub fn new(anim: Animation) -> Result<Option<Self>> {
+    /// Build a query over an `Animation`, reading its joint and blend-shape
+    /// orders (C++ `UsdSkel_AnimQueryImpl::New`). An animation that authors
+    /// neither has empty orders.
+    pub fn new(anim: Animation) -> Result<Self> {
         let joints = anim.joint_paths()?;
         let blend_shapes: Vec<String> = anim.blend_shapes_attr().cast()?.unwrap_or_default();
-        if joints.is_empty() && blend_shapes.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(Self {
+        Ok(Self {
             anim,
             joints,
             blend_shapes,
-        }))
+        })
     }
 
     /// The `Animation` prim the query reads.

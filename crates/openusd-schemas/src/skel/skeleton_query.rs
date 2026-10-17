@@ -19,7 +19,7 @@ use super::anim_mapper::AnimMapper;
 use super::anim_query::AnimQuery;
 use super::skinning::{inverse_transforms, joint_local_to_skel_space, skinning_transforms};
 use super::topology::Topology;
-use super::{Skeleton, SkeletonSchema};
+use super::{Cache, Skeleton, SkeletonSchema};
 use crate::SchemaError;
 use crate::geom::XformCache;
 
@@ -31,6 +31,8 @@ use crate::geom::XformCache;
 /// animation.
 #[derive(Debug, Clone)]
 pub struct SkeletonQuery {
+    /// The skeleton as asked for, an instance proxy where it is one.
+    skeleton: Skeleton,
     definition: Rc<Definition>,
     /// The animation the skeleton binds and its mapping onto the skeleton's
     /// joint order. `None` without an animation; the mapper is null when
@@ -40,11 +42,11 @@ pub struct SkeletonQuery {
 
 /// A skeleton's joints, topology, and bind and rest poses, read once at the
 /// default time (C++ `UsdSkel_SkelDefinition`). The poses derived from them
-/// are computed on first use and kept here, where every clone of the query
-/// shares them.
+/// are computed on first use and kept here, where every clone of the query,
+/// and every query a [`Cache`](super::Cache) builds over an instance of the
+/// same skeleton, shares them.
 #[derive(Debug)]
-struct Definition {
-    skeleton: Skeleton,
+pub(super) struct Definition {
     joints: Vec<String>,
     topology: Topology,
     /// The bind pose, where `bindTransforms` holds one entry per joint.
@@ -75,29 +77,29 @@ impl SkeletonQuery {
     /// bind transform invert as [`gf::Mat4d::inverse_or_max`] does (C++
     /// `GfMatrix4d::GetInverse`).
     pub fn new(skeleton: &Skeleton) -> Result<Option<Self>> {
-        if !skeleton.is_active()? {
-            return Ok(None);
-        }
-        let Some(definition) = Definition::new(skeleton)? else {
-            return Ok(None);
-        };
-        let anim = match skeleton.animation_source()? {
-            Some(anim) => AnimQuery::new(anim)?,
-            None => None,
-        };
+        Cache::new().skel_query(skeleton)
+    }
+
+    /// The query over `skeleton`, whose definition is `definition`, bound to
+    /// `anim`.
+    pub(super) fn from_definition(skeleton: Skeleton, definition: Rc<Definition>, anim: Option<AnimQuery>) -> Self {
         let anim = anim.map(|query| {
             let mapper = AnimMapper::new(query.joint_order(), &definition.joints);
             (query, mapper)
         });
-        Ok(Some(Self {
-            definition: Rc::new(definition),
+        Self {
+            skeleton,
+            definition,
             anim,
-        }))
+        }
     }
 
-    /// The skeleton the query poses.
+    /// The skeleton the query poses, as it was asked for: an instance proxy
+    /// where it is one. C++ answers the prototype's skeleton, which places
+    /// [`joint_world_transforms`](Self::joint_world_transforms) at the
+    /// prototype's transform.
     pub fn skeleton(&self) -> &Skeleton {
-        &self.definition.skeleton
+        &self.skeleton
     }
 
     /// The animation the skeleton binds, if any (C++ `GetAnimQuery`).
@@ -299,7 +301,7 @@ impl SkeletonQuery {
 impl Definition {
     /// The definition of `skeleton`, or `None` when its joint topology is
     /// invalid.
-    fn new(skeleton: &Skeleton) -> Result<Option<Self>> {
+    pub(super) fn new(skeleton: &Skeleton) -> Result<Option<Self>> {
         let joints = skeleton.joint_paths()?;
         let topology = Topology::from_joint_paths(&joints);
         if topology.validate().is_err() {
@@ -312,7 +314,6 @@ impl Definition {
         });
         let rest = per_joint(skeleton.rest_transforms()?);
         Ok(Some(Self {
-            skeleton: skeleton.clone(),
             joints,
             topology,
             bind,
