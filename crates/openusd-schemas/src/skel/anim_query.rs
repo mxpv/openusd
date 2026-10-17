@@ -98,6 +98,13 @@ impl AnimQuery {
         ]
     }
 
+    /// The attributes the blend-shape weights are read from:
+    /// `blendShapeWeights`, whether or not it is authored (C++
+    /// `GetBlendShapeWeightAttributes`).
+    pub fn blend_shape_weight_attributes(&self) -> [Attribute; 1] {
+        [self.anim.blend_shape_weights_attr()]
+    }
+
     /// Returns `(translations, rotations, scales)` at `time`, `None` being
     /// the default time (C++ `ComputeJointLocalTransformComponents`). `None`
     /// when any of the three has no value at `time`: unauthored, blocked, or

@@ -7,7 +7,7 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
 use openusd::sdf::{self, Value};
-use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
+use openusd::usd::{Attribute, PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
     BBoxCache, BoundableExt, BoundableSchema, Extent, Interpolation, Mesh, Purpose, XformCache, XformableExt,
@@ -458,6 +458,20 @@ fn anim_query_when_empty() -> Result<()> {
     assert!(empty.joint_order().is_empty());
     assert!(empty.blend_shape_order().is_empty());
     assert!(empty.joint_local_transforms(None)?.is_none());
+    Ok(())
+}
+
+/// The query names the attributes it reads, authored or not.
+#[test]
+fn anim_query_attributes() -> Result<()> {
+    let stage = memory()?;
+    let query = AnimQuery::new(Animation::define(&stage, "/Anim")?)?;
+    let names = |attrs: &[Attribute]| attrs.iter().map(|attr| attr.name().to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        names(&query.joint_transform_attributes()),
+        ["translations", "rotations", "scales"]
+    );
+    assert_eq!(names(&query.blend_shape_weight_attributes()), ["blendShapeWeights"]);
     Ok(())
 }
 

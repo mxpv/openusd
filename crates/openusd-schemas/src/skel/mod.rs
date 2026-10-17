@@ -17,7 +17,9 @@
 //! ```
 //!
 //! [`Root`] and [`Skeleton`] are [`geom::Boundable`](crate::geom)
-//! prims, so `skel` enables the `geom` feature. Time-sampled Animation
+//! prims, so `skel` enables the `geom` feature. A prim is an animation source
+//! (C++ `UsdSkelIsSkelAnimationPrim`) where [`Animation::from_prim`] answers
+//! one. Time-sampled Animation
 //! evaluation is handled by [`AnimQuery`], which delegates to
 //! [`openusd::usd::Attribute::get`] and inherits the stage's interpolation mode
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
