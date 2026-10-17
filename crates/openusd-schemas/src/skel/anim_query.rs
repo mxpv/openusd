@@ -108,17 +108,7 @@ impl AnimQuery {
         &self,
         time: impl Into<Option<TimeCode>>,
     ) -> Result<Option<JointTransformComponents>> {
-        let time = time.into();
-        let Some(translations) = array_at(&self.anim.translations_attr(), time)? else {
-            return Ok(None);
-        };
-        let Some(rotations) = array_at(&self.anim.rotations_attr(), time)? else {
-            return Ok(None);
-        };
-        let Some(scales) = array_at(&self.anim.scales_attr(), time)? else {
-            return Ok(None);
-        };
-        Ok(Some((translations, rotations, scales)))
+        transform_components(&self.anim, time.into())
     }
 
     /// Returns the joint-local 4×4 transform per joint at `time`,
@@ -173,6 +163,24 @@ impl AnimQuery {
 
 /// `attribute`'s value at `time` as an array of `T`, whatever precision it
 /// was authored at, or `None` where it holds no value of that shape.
+/// `anim`'s `(translations, rotations, scales)` at `time`, as
+/// [`AnimQuery::joint_transform_components`] answers them.
+pub(super) fn transform_components(
+    anim: &Animation,
+    time: Option<TimeCode>,
+) -> Result<Option<JointTransformComponents>> {
+    let Some(translations) = array_at(&anim.translations_attr(), time)? else {
+        return Ok(None);
+    };
+    let Some(rotations) = array_at(&anim.rotations_attr(), time)? else {
+        return Ok(None);
+    };
+    let Some(scales) = array_at(&anim.scales_attr(), time)? else {
+        return Ok(None);
+    };
+    Ok(Some((translations, rotations, scales)))
+}
+
 fn array_at<T>(attribute: &Attribute, time: Option<TimeCode>) -> Result<Option<Vec<T>>>
 where
     Vec<T>: sdf::FromValueCast,

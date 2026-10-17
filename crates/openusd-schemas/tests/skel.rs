@@ -10,12 +10,12 @@ use openusd::sdf::{self, Value};
 use openusd::usd::{PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
-    BBoxCache, BoundableExt, BoundableSchema, Extent, Mesh, Purpose, XformCache, XformableExt,
+    BBoxCache, BoundableExt, BoundableSchema, Extent, Interpolation, Mesh, Purpose, XformCache, XformableExt,
 };
 use openusd_schemas::skel::{
     AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BlendShape, BlendShapeQuery,
-    BlendShapeSchema, Cache, NO_PARENT, Pose, Root, Skeleton, SkeletonQuery, SkeletonSchema, SkinningMethod,
-    SkinningQuery, Topology, skinning,
+    BlendShapeSchema, Cache, IndexError, NO_PARENT, Pose, Root, Skeleton, SkeletonQuery, SkeletonSchema,
+    SkinningMethod, SkinningQuery, Topology, skinning, validate_indices,
 };
 
 mod common;
@@ -2075,5 +2075,114 @@ def Xform "World" {
         (bound.min(), bound.max()),
         (gf::vec3d(-1.0, 5.0, 0.0), gf::vec3d(1.0, 5.0, 1.0))
     );
+    Ok(())
+}
+
+#[test]
+fn binding_joint_influences() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let binding = BindingAPI::from_prim_unchecked(stage.define_prim("/Model/Gprim")?);
+
+    let indices = binding.create_joint_indices_primvar(false, 3)?;
+    assert_eq!(indices.interpolation()?, Interpolation::Vertex);
+    assert_eq!(indices.element_size()?, 3);
+    let weights = binding.create_joint_weights_primvar(true, None)?;
+    assert_eq!(weights.interpolation()?, Interpolation::Constant);
+    // The primvars can be authored again with another interpolation or
+    // element size.
+    let weights = binding.create_joint_weights_primvar(false, 3)?;
+    assert_eq!(weights.interpolation()?, Interpolation::Vertex);
+    assert_eq!(weights.element_size()?, 3);
+
+    binding.set_rigid_joint_influence(10, 0.5)?;
+    let (indices, weights) = (binding.joint_indices_primvar(), binding.joint_weights_primvar());
+    assert_eq!(indices.get_at::<Vec<i32>>(None)?, Some(vec![10]));
+    assert_eq!(weights.get_at::<Vec<f32>>(None)?, Some(vec![0.5]));
+    for primvar in [&indices, &weights] {
+        assert_eq!(primvar.interpolation()?, Interpolation::Constant);
+        assert_eq!(primvar.element_size()?, 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn rigid_influence_overflow() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let binding = BindingAPI::from_prim_unchecked(stage.define_prim("/Gprim")?);
+    let joint = usize::try_from(i32::MAX).expect("fits") + 1;
+    let error = binding.set_rigid_joint_influence(joint, 1.0).expect_err("overflows");
+    assert!(matches!(error, SchemaError::JointIndexOverflow { joint: found, .. } if found == joint));
+    assert!(!binding.joint_indices_attr().has_authored_value()?);
+    assert!(!binding.joint_weights_attr().has_authored_value()?);
+    Ok(())
+}
+
+#[test]
+fn validate_indices_range() {
+    assert_eq!(validate_indices(&[0, 2, 1], 3), Ok(()));
+    let error = validate_indices(&[0, 3, -1], 3).expect_err("3 is out of range");
+    assert_eq!(
+        error,
+        IndexError {
+            index: 3,
+            position: 1,
+            len: 3
+        }
+    );
+    assert_eq!(error.to_string(), "index 3 at element 1 is not in the range [0, 3)");
+    assert_eq!(validate_indices(&[0, -1], 3).map_err(|error| error.index), Err(-1));
+}
+
+#[test]
+fn animation_transforms_roundtrip() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let anim = Animation::define(&stage, "/Anim")?;
+    let time = TimeCode::new(1.0);
+    let xforms = vec![
+        Mat4d::scale([2.0, 2.0, 2.0]) * Mat4d::rotation_z(FRAC_PI_4) * Mat4d::translation([1.0, 2.0, 3.0]),
+        Mat4d::translation([0.0, 1.0, 0.0]),
+    ];
+    let near = |a: &[Mat4d], b: &[Mat4d]| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(a, b)| (0..4).all(|r| (0..4).all(|c| (a[(r, c)] - b[(r, c)]).abs() < 1e-5)))
+    };
+    assert!(anim.set_transforms(&xforms, time)?);
+    let read = anim.transforms(time)?.expect("components at the time");
+    assert!(near(&read, &xforms), "{read:?}");
+
+    // A singular matrix late in the array leaves every component as it was.
+    let singular = [Mat4d::translation([5.0, 0.0, 0.0]), Mat4d::scale([0.0, 1.0, 1.0])];
+    assert!(!anim.set_transforms(&singular, time)?);
+    assert!(near(&anim.transforms(time)?.expect("components"), &xforms));
+    Ok(())
+}
+
+#[test]
+fn root_find_nearest() -> Result<()> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Xform "X" {
+        def Mesh "M" {
+        }
+        def SkelRoot "Inner" {
+            def Mesh "M" {
+            }
+        }
+    }
+}
+def Xform "Outside" {
+}
+"#,
+    )?;
+    let found = |path: &str| -> Result<Option<String>> {
+        Ok(Root::find(&stage.prim(path)?)?.map(|root| root.path().as_str().to_string()))
+    };
+    assert_eq!(found("/R/X/M")?.as_deref(), Some("/R"));
+    assert_eq!(found("/R")?.as_deref(), Some("/R"));
+    assert_eq!(found("/R/X/Inner/M")?.as_deref(), Some("/R/X/Inner"));
+    assert_eq!(found("/Outside")?, None);
     Ok(())
 }

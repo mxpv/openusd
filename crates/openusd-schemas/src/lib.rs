@@ -404,6 +404,16 @@ pub enum SchemaError {
         tangents: usize,
     },
 
+    /// A joint index above `i32::MAX`, which the `int[]` joint indices
+    /// primvar cannot hold.
+    #[error("joint index {joint} of {prim} does not fit the `int` it is authored as")]
+    JointIndexOverflow {
+        /// The prim whose influences were being authored.
+        prim: sdf::Path,
+        /// The joint index asked for.
+        joint: usize,
+    },
+
     /// A geom subset query names an element type the geometry has no
     /// elements of, such as the segments of a mesh.
     #[error("{prim} has no `{element_type}` elements for a GeomSubset to index")]
