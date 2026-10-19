@@ -25,6 +25,8 @@
 //!
 //! Authored values are in the scene's units (linear in scene units, mass in
 //! scene mass units, angles in degrees, quaternions in `(w, x, y, z)` order).
+//! The mass unit is the stage's `kilogramsPerUnit`, which [`StageMetadata`]
+//! reads and authors; [`mass_units`] names the common ones.
 //!
 //! # Example
 //!
@@ -56,6 +58,7 @@
 openusd::include_schema!("usdPhysics");
 
 mod collision_group;
+pub mod mass_units;
 
 pub use collision_group::{CollisionGroupTable, collision_group_table};
 
