@@ -43,6 +43,17 @@ impl CollisionGroup {
     pub fn colliders_collection(&self) -> CollectionAPI {
         CollectionAPI::from_prim_unchecked(self.prim().clone(), COLLIDERS)
     }
+
+    /// Whether the group disables collisions against everything *except*
+    /// what it filters.
+    ///
+    /// A value is what decides this: an unauthored flag, a declaration with no
+    /// value and a blocked one all leave filtering the usual way round, as does
+    /// a value of the wrong type. `physics:invertFilteredGroups` declares no
+    /// fallback.
+    pub(crate) fn inverts_filtering(&self) -> Result<bool> {
+        Ok(self.invert_filtered_groups()?.unwrap_or(false))
+    }
 }
 
 /// Which pairs of collision groups collide, once every group's filtering
@@ -155,7 +166,7 @@ pub fn collision_group_table(stage: &Stage) -> Result<CollisionGroupTable> {
             .filter_map(|target| merged_index.get(target).copied())
             .collect();
 
-        match inverts_filtering(group)? {
+        match group.inverts_filtering()? {
             // Disable everything the group did not ask for, its own pair
             // included unless it named itself.
             true => {
@@ -220,16 +231,6 @@ fn merge_group_name(group: &CollisionGroup) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(name.get::<String>()?.unwrap_or_default()))
-}
-
-/// Whether `group` disables collisions against everything *except* what it
-/// filters.
-///
-/// Unlike the merge name, a value is what decides this: an unauthored flag, a
-/// declaration with no value and a blocked one all leave filtering the usual
-/// way round, as does a value of the wrong type.
-fn inverts_filtering(group: &CollisionGroup) -> Result<bool> {
-    Ok(group.invert_filtered_groups()?.unwrap_or(false))
 }
 
 /// How many unordered pairs `len` groups have, each group's pair with itself

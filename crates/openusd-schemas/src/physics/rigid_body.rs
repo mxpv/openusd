@@ -13,7 +13,7 @@ use openusd::gf;
 use openusd::usd::{self, PrimPredicate, SchemaBase};
 
 use super::tokens::{PHYSICS_COLLISION_API, PHYSICS_RIGID_BODY_API};
-use super::{MATERIAL_PURPOSE, MassAPI, MassProperties, MaterialAPI, RigidBodyAPI, mass_units};
+use super::{MassAPI, MassProperties, MaterialAPI, RigidBodyAPI, mass_units};
 use crate::SchemaError;
 use crate::geom::{self, XformCache};
 use crate::shade::MaterialBindingAPI;
@@ -235,10 +235,7 @@ fn density(collider: &usd::Prim, shape: &MassApiData, body_density: Option<f64>)
     // several colliders could be read once; each collider resolves and reads
     // its own here.
     let binding = MaterialBindingAPI::from_prim_unchecked(collider.clone());
-    let Some(material) = binding.bound_material(MATERIAL_PURPOSE)? else {
-        return Ok(None);
-    };
-    let Some(material) = MaterialAPI::from_prim(material.prim().clone())? else {
+    let Some(material) = MaterialAPI::bound(&binding)? else {
         return Ok(None);
     };
     Ok(material

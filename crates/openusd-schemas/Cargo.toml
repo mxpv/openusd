@@ -82,6 +82,10 @@ name = "physics"
 required-features = ["physics"]
 
 [[test]]
+name = "physics_parse"
+required-features = ["physics"]
+
+[[test]]
 name = "proc"
 required-features = ["proc"]
 
