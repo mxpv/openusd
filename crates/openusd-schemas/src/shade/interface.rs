@@ -409,20 +409,16 @@ mod tests {
         inactive_shader.create_input("gain", "float")?.connect_to(&gain)?;
         inactive.prim().clone().set_active(false)?;
 
-        stage.override_prim("/Graph/Undefined")?;
         let undefined_shader = Shader::define(&stage, "/Graph/Undefined/Shader")?;
         undefined_shader.create_input("gain", "float")?.connect_to(&gain)?;
 
         stage.define_prim("/Graph/Abstract")?;
         let abstract_shader = Shader::define(&stage, "/Graph/Abstract/Shader")?;
         abstract_shader.create_input("gain", "float")?.connect_to(&gain)?;
-        let root_id = stage.root_layer().identifier().to_owned();
-        stage.layer_mut(&root_id).expect("root layer").edit(|edit| {
-            edit.prim_mut("/Graph/Abstract")?
-                .expect("abstract prim")
-                .set_specifier(sdf::Specifier::Class);
-            Ok(())
-        })?;
+        // Defining the shaders defined their parents; the specifiers under
+        // test are authored after.
+        stage.prim("/Graph/Undefined")?.set_specifier(sdf::Specifier::Over)?;
+        stage.prim("/Graph/Abstract")?.set_specifier(sdf::Specifier::Class)?;
 
         let map = graph.interface_input_consumers(false)?;
         assert_eq!(

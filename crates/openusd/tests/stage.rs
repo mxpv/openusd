@@ -4655,6 +4655,61 @@ fn define_below_inactive() -> Result<()> {
     Ok(())
 }
 
+/// Defining a prim defines the ancestors it is under (C++
+/// `UsdStage::DefinePrim`): a missing or `over` ancestor becomes a `def` with
+/// its type kept, and a `class` ancestor, defining already, stays one.
+#[test]
+fn define_defines_ancestors() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        "#usda 1.0\n\
+         over Scope \"Over\" {}\n\
+         class \"Class\" {}\n",
+    )?;
+    stage.define_prim("/Over/New/Leaf")?;
+    stage.define_prim("/Class/Leaf")?;
+    for path in ["/Over", "/Over/New", "/Over/New/Leaf", "/Class/Leaf"] {
+        let prim = stage.prim(path)?;
+        assert_eq!(prim.specifier()?, Some(sdf::Specifier::Def), "{path}");
+        assert!(prim.is_defined()?, "{path}");
+    }
+    assert_eq!(stage.prim("/Over")?.type_name()?.expect("a type").as_str(), "Scope");
+    assert_eq!(stage.prim("/Class")?.specifier()?, Some(sdf::Specifier::Class));
+    Ok(())
+}
+
+/// A prim the stage holds as defined takes no spec from a define: one a
+/// weaker layer defines gets nothing on the edit target, and a `class` stays
+/// one, unless the define names another type (C++ `UsdStage::DefinePrim`).
+#[test]
+fn define_leaves_defined() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        "#usda 1.0\ndef Scope \"A\" {}\nclass \"Rig\" {}\n",
+    )?;
+    let stage = open_text(&dir, "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n")?;
+
+    stage.define_prim("/A/B")?;
+    // The chain to `/A/B` holds `/A` as an `over`, as the layer tier creates
+    // it; the weaker layer's def is left to define it.
+    assert_ne!(
+        stage.root_layer().prim("/A")?.expect("the chain to /A/B").specifier(),
+        Some(sdf::Specifier::Def)
+    );
+    assert!(stage.prim("/A/B")?.is_defined()?);
+
+    stage.define_prim("/Rig")?;
+    assert!(stage.root_layer().prim("/Rig")?.is_none(), "a class is defined");
+    assert_eq!(stage.prim("/Rig")?.specifier()?, Some(sdf::Specifier::Class));
+
+    stage.define_typed_prim("/Rig", "Xform")?;
+    assert_eq!(stage.prim("/Rig")?.specifier()?, Some(sdf::Specifier::Def));
+    assert_eq!(stage.prim("/Rig")?.type_name()?.expect("a type").as_str(), "Xform");
+    Ok(())
+}
+
 /// A property write needs a prim the stage holds: below an inactive prim every
 /// creation and every write to an existing property is refused and authors
 /// nothing (C++ authoring through an invalid `UsdPrim`). After reactivation
@@ -6689,8 +6744,8 @@ fn edit_context_rejects_bad_target() -> Result<()> {
 }
 
 /// Authoring the variant-owning prim itself through a variant target maps
-/// to the bare variant selection, which is not a prim — it must error, not
-/// panic.
+/// to the bare variant selection, which is not a prim — a define that has
+/// to write there must error, not panic.
 #[test]
 fn define_prim_at_variant_leaf_errors() -> Result<()> {
     let stage = in_memory_stage()?;
@@ -6700,9 +6755,10 @@ fn define_prim_at_variant_leaf_errors() -> Result<()> {
         root,
         sdf::path("/Prim{set=sel}")?,
     )?)?;
+    // `/Prim` is defined already; a new type makes the define write, and
     // `/Prim` maps to the variant selection `/Prim{set=sel}`.
     assert!(matches!(
-        stage.define_prim("/Prim"),
+        stage.define_typed_prim("/Prim", "Scope"),
         Err(StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. }))
     ));
     Ok(())
@@ -13169,6 +13225,16 @@ fn instancing_edits_refused() -> Result<()> {
     let prototype = proxy
         .prim_in_prototype()?
         .expect("the proxy stands in for a prototype prim");
+    // A define with nothing to write, the prim being defined already, is
+    // refused all the same.
+    assert!(matches!(
+        stage.define_prim("/Inst/Child"),
+        Err(StageAuthoringError::InstanceProxyEdit { .. })
+    ));
+    assert!(matches!(
+        stage.define_prim(prototype.path().clone()),
+        Err(StageAuthoringError::PrototypeEdit { .. })
+    ));
     assert!(matches!(
         prototype.apply_api("SomeAPI"),
         Err(StageAuthoringError::PrototypeEdit { .. })

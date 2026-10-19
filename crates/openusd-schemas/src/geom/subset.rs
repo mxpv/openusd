@@ -958,7 +958,7 @@ fn time_label(time: Option<usd::TimeCode>) -> String {
 #[cfg(test)]
 mod tests {
     use openusd::usd::{self, SchemaBase};
-    use openusd::{gf, tf};
+    use openusd::{gf, sdf, tf};
 
     use super::FamilyType;
     use crate::SchemaError;
@@ -1838,8 +1838,10 @@ mod tests {
 
         let stage = crate::tests::stage("anon.usda")?;
         Scope::define(&stage, "/Sphere")?;
-        stage.override_prim("/Sphere/Prototypes")?;
         let mesh = grid(&stage, "/Sphere/Prototypes/pSphere1", 2)?;
+        // Defining the mesh defined its ancestors; the prototypes prim is
+        // the `over` a point instancer's fixture authors.
+        stage.prim("/Sphere/Prototypes")?.set_specifier(sdf::Specifier::Over)?;
         assert!(!mesh.prim().is_defined()?);
 
         family(
