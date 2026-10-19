@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use std::{cmp, convert::Infallible, fmt, str::FromStr};
 
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxHasher};
 
 use crate::tf;
 
@@ -1264,6 +1264,11 @@ fn rsplit_outside_targets(text: &str) -> Option<(&str, &str)> {
 /// opposed to one embedded in a dotted variant name or a bracketed target
 /// path.
 fn find_component_dot(segment: &str) -> Option<usize> {
+    let first = segment.find('.')?;
+    let prefix = &segment[..first];
+    if !prefix.contains('{') && !prefix.contains('[') {
+        return Some(first);
+    }
     let mut depth = 0usize;
     for (i, byte) in segment.bytes().enumerate() {
         match byte {
@@ -1463,7 +1468,7 @@ impl TryFrom<&String> for Path {
 
 impl Text {
     fn new(text: String) -> Self {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
         Self {
             hash: hasher.finish(),
@@ -2338,6 +2343,21 @@ mod tests {
         assert_eq!(p.prim_path().as_str(), "/A{v=1.5}");
         assert_eq!(p.parent().unwrap().as_str(), "/A{v=1.5}");
         assert_eq!(Path::new("Foo{v=1.5}.attr").unwrap().prim_path().as_str(), "Foo{v=1.5}");
+    }
+
+    #[test]
+    fn component_dot_boundaries() {
+        for (segment, dot) in [
+            ("Mesh", None),
+            ("Mesh.points", Some(4)),
+            ("Mësh.points", Some(5)),
+            ("Mesh{lod=1.5}", None),
+            ("Mesh{lod=1.5}.points", Some(13)),
+            ("Mesh[/Target.attr].points", Some(18)),
+            ("Mesh{lod=1.5}Child[/Target.attr].points", Some(32)),
+        ] {
+            assert_eq!(find_component_dot(segment), dot, "{segment}");
+        }
     }
 
     #[test]

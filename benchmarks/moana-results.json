@@ -1,0 +1,232 @@
+{
+  "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+  "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+  "cpu_count": 72,
+  "binaries": {
+    "before": "/tmp/openusd-bench-before",
+    "rust": "/tmp/openusd-bench-final",
+    "cpp": "/tmp/openusd-reference/open_bench"
+  },
+  "binary_sha256": {
+    "before": "65c18a2fd4021abdb1dd1862560dd2ec2559c74b176a86090d2cb514eb3009d3",
+    "rust": "c4b5bd1fa1df9c199d3226af17c62c0748acebc0778d3416dfefac1f8a07e238",
+    "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+  },
+  "options": [
+    "--proxies",
+    "--authored",
+    "--no-heap"
+  ],
+  "warmups": 1,
+  "results": {
+    "before": [
+      {
+        "phases": {
+          "open": 0.002,
+          "metadata": 25.838,
+          "arrays": 27.778
+        },
+        "total": 53.617999999999995,
+        "process_seconds": 60.026336746002926,
+        "peak_rss_mib": 6684.8,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154
+        }
+      },
+      {
+        "phases": {
+          "open": 0.002,
+          "metadata": 28.272,
+          "arrays": 28.319
+        },
+        "total": 56.592999999999996,
+        "process_seconds": 63.39638211900092,
+        "peak_rss_mib": 6685.0,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154
+        }
+      },
+      {
+        "phases": {
+          "open": 0.002,
+          "metadata": 26.762,
+          "arrays": 26.672
+        },
+        "total": 53.436,
+        "process_seconds": 60.02196483100124,
+        "peak_rss_mib": 6685.1,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154
+        }
+      }
+    ],
+    "rust": [
+      {
+        "phases": {
+          "open": 0.002,
+          "metadata": 26.309,
+          "arrays": 24.299
+        },
+        "total": 50.61,
+        "process_seconds": 57.64159177300098,
+        "peak_rss_mib": 6685.0,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154,
+          "elements": 627170615
+        }
+      },
+      {
+        "phases": {
+          "open": 0.002,
+          "metadata": 25.059,
+          "arrays": 23.66
+        },
+        "total": 48.721000000000004,
+        "process_seconds": 55.54985072599811,
+        "peak_rss_mib": 6685.0,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154,
+          "elements": 627170615
+        }
+      },
+      {
+        "phases": {
+          "open": 0.002,
+          "metadata": 24.515,
+          "arrays": 23.241
+        },
+        "total": 47.757999999999996,
+        "process_seconds": 54.702705052000965,
+        "peak_rss_mib": 6685.2,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154,
+          "elements": 627170615
+        }
+      }
+    ],
+    "cpp": [
+      {
+        "phases": {
+          "open": 4.293924,
+          "metadata": 1.183708,
+          "arrays": 11.891352
+        },
+        "total": 17.368983999999998,
+        "process_seconds": 17.876850536002166,
+        "peak_rss_mib": 1776.7890625,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154,
+          "elements": 627170615
+        }
+      },
+      {
+        "phases": {
+          "open": 5.134298,
+          "metadata": 1.326881,
+          "arrays": 11.689404
+        },
+        "total": 18.150583,
+        "process_seconds": 18.535488386001816,
+        "peak_rss_mib": 1800.94921875,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154,
+          "elements": 627170615
+        }
+      },
+      {
+        "phases": {
+          "open": 4.577219,
+          "metadata": 1.164305,
+          "arrays": 10.290155
+        },
+        "total": 16.031679,
+        "process_seconds": 16.456464804999996,
+        "peak_rss_mib": 1800.7421875,
+        "counts": {
+          "prims": 416549,
+          "arrays": 1425154,
+          "elements": 627170615
+        }
+      }
+    ]
+  },
+  "status_records_matched": 416549,
+  "date": "2026-10-19",
+  "baseline_commit": "7ab085dc76abcbcdb66c49d8c9823d02e92d014e",
+  "reference_header_commit": "70c45e83b08a7b45588cd6cdbd2ae67f5147befb",
+  "versions": {
+    "rustc": "1.96.1 (31fca3adb 2026-06-26)",
+    "cpp": "OpenUSD 0.26.8 (usd-core 26.8 wheel)",
+    "benchmark_compiler": "GCC 11.5.0, -O3 -std=c++17",
+    "valgrind": "3.26.0"
+  },
+  "cpu": "Intel Xeon E5-2699 v4 @ 2.20GHz; 72 virtual CPUs",
+  "measurements": "Fresh processes, sequential runs, warm filesystem cache; timed repetitions had no concurrent build or profiler. C++ uses default workers.",
+  "instruction_profile": {
+    "asset": "usd/elements/isBayCedarA1/isBayCedarA1_bonsaiA_model.usd",
+    "options": [
+      "--proxies",
+      "--no-heap"
+    ],
+    "before": 4834117710,
+    "rust": 3739037694,
+    "reduction_percent": 22.653151654430857
+  },
+  "validation": {
+    "workspace_tests_passed": 3972,
+    "workspace_tests_ignored": 1,
+    "clippy": "passed: workspace, all targets, all features, warnings denied",
+    "documentation": "passed: workspace, all features",
+    "formatting": "passed"
+  },
+  "secondary_checks": {
+    "alab_book": {
+      "root": "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda",
+      "counts": {
+        "prims": 8,
+        "arrays": 50,
+        "elements": 16530
+      },
+      "status_records_matched": 8
+    },
+    "nested_instancing": {
+      "root": "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda",
+      "counts": {
+        "prims": 9,
+        "arrays": 0,
+        "elements": 0
+      },
+      "status_records_matched": 9
+    }
+  },
+  "commands": {
+    "before": [
+      "/tmp/openusd-bench-before",
+      "--proxies",
+      "--no-heap",
+      "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+    ],
+    "rust": [
+      "/tmp/openusd-bench-final",
+      "--proxies",
+      "--no-heap",
+      "--authored",
+      "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+    ],
+    "cpp": [
+      "/tmp/openusd-reference/open_bench",
+      "--proxies",
+      "--no-heap",
+      "--authored",
+      "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+    ]
+  }
+}
