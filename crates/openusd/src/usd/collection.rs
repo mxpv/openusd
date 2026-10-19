@@ -358,13 +358,11 @@ fn compute_included_by_expression(
     // unchanged, and otherwise the extra prims feed the searcher without
     // becoming candidates.
     //
-    // TODO: Stage::traverse can neither skip a declined prim's subtree (C++
-    // UsdPrimRange prunes non-matching prims wholesale) nor let the visitor
-    // prune a subtree it has answered (C++ UsdPrimRange::PruneChildren).
-    // Generalizing traverse that way would collapse the projected walk and
-    // the per-prim `prim_matches` re-test into the C++ loop shape and let
-    // constant-answered subtrees go unvisited; today the searcher's memo
-    // answers their visits in constant time instead.
+    // TODO: walk a `PrimRange` here, pruning the subtree under a declined
+    // prim and under one the searcher has answered for good, which collapses
+    // the projected walk and the per-prim `prim_matches` re-test into the
+    // C++ `UsdPrimRange` loop. Today the searcher's memo answers the extra
+    // visits in constant time.
     let walk = predicate.inherited_projection();
     let clean = walk == predicate;
     let mut searcher = evaluator.searcher();

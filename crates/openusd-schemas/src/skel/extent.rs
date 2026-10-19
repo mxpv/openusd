@@ -107,13 +107,10 @@ fn root(
 /// predicate lets through, instance proxies included, in depth-first order.
 fn skeletons_beneath(prim: &Prim) -> Result<Vec<Skeleton>, SchemaError> {
     let mut skeletons = Vec::new();
-    let mut stack = vec![prim.clone()];
-    while let Some(prim) = stack.pop() {
-        let children = prim.filtered_children(PrimPredicate::DEFAULT_PROXIES)?;
-        if let Some(skeleton) = Skeleton::from_prim(prim)? {
+    for prim in prim.filtered_subtree(PrimPredicate::DEFAULT_PROXIES)? {
+        if let Some(skeleton) = Skeleton::from_prim(prim?)? {
             skeletons.push(skeleton);
         }
-        stack.extend(children.into_iter().rev());
     }
     Ok(skeletons)
 }

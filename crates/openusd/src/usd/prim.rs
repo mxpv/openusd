@@ -1024,6 +1024,8 @@ impl Prim {
     /// A prim that does not match is left out with everything beneath it.
     /// Nothing beneath an instance is listed unless `predicate` traverses
     /// instance proxies, or this prim is itself an instance proxy.
+    /// [`filtered_subtree`](Self::filtered_subtree) is the walk that starts
+    /// at this prim.
     ///
     /// # Example
     ///
@@ -1044,10 +1046,27 @@ impl Prim {
     /// assert_eq!(paths, ["/World/Set", "/World/Set/Chair", "/World/Cast"]);
     /// # Ok::<(), openusd::Error>(())
     /// ```
-    pub fn filtered_descendants(&self, predicate: PrimPredicate) -> Result<FilteredDescendants> {
+    pub fn filtered_descendants(&self, predicate: PrimPredicate) -> Result<PrimRange> {
         let mut stack = self.stage.filtered_children(&self.path, predicate, None)?;
         stack.reverse();
-        Ok(FilteredDescendants { predicate, stack })
+        Ok(PrimRange {
+            predicate,
+            stack,
+            pending: None,
+        })
+    }
+
+    /// This prim, where it matches `predicate`, and then the prims beneath
+    /// it as [`filtered_descendants`](Self::filtered_descendants) lists them
+    /// (C++ `UsdPrimRange(start, predicate)`). The walk is empty where this
+    /// prim does not match.
+    pub fn filtered_subtree(&self, predicate: PrimPredicate) -> Result<PrimRange> {
+        let root = self.stage.matching_status(&self.path, predicate)?;
+        Ok(PrimRange {
+            predicate,
+            stack: root.map(|composed| (self.clone(), composed)).into_iter().collect(),
+            pending: None,
+        })
     }
 
     /// [`filtered_children`](Self::filtered_children) for a walk that goes
@@ -1531,48 +1550,88 @@ impl VariantSets {
     }
 }
 
-/// The prims beneath a prim that match a predicate, each before the prims
-/// beneath it: what [`Prim::filtered_descendants`] walks (C++
-/// `UsdPrimSubtreeRange`).
+/// The prims a walk yields, each before the prims beneath it (C++
+/// `UsdPrimRange`): those beneath a prim, from
+/// [`Prim::filtered_descendants`], or a prim and those beneath it, from
+/// [`Prim::filtered_subtree`].
 ///
-/// A prim's children are listed when the walk comes to it, so a walk that
-/// stops early lists nothing beneath where it stopped. A listing that fails
-/// is the walk's last item.
-pub struct FilteredDescendants {
+/// A prim's children are listed when the walk steps past it. A walk that
+/// stops at a prim lists nothing beneath it, and
+/// [`prune_children`](Self::prune_children) before the step leaves them
+/// out. A listing that fails is the walk's last item.
+pub struct PrimRange {
     predicate: PrimPredicate,
     /// The prims still to walk, the next one last, each with the status it
     /// composed when it was listed.
     stack: Vec<(Prim, ComposedStatus)>,
+    /// The prim last yielded, whose children the next step lists, until
+    /// pruned.
+    pending: Option<(Prim, ComposedStatus)>,
 }
 
-impl Iterator for FilteredDescendants {
+impl PrimRange {
+    /// Leave out the prims beneath the prim just yielded (C++
+    /// `UsdPrimRange::iterator::PruneChildren`). Before the first step, or
+    /// again after pruning, there is nothing to leave out.
+    ///
+    /// ```
+    /// use openusd::usd::{self, PrimPredicate};
+    ///
+    /// let stage = usd::Stage::builder().in_memory("scene.usda")?;
+    /// stage.define_prim("/World")?;
+    /// stage.define_prim("/World/Set")?;
+    /// stage.define_prim("/World/Set/Chair")?;
+    /// stage.define_prim("/World/Cast")?;
+    ///
+    /// let mut walk = stage.prim("/World")?.filtered_descendants(PrimPredicate::DEFAULT)?;
+    /// let mut paths = Vec::new();
+    /// while let Some(prim) = walk.next() {
+    ///     let prim = prim?;
+    ///     if prim.path().as_str() == "/World/Set" {
+    ///         walk.prune_children();
+    ///     }
+    ///     paths.push(prim.path().to_string());
+    /// }
+    /// assert_eq!(paths, ["/World/Set", "/World/Cast"]);
+    /// # Ok::<(), openusd::Error>(())
+    /// ```
+    pub fn prune_children(&mut self) {
+        self.pending = None;
+    }
+}
+
+impl Iterator for PrimRange {
     type Item = Result<Prim>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (prim, composed) = self.stack.pop()?;
-        match prim.stage.filtered_children(&prim.path, self.predicate, Some(composed)) {
-            Ok(children) => {
-                self.stack.extend(children.into_iter().rev());
-                Some(Ok(prim))
-            }
-            Err(error) => {
-                self.stack.clear();
-                Some(Err(error))
+        if let Some((prim, composed)) = self.pending.take() {
+            match prim.stage.filtered_children(&prim.path, self.predicate, Some(composed)) {
+                Ok(children) => self.stack.extend(children.into_iter().rev()),
+                Err(error) => {
+                    self.stack.clear();
+                    return Some(Err(error));
+                }
             }
         }
+        let (prim, composed) = self.stack.pop()?;
+        self.pending = Some((prim.clone(), composed));
+        Some(Ok(prim))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::fs;
     use std::sync::Arc;
 
     use crate::Result;
 
     use crate::sdf;
     use crate::tf::Token;
-    use crate::usd::{ApplyApiError, SchemaRegistry, Stage, StageAuthoringError, VersionFilter};
+    use crate::usd::{
+        ApplyApiError, PrimPredicate, PrimRange, PrimStatus, SchemaRegistry, Stage, StageAuthoringError, VersionFilter,
+    };
 
     fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -1584,6 +1643,105 @@ mod tests {
         Stage::builder()
             .schema_registry(SchemaRegistry::test_registry())
             .in_memory("anon.usda")
+    }
+
+    /// Pruning leaves out what is beneath the prim just yielded and keeps
+    /// its siblings; before the first step, or twice over, it is nothing.
+    #[test]
+    fn prune_descendants() -> Result<()> {
+        let stage = stage()?;
+        for path in ["/A", "/A/Pruned", "/A/Pruned/Under", "/A/Kept", "/A/Kept/Leaf"] {
+            stage.define_prim(path)?;
+        }
+        let mut walk = stage.prim("/A")?.filtered_descendants(PrimPredicate::DEFAULT)?;
+        walk.prune_children();
+        let mut paths = Vec::new();
+        while let Some(prim) = walk.next() {
+            let prim = prim?;
+            if prim.path().as_str() == "/A/Pruned" {
+                walk.prune_children();
+                walk.prune_children();
+            }
+            paths.push(prim.path().to_string());
+        }
+        assert_eq!(paths, ["/A/Pruned", "/A/Kept", "/A/Kept/Leaf"]);
+        Ok(())
+    }
+
+    /// A pruned prim's children are never listed: a child whose reference
+    /// would load a second layer leaves that layer unloaded until something
+    /// lists it.
+    #[test]
+    fn prune_skips_listing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("ref.usda"), "#usda 1.0\ndef \"Ref\" {}\n")?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"A\" {\n    def \"Pruned\" {\n        def \"Child\" (references = @./ref.usda@</Ref>) {}\n    }\n    def \"Kept\" {}\n}\n",
+        )?;
+        let root = dir.path().join("root.usda");
+        let stage = Stage::open(root.to_str().expect("utf-8 path"))?;
+
+        let mut walk = stage.prim("/A")?.filtered_descendants(PrimPredicate::DEFAULT)?;
+        let mut paths = Vec::new();
+        while let Some(prim) = walk.next() {
+            let prim = prim?;
+            if prim.path().as_str() == "/A/Pruned" {
+                walk.prune_children();
+            }
+            paths.push(prim.path().to_string());
+        }
+        assert_eq!(paths, ["/A/Pruned", "/A/Kept"]);
+        assert!(
+            stage.layers().find_by_leaf("ref.usda").is_none(),
+            "the pruned prim's children were never listed"
+        );
+        stage.prim("/A/Pruned")?.filtered_children(PrimPredicate::DEFAULT)?;
+        assert!(
+            stage.layers().find_by_leaf("ref.usda").is_some(),
+            "premise: listing them loads the child's reference"
+        );
+        Ok(())
+    }
+
+    /// A subtree walk yields the prim first and prunes beneath it like any
+    /// other, and is empty where the prim does not match the predicate.
+    #[test]
+    fn filtered_subtree() -> Result<()> {
+        let stage = stage()?;
+        for path in ["/A", "/A/B", "/A/B/C", "/A/D"] {
+            stage.define_prim(path)?;
+        }
+        let a = stage.prim("/A")?;
+        let paths =
+            |walk: PrimRange| -> Result<Vec<String>> { walk.map(|prim| Ok(prim?.path().to_string())).collect() };
+        assert_eq!(
+            paths(a.filtered_subtree(PrimPredicate::DEFAULT)?)?,
+            ["/A", "/A/B", "/A/B/C", "/A/D"]
+        );
+
+        let mut walk = a.filtered_subtree(PrimPredicate::DEFAULT)?;
+        assert_eq!(walk.next().expect("the prim itself")?, a);
+        walk.prune_children();
+        assert!(walk.next().is_none());
+
+        a.clone().set_active(false)?;
+        assert_eq!(
+            paths(a.filtered_subtree(PrimPredicate::DEFAULT)?)?,
+            Vec::<String>::new()
+        );
+        // An inactive prim matches every prim, and has nothing beneath it.
+        assert_eq!(paths(a.filtered_subtree(PrimPredicate::ALL)?)?, ["/A"]);
+
+        // A prim nothing composes heads no walk, and the pseudo-root heads
+        // its own as the model it is.
+        assert_eq!(
+            paths(stage.prim("/Nope")?.filtered_subtree(PrimPredicate::ALL)?)?,
+            Vec::<String>::new()
+        );
+        let models = PrimPredicate::new(PrimStatus::MODEL, PrimStatus::empty());
+        assert_eq!(paths(stage.prim("/")?.filtered_subtree(models)?)?, ["/"]);
+        Ok(())
     }
 
     /// A prim is its stage instance and path: the same path on another stage

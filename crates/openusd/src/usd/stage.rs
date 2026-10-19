@@ -3487,6 +3487,23 @@ impl Stage {
         Ok(children)
     }
 
+    /// The status of `prim` under `predicate`, for a walk that starts at the
+    /// prim and lists it first (C++ `UsdPrimRange(start, predicate)`), or
+    /// `None` where the prim does not match or nothing composes it.
+    pub(super) fn matching_status(&self, prim: &sdf::Path, predicate: PrimPredicate) -> Result<Option<ComposedStatus>> {
+        if !self.has_spec(prim)? {
+            return Ok(None);
+        }
+        let needed = predicate.consulted_bits().union(PrimStatus::INHERITED);
+        let status = self.prim_status_masked(prim, needed)?;
+        Ok(predicate.matches(status).then(|| ComposedStatus {
+            prim: super::Prim::new(self, prim.clone()),
+            status,
+            instance_known: needed.contains(PrimStatus::INSTANCE),
+            epoch: self.population_epoch(),
+        }))
+    }
+
     /// `prim`'s inherited bits below a parent whose are `parent`, from the
     /// prim's own opinions as C++ `Usd_PrimData::_ComposeAndCacheFlags`
     /// combines them: active and defined require the parent's, abstract is

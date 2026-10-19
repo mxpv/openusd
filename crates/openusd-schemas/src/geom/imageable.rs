@@ -224,7 +224,8 @@ pub trait ImageableExt: ImageableSchema {
     /// was hiding stay hidden. A sibling that is not imageable has the
     /// imageable prims nearest below it made `invisible` in its place, and
     /// the siblings below an ancestor that is not imageable are hidden like
-    /// any others; C++ leaves both visible. All of it is one edit.
+    /// any others; C++ leaves both visible. An instance that is not imageable
+    /// is left as it is: its proxies take no opinion. All of it is one edit.
     fn make_visible(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<()> {
         let time = time.into();
         let stage = self.stage();
@@ -248,9 +249,18 @@ pub trait ImageableExt: ImageableSchema {
             if !has_invisible_ancestor {
                 continue;
             }
-            for sibling in parent.children()? {
-                if sibling.path() != &pair[1] {
-                    hide_subtree(sibling, &mut writes)?;
+            // Every child, stopping at an instance (C++ `GetAllChildren`): hide
+            // each imageable sibling, or the imageable prims nearest below one
+            // that is not.
+            let every_child = usd::PrimPredicate::new(usd::PrimStatus::empty(), usd::PrimStatus::empty());
+            let mut walk = parent.filtered_descendants(every_child)?;
+            while let Some(prim) = walk.next() {
+                let prim = prim?;
+                if prim.path() == &pair[1] {
+                    walk.prune_children();
+                } else if Imageable::from_prim(prim.clone())?.is_some() {
+                    writes.push((prim.path().clone(), Visibility::Invisible));
+                    walk.prune_children();
                 }
             }
         }
@@ -451,19 +461,6 @@ fn fallback_purpose(ip: Option<&Imageable>) -> Result<PurposeInfo> {
         purpose: fallback.and_then(Purpose::from_token).unwrap_or_default(),
         is_inheritable: false,
     })
-}
-
-/// Queue an `invisible` for `prim`, or for the imageable prims nearest below
-/// it where it is not imageable itself.
-fn hide_subtree(prim: usd::Prim, writes: &mut Vec<(sdf::Path, Visibility)>) -> Result<()> {
-    if Imageable::from_prim(prim.clone())?.is_some() {
-        writes.push((prim.path().clone(), Visibility::Invisible));
-        return Ok(());
-    }
-    for child in prim.children()? {
-        hide_subtree(child, writes)?;
-    }
-    Ok(())
 }
 
 /// `true` when `ip`'s own `visibility` reads `invisible` at `time`.
@@ -870,6 +867,37 @@ mod tests {
         assert_eq!(visibility(&stage, "/foo/bar1/thing2")?, Visibility::Invisible);
         assert_eq!(visibility(&stage, "/foo/bar2")?, Visibility::Invisible);
         assert_eq!(visibility(&stage, "/foo/bar1")?, Visibility::Inherited);
+        Ok(())
+    }
+
+    /// A sibling that is an instance and not imageable is left as it is:
+    /// the prims beneath it are instance proxies, which take no opinion.
+    #[test]
+    fn make_visible_past_instance() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let foo = Scope::define(&stage, "/foo")?;
+        Scope::define(&stage, "/foo/thing")?;
+        Scope::define(&stage, "/_prototype/mesh")?;
+        stage
+            .define_prim("/foo/props")?
+            .set_metadata(
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    prim_path: sdf::path("/_prototype")?,
+                    ..Default::default()
+                }])),
+            )?
+            .set_instanceable(true)?;
+        foo.create_visibility_attr()?.set(Visibility::Invisible)?;
+
+        Imageable::get(&stage, "/foo/thing")?
+            .expect("Imageable")
+            .make_visible(None)?;
+        assert_eq!(visibility(&stage, "/foo/thing")?, Visibility::Inherited);
+        let proxy = Imageable::get(&stage, "/foo/props/mesh")?.expect("Imageable");
+        assert!(proxy.prim().is_instance_proxy()?);
+        assert!(!proxy.visibility_attr().has_authored_value()?);
+        assert_eq!(visibility(&stage, "/foo/props/mesh")?, Visibility::Inherited);
         Ok(())
     }
 
