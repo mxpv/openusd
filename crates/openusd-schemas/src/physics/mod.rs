@@ -26,7 +26,9 @@
 //! Authored values are in the scene's units (linear in scene units, mass in
 //! scene mass units, angles in degrees, quaternions in `(w, x, y, z)` order).
 //! The mass unit is the stage's `kilogramsPerUnit`, which [`StageMetadata`]
-//! reads and authors; [`mass_units`] names the common ones.
+//! reads and authors; [`mass_units`] names the common ones. A body's mass,
+//! inertia tensor and center of mass travel together as a
+//! [`MassProperties`].
 //!
 //! # Example
 //!
@@ -58,9 +60,11 @@
 openusd::include_schema!("usdPhysics");
 
 mod collision_group;
+mod mass_properties;
 pub mod mass_units;
 
 pub use collision_group::{CollisionGroupTable, collision_group_table};
+pub use mass_properties::MassProperties;
 
 use tokens::*;
 

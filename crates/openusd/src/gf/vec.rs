@@ -14,14 +14,30 @@ use std::ops::{Index, IndexMut};
 use super::MIN_VECTOR_LENGTH;
 
 use bytemuck::{Pod, Zeroable};
-use derive_more::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign, Sum};
+use derive_more::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign, Sum};
 
 use super::f16;
 
 /// 2-component single-precision float vector (`GfVec2f`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f32; 2]", into = "[f32; 2]"))]
@@ -76,7 +92,23 @@ impl Vec2f {
 /// 2-component double-precision float vector (`GfVec2d`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f64; 2]", into = "[f64; 2]"))]
@@ -149,7 +181,23 @@ impl Vec2d {
 /// 2-component half-precision float vector (`GfVec2h`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f16; 2]", into = "[f16; 2]"))]
@@ -207,7 +255,23 @@ impl Vec2h {
 /// 2-component integer vector (`GfVec2i`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[i32; 2]", into = "[i32; 2]"))]
@@ -260,7 +324,23 @@ impl IndexMut<usize> for Vec2i {
 /// needed by LBS skinning and blend-shape interpolation.
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f32; 3]", into = "[f32; 3]"))]
@@ -370,7 +450,23 @@ impl Vec3f {
 /// 3-component double-precision float vector (`GfVec3d`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f64; 3]", into = "[f64; 3]"))]
@@ -546,7 +642,23 @@ impl Vec3d {
 /// 3-component half-precision float vector (`GfVec3h`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f16; 3]", into = "[f16; 3]"))]
@@ -608,7 +720,23 @@ impl Vec3h {
 /// 3-component integer vector (`GfVec3i`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[i32; 3]", into = "[i32; 3]"))]
@@ -660,7 +788,23 @@ impl IndexMut<usize> for Vec3i {
 /// 4-component single-precision float vector (`GfVec4f`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f32; 4]", into = "[f32; 4]"))]
@@ -721,7 +865,23 @@ impl Vec4f {
 /// 4-component double-precision float vector (`GfVec4d`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f64; 4]", into = "[f64; 4]"))]
@@ -782,7 +942,23 @@ impl Vec4d {
 /// 4-component half-precision float vector (`GfVec4h`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[f16; 4]", into = "[f16; 4]"))]
@@ -848,7 +1024,23 @@ impl Vec4h {
 /// 4-component integer vector (`GfVec4i`).
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Add, AddAssign, Sub, SubAssign, Neg, Mul, MulAssign, Sum, Zeroable, Pod,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Zeroable,
+    Pod,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    Neg,
+    Mul,
+    MulAssign,
+    Div,
+    DivAssign,
+    Sum,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(from = "[i32; 4]", into = "[i32; 4]"))]

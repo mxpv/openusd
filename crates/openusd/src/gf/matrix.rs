@@ -2,7 +2,7 @@
 //! `GfMatrix4d`).
 
 use std::array;
-use std::ops::{Index, IndexMut, Mul};
+use std::ops::{Add, AddAssign, Index, IndexMut, Mul};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -97,6 +97,38 @@ pub struct Mat3d(pub [f64; 9]);
 
 impl Mat3d {
     pub const IDENTITY: Mat3d = Mat3d([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    /// The matrix with every entry zero (C++ `SetZero`).
+    pub const ZERO: Mat3d = Mat3d([0.0; 9]);
+
+    /// The rotation matrix of the `(w, x, y, z)` quaternion `q`, taken to be
+    /// unit length (C++ `GfMatrix3d(const GfQuatd&)`): the row vector `v`
+    /// through it, by [`transform`](Self::transform), turns as `q` turns `v`.
+    /// `q` is any type that converts to `[f64; 4]`: a `Quatd`, a `Quatf` or
+    /// the array itself.
+    pub fn from_quat(q: impl Into<[f64; 4]>) -> Self {
+        let [w, x, y, z] = q.into();
+        let (xx, yy, zz) = (x * x, y * y, z * z);
+        let (xy, xz, yz) = (x * y, x * z, y * z);
+        let (wx, wy, wz) = (w * x, w * y, w * z);
+        Mat3d([
+            1.0 - 2.0 * (yy + zz),
+            2.0 * (xy + wz),
+            2.0 * (xz - wy),
+            2.0 * (xy - wz),
+            1.0 - 2.0 * (xx + zz),
+            2.0 * (yz + wx),
+            2.0 * (xz + wy),
+            2.0 * (yz - wx),
+            1.0 - 2.0 * (xx + yy),
+        ])
+    }
+
+    /// The matrix with `d` down its diagonal and zero elsewhere (C++
+    /// `GfMatrix3d(const GfVec3d&)`).
+    pub fn diagonal(d: impl Into<[f64; 3]>) -> Self {
+        let [x, y, z] = d.into();
+        Mat3d([x, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.0, z])
+    }
 
     /// Component-wise linear interpolation.
     pub fn lerp(self, other: Self, t: f64) -> Self {
@@ -141,10 +173,8 @@ impl Mat3d {
     /// The inverse, or `f32::MAX` times the identity for a matrix whose
     /// determinant is zero (C++ `GetInverse` at its default `eps` of zero).
     pub fn inverse_or_max(self) -> Mat3d {
-        self.inverse_above(0.0).unwrap_or_else(|| {
-            let max = f64::from(f32::MAX);
-            Mat3d([max, 0.0, 0.0, 0.0, max, 0.0, 0.0, 0.0, max])
-        })
+        self.inverse_above(0.0)
+            .unwrap_or_else(|| Mat3d::diagonal([f64::from(f32::MAX); 3]))
     }
 
     /// The transpose (C++ `GetTranspose`).
@@ -203,6 +233,32 @@ impl Mul for Mat3d {
             let (r, c) = (i / 3, i % 3);
             (0..3).map(|k| self[(r, k)] * rhs[(k, c)]).sum()
         }))
+    }
+}
+
+/// Element-wise sum (C++ `operator+`).
+impl Add for Mat3d {
+    type Output = Mat3d;
+    fn add(self, rhs: Mat3d) -> Mat3d {
+        let mut out = self;
+        out += rhs;
+        out
+    }
+}
+
+impl AddAssign for Mat3d {
+    fn add_assign(&mut self, rhs: Mat3d) {
+        for (entry, other) in self.0.iter_mut().zip(rhs.0) {
+            *entry += other;
+        }
+    }
+}
+
+/// Each entry times `s` (C++ `operator*(double)`).
+impl Mul<f64> for Mat3d {
+    type Output = Mat3d;
+    fn mul(self, s: f64) -> Mat3d {
+        Mat3d(self.0.map(|entry| entry * s))
     }
 }
 
@@ -414,38 +470,11 @@ impl Mat4d {
             * Self::translation([t.x as f64, t.y as f64, t.z as f64])
     }
 
-    /// Build a rotation matrix from a `(w, x, y, z)` quaternion.
-    /// `q` is accepted as any type that converts to `[f64; 4]`; callers
-    /// may pass `Quatf` or `[f64; 4]` directly.
+    /// The rotation matrix of the `(w, x, y, z)` quaternion `q` (C++
+    /// `GfMatrix4d::SetRotate(const GfQuatd&)`): [`Mat3d::from_quat`] as the
+    /// upper-left of the identity.
     pub fn from_quat(q: impl Into<[f64; 4]>) -> Self {
-        let [w, x, y, z] = q.into();
-        let xx = x * x;
-        let yy = y * y;
-        let zz = z * z;
-        let xy = x * y;
-        let xz = x * z;
-        let yz = y * z;
-        let wx = w * x;
-        let wy = w * y;
-        let wz = w * z;
-        Mat4d([
-            1.0 - 2.0 * (yy + zz),
-            2.0 * (xy + wz),
-            2.0 * (xz - wy),
-            0.0,
-            2.0 * (xy - wz),
-            1.0 - 2.0 * (xx + zz),
-            2.0 * (yz + wx),
-            0.0,
-            2.0 * (xz + wy),
-            2.0 * (yz - wx),
-            1.0 - 2.0 * (xx + yy),
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        ])
+        Mat3d::from_quat(q).into()
     }
 
     /// The inverse, or `None` for a matrix whose determinant is no greater
@@ -898,9 +927,8 @@ impl Mul<Mat4d> for Mat4d {
     }
 }
 
-/// Element-wise addition (used for weighted matrix accumulation in rigid
-/// skinning).
-impl std::ops::Add<Mat4d> for Mat4d {
+/// Element-wise sum (C++ `operator+`).
+impl Add for Mat4d {
     type Output = Mat4d;
     fn add(self, rhs: Mat4d) -> Mat4d {
         let mut out = self;
@@ -909,23 +937,19 @@ impl std::ops::Add<Mat4d> for Mat4d {
     }
 }
 
-impl std::ops::AddAssign for Mat4d {
+impl AddAssign for Mat4d {
     fn add_assign(&mut self, rhs: Mat4d) {
-        for i in 0..16 {
-            self.0[i] += rhs.0[i];
+        for (entry, other) in self.0.iter_mut().zip(rhs.0) {
+            *entry += other;
         }
     }
 }
 
-/// Scalar scale (used for weighted matrix accumulation in rigid skinning).
+/// Each entry times `s` (C++ `operator*(double)`).
 impl Mul<f64> for Mat4d {
     type Output = Mat4d;
     fn mul(self, s: f64) -> Mat4d {
-        let mut out = self.0;
-        for v in &mut out {
-            *v *= s;
-        }
-        Mat4d(out)
+        Mat4d(self.0.map(|entry| entry * s))
     }
 }
 
@@ -998,6 +1022,7 @@ fn rotation_quat(m: impl Fn(usize, usize) -> f64, w: f64) -> Quatd {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::gf;
 
     fn translation(x: f64, y: f64, z: f64) -> Mat4d {
         Mat4d::translation([x, y, z])
@@ -1025,6 +1050,27 @@ pub(crate) mod tests {
         assert!(rotation.is_close(Mat4d::rotation_z(0.7).extract_rotation_matrix(), 1e-9));
         let quat = rotation.extract_rotation_quat();
         assert!((quat.transform(v) - rotation.transform(v)).length() < 1e-9);
+    }
+
+    /// A quaternion's matrix turns a row vector as the quaternion does and
+    /// is the upper-left of the 4×4 built from it; a diagonal matrix scales
+    /// by its entries; sums and scalar products are element-wise.
+    #[test]
+    fn mat3d_quat_diagonal_sums() {
+        let q = gf::quatd(0.9, 0.1, 0.2, 0.3).normalize();
+        let v = gf::vec3d(0.5, -1.0, 2.0);
+        let m = Mat3d::from_quat(q);
+        assert!((m.transform(v) - q.transform(v)).length() < 1e-12);
+        assert_eq!(Mat4d::from_quat(q).extract_rotation_matrix(), m);
+
+        let d = Mat3d::diagonal([1.0, 2.0, 3.0]);
+        assert_eq!(d.transform(v), gf::vec3d(0.5, -2.0, 6.0));
+        assert_eq!(Mat3d::diagonal([1.0; 3]), Mat3d::IDENTITY);
+        let mut sum = d + Mat3d::IDENTITY;
+        assert_eq!(sum, Mat3d::diagonal([2.0, 3.0, 4.0]));
+        sum += d;
+        assert_eq!(sum, Mat3d::diagonal([3.0, 5.0, 7.0]));
+        assert_eq!(d * 2.0, Mat3d::diagonal([2.0, 4.0, 6.0]));
     }
 
     #[test]
