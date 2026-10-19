@@ -227,6 +227,13 @@ impl From<Quatd> for [f64; 4] {
     }
 }
 
+impl From<Quatf> for Quatd {
+    #[inline]
+    fn from(q: Quatf) -> Self {
+        <[f64; 4]>::from(q).into()
+    }
+}
+
 /// The Hamilton product (C++ `GfQuatd::operator*`): rotating by the product
 /// rotates by `other` and then by `self`.
 impl Mul for Quatd {
@@ -368,6 +375,13 @@ mod tests {
 
     use super::*;
     use crate::gf::Mat4d;
+
+    /// A single-precision quaternion widens component by component.
+    #[test]
+    fn quatf_widens() {
+        let q = Quatd::from(Quatf::from([0.5_f32, -1.0, 2.0, 0.25]));
+        assert_eq!(<[f64; 4]>::from(q), [0.5, -1.0, 2.0, 0.25]);
+    }
 
     #[test]
     fn slerp_90deg() {

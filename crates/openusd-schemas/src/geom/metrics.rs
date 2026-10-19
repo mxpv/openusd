@@ -4,8 +4,10 @@
 //! Both are stage metadata, which [`StageMetadata`](super::StageMetadata)
 //! reads and authors as the tokens and numbers they are: `up_axis` and
 //! `set_up_axis`, `meters_per_unit` and `set_meters_per_unit` (C++
-//! `UsdGeomGetStageMetersPerUnit` and `UsdGeomSetStageMetersPerUnit`). The
-//! registered fallbacks stand behind the reads: `Y` up, and `0.01` meters, a
+//! `UsdGeomSetStageMetersPerUnit`), and [`stage_up_axis`] and
+//! [`stage_meters_per_unit`] read them with the fallbacks in hand (C++
+//! `UsdGeomGetStageUpAxis` and `UsdGeomGetStageMetersPerUnit`). The
+//! registered fallbacks stand behind every read: `Y` up, and `0.01` meters, a
 //! centimeter, to the unit. Whether a layer authors the unit (C++
 //! `UsdGeomStageHasAuthoredMetersPerUnit`) is
 //! [`usd::Stage::has_authored_stage_metadata`] of
@@ -70,6 +72,15 @@ pub fn set_stage_up_axis(stage: &usd::Stage, axis: UpAxis) -> Result<(), usd::St
     stage.set_stage_metadata(tokens::UP_AXIS, axis)
 }
 
+/// The length of one unit of `stage` in meters (C++
+/// `UsdGeomGetStageMetersPerUnit`): the `metersPerUnit` its session or root
+/// layer authors, and the fallback the schema registry holds for the field
+/// where neither does. A registry that declares no `metersPerUnit` leaves
+/// [`linear_units::CENTIMETERS`].
+pub fn stage_meters_per_unit(stage: &usd::Stage) -> Result<f64> {
+    Ok(stage.meters_per_unit()?.unwrap_or(linear_units::CENTIMETERS))
+}
+
 /// Common units of length in meters (C++ `UsdGeomLinearUnits`), as
 /// `metersPerUnit` states them.
 pub mod linear_units {
@@ -128,7 +139,7 @@ mod tests {
 
     use openusd::{sdf, usd};
 
-    use super::{StageMetadata, UpAxis, linear_units, set_stage_up_axis, stage_up_axis, tokens};
+    use super::{StageMetadata, UpAxis, linear_units, set_stage_up_axis, stage_meters_per_unit, stage_up_axis, tokens};
     use crate::SchemaError;
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
@@ -140,12 +151,16 @@ mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         assert_eq!(stage_up_axis(&stage)?, UpAxis::Y);
         assert_eq!(stage.meters_per_unit()?, Some(linear_units::CENTIMETERS));
+        assert_eq!(stage_meters_per_unit(&stage)?, linear_units::CENTIMETERS);
         assert!(!stage.has_authored_stage_metadata(tokens::METERS_PER_UNIT)?);
 
-        // A stage whose registry knows no `upAxis` still has Y up.
+        // A stage whose registry knows neither field still has Y up and a
+        // centimeter to the unit.
         let bare = usd::Stage::builder().in_memory("bare.usda")?;
         assert_eq!(bare.up_axis()?, None);
         assert_eq!(stage_up_axis(&bare)?, UpAxis::Y);
+        assert_eq!(bare.meters_per_unit()?, None);
+        assert_eq!(stage_meters_per_unit(&bare)?, linear_units::CENTIMETERS);
         Ok(())
     }
 
@@ -162,6 +177,7 @@ mod tests {
 
         stage.set_meters_per_unit(linear_units::FEET)?;
         assert_eq!(stage.meters_per_unit()?, Some(0.3048));
+        assert_eq!(stage_meters_per_unit(&stage)?, linear_units::FEET);
         Ok(())
     }
 

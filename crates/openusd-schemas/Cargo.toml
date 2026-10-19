@@ -22,8 +22,10 @@ lux = ["geom"]
 # build on the geom schema traits.
 media = ["geom"]
 # UsdPhysicsJoint and the collider prims are UsdGeom Imageable / Xformable
-# prims, so the physics views build on the geom schema traits.
-physics = ["geom"]
+# prims, so the physics views build on the geom schema traits; a rigid
+# body's mass reads the material bound for the physics purpose, which the
+# shade views resolve.
+physics = ["geom", "shade"]
 # UsdProcGenerativeProcedural is a UsdGeomBoundable-derived prim, so the proc
 # views build on the geom schema traits.
 proc = ["geom"]

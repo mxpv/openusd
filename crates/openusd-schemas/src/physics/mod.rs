@@ -4,7 +4,9 @@
 //! `UsdPhysics` family — rigid-body dynamics, collision, and joints. A joint is
 //! a `UsdGeom` [`Imageable`](crate::geom::Imageable), which is why this family
 //! enables `geom`; [`Scene`] and [`CollisionGroup`] derive `UsdTyped` directly,
-//! and the rest are API schemas applied onto existing prims.
+//! and the rest are API schemas applied onto existing prims. A body's mass
+//! reads the material bound for the `physics` purpose, which is why the
+//! family enables `shade`.
 //!
 //! ```text
 //! SchemaBase
@@ -28,7 +30,9 @@
 //! The mass unit is the stage's `kilogramsPerUnit`, which [`StageMetadata`]
 //! reads and authors; [`mass_units`] names the common ones. A body's mass,
 //! inertia tensor and center of mass travel together as a
-//! [`MassProperties`].
+//! [`MassProperties`], and [`RigidBodyAPI::mass_properties`] computes a
+//! body's from its colliders, whose shapes the caller describes through a
+//! [`MassInformation`].
 //!
 //! # Example
 //!
@@ -62,15 +66,17 @@ openusd::include_schema!("usdPhysics");
 mod collision_group;
 mod mass_properties;
 pub mod mass_units;
+mod rigid_body;
 
 pub use collision_group::{CollisionGroupTable, collision_group_table};
 pub use mass_properties::MassProperties;
+pub use rigid_body::{BodyMass, MassInformation};
 
 use tokens::*;
 
-/// The physics-specific material binding, which is `material:binding` under
-/// the `physics` purpose.
-pub const REL_MATERIAL_BINDING_PHYSICS: &str = "material:binding:physics";
+/// The material-binding purpose a collider's physics material is bound
+/// under (C++ `_physicsPurposeTokens->materialPurposePhysics`).
+pub const MATERIAL_PURPOSE: &str = "physics";
 
 // What a `PhysicsDriveAPI` instance's properties are called after the instance
 // name: a drive is `drive:<name>:targetPosition`, and the schema declares the

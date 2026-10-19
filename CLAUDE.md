@@ -112,8 +112,8 @@ source of truth for specifics.
   module of the core: domain schemas layered on `sdf` / `usd`, not part of the
   AOUSD core spec. It depends on `openusd`, so the core must never reference it.
   Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`,
-  `semantics`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively).
-  See the table in its `lib.rs`.
+  `semantics`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively,
+  and `physics` enables `shade`). See the table in its `lib.rs`.
 
 - **`openusd-build`** - A separate crate (`crates/openusd-build`): the schema
   view generator `openusd-schemas` runs as a build dependency. It loads a schema

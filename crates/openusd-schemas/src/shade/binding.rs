@@ -22,6 +22,7 @@ use openusd::sdf::{self, Path, Value};
 use openusd::usd::{CollectionAPI, MembershipQuery, Relationship, Stage};
 
 use super::BindingStrength;
+use super::Material;
 use super::MaterialBindingAPI;
 use super::tokens::{ALL_PURPOSE, BIND_MATERIAL_AS, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION};
 
@@ -110,14 +111,16 @@ impl MaterialBindingAPI {
     /// ancestor unless the ancestor binding is `strongerThanDescendants` (the
     /// topmost such ancestor then wins). At a single prim, a collection-based
     /// binding whose collection includes the prim beats a direct binding, and
-    /// collection bindings resolve in native property order.
-    pub fn bound_material(&self, purpose: &str) -> Result<Option<Path>> {
+    /// collection bindings resolve in native property order. The winning
+    /// binding's target is the material only where it is a `Material` prim;
+    /// a prim of another type binds nothing, as in C++.
+    pub fn bound_material(&self, purpose: &str) -> Result<Option<Material>> {
         let prim = self.path();
         // Cache each collection's membership query across the namespace walk.
         let mut cache: HashMap<Path, Option<MembershipQuery>> = HashMap::new();
         for pur in purpose_fallbacks(purpose) {
             if let Some(material) = bound_material_for_single_purpose(self.stage(), prim, pur, &mut cache)? {
-                return Ok(Some(material));
+                return Material::from_prim(self.stage().prim(material)?);
             }
         }
         Ok(None)
@@ -369,16 +372,25 @@ mod tests {
         Ok(())
     }
 
+    /// `Material` prims at `paths`, for bindings to target.
+    fn materials(stage: &Stage, paths: &[&str]) -> Result<()> {
+        for path in paths {
+            Material::define(stage, *path)?;
+        }
+        Ok(())
+    }
+
     fn bound(stage: &Stage, prim: &str, purpose: &str) -> Option<String> {
         MaterialBindingAPI(stage.prim(prim).unwrap())
             .bound_material(purpose)
             .unwrap()
-            .map(|p| p.as_str().to_string())
+            .map(|material| material.path().as_str().to_string())
     }
 
     #[test]
     fn closer_binding_wins() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatA", "/MatB"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind(sdf::path("/MatA")?)?;
@@ -396,9 +408,22 @@ mod tests {
         Ok(())
     }
 
+    /// A binding to a prim that is not a `Material` binds nothing, as in
+    /// C++.
+    #[test]
+    fn non_material_target() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
+        stage.define_prim("/NotAMaterial")?.set_type_name("Scope")?;
+        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?.bind(sdf::path("/NotAMaterial")?)?;
+        assert_eq!(bound(&stage, "/Mesh", ""), None);
+        Ok(())
+    }
+
     #[test]
     fn stronger_ancestor_wins() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatStrong", "/MatWeak"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         // Ancestor binding is stronger; closer binding is the default weak.
@@ -417,6 +442,7 @@ mod tests {
     #[test]
     fn restricted_purpose_preferred() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatAll", "/MatPreview"])?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
         let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?;
         binding.bind(sdf::path("/MatAll")?)?; // all-purpose
@@ -436,6 +462,7 @@ mod tests {
     #[test]
     fn restricted_ancestor_wins() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatPreview", "/MatAll"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         // Restricted "preview" binding on the ancestor; the queried prim carries
@@ -459,6 +486,7 @@ mod tests {
     /// collection binding to `/MatMetal`, plus a direct binding to `/MatDir`.
     fn collection_scene() -> Result<Stage> {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatDir", "/MatMetal"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         stage.define_prim("/Set/B")?.set_type_name("Mesh")?;
@@ -489,6 +517,7 @@ mod tests {
     #[test]
     fn collection_native_order() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatSecond", "/MatFirst"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         // Two collections that both include /Set/A.
