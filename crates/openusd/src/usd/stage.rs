@@ -1469,10 +1469,17 @@ impl Stage {
     }
 
     /// Author a `def` prim spec typed `type_name` at `path` on the edit
-    /// target's layer, in one write, and return a [`Prim`](super::Prim) handle
-    /// (C++ `UsdStage::DefinePrim(path, typeName)`). An existing spec is upgraded
-    /// to a `def` and retyped; an empty `type_name` leaves its type alone,
-    /// which is [`define_prim`](Self::define_prim).
+    /// target's layer and return a [`Prim`](super::Prim) handle (C++
+    /// `UsdStage::DefinePrim(path, typeName)`). A prim the stage holds as
+    /// defined is left as it is, unless `type_name` names a type other than
+    /// its own; any other prim gets a `def` spec on the edit target, typed
+    /// `type_name` where that is not empty, which is
+    /// [`define_prim`](Self::define_prim). An ancestor the stage does not
+    /// hold as defined gets a `def` of its own in the same write, its type
+    /// left alone: a prim is [defined](super::Prim::is_defined) only under
+    /// defined ancestors. A prim the stage does not hold at all, outside its
+    /// population or below an inactive prim, counts as undefined here, as
+    /// the invalid `UsdPrim` does in C++.
     pub fn define_typed_prim(
         &self,
         path: impl sdf::IntoPath,
@@ -1480,15 +1487,49 @@ impl Stage {
     ) -> Result<super::Prim, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
         let type_name = type_name.into();
-        self.with_target_layer_at(&path, |layer, layer_path| {
-            // The layer records the spec add and any auto-created ancestor
-            // `over`s; an idempotent call (an existing def of that type)
-            // records nothing because deriving the change skips the no-op
-            // write.
-            sdf::PrimSpec::new(layer.data_mut(), layer_path, sdf::Specifier::Def, type_name)?;
+        // The ancestors to define, root-most first, then the prim (C++
+        // `_DefinePrim`, which defines the parent before the prim). With
+        // its parent defined, a prim is defined by its own specifier.
+        let mut paths: Vec<sdf::Path> = Vec::new();
+        for ancestor in path.strict_ancestors_below_root() {
+            if !self.defining(&ancestor)? {
+                paths.push(ancestor);
+            }
+        }
+        paths.reverse();
+        let retype = !type_name.is_empty()
+            && self
+                .field::<Token>(&path, sdf::FieldKey::TypeName)?
+                .as_ref()
+                .map(Token::as_str)
+                != Some(&type_name);
+        let define = retype || !self.defining(&path)?;
+        // The prim's path goes along whether or not it is written: the
+        // batch validates every path it is given (C++
+        // `_IsValidPathForCreatingPrim`), a prototype or proxy path among
+        // them whatever its specifier.
+        paths.push(path.clone());
+        self.with_target_layer_at_each(&paths, |layer, mut spec_paths| {
+            // An idempotent call (an existing def of that type) records
+            // nothing because deriving the change skips the no-op write.
+            let prim = spec_paths.pop().expect("the prim itself");
+            for ancestor in spec_paths {
+                sdf::PrimSpec::new(layer.data_mut(), ancestor, sdf::Specifier::Def, String::new())?;
+            }
+            if define {
+                sdf::PrimSpec::new(layer.data_mut(), prim, sdf::Specifier::Def, type_name)?;
+            }
             Ok(())
         })?;
         Ok(super::Prim::new(self, path))
+    }
+
+    /// Whether the prim at `path` has a defining specifier, `def` or
+    /// `class`, as the stage holds it: `false` for one it does not hold.
+    fn defining(&self, path: &sdf::Path) -> Result<bool, pcp::QueryError> {
+        Ok(self
+            .masked_opinions(path, |graph, cache| cache.own_status(graph, path))?
+            .is_some_and(|own| own.defining))
     }
 
     /// Ensure a prim spec exists at `path` and return a [`Prim`](super::Prim)

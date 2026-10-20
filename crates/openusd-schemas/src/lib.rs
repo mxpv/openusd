@@ -22,7 +22,7 @@
 //! | `geom`    | `geom`    | `UsdGeom`     | `ImageableExt` (visibility / purpose down namespace), `XformableExt` (the transform stack), `Primvar` and the `PrimvarsAPI` queries (indexed values, inheritance down namespace), the token enums |
 //! | `lux`     | `lux`     | `UsdLux`      | the token enums; needs `geom` |
 //! | `media`   | `media`   | `UsdMedia`    | asset-preview thumbnails, which live in `assetInfo`; needs `geom` |
-//! | `physics` | `physics` | `UsdPhysics`  | the token enums; needs `geom` |
+//! | `physics` | `physics` | `UsdPhysics`  | the token enums, a rigid body's mass properties from its colliders, the parser that describes a stage's physics objects to a simulator; needs `geom`, `shade` |
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
 //! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim |
 //! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, and the labels it carries under one of them over time and down namespace |
@@ -190,6 +190,10 @@ pub enum SchemaError {
     /// A labels query over an interval needs one that holds a time.
     #[error("Labels query interval must not be empty")]
     EmptyInterval,
+
+    /// A physics parse needs at least one include path to walk from.
+    #[error("Physics parse include paths must not be empty")]
+    EmptyIncludePaths,
 
     /// A render context that is neither the universal context nor a
     /// namespaced identifier.

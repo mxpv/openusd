@@ -1,14 +1,19 @@
 //! Common units of mass in kilograms (C++ `UsdPhysicsMassUnits`), as a
 //! stage's `kilogramsPerUnit` states them.
 //!
-//! The unit is stage metadata, which [`StageMetadata`](super::StageMetadata)
+//! The unit is stage metadata, which [`StageMetadata`]
 //! reads and authors as the number it is: `kilograms_per_unit` and
-//! `set_kilograms_per_unit` (C++ `UsdPhysicsGetStageKilogramsPerUnit` and
-//! `UsdPhysicsSetStageKilogramsPerUnit`). The registered fallback stands
-//! behind the read: `1.0`, a kilogram, to the unit. Whether a layer authors
+//! `set_kilograms_per_unit` (C++ `UsdPhysicsSetStageKilogramsPerUnit`), and
+//! [`stage_kilograms_per_unit`] reads it with the fallback in hand (C++
+//! `UsdPhysicsGetStageKilogramsPerUnit`). The registered fallback stands
+//! behind both reads: `1.0`, a kilogram, to the unit. Whether a layer authors
 //! the unit (C++ `UsdPhysicsStageHasAuthoredKilogramsPerUnit`) is
 //! [`openusd::usd::Stage::has_authored_stage_metadata`] of
 //! [`tokens::KILOGRAMS_PER_UNIT`](super::tokens::KILOGRAMS_PER_UNIT).
+
+use openusd::{Result, usd};
+
+use super::StageMetadata;
 
 /// One gram.
 pub const GRAMS: f64 = 0.001;
@@ -16,6 +21,15 @@ pub const GRAMS: f64 = 0.001;
 pub const KILOGRAMS: f64 = 1.0;
 /// One slug.
 pub const SLUGS: f64 = 14.5939;
+
+/// The mass unit of `stage` in kilograms (C++
+/// `UsdPhysicsGetStageKilogramsPerUnit`): the `kilogramsPerUnit` its session
+/// or root layer authors, and the fallback the schema registry holds for the
+/// field where neither does. A registry that declares no `kilogramsPerUnit`
+/// leaves [`KILOGRAMS`].
+pub fn stage_kilograms_per_unit(stage: &usd::Stage) -> Result<f64> {
+    Ok(stage.kilograms_per_unit()?.unwrap_or(KILOGRAMS))
+}
 
 /// The relative difference C++ `UsdPhysicsMassUnitsAre` allows by default.
 pub const EPSILON: f64 = 1e-5;
@@ -41,7 +55,9 @@ pub fn are(authored: f64, standard: f64, epsilon: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{EPSILON, GRAMS, KILOGRAMS, SLUGS, are};
+    use openusd::usd;
+
+    use super::{EPSILON, GRAMS, KILOGRAMS, SLUGS, are, stage_kilograms_per_unit};
     use crate::SchemaError;
     use crate::physics::{StageMetadata, tokens};
 
@@ -54,6 +70,7 @@ mod tests {
     fn kilograms_per_unit() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         assert_eq!(stage.kilograms_per_unit()?, Some(KILOGRAMS));
+        assert_eq!(stage_kilograms_per_unit(&stage)?, KILOGRAMS);
         assert!(!stage.has_authored_stage_metadata(tokens::KILOGRAMS_PER_UNIT)?);
 
         stage.set_kilograms_per_unit(GRAMS)?;
@@ -61,6 +78,13 @@ mod tests {
         let authored = stage.kilograms_per_unit()?.expect("an authored unit");
         assert!(are(authored, GRAMS, EPSILON));
         assert!(!are(authored, KILOGRAMS, EPSILON));
+        assert!(are(stage_kilograms_per_unit(&stage)?, GRAMS, EPSILON));
+
+        // A stage whose registry knows no `kilogramsPerUnit` still weighs a
+        // kilogram to the unit.
+        let bare = usd::Stage::builder().in_memory("bare.usda")?;
+        assert_eq!(bare.kilograms_per_unit()?, None);
+        assert_eq!(stage_kilograms_per_unit(&bare)?, KILOGRAMS);
         Ok(())
     }
 

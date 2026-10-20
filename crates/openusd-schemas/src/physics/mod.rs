@@ -4,7 +4,9 @@
 //! `UsdPhysics` family — rigid-body dynamics, collision, and joints. A joint is
 //! a `UsdGeom` [`Imageable`](crate::geom::Imageable), which is why this family
 //! enables `geom`; [`Scene`] and [`CollisionGroup`] derive `UsdTyped` directly,
-//! and the rest are API schemas applied onto existing prims.
+//! and the rest are API schemas applied onto existing prims. A body's mass
+//! reads the material bound for the `physics` purpose, which is why the
+//! family enables `shade`.
 //!
 //! ```text
 //! SchemaBase
@@ -28,7 +30,12 @@
 //! The mass unit is the stage's `kilogramsPerUnit`, which [`StageMetadata`]
 //! reads and authors; [`mass_units`] names the common ones. A body's mass,
 //! inertia tensor and center of mass travel together as a
-//! [`MassProperties`].
+//! [`MassProperties`], and [`RigidBodyAPI::mass_properties`] computes a
+//! body's from its colliders, whose shapes the caller describes through a
+//! [`MassInformation`].
+//!
+//! [`parse`] walks a stage's physics objects into the [`desc`] descriptors
+//! a simulator is set up from (C++ `UsdPhysicsLoadStageFromPrimRange`).
 //!
 //! # Example
 //!
@@ -60,17 +67,23 @@
 openusd::include_schema!("usdPhysics");
 
 mod collision_group;
+pub mod desc;
 mod mass_properties;
 pub mod mass_units;
+mod material;
+mod parse;
+mod rigid_body;
 
 pub use collision_group::{CollisionGroupTable, collision_group_table};
 pub use mass_properties::MassProperties;
+pub use parse::{CustomTokens, ParseDiagnostic, ParseOptions, Parsed, parse};
+pub use rigid_body::{BodyMass, MassInformation};
 
 use tokens::*;
 
-/// The physics-specific material binding, which is `material:binding` under
-/// the `physics` purpose.
-pub const REL_MATERIAL_BINDING_PHYSICS: &str = "material:binding:physics";
+/// The material-binding purpose a collider's physics material is bound
+/// under (C++ `_physicsPurposeTokens->materialPurposePhysics`).
+pub const MATERIAL_PURPOSE: &str = "physics";
 
 // What a `PhysicsDriveAPI` instance's properties are called after the instance
 // name: a drive is `drive:<name>:targetPosition`, and the schema declares the
@@ -81,52 +94,75 @@ pub const DRIVE_SUB_DAMPING: &str = "damping";
 pub const DRIVE_SUB_STIFFNESS: &str = "stiffness";
 pub const DRIVE_SUB_MAX_FORCE: &str = "maxForce";
 
-/// A joint degree of freedom, used as the multi-apply instance name on
-/// [`DriveAPI`] / [`LimitAPI`] (`transX`..`rotZ` for generic joints; `linear` /
-/// `angular` / `distance` are the shorthand some tools emit on single-axis
-/// joints). It names a schema instance rather than an attribute value, so —
-/// unlike [`JointAxis`] / [`DriveType`] / [`CollisionApprox`] — it has no
-/// `Value` conversion.
+/// A joint degree of freedom (C++ `UsdPhysicsJointDOF`): the instance name
+/// a [`LimitAPI`] or [`DriveAPI`] on a generic joint is applied under, in
+/// the order C++ enumerates them. A single-axis joint's drive is applied
+/// under [`tokens::LINEAR`] or [`tokens::ANGULAR`], which are not degrees
+/// of freedom. It names a schema instance, not an attribute value, and has
+/// no `Value` conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Dof {
+    Distance,
     TransX,
     TransY,
     TransZ,
     RotX,
     RotY,
     RotZ,
-    Linear,
-    Angular,
-    Distance,
 }
 
 impl Dof {
+    /// Every degree of freedom, in the order C++ enumerates them.
+    pub const ALL: [Dof; 7] = [
+        Dof::Distance,
+        Dof::TransX,
+        Dof::TransY,
+        Dof::TransZ,
+        Dof::RotX,
+        Dof::RotY,
+        Dof::RotZ,
+    ];
+
+    /// The instance name.
     pub fn as_token(self) -> &'static str {
         match self {
+            Dof::Distance => DISTANCE,
             Dof::TransX => TRANS_X,
             Dof::TransY => TRANS_Y,
             Dof::TransZ => TRANS_Z,
             Dof::RotX => ROT_X,
             Dof::RotY => ROT_Y,
             Dof::RotZ => ROT_Z,
-            Dof::Linear => LINEAR,
-            Dof::Angular => ANGULAR,
-            Dof::Distance => DISTANCE,
         }
     }
 
+    /// The degree of freedom `token` names, if any.
     pub fn from_token(token: impl AsRef<str>) -> Option<Self> {
         Some(match token.as_ref() {
+            DISTANCE => Dof::Distance,
             TRANS_X => Dof::TransX,
             TRANS_Y => Dof::TransY,
             TRANS_Z => Dof::TransZ,
             ROT_X => Dof::RotX,
             ROT_Y => Dof::RotY,
             ROT_Z => Dof::RotZ,
-            LINEAR => Dof::Linear,
-            ANGULAR => Dof::Angular,
-            DISTANCE => Dof::Distance,
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dof, tokens};
+
+    /// Each degree of freedom round-trips through its token; the drive
+    /// instance names of single-axis joints are no degree of freedom.
+    #[test]
+    fn dof_tokens() {
+        for dof in Dof::ALL {
+            assert_eq!(Dof::from_token(dof.as_token()), Some(dof));
+        }
+        assert_eq!(Dof::from_token(tokens::LINEAR), None);
+        assert_eq!(Dof::from_token(tokens::ANGULAR), None);
     }
 }

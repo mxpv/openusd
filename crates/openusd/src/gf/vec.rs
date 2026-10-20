@@ -577,6 +577,22 @@ impl Vec3d {
         }
     }
 
+    /// The component-wise product (C++ `GfCompMult`).
+    pub fn comp_mult(self, other: Vec3d) -> Vec3d {
+        Vec3d {
+            x: self.x * other.x,
+            y: self.y * other.y,
+            z: self.z * other.z,
+        }
+    }
+
+    /// Whether `self` is within `tolerance` of `other`: their difference
+    /// is at most `tolerance` long (C++ `GfIsClose`).
+    pub fn is_close(self, other: Vec3d, tolerance: f64) -> bool {
+        let delta = self - other;
+        delta.dot(delta) <= tolerance * tolerance
+    }
+
     /// Make three vectors mutually orthogonal by iterating toward the basis
     /// nearest all three, and of unit length when `normalize` is set (C++
     /// `GfVec3d::OrthogonalizeBasis`).
@@ -1089,5 +1105,28 @@ impl IndexMut<usize> for Vec4i {
             3 => &mut self.w,
             _ => panic!("index {i} out of bounds for Vec4i"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::gf::vec3d;
+
+    /// The component-wise product multiplies each component by its
+    /// partner.
+    #[test]
+    fn comp_mult() {
+        assert_eq!(
+            vec3d(1.0, -2.0, 3.0).comp_mult(vec3d(2.0, 0.5, -1.0)),
+            vec3d(2.0, -1.0, -3.0)
+        );
+    }
+
+    /// Closeness is the difference's length against the tolerance.
+    #[test]
+    fn is_close() {
+        let v = vec3d(1.0, 2.0, 3.0);
+        assert!(v.is_close(vec3d(1.0, 2.0, 3.001), 0.001));
+        assert!(!v.is_close(vec3d(1.0, 2.0, 3.002), 0.001));
     }
 }

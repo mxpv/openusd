@@ -105,6 +105,14 @@ impl Prim {
         })
     }
 
+    /// Set the prim's `specifier` (C++ `UsdPrim::SetSpecifier`).
+    pub fn set_specifier(self, specifier: sdf::Specifier) -> Result<Self, StageAuthoringError> {
+        self.edit(|spec| {
+            spec.set_specifier(specifier);
+            Ok(())
+        })
+    }
+
     /// Set the prim's `active` flag.
     pub fn set_active(self, active: bool) -> Result<Self, StageAuthoringError> {
         self.edit(|spec| {
