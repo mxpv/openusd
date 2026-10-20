@@ -12,124 +12,563 @@
 //! A direct binding rel has one target (the Material); a collection binding has
 //! two (the collection path + the Material). The optional `bindMaterialAs`
 //! metadata on the rel records binding strength.
+//!
+//! [`DirectBinding`] and [`CollectionBinding`] each read one relationship.
+//! [`MaterialBindingAPI::resolve_binding`] walks a prim and its ancestors for
+//! the binding that wins, answering a [`ResolvedBinding`], over a
+//! [`BindingCache`] one resolution shares with the next.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::iter;
 
 use openusd::Result;
+use openusd::sdf::{self, Path, PathMap};
+use openusd::usd::{CollectionAPI, MembershipQuery, Prim, Relationship, Stage};
 
-use openusd::sdf::{self, Path, Value};
-use openusd::usd::{CollectionAPI, MembershipQuery, Relationship, Stage};
+use crate::SchemaError;
 
-use super::BindingStrength;
-use super::Material;
-use super::MaterialBindingAPI;
-use super::tokens::{ALL_PURPOSE, BIND_MATERIAL_AS, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION};
+use super::tokens::{
+    ALL_PURPOSE, BIND_MATERIAL_AS, FULL, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION, PREVIEW,
+    WEAKER_THAN_DESCENDANTS,
+};
+use super::{BindingStrength, Material, MaterialBindingAPI, RelationshipMetadata};
+
+/// The purposes UsdShade names, all-purpose first (C++ `GetMaterialPurposes`).
+/// A binding may be restricted to any token; these are the two a renderer asks
+/// for and the fallback both resolve to.
+pub const MATERIAL_PURPOSES: [&str; 3] = [ALL_PURPOSE, PREVIEW, FULL];
 
 impl MaterialBindingAPI {
-    /// Author an all-purpose **direct** binding (`material:binding`) targeting
-    /// `material` (C++ `UsdShadeMaterialBindingAPI::Bind`).
-    pub fn bind(&self, material: impl sdf::IntoPath) -> Result<&Self> {
-        self.bind_for_purpose(ALL_PURPOSE, material, BindingStrength::WeakerThanDescendants)
+    /// Whether `name` is a property this schema owns: `material:binding` or a
+    /// name namespaced under it. C++ `CanContainPropertyName` accepts any
+    /// name starting with `material:binding`, `material:bindingX` included.
+    pub fn can_contain_property_name(name: &str) -> bool {
+        name.strip_prefix(MATERIAL_BINDING)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
     }
 
-    /// Author a **direct** binding for an explicit `purpose`
+    /// The direct binding relationship for `purpose`, authored or not (C++
+    /// `GetDirectBindingRel`): `material:binding` for [`ALL_PURPOSE`], else
+    /// `material:binding:<purpose>`.
+    pub fn direct_binding_rel(&self, purpose: &str) -> Relationship {
+        self.relationship(direct_binding_rel_name(purpose))
+    }
+
+    /// The collection binding relationship named `binding_name` for
+    /// `purpose`, authored or not (C++ `GetCollectionBindingRel`).
+    pub fn collection_binding_rel(&self, binding_name: &str, purpose: &str) -> Relationship {
+        self.relationship(collection_binding_rel_name(binding_name, purpose))
+    }
+
+    /// The authored collection binding relationships for `purpose`, in
+    /// property order, whatever each targets (C++ `GetCollectionBindingRels`).
+    pub fn collection_binding_rels(&self, purpose: &str) -> Result<Vec<Relationship>> {
+        Ok(self
+            .authored_relationships_in_namespace(&collection_binding_rel_name("", purpose))?
+            .into_iter()
+            .filter(|rel| binding_purpose(rel.name()) == purpose)
+            .collect())
+    }
+
+    /// The direct binding for `purpose`, where its relationship binds a
+    /// material (C++ `GetDirectBinding`).
+    pub fn direct_binding(&self, purpose: &str) -> Result<Option<DirectBinding>> {
+        DirectBinding::new(self.direct_binding_rel(purpose))
+    }
+
+    /// The collection bindings for `purpose` in property order, the order
+    /// resolution tries them in, keeping those whose relationship names a
+    /// collection and a material (C++ `GetCollectionBindings`).
+    pub fn collection_bindings(&self, purpose: &str) -> Result<Vec<CollectionBinding>> {
+        self.collection_binding_rels(purpose)?
+            .into_iter()
+            .filter_map(|rel| CollectionBinding::new(rel).transpose())
+            .collect()
+    }
+
+    /// Author an all-purpose direct binding (`material:binding`) targeting
+    /// `material` at the fallback strength (C++
+    /// `UsdShadeMaterialBindingAPI::Bind`).
+    pub fn bind(&self, material: impl sdf::IntoPath) -> Result<&Self> {
+        self.bind_for_purpose(ALL_PURPOSE, material, None)
+    }
+
+    /// Author a direct binding for `purpose` targeting `material`
     /// (`material:binding:<purpose>`, or `material:binding` when `purpose` is
-    /// [`ALL_PURPOSE`]). `strength` is written as
-    /// `bindMaterialAs` only when it must override a composed opinion (the
-    /// default `weakerThanDescendants` is otherwise left unauthored).
+    /// [`ALL_PURPOSE`]), with `strength` authored as [`set_binding_strength`]
+    /// authors it (C++ `Bind`).
     pub fn bind_for_purpose(
         &self,
         purpose: &str,
         material: impl sdf::IntoPath,
-        strength: BindingStrength,
+        strength: Option<BindingStrength>,
     ) -> Result<&Self> {
-        let rel = self
-            .0
-            .author_relationship_targets(&direct_binding_rel(purpose), [sdf::try_into_path(material)?])?;
-        apply_binding_strength(self.stage(), rel, strength)?;
+        let rel =
+            self.author_relationship_targets(&direct_binding_rel_name(purpose), [sdf::try_into_path(material)?])?;
+        set_binding_strength(rel, strength)?;
         Ok(self)
     }
 
-    /// Author a **collection** binding named `binding_name`. The relationship
-    /// targets the `collection` path then the `material` path, per the spec's
-    /// two-target convention. C++ `UsdShadeMaterialBindingAPI::Bind` (collection
-    /// overload).
+    /// Author a collection binding of `material` to `collection` for
+    /// `purpose`, named `binding_name` on this prim, with `strength` authored
+    /// as [`set_binding_strength`] authors it (C++ `Bind`, the collection
+    /// overload). The relationship targets the collection path then the
+    /// material path.
+    ///
+    /// An empty `binding_name` takes the collection's name with any namespace
+    /// stripped. A name that is not one plain identifier is refused, since the
+    /// relationship's token count is what tells its role.
     pub fn bind_collection(
         &self,
         binding_name: &str,
-        collection: impl sdf::IntoPath,
+        collection: &CollectionAPI,
         material: impl sdf::IntoPath,
         purpose: &str,
-        strength: BindingStrength,
-    ) -> Result<&Self> {
-        let rel = self.0.author_relationship_targets(
-            &collection_binding_rel(purpose, binding_name),
-            [sdf::try_into_path(collection)?, sdf::try_into_path(material)?],
+        strength: Option<BindingStrength>,
+    ) -> Result<&Self, SchemaError> {
+        if !binding_name.is_empty() && !Path::is_valid_identifier(binding_name) {
+            return Err(SchemaError::InvalidBindingName {
+                name: binding_name.to_string(),
+            });
+        }
+        let binding_name = if binding_name.is_empty() {
+            let name = collection.name().as_str();
+            name.rsplit_once(':').map_or(name, |(_, last)| last)
+        } else {
+            binding_name
+        };
+        let rel = self.author_relationship_targets(
+            &collection_binding_rel_name(binding_name, purpose),
+            [collection.collection_path()?, sdf::try_into_path(material)?],
         )?;
-        apply_binding_strength(self.stage(), rel, strength)?;
+        set_binding_strength(rel, strength)?;
         Ok(self)
     }
 
-    /// The directly-bound Material for `purpose`
-    /// ([`ALL_PURPOSE`] for the fallback binding).
-    /// Returns `None` when no such binding is authored.
-    /// C++ `UsdShadeMaterialBindingAPI::GetDirectBinding`.
-    pub fn direct_binding(&self, purpose: &str) -> Result<Option<Path>> {
-        direct_binding(self.stage(), self.path(), purpose)
+    /// Block the direct binding for `purpose` with an explicit empty target
+    /// list on the edit target, which hides any binding a weaker layer authors
+    /// (C++ `UnbindDirectBinding`). The schema stays applied.
+    pub fn unbind_direct(&self, purpose: &str) -> Result<&Self> {
+        self.author_relationship_targets(&direct_binding_rel_name(purpose), [] as [Path; 0])?;
+        Ok(self)
     }
 
-    /// A collection binding `(collection, material)` for `binding_name` +
-    /// `purpose`. Returns `None` when not authored or the relationship lacks the
-    /// expected two targets. C++ `UsdShadeMaterialBindingAPI::GetCollectionBindings`.
-    pub fn collection_binding(&self, binding_name: &str, purpose: &str) -> Result<Option<(Path, Path)>> {
-        let rel = self
-            .path()
-            .append_property(collection_binding_rel(purpose, binding_name))?;
-        let targets = self.stage().relationship(rel)?.targets()?;
-        Ok(match targets.as_slice() {
-            [collection, material] => Some((collection.clone(), material.clone())),
-            _ => None,
-        })
+    /// Block the collection binding named `binding_name` for `purpose`, as
+    /// [`unbind_direct`](Self::unbind_direct) blocks a direct one (C++
+    /// `UnbindCollectionBinding`). A binding authored without a name is named
+    /// after its collection.
+    pub fn unbind_collection(&self, binding_name: &str, purpose: &str) -> Result<&Self> {
+        self.author_relationship_targets(&collection_binding_rel_name(binding_name, purpose), [] as [Path; 0])?;
+        Ok(self)
     }
 
-    /// The `bindMaterialAs` strength on the direct binding for `purpose`,
-    /// defaulting to [`BindingStrength::WeakerThanDescendants`] when unauthored.
-    /// C++ `UsdShadeMaterialBindingAPI::GetMaterialBindingStrength`.
-    pub fn binding_strength(&self, purpose: &str) -> Result<BindingStrength> {
-        binding_strength(self.stage(), self.path(), purpose)
+    /// Block every direct and collection binding relationship on this prim
+    /// (C++ `UnbindAllBindings`).
+    pub fn unbind_all(&self) -> Result<&Self> {
+        for rel in self.relationships()? {
+            if Self::can_contain_property_name(rel.name()) {
+                rel.set_targets([] as [Path; 0])?;
+            }
+        }
+        Ok(self)
     }
 
-    /// Resolve the material bound to this prim for `purpose`, walking the prim
-    /// and its ancestors (spec §15 /
-    /// `UsdShadeMaterialBindingAPI::ComputeBoundMaterial`).
+    /// Include `prim` in the collection the binding named `binding_name` for
+    /// `purpose` targets (C++ `AddPrimToBindingCollection`). Where no such
+    /// binding names an applied collection, nothing changes.
+    pub fn add_to_binding_collection(
+        &self,
+        prim: impl sdf::IntoPath,
+        binding_name: &str,
+        purpose: &str,
+    ) -> Result<&Self> {
+        if let Some(collection) = self.bound_collection(binding_name, purpose)? {
+            collection.include_path(prim)?;
+        }
+        Ok(self)
+    }
+
+    /// Exclude `prim` from the collection the binding named `binding_name` for
+    /// `purpose` targets (C++ `RemovePrimFromBindingCollection`). Where no such
+    /// binding names an applied collection, nothing changes.
+    pub fn remove_from_binding_collection(
+        &self,
+        prim: impl sdf::IntoPath,
+        binding_name: &str,
+        purpose: &str,
+    ) -> Result<&Self> {
+        if let Some(collection) = self.bound_collection(binding_name, purpose)? {
+            collection.exclude_path(prim)?;
+        }
+        Ok(self)
+    }
+
+    /// The binding that wins material resolution for `purpose` over this prim
+    /// and its ancestors (C++ `ComputeBoundMaterial`, together with the
+    /// relationship it hands back through `bindingRel`).
     ///
-    /// A restricted purpose (`purpose != ""`) is resolved across the whole
-    /// ancestor chain before falling back to all-purpose, so a restricted
-    /// binding on any ancestor outranks an all-purpose binding on a closer prim.
-    /// Within a single purpose, a binding on a closer prim wins over one on an
-    /// ancestor unless the ancestor binding is `strongerThanDescendants` (the
-    /// topmost such ancestor then wins). At a single prim, a collection-based
-    /// binding whose collection includes the prim beats a direct binding, and
-    /// collection bindings resolve in native property order. The winning
-    /// binding's target is the material only where it is a `Material` prim;
-    /// a prim of another type binds nothing, as in C++.
-    pub fn bound_material(&self, purpose: &str) -> Result<Option<Material>> {
-        let prim = self.path();
-        // Cache each collection's membership query across the namespace walk.
-        let mut cache: HashMap<Path, Option<MembershipQuery>> = HashMap::new();
-        for pur in purpose_fallbacks(purpose) {
-            if let Some(material) = bound_material_for_single_purpose(self.stage(), prim, pur, &mut cache)? {
-                return Material::from_prim(self.stage().prim(material)?);
+    /// A restricted purpose is resolved over the whole ancestor chain before
+    /// the all-purpose bindings are, so a restricted binding on any ancestor
+    /// outranks an all-purpose one on a closer prim. Within one purpose, a
+    /// binding on a closer prim wins over one on an ancestor unless the
+    /// ancestor's is `strongerThanDescendants`, in which case the topmost such
+    /// ancestor wins. At one prim, a collection binding whose collection holds
+    /// this prim beats the direct binding, and collection bindings are tried in
+    /// property order. A collection with no `CollectionAPI` applied on the
+    /// stage binds nothing. Bindings count whether or not the schema is applied
+    /// to the prim carrying them, which is the C++ `supportLegacyBindings`
+    /// default.
+    ///
+    /// The winner is committed by its target path, so the answer stands even
+    /// where no `Material` prim is there to read (see [`ResolvedBinding`]).
+    /// `cache` carries what the walk computes to the next call; hand one cache
+    /// to every resolution over a subtree.
+    pub fn resolve_binding(&self, purpose: &str, cache: &mut BindingCache) -> Result<Option<ResolvedBinding>> {
+        let stage = self.stage();
+        let queried = self.path();
+        let chain: Vec<Path> = queried.ancestors_below_root().collect();
+        let StageCache {
+            bindings,
+            queries,
+            strengths,
+        } = cache.stages.entry(stage.clone()).or_default();
+        for pass in purpose_passes(purpose) {
+            let mut winner: Option<ResolvedBinding> = None;
+            for current in &chain {
+                let at = cached(bindings, current, || {
+                    BindingsAtPrim::gather(&stage.prim(current.clone())?)
+                })?;
+                // Whether the winner was set at this prim, where a collection
+                // binding outranks the direct one.
+                let mut won_here = false;
+                if let Some(direct) = at.direct.iter().find(|direct| direct.purpose() == pass)
+                    && (winner.is_none()
+                        || *cached(strengths, direct.rel.path(), || direct.strength())?
+                            == BindingStrength::StrongerThanDescendants)
+                {
+                    winner = Some(ResolvedBinding::of(&direct.rel, &direct.material_path));
+                    won_here = true;
+                }
+                for binding in at.collections.iter().filter(|binding| binding.purpose() == pass) {
+                    let query = cached(queries, &binding.collection_path, || {
+                        binding.collection()?.map(|c| c.membership_query()).transpose()
+                    })?;
+                    if !query.as_ref().is_some_and(|query| query.is_included(queried)) {
+                        continue;
+                    }
+                    if winner.is_some()
+                        && !won_here
+                        && *cached(strengths, binding.rel.path(), || binding.strength())?
+                            != BindingStrength::StrongerThanDescendants
+                    {
+                        continue;
+                    }
+                    winner = Some(ResolvedBinding::of(&binding.rel, &binding.material_path));
+                    break;
+                }
+            }
+            if winner.is_some() {
+                return Ok(winner);
             }
         }
         Ok(None)
     }
+
+    /// The `Material` bound to this prim for `purpose`, resolved as
+    /// [`resolve_binding`](Self::resolve_binding) resolves it (C++
+    /// `ComputeBoundMaterial`). `None` where nothing is bound and where the
+    /// winning binding names no `Material` prim the stage holds; the resolved
+    /// binding tells the two apart.
+    pub fn bound_material(&self, purpose: &str) -> Result<Option<Material>> {
+        match self.resolve_binding(purpose, &mut BindingCache::default())? {
+            Some(resolved) => resolved.material(),
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve the binding of each of `prims` for `purpose` over one shared
+    /// cache (C++ `ComputeBoundMaterials`), answering in the same order.
+    ///
+    /// TODO(rayon): each prim resolves independently over the shared cache,
+    /// which C++ runs under `WorkParallelForN`; the cache would need to admit
+    /// concurrent fills.
+    pub fn resolve_bindings(prims: &[Prim], purpose: &str) -> Result<Vec<Option<ResolvedBinding>>> {
+        let mut cache = BindingCache::default();
+        prims
+            .iter()
+            .map(|prim| Self::from_prim_unchecked(prim.clone()).resolve_binding(purpose, &mut cache))
+            .collect()
+    }
+
+    /// The applied collection the binding named `binding_name` for `purpose`
+    /// targets.
+    fn bound_collection(&self, binding_name: &str, purpose: &str) -> Result<Option<CollectionAPI>> {
+        match CollectionBinding::new(self.collection_binding_rel(binding_name, purpose))? {
+            Some(binding) => binding.collection(),
+            None => Ok(None),
+        }
+    }
 }
 
-/// The direct-binding relationship name for `purpose`. All-purpose (empty) →
-/// `material:binding`; otherwise `material:binding:<purpose>`.
-fn direct_binding_rel(purpose: &str) -> String {
+/// A direct binding relationship, `material:binding` or
+/// `material:binding:<purpose>`, read as one (C++
+/// `UsdShadeMaterialBindingAPI::DirectBinding`).
+#[derive(Clone)]
+pub struct DirectBinding {
+    rel: Relationship,
+    material_path: Path,
+}
+
+impl DirectBinding {
+    /// Read `rel` as a direct binding: `Some` when its forwarded targets are
+    /// exactly one prim path, which is the material it binds (C++ `IsBound`).
+    pub fn new(rel: Relationship) -> Result<Option<Self>> {
+        let targets = rel.forwarded_targets()?;
+        let material_path = match targets.as_slice() {
+            [target] if target.is_prim() => target.clone(),
+            _ => return Ok(None),
+        };
+        Ok(Some(Self { rel, material_path }))
+    }
+
+    /// The binding relationship.
+    pub fn rel(&self) -> &Relationship {
+        &self.rel
+    }
+
+    /// The purpose the relationship's name restricts the binding to, or
+    /// [`ALL_PURPOSE`] (C++ `GetMaterialPurpose`).
+    pub fn purpose(&self) -> &str {
+        binding_purpose(self.rel.name())
+    }
+
+    /// The bound material's prim path (C++ `GetMaterialPath`).
+    pub fn material_path(&self) -> &Path {
+        &self.material_path
+    }
+
+    /// The bound `Material`, or `None` where the stage holds no `Material`
+    /// prim at the path: the prim is missing, outside the population mask, or
+    /// of another type (C++ `GetMaterial`).
+    pub fn material(&self) -> Result<Option<Material>> {
+        Material::get(self.rel.stage(), self.material_path.clone())
+    }
+
+    /// The binding's `bindMaterialAs` strength.
+    pub fn strength(&self) -> Result<BindingStrength> {
+        binding_strength(&self.rel)
+    }
+}
+
+/// A collection binding relationship, `material:binding:collection:<name>` or
+/// `material:binding:collection:<purpose>:<name>`, read as one (C++
+/// `UsdShadeMaterialBindingAPI::CollectionBinding`).
+#[derive(Clone)]
+pub struct CollectionBinding {
+    rel: Relationship,
+    collection_path: Path,
+    material_path: Path,
+}
+
+impl CollectionBinding {
+    /// Read `rel` as a collection binding: `Some` when it is named as one and
+    /// its forwarded targets are exactly two, one a prim path (the material)
+    /// and the other not (the collection), in either order (C++ `IsValid`).
+    pub fn new(rel: Relationship) -> Result<Option<Self>> {
+        if !is_collection_binding_name(rel.name()) {
+            return Ok(None);
+        }
+        let targets = rel.forwarded_targets()?;
+        let (collection_path, material_path) = match targets.as_slice() {
+            [collection, material] | [material, collection] if material.is_prim() && !collection.is_prim() => {
+                (collection.clone(), material.clone())
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(Self {
+            rel,
+            collection_path,
+            material_path,
+        }))
+    }
+
+    /// Whether `rel` is named as a collection binding, whatever it targets
+    /// (C++ `IsCollectionBindingRel`).
+    pub fn is_binding_rel(rel: &Relationship) -> bool {
+        is_collection_binding_name(rel.name())
+    }
+
+    /// The binding relationship.
+    pub fn rel(&self) -> &Relationship {
+        &self.rel
+    }
+
+    /// The purpose the relationship's name restricts the binding to, or
+    /// [`ALL_PURPOSE`].
+    pub fn purpose(&self) -> &str {
+        binding_purpose(self.rel.name())
+    }
+
+    /// The bound collection's path, a `collection:<name>` property path (C++
+    /// `GetCollectionPath`).
+    pub fn collection_path(&self) -> &Path {
+        &self.collection_path
+    }
+
+    /// The bound material's prim path (C++ `GetMaterialPath`).
+    pub fn material_path(&self) -> &Path {
+        &self.material_path
+    }
+
+    /// The bound collection, or `None` where the stage holds no
+    /// `CollectionAPI` applied under that name on that prim (C++
+    /// `GetCollection`, which is valid for an applied instance only).
+    pub fn collection(&self) -> Result<Option<CollectionAPI>> {
+        let Some((prim, name)) = CollectionAPI::instance_at_path(&self.collection_path) else {
+            return Ok(None);
+        };
+        CollectionAPI::from_prim(&self.rel.stage().prim(prim)?, name)
+    }
+
+    /// The bound `Material`, or `None` where the stage holds no `Material`
+    /// prim at the path (C++ `GetMaterial`).
+    pub fn material(&self) -> Result<Option<Material>> {
+        Material::get(self.rel.stage(), self.material_path.clone())
+    }
+
+    /// The binding's `bindMaterialAs` strength.
+    pub fn strength(&self) -> Result<BindingStrength> {
+        binding_strength(&self.rel)
+    }
+}
+
+/// The binding material resolution selects for a prim, and the material it
+/// names (C++ `ComputeBoundMaterial`'s material together with its
+/// `bindingRel` out-parameter).
+///
+/// Resolution commits to the winning binding by its target path, so the record
+/// exists whether or not the stage holds a `Material` there. `material_path`
+/// names what was bound either way.
+#[derive(Clone)]
+pub struct ResolvedBinding {
+    rel: Relationship,
+    material_path: Path,
+}
+
+impl ResolvedBinding {
+    fn of(rel: &Relationship, material_path: &Path) -> Self {
+        Self {
+            rel: rel.clone(),
+            material_path: material_path.clone(),
+        }
+    }
+
+    /// The winning binding relationship, direct or collection.
+    pub fn rel(&self) -> &Relationship {
+        &self.rel
+    }
+
+    /// The prim path the winning binding targets as its material.
+    pub fn material_path(&self) -> &Path {
+        &self.material_path
+    }
+
+    /// The `Material` at the target path, or `None` where the stage holds no
+    /// `Material` prim there: the prim is missing, outside the population
+    /// mask, or of another type.
+    pub fn material(&self) -> Result<Option<Material>> {
+        Material::get(self.rel.stage(), self.material_path.clone())
+    }
+}
+
+/// What material resolutions share (C++ `BindingsCache` and
+/// `CollectionQueryCache`): the bindings authored at each prim, the membership
+/// query of each collection they bind, and each binding's strength, kept per
+/// stage instance.
+///
+/// Over a subtree, resolutions read the same ancestors and evaluate the same
+/// collections; one cache handed to each
+/// [`resolve_binding`](MaterialBindingAPI::resolve_binding) computes them
+/// once, for any purpose asked and any stage resolved. Nothing evicts an
+/// entry: start a new cache after editing bindings or collections.
+#[derive(Default)]
+pub struct BindingCache {
+    /// Entries are keyed by path, which stages share, so each stage has its
+    /// own.
+    stages: HashMap<Stage, StageCache>,
+}
+
+/// A [`BindingCache`]'s entries for one stage.
+#[derive(Default)]
+struct StageCache {
+    bindings: PathMap<BindingsAtPrim>,
+    /// By collection path; `None` where the collection is not applied.
+    queries: PathMap<Option<MembershipQuery>>,
+    /// By binding relationship path.
+    strengths: PathMap<BindingStrength>,
+}
+
+/// The bindings authored on one prim, each kind in property order (C++
+/// `BindingsAtPrim`, which gathers for one purpose; here a pass picks its
+/// purpose out at read time).
+struct BindingsAtPrim {
+    direct: Vec<DirectBinding>,
+    collections: Vec<CollectionBinding>,
+}
+
+impl BindingsAtPrim {
+    fn gather(prim: &Prim) -> Result<Self> {
+        let mut direct = Vec::new();
+        let mut collections = Vec::new();
+        for name in prim.authored_property_names()? {
+            if is_collection_binding_name(&name) {
+                collections.extend(CollectionBinding::new(prim.relationship(name))?);
+            } else if is_direct_binding_name(&name) {
+                direct.extend(DirectBinding::new(prim.relationship(name))?);
+            }
+        }
+        Ok(Self { direct, collections })
+    }
+}
+
+/// The `bindMaterialAs` strength of a binding relationship,
+/// [`BindingStrength::WeakerThanDescendants`] where none is authored (C++
+/// `GetMaterialBindingStrength`).
+pub fn binding_strength(rel: &Relationship) -> Result<BindingStrength> {
+    Ok(rel
+        .bind_material_as()?
+        .and_then(BindingStrength::from_token)
+        .unwrap_or_default())
+}
+
+/// Author `strength` as the `bindMaterialAs` of a binding relationship (C++
+/// `SetMaterialBindingStrength`). `Some` authors the strength as given. `None`
+/// is the fallback (C++ `fallbackStrength`): `weakerThanDescendants` is then
+/// written only over an authored opinion that says otherwise.
+pub fn set_binding_strength(rel: Relationship, strength: Option<BindingStrength>) -> Result<Relationship> {
+    match strength {
+        Some(strength) => Ok(rel.set_metadata(BIND_MATERIAL_AS, strength)?),
+        None if rel
+            .bind_material_as()?
+            .is_some_and(|authored| authored != WEAKER_THAN_DESCENDANTS) =>
+        {
+            Ok(rel.set_metadata(BIND_MATERIAL_AS, BindingStrength::WeakerThanDescendants)?)
+        }
+        None => Ok(rel),
+    }
+}
+
+/// The entry of `map` at `key`, computed by `fill` on first request.
+fn cached<'m, V>(map: &'m mut PathMap<V>, key: &Path, fill: impl FnOnce() -> Result<V>) -> Result<&'m V> {
+    if !map.contains_key(key) {
+        map.insert(key.clone(), fill()?);
+    }
+    Ok(map.get(key).expect("inserted above"))
+}
+
+/// The direct binding relationship name for `purpose` (C++
+/// `_GetDirectBindingRelName`).
+fn direct_binding_rel_name(purpose: &str) -> String {
     if purpose == ALL_PURPOSE {
         MATERIAL_BINDING.to_string()
     } else {
@@ -137,243 +576,271 @@ fn direct_binding_rel(purpose: &str) -> String {
     }
 }
 
-/// The collection-binding relationship name for `purpose` + `name`.
-fn collection_binding_rel(purpose: &str, name: &str) -> String {
+/// The collection binding relationship name for `binding_name` under
+/// `purpose` (C++ `_GetCollectionBindingRelName`).
+fn collection_binding_rel_name(binding_name: &str, purpose: &str) -> String {
     if purpose == ALL_PURPOSE {
-        format!("{MATERIAL_BINDING_COLLECTION}:{name}")
+        format!("{MATERIAL_BINDING_COLLECTION}:{binding_name}")
     } else {
-        format!("{MATERIAL_BINDING_COLLECTION}:{purpose}:{name}")
+        format!("{MATERIAL_BINDING_COLLECTION}:{purpose}:{binding_name}")
     }
 }
 
-/// Author `bindMaterialAs` on a freshly-bound relationship. Mirrors C++
-/// `UsdShadeMaterialBindingAPI::SetMaterialBindingStrength`: the default
-/// `weakerThanDescendants` is left unauthored unless a different opinion already
-/// composes (from a weaker layer or a prior binding), in which case it is
-/// authored explicitly to override that stale opinion.
-fn apply_binding_strength(stage: &Stage, rel: Relationship, strength: BindingStrength) -> Result<()> {
-    let needs_write = strength != BindingStrength::WeakerThanDescendants
-        || composed_strength(stage, rel.path())? != BindingStrength::WeakerThanDescendants;
-    if needs_write {
-        rel.set_metadata(BIND_MATERIAL_AS, strength)?;
+/// Whether `name` is a direct binding relationship name: `material:binding`
+/// or `material:binding:<purpose>`.
+fn is_direct_binding_name(name: &str) -> bool {
+    name.strip_prefix(MATERIAL_BINDING)
+        .is_some_and(|rest| rest.is_empty() || rest.strip_prefix(':').is_some_and(|purpose| !purpose.contains(':')))
+}
+
+/// Whether `name` is a collection binding relationship name, one under
+/// `material:binding:collection` (C++ `IsCollectionBindingRel`).
+fn is_collection_binding_name(name: &str) -> bool {
+    name.strip_prefix(MATERIAL_BINDING_COLLECTION)
+        .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// The purpose a binding relationship's name restricts it to, or
+/// [`ALL_PURPOSE`]: the third token of a direct name, the fourth of a
+/// collection name. A collection name with tokens beyond its fifth is read
+/// as C++ resolution gathers it, restricted to its fourth token; C++
+/// `GetCollectionBindingRels` lists such a name as all-purpose instead.
+fn binding_purpose(rel_name: &str) -> &str {
+    if let Some(rest) = rel_name
+        .strip_prefix(MATERIAL_BINDING_COLLECTION)
+        .and_then(|rest| rest.strip_prefix(':'))
+    {
+        return rest.split_once(':').map_or(ALL_PURPOSE, |(purpose, _)| purpose);
     }
-    Ok(())
+    rel_name
+        .strip_prefix(MATERIAL_BINDING)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .filter(|purpose| !purpose.contains(':'))
+        .unwrap_or(ALL_PURPOSE)
 }
 
-/// Composed `bindMaterialAs` strength on a binding relationship, falling back to
-/// the spec default when unauthored.
-fn composed_strength(stage: &Stage, rel: &Path) -> Result<BindingStrength> {
-    Ok(match stage.field::<Value>(rel.clone(), BIND_MATERIAL_AS)? {
-        Some(Value::Token(t)) => BindingStrength::from_token(t).unwrap_or_default(),
-        _ => BindingStrength::default(),
-    })
-}
-
-/// The directly-bound Material for `purpose` on the prim at `prim`.
-fn direct_binding(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
-    let rel = prim.append_property(direct_binding_rel(purpose))?;
-    Ok(stage.relationship(rel)?.targets()?.into_iter().next())
-}
-
-/// The `bindMaterialAs` strength on the direct binding for `purpose`.
-fn binding_strength(stage: &Stage, prim: &Path, purpose: &str) -> Result<BindingStrength> {
-    let rel = prim.append_property(direct_binding_rel(purpose))?;
-    composed_strength(stage, &rel)
-}
-
-/// Resolve the bound material for one concrete `purpose` by walking `prim` and
-/// its ancestors. The closest binding wins unless a `strongerThanDescendants`
-/// ancestor overrides it (the topmost such ancestor then wins).
-fn bound_material_for_single_purpose(
-    stage: &Stage,
-    prim: &Path,
-    purpose: &str,
-    cache: &mut HashMap<Path, Option<MembershipQuery>>,
-) -> Result<Option<Path>> {
-    let mut winner: Option<Path> = None;
-    let mut current = Some(prim.clone());
-    while let Some(p) = current {
-        if !p.is_abs_root()
-            && let Some((material, strength)) = winning_binding_at(stage, &p, prim, purpose, cache)?
-            && (winner.is_none() || strength == BindingStrength::StrongerThanDescendants)
-        {
-            winner = Some(material);
-        }
-        current = p.parent();
-    }
-    Ok(winner)
-}
-
-/// The binding that wins at a single prim `p` for a concrete `purpose`, as
-/// `(material, strength)`. A collection binding whose collection includes
-/// `queried` beats the direct binding, in native property order.
-fn winning_binding_at(
-    stage: &Stage,
-    p: &Path,
-    queried: &Path,
-    purpose: &str,
-    cache: &mut HashMap<Path, Option<MembershipQuery>>,
-) -> Result<Option<(Path, BindingStrength)>> {
-    // Collection bindings beat direct, in native property order.
-    for (collection, material, strength) in collection_bindings_on(stage, p, purpose)? {
-        if is_collection_member(stage, &collection, queried, cache)? {
-            return Ok(Some((material, strength)));
-        }
-    }
-    if let Some(material) = direct_binding(stage, p, purpose)? {
-        return Ok(Some((material, binding_strength(stage, p, purpose)?)));
-    }
-    Ok(None)
-}
-
-/// The collection bindings authored on `p` for `purpose`, as
-/// `(collection, material, strength)`, in native property order.
-fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<(Path, Path, BindingStrength)>> {
-    let prefix = format!("{MATERIAL_BINDING_COLLECTION}:");
-    let mut out = Vec::new();
-    for name in stage.prim(p.clone())?.authored_property_names()? {
-        let Some(rest) = name.strip_prefix(&prefix) else {
-            continue;
-        };
-        // `rest` is `<purpose>:<name>` (restricted) or `<name>` (all-purpose),
-        // classified by token count to mirror C++ `_GetMaterialPurpose`: only a
-        // single-colon remainder is purpose-restricted; a plain name or any
-        // deeper-namespaced name is all-purpose.
-        let binding_purpose = match rest.split(':').collect::<Vec<_>>().as_slice() {
-            [pur, _name] => *pur,
-            _ => ALL_PURPOSE,
-        };
-        if binding_purpose != purpose {
-            continue;
-        }
-        let rel = p.append_property(&name)?;
-        if let [collection, material] = stage.relationship(rel.clone())?.targets()?.as_slice() {
-            out.push((collection.clone(), material.clone(), composed_strength(stage, &rel)?));
-        }
-    }
-    Ok(out)
-}
-
-/// Whether `queried` is a member of the collection at `collection_path`,
-/// caching the result by collection path. A path that is not a collection
-/// identity caches `None` and is never a member.
-fn is_collection_member(
-    stage: &Stage,
-    collection_path: &Path,
-    queried: &Path,
-    cache: &mut HashMap<Path, Option<MembershipQuery>>,
-) -> Result<bool> {
-    let query = match cache.entry(collection_path.clone()) {
-        Entry::Occupied(e) => e.into_mut(),
-        Entry::Vacant(e) => {
-            let query = match CollectionAPI::instance_at_path(collection_path) {
-                Some((prim, name)) => {
-                    Some(CollectionAPI::from_prim_unchecked(stage.prim(prim)?, name).membership_query()?)
-                }
-                None => None,
-            };
-            e.insert(query)
-        }
-    };
-    Ok(query.as_ref().is_some_and(|q| q.is_included(queried)))
-}
-
-/// Purposes to try in preference order: a restricted purpose first, then the
-/// all-purpose fallback (spec §15 — restricted preferred over all-purpose).
-fn purpose_fallbacks(purpose: &str) -> Vec<&str> {
-    if purpose == ALL_PURPOSE {
-        vec![ALL_PURPOSE]
-    } else {
-        vec![purpose, ALL_PURPOSE]
-    }
+/// The purposes a query for `purpose` tries, in order: the purpose itself,
+/// then the all-purpose fallback where that is another.
+fn purpose_passes(purpose: &str) -> impl Iterator<Item = &str> {
+    iter::once(purpose).chain((purpose != ALL_PURPOSE).then_some(ALL_PURPOSE))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use openusd::Result;
     use openusd::sdf;
+    use openusd::usd::{StagePopulationMask, apply_collection};
+
+    type Result<T = ()> = std::result::Result<T, SchemaError>;
 
     #[test]
-    fn direct_all_purpose_roundtrip() -> Result<()> {
+    fn direct_all_purpose_roundtrip() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
-        stage.define_prim("/World/Mat")?.set_type_name("Material")?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/World/Mesh")?)?)?.bind(sdf::path("/World/Mat")?)?;
+        Material::define(&stage, "/World/Mat")?;
+        MaterialBindingAPI::apply(&stage.prim("/World/Mesh")?)?.bind("/World/Mat")?;
 
         let binding = MaterialBindingAPI::get(&stage, "/World/Mesh")?.expect("MaterialBindingAPI");
-        assert_eq!(
-            binding.direct_binding("")?.map(|p| p.as_str().to_string()),
-            Some("/World/Mat".to_string())
-        );
-        assert_eq!(binding.binding_strength("")?, BindingStrength::WeakerThanDescendants);
+        let direct = binding.direct_binding("")?.expect("all-purpose binding");
+        assert_eq!(direct.rel().name(), MATERIAL_BINDING);
+        assert_eq!(direct.purpose(), ALL_PURPOSE);
+        assert_eq!(direct.material_path().as_str(), "/World/Mat");
+        assert_eq!(direct.strength()?, BindingStrength::WeakerThanDescendants);
+        assert_eq!(direct.material()?.expect("a Material").path().as_str(), "/World/Mat");
         Ok(())
     }
 
     #[test]
-    fn purpose_binding_with_strength() -> Result<()> {
+    fn purpose_binding_with_strength() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
         stage.define_prim("/Mat")?.set_type_name("Material")?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?.bind_for_purpose(
+        MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?.bind_for_purpose(
             "preview",
-            sdf::path("/Mat")?,
-            BindingStrength::StrongerThanDescendants,
+            "/Mat",
+            Some(BindingStrength::StrongerThanDescendants),
         )?;
 
         let binding = MaterialBindingAPI::get(&stage, "/Mesh")?.expect("MaterialBindingAPI");
-        assert_eq!(
-            binding.direct_binding("preview")?.map(|p| p.as_str().to_string()),
-            Some("/Mat".to_string())
-        );
-        assert_eq!(
-            binding.binding_strength("preview")?,
-            BindingStrength::StrongerThanDescendants
-        );
+        let preview = binding.direct_binding("preview")?.expect("preview binding");
+        assert_eq!(preview.rel().name(), "material:binding:preview");
+        assert_eq!(preview.purpose(), "preview");
+        assert_eq!(preview.material_path().as_str(), "/Mat");
+        assert_eq!(preview.strength()?, BindingStrength::StrongerThanDescendants);
         // The all-purpose binding wasn't authored.
         assert!(binding.direct_binding("")?.is_none());
         Ok(())
     }
 
+    /// The fallback strength is authored only over an opinion that says
+    /// otherwise; an explicit strength is authored as given.
     #[test]
-    fn rebind_overrides_strength() -> Result<()> {
-        // Rebinding with the default strength must clear a previously authored
-        // stronger opinion, not silently leave it composing.
+    fn strength_authored_sparsely() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
-        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?;
-        binding.bind_for_purpose("", sdf::path("/MatA")?, BindingStrength::StrongerThanDescendants)?;
-        binding.bind_for_purpose("", sdf::path("/MatB")?, BindingStrength::WeakerThanDescendants)?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?;
+        binding.bind("/MatA")?;
+        let rel = binding.direct_binding_rel("");
+        assert!(rel.bind_material_as()?.is_none(), "the fallback is left unauthored");
 
-        assert_eq!(binding.binding_strength("")?, BindingStrength::WeakerThanDescendants);
+        binding.bind_for_purpose("", "/MatA", Some(BindingStrength::StrongerThanDescendants))?;
+        assert_eq!(binding_strength(&rel)?, BindingStrength::StrongerThanDescendants);
+
+        binding.bind_for_purpose("", "/MatB", None)?;
+        assert_eq!(rel.bind_material_as()?.as_deref(), Some(WEAKER_THAN_DESCENDANTS));
+        assert_eq!(binding_strength(&rel)?, BindingStrength::WeakerThanDescendants);
+
+        let rel = binding.direct_binding_rel("preview");
+        binding.bind_for_purpose("preview", "/MatA", Some(BindingStrength::WeakerThanDescendants))?;
+        assert_eq!(rel.bind_material_as()?.as_deref(), Some(WEAKER_THAN_DESCENDANTS));
         Ok(())
     }
 
     #[test]
-    fn collection_binding_roundtrip() -> Result<()> {
+    fn collection_binding_roundtrip() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
-        stage.define_prim("/Set/Mat")?.set_type_name("Material")?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind_collection(
-            "metalBits",
-            sdf::path("/Set.collection:metal")?,
-            sdf::path("/Set/Mat")?,
-            "",
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        Material::define(&stage, "/Set/Mat")?;
+        let metal = apply_collection(&stage, "/Set", "metal")?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Set")?)?;
+        binding.bind_collection("metalBits", &metal, "/Set/Mat", "", None)?;
+        // No name: the collection's own.
+        binding.bind_collection("", &metal, "/Set/Mat", "preview", None)?;
 
         let binding = MaterialBindingAPI::get(&stage, "/Set")?.expect("MaterialBindingAPI");
-        let (collection, material) = binding
-            .collection_binding("metalBits", "")?
-            .expect("collection binding");
-        assert_eq!(collection.as_str(), "/Set.collection:metal");
-        assert_eq!(material.as_str(), "/Set/Mat");
+        let all = binding.collection_bindings("")?;
+        let [bound] = all.as_slice() else {
+            panic!("one all-purpose collection binding, not {}", all.len());
+        };
+        assert_eq!(bound.rel().name(), "material:binding:collection:metalBits");
+        assert_eq!(bound.purpose(), ALL_PURPOSE);
+        assert_eq!(bound.collection_path().as_str(), "/Set.collection:metal");
+        assert_eq!(bound.material_path().as_str(), "/Set/Mat");
+        assert_eq!(
+            bound.collection()?.expect("an applied collection").name().as_str(),
+            "metal"
+        );
+        assert!(bound.material()?.is_some());
+        assert!(CollectionBinding::is_binding_rel(bound.rel()));
+        assert!(!CollectionBinding::is_binding_rel(&binding.direct_binding_rel("")));
+
+        let preview = binding.collection_bindings("preview")?;
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].rel().name(), "material:binding:collection:preview:metal");
+        assert_eq!(preview[0].purpose(), "preview");
+        Ok(())
+    }
+
+    /// A binding name that is not one identifier would change the
+    /// relationship's token count, so it is refused.
+    #[test]
+    fn invalid_binding_name_refused() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/Set")?.set_type_name("Xform")?;
+        let metal = apply_collection(&stage, "/Set", "metal")?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Set")?)?;
+        for name in ["metal:bits", "metal bits", "1metal"] {
+            let refused = binding.bind_collection(name, &metal, "/Set/Mat", "", None);
+            assert!(matches!(refused, Err(SchemaError::InvalidBindingName { name: refused }) if refused == name));
+        }
+        assert!(binding.collection_binding_rels("")?.is_empty());
+        Ok(())
+    }
+
+    /// The relationships are listed by purpose whatever they target; the
+    /// bindings keep only those naming a collection and a material.
+    #[test]
+    fn collection_rels_by_purpose() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let set = stage.define_prim("/Set")?;
+        set.author_relationship_targets("material:binding:collection:dangling", ["/Nothing"])?;
+        set.author_relationship_targets("material:binding:collection:full:tight", ["/Set.collection:a", "/Mat"])?;
+        set.author_relationship_targets("material:binding:collection:loose", ["/Set.collection:b", "/Mat"])?;
+        let binding = MaterialBindingAPI::from_prim_unchecked(set);
+
+        let names = |rels: Vec<Relationship>| rels.into_iter().map(|rel| rel.name().to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            names(binding.collection_binding_rels("")?),
+            [
+                "material:binding:collection:dangling",
+                "material:binding:collection:loose"
+            ]
+        );
+        assert_eq!(
+            names(binding.collection_binding_rels("full")?),
+            ["material:binding:collection:full:tight"]
+        );
+        assert!(binding.collection_binding_rels("preview")?.is_empty());
+
+        let all = binding.collection_bindings("")?;
+        assert_eq!(all.len(), 1, "the dangling relationship is no binding");
+        assert_eq!(all[0].rel().name(), "material:binding:collection:loose");
+        Ok(())
+    }
+
+    #[test]
+    fn property_name_ownership() {
+        assert!(MaterialBindingAPI::can_contain_property_name("material:binding"));
+        assert!(MaterialBindingAPI::can_contain_property_name(
+            "material:binding:preview"
+        ));
+        assert!(MaterialBindingAPI::can_contain_property_name(
+            "material:binding:collection:full:x"
+        ));
+        assert!(!MaterialBindingAPI::can_contain_property_name(
+            "material:bindingStrength"
+        ));
+        assert!(!MaterialBindingAPI::can_contain_property_name("material"));
+        assert_eq!(MATERIAL_PURPOSES, ["", "preview", "full"]);
+
+        assert_eq!(binding_purpose("material:binding"), "");
+        assert_eq!(binding_purpose("material:binding:preview"), "preview");
+        assert_eq!(binding_purpose("material:binding:collection:x"), "");
+        assert_eq!(binding_purpose("material:binding:collection:full:x"), "full");
+        assert_eq!(binding_purpose("material:binding:collection:full:x:y"), "full");
+        assert_eq!(binding_purpose("material:binding:a:b"), "");
+    }
+
+    /// A direct binding is one forwarded prim-path target; a collection
+    /// binding two targets of which one is a prim path, in either order.
+    #[test]
+    fn binding_target_shapes() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let set = stage.define_prim("/Set")?;
+        Material::define(&stage, "/Mat")?;
+        let binding = MaterialBindingAPI::from_prim_unchecked(set.clone());
+
+        set.author_relationship_targets("material:binding", ["/Mat", "/Other"])?;
+        assert!(binding.direct_binding("")?.is_none(), "two targets bind nothing");
+        set.author_relationship_targets("material:binding", ["/Set.collection:a"])?;
+        assert!(binding.direct_binding("")?.is_none(), "a property target binds nothing");
+        set.author_relationship_targets("material:binding", ["/Mat", "/Set.collection:a"])?;
+        assert!(
+            CollectionBinding::new(binding.direct_binding_rel(""))?.is_none(),
+            "a direct name is no collection binding, whatever its targets"
+        );
+
+        // Forwarded through another relationship.
+        set.author_relationship_targets("via", ["/Mat"])?;
+        set.author_relationship_targets("material:binding", ["/Set.via"])?;
+        assert_eq!(
+            binding.direct_binding("")?.expect("forwarded").material_path().as_str(),
+            "/Mat"
+        );
+
+        set.author_relationship_targets("material:binding:collection:swapped", ["/Mat", "/Set.collection:a"])?;
+        let swapped = CollectionBinding::new(binding.collection_binding_rel("swapped", ""))?.expect("either order");
+        assert_eq!(swapped.collection_path().as_str(), "/Set.collection:a");
+        assert_eq!(swapped.material_path().as_str(), "/Mat");
+
+        set.author_relationship_targets("material:binding:collection:prims", ["/Mat", "/Other"])?;
+        assert!(CollectionBinding::new(binding.collection_binding_rel("prims", ""))?.is_none());
         Ok(())
     }
 
     /// `Material` prims at `paths`, for bindings to target.
-    fn materials(stage: &Stage, paths: &[&str]) -> Result<()> {
+    fn materials(stage: &Stage, paths: &[&str]) -> Result {
         for path in paths {
             Material::define(stage, *path)?;
         }
@@ -381,25 +848,30 @@ mod tests {
     }
 
     fn bound(stage: &Stage, prim: &str, purpose: &str) -> Option<String> {
-        MaterialBindingAPI(stage.prim(prim).unwrap())
+        MaterialBindingAPI::from_prim_unchecked(stage.prim(prim).unwrap())
             .bound_material(purpose)
             .unwrap()
             .map(|material| material.path().as_str().to_string())
     }
 
+    /// The target path of a resolved binding, for comparing resolutions.
+    fn target(resolved: Option<ResolvedBinding>) -> Option<String> {
+        resolved.map(|resolved| resolved.material_path().as_str().to_string())
+    }
+
     #[test]
-    fn closer_binding_wins() -> Result<()> {
+    fn closer_binding_wins() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         materials(&stage, &["/MatA", "/MatB"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind(sdf::path("/MatA")?)?;
+        MaterialBindingAPI::apply(&stage.prim("/Set")?)?.bind("/MatA")?;
 
         // Inherited from the ancestor.
         assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatA".to_string()));
 
         // A binding on the closer prim wins (both weakerThanDescendants).
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set/Mesh")?)?)?.bind(sdf::path("/MatB")?)?;
+        MaterialBindingAPI::apply(&stage.prim("/Set/Mesh")?)?.bind("/MatB")?;
         assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatB".to_string()));
         // The ancestor itself still resolves to its own binding.
         assert_eq!(bound(&stage, "/Set", ""), Some("/MatA".to_string()));
@@ -408,31 +880,92 @@ mod tests {
         Ok(())
     }
 
-    /// A binding to a prim that is not a `Material` binds nothing, as in
-    /// C++.
+    /// A binding to a prim that is not a `Material` commits the resolution,
+    /// as in C++: the binding is reported, the material is not, and no weaker
+    /// purpose is consulted.
     #[test]
-    fn non_material_target() -> Result<()> {
+    fn non_material_target() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatAll"])?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
         stage.define_prim("/NotAMaterial")?.set_type_name("Scope")?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?.bind(sdf::path("/NotAMaterial")?)?;
-        assert_eq!(bound(&stage, "/Mesh", ""), None);
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?;
+        binding.bind("/MatAll")?;
+        binding.bind_for_purpose("preview", "/NotAMaterial", None)?;
+
+        let resolved = binding
+            .resolve_binding("preview", &mut BindingCache::default())?
+            .expect("the preview binding wins");
+        assert_eq!(resolved.rel().name(), "material:binding:preview");
+        assert_eq!(resolved.material_path().as_str(), "/NotAMaterial");
+        assert!(resolved.material()?.is_none());
+        assert_eq!(bound(&stage, "/Mesh", "preview"), None);
+        assert_eq!(bound(&stage, "/Mesh", ""), Some("/MatAll".to_string()));
+        Ok(())
+    }
+
+    /// A binding whose target the stage does not hold is still the winning
+    /// binding.
+    #[test]
+    fn dangling_target() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?;
+        binding.bind("/Looks/Missing")?;
+
+        let resolved = binding
+            .resolve_binding("", &mut BindingCache::default())?
+            .expect("a winning binding");
+        assert_eq!(resolved.rel().path().as_str(), "/Mesh.material:binding");
+        assert_eq!(resolved.material_path().as_str(), "/Looks/Missing");
+        assert!(resolved.material()?.is_none());
+        assert!(binding.bound_material("")?.is_none());
+        Ok(())
+    }
+
+    /// The scene of issue 161: a stage populated under a mask that leaves the
+    /// bound material out still reports the binding and its target.
+    #[test]
+    fn masked_target_keeps_binding() -> Result {
+        const SCENE: &str = r#"#usda 1.0
+def Xform "scene" {
+    def Mesh "pCube1" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </scene/Looks/mat>
+    }
+    def Scope "Looks" { def Material "mat" {} }
+}
+"#;
+        let mask = StagePopulationMask::new(["/scene/pCube1"]).expect("a prim path");
+        let (_dir, stage) = crate::tests::from_usda_with(SCENE, |builder| builder.mask(mask))?;
+
+        let binding = MaterialBindingAPI::get(&stage, "/scene/pCube1")?.expect("MaterialBindingAPI");
+        let resolved = binding
+            .resolve_binding("full", &mut BindingCache::default())?
+            .expect("the binding wins whether or not its target is populated");
+        assert_eq!(resolved.rel().path().as_str(), "/scene/pCube1.material:binding");
+        assert_eq!(resolved.material_path().as_str(), "/scene/Looks/mat");
+        assert!(resolved.material()?.is_none(), "the material is outside the mask");
+        assert!(binding.bound_material("full")?.is_none());
+
+        let direct = binding.direct_binding("")?.expect("read straight off the relationship");
+        assert_eq!(direct.material_path().as_str(), "/scene/Looks/mat");
+        assert!(direct.material()?.is_none());
         Ok(())
     }
 
     #[test]
-    fn stronger_ancestor_wins() -> Result<()> {
+    fn stronger_ancestor_wins() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         materials(&stage, &["/MatStrong", "/MatWeak"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         // Ancestor binding is stronger; closer binding is the default weak.
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind_for_purpose(
+        MaterialBindingAPI::apply(&stage.prim("/Set")?)?.bind_for_purpose(
             "",
-            sdf::path("/MatStrong")?,
-            BindingStrength::StrongerThanDescendants,
+            "/MatStrong",
+            Some(BindingStrength::StrongerThanDescendants),
         )?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set/Mesh")?)?)?.bind(sdf::path("/MatWeak")?)?;
+        MaterialBindingAPI::apply(&stage.prim("/Set/Mesh")?)?.bind("/MatWeak")?;
 
         // The stronger ancestor wins despite the closer binding.
         assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatStrong".to_string()));
@@ -440,17 +973,13 @@ mod tests {
     }
 
     #[test]
-    fn restricted_purpose_preferred() -> Result<()> {
+    fn restricted_purpose_preferred() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         materials(&stage, &["/MatAll", "/MatPreview"])?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
-        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Mesh")?)?)?;
-        binding.bind(sdf::path("/MatAll")?)?; // all-purpose
-        binding.bind_for_purpose(
-            "preview",
-            sdf::path("/MatPreview")?,
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?;
+        binding.bind("/MatAll")?; // all-purpose
+        binding.bind_for_purpose("preview", "/MatPreview", None)?;
 
         // Restricted purpose preferred over the all-purpose binding.
         assert_eq!(bound(&stage, "/Mesh", "preview"), Some("/MatPreview".to_string()));
@@ -460,19 +989,15 @@ mod tests {
     }
 
     #[test]
-    fn restricted_ancestor_wins() -> Result<()> {
+    fn restricted_ancestor_wins() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         materials(&stage, &["/MatPreview", "/MatAll"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
         // Restricted "preview" binding on the ancestor; the queried prim carries
         // only an all-purpose binding.
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?.bind_for_purpose(
-            "preview",
-            sdf::path("/MatPreview")?,
-            BindingStrength::WeakerThanDescendants,
-        )?;
-        MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set/Mesh")?)?)?.bind(sdf::path("/MatAll")?)?;
+        MaterialBindingAPI::apply(&stage.prim("/Set")?)?.bind_for_purpose("preview", "/MatPreview", None)?;
+        MaterialBindingAPI::apply(&stage.prim("/Set/Mesh")?)?.bind("/MatAll")?;
 
         // The restricted purpose is resolved across the whole chain first, so
         // the ancestor's "preview" binding outranks the closer all-purpose one.
@@ -490,63 +1015,246 @@ mod tests {
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         stage.define_prim("/Set/B")?.set_type_name("Mesh")?;
-        let coll = openusd::usd::apply_collection(&stage, sdf::path("/Set")?, "metal")?;
-        coll.include_path(sdf::path("/Set/A")?)?;
-        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?;
-        binding.bind(sdf::path("/MatDir")?)?;
-        binding.bind_collection(
-            "metalBits",
-            sdf::path("/Set.collection:metal")?,
-            sdf::path("/MatMetal")?,
-            "",
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        let metal = apply_collection(&stage, "/Set", "metal")?;
+        metal.include_path("/Set/A")?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Set")?)?;
+        binding.bind("/MatDir")?;
+        binding.bind_collection("metalBits", &metal, "/MatMetal", "", None)?;
         Ok(stage)
     }
 
     #[test]
-    fn collection_beats_direct() -> Result<()> {
+    fn collection_beats_direct() -> Result {
         let stage = collection_scene()?;
         // /Set/A is a collection member → the collection binding wins over direct.
         assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatMetal".to_string()));
         // /Set/B is not a member → falls back to the inherited direct binding.
         assert_eq!(bound(&stage, "/Set/B", ""), Some("/MatDir".to_string()));
+
+        let resolved = MaterialBindingAPI::from_prim_unchecked(stage.prim("/Set/A")?)
+            .resolve_binding("", &mut BindingCache::default())?
+            .expect("bound");
+        assert_eq!(
+            resolved.rel().path().as_str(),
+            "/Set.material:binding:collection:metalBits"
+        );
+        Ok(())
+    }
+
+    /// A weak collection binding on an ancestor does not displace a closer
+    /// winner, while a stronger one does.
+    #[test]
+    fn ancestor_collection_strength() -> Result {
+        let stage = collection_scene()?;
+        materials(&stage, &["/MatLeaf"])?;
+        MaterialBindingAPI::apply(&stage.prim("/Set/A")?)?.bind("/MatLeaf")?;
+        assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatLeaf".to_string()));
+
+        let set = MaterialBindingAPI::get(&stage, "/Set")?.expect("MaterialBindingAPI");
+        set_binding_strength(
+            set.collection_binding_rel("metalBits", ""),
+            Some(BindingStrength::StrongerThanDescendants),
+        )?;
+        assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatMetal".to_string()));
+        Ok(())
+    }
+
+    /// Editing the bound collection through the binding moves prims between
+    /// the collection's material and the direct fallback.
+    #[test]
+    fn binding_collection_edits() -> Result {
+        let stage = collection_scene()?;
+        let binding = MaterialBindingAPI::get(&stage, "/Set")?.expect("MaterialBindingAPI");
+        binding.add_to_binding_collection("/Set/B", "metalBits", "")?;
+        assert_eq!(bound(&stage, "/Set/B", ""), Some("/MatMetal".to_string()));
+        binding.remove_from_binding_collection("/Set/B", "metalBits", "")?;
+        assert_eq!(bound(&stage, "/Set/B", ""), Some("/MatDir".to_string()));
+        // A binding name nothing is bound under edits nothing.
+        binding.add_to_binding_collection("/Set/B", "plasticBits", "")?;
+        assert_eq!(bound(&stage, "/Set/B", ""), Some("/MatDir".to_string()));
+        Ok(())
+    }
+
+    /// A collection binding whose collection has no `CollectionAPI` applied
+    /// binds nothing, whatever `includes` says.
+    #[test]
+    fn unapplied_collection_skipped() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatDir", "/MatGhost"])?;
+        let set = stage.define_prim("/Set")?;
+        stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
+        set.author_relationship_targets("collection:ghost:includes", ["/Set/A"])?;
+        set.author_relationship_targets(
+            "material:binding:collection:ghostBits",
+            ["/Set.collection:ghost", "/MatGhost"],
+        )?;
+        let binding = MaterialBindingAPI::apply(&set)?;
+        binding.bind("/MatDir")?;
+
+        let ghost = &binding.collection_bindings("")?[0];
+        assert!(ghost.collection()?.is_none());
+        assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatDir".to_string()));
+
+        apply_collection(&stage, "/Set", "ghost")?;
+        assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatGhost".to_string()));
         Ok(())
     }
 
     #[test]
-    fn collection_native_order() -> Result<()> {
+    fn collection_native_order() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         materials(&stage, &["/MatSecond", "/MatFirst"])?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
         // Two collections that both include /Set/A.
-        for c in ["first", "second"] {
-            let coll = openusd::usd::apply_collection(&stage, sdf::path("/Set")?, c)?;
-            coll.include_path(sdf::path("/Set/A")?)?;
-        }
+        let first = apply_collection(&stage, "/Set", "first")?;
+        first.include_path("/Set/A")?;
+        let second = apply_collection(&stage, "/Set", "second")?;
+        second.include_path("/Set/A")?;
         // Author binding "aaa" (collection `second`) before "zzz" (collection
         // `first`) — native *property* order, not target order, decides.
-        let binding = MaterialBindingAPI::apply(&stage.prim(sdf::path("/Set")?)?)?;
-        binding.bind_collection(
-            "aaa",
-            sdf::path("/Set.collection:second")?,
-            sdf::path("/MatSecond")?,
-            "",
-            BindingStrength::WeakerThanDescendants,
-        )?;
-        binding.bind_collection(
-            "zzz",
-            sdf::path("/Set.collection:first")?,
-            sdf::path("/MatFirst")?,
-            "",
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Set")?)?;
+        binding.bind_collection("aaa", &second, "/MatSecond", "", None)?;
+        binding.bind_collection("zzz", &first, "/MatFirst", "", None)?;
 
         // `aaa` precedes `zzz` in native property order, so its collection
         // binding (to `/MatSecond`) is the one tested and wins — even though its
         // collection `second` was authored after `first`.
         assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatSecond".to_string()));
+        Ok(())
+    }
+
+    /// One cache over a subtree answers as fresh caches do, for both the
+    /// per-call and the batch entry points, and for more than one purpose.
+    #[test]
+    fn cache_shared_over_subtree() -> Result {
+        let stage = collection_scene()?;
+        MaterialBindingAPI::get(&stage, "/Set")?
+            .expect("MaterialBindingAPI")
+            .bind_for_purpose("preview", "/MatMetal", None)?;
+        let prims = [stage.prim("/Set/A")?, stage.prim("/Set/B")?, stage.prim("/Set")?];
+        let mut cache = BindingCache::default();
+        for purpose in ["", "preview", "full"] {
+            let shared: Vec<Option<String>> = prims
+                .iter()
+                .map(|prim| {
+                    MaterialBindingAPI::from_prim_unchecked(prim.clone())
+                        .resolve_binding(purpose, &mut cache)
+                        .map(target)
+                })
+                .collect::<openusd::Result<_>>()?;
+            let fresh: Vec<Option<String>> = prims
+                .iter()
+                .map(|prim| bound(&stage, prim.path().as_str(), purpose))
+                .collect();
+            assert_eq!(shared, fresh, "purpose {purpose:?}");
+            let batch: Vec<Option<String>> = MaterialBindingAPI::resolve_bindings(&prims, purpose)?
+                .into_iter()
+                .map(target)
+                .collect();
+            assert_eq!(batch, fresh, "purpose {purpose:?}");
+        }
+        assert_eq!(
+            MaterialBindingAPI::resolve_bindings(&prims, "preview")?
+                .into_iter()
+                .map(target)
+                .collect::<Vec<_>>(),
+            vec![Some("/MatMetal".to_string()); 3]
+        );
+        Ok(())
+    }
+
+    /// Prims of two stages at one path keep their own stage's bindings
+    /// through one cache and one batch.
+    #[test]
+    fn cache_partitioned_by_stage() -> Result {
+        let mut stages = Vec::new();
+        for material in ["/MatOne", "/MatTwo"] {
+            let stage = crate::tests::stage("anon.usda")?;
+            materials(&stage, &[material])?;
+            stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
+            MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?.bind(material)?;
+            stages.push(stage);
+        }
+        let prims = [stages[0].prim("/Mesh")?, stages[1].prim("/Mesh")?];
+
+        let mut cache = BindingCache::default();
+        for (prim, material) in prims.iter().zip(["/MatOne", "/MatTwo"]) {
+            let resolved = MaterialBindingAPI::from_prim_unchecked(prim.clone())
+                .resolve_binding("", &mut cache)?
+                .expect("bound");
+            assert_eq!(resolved.material_path().as_str(), material);
+            assert!(resolved.rel().stage() == prim.stage());
+        }
+        let batch: Vec<Option<String>> = MaterialBindingAPI::resolve_bindings(&prims, "")?
+            .into_iter()
+            .map(target)
+            .collect();
+        assert_eq!(batch, [Some("/MatOne".to_string()), Some("/MatTwo".to_string())]);
+        Ok(())
+    }
+
+    /// Unbinding blocks a binding a weaker layer authors.
+    #[test]
+    fn unbind_blocks_weaker_layer() -> Result {
+        let (_dir, stage) = crate::tests::layered(&[(
+            "weak.usda",
+            r#"
+def Material "MatWeak" {}
+def Xform "Set" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+    rel material:binding = </MatWeak>
+    def Mesh "Mesh" {}
+}
+"#,
+        )])?;
+        assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatWeak".to_string()));
+
+        let binding = MaterialBindingAPI::get(&stage, "/Set")?.expect("MaterialBindingAPI");
+        binding.unbind_direct("")?;
+        assert!(binding.direct_binding("")?.is_none());
+        assert!(binding.direct_binding_rel("").targets()?.is_empty());
+        assert_eq!(bound(&stage, "/Set/Mesh", ""), None);
+        Ok(())
+    }
+
+    #[test]
+    fn unbind_all_bindings() -> Result {
+        let stage = collection_scene()?;
+        let binding = MaterialBindingAPI::get(&stage, "/Set")?.expect("MaterialBindingAPI");
+        binding.bind_for_purpose("preview", "/MatDir", None)?;
+        binding.unbind_all()?;
+
+        assert!(binding.direct_binding("")?.is_none());
+        assert!(binding.direct_binding("preview")?.is_none());
+        assert!(binding.collection_bindings("")?.is_empty());
+        assert_eq!(bound(&stage, "/Set/A", ""), None);
+        assert_eq!(bound(&stage, "/Set/A", "preview"), None);
+
+        // Each relationship was blocked, not removed, so unbinding one again
+        // authors nothing new.
+        let rel = binding.collection_binding_rel("metalBits", "");
+        assert!(rel.is_defined()?);
+        assert!(rel.targets()?.is_empty());
+        let authored = stage.prim("/Set")?.authored_relationships()?.len();
+        binding.unbind_collection("metalBits", "")?;
+        assert_eq!(stage.prim("/Set")?.authored_relationships()?.len(), authored);
+        Ok(())
+    }
+
+    #[test]
+    fn strength_read_through_metadata() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        let mesh = stage.define_prim("/Mesh")?;
+        let rel = mesh.author_relationship_targets("material:binding", ["/Mat"])?;
+        assert_eq!(binding_strength(&rel)?, BindingStrength::WeakerThanDescendants);
+        let rel = rel.set_metadata(BIND_MATERIAL_AS, BindingStrength::StrongerThanDescendants)?;
+        assert_eq!(binding_strength(&rel)?, BindingStrength::StrongerThanDescendants);
+        // An unrecognized token reads as the fallback, and the fallback
+        // request overwrites it.
+        let rel = rel.set_metadata(BIND_MATERIAL_AS, sdf::Value::token("sideways"))?;
+        assert_eq!(binding_strength(&rel)?, BindingStrength::WeakerThanDescendants);
+        let rel = set_binding_strength(rel, None)?;
+        assert_eq!(rel.bind_material_as()?.as_deref(), Some(WEAKER_THAN_DESCENDANTS));
         Ok(())
     }
 }

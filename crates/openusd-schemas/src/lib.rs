@@ -203,6 +203,14 @@ pub enum SchemaError {
         context: String,
     },
 
+    /// A collection binding name that is not one plain identifier, which would
+    /// change the token count that tells a binding relationship's role.
+    #[error("`{name}` is not a binding name: one identifier with no `:`")]
+    InvalidBindingName {
+        /// The rejected name.
+        name: String,
+    },
+
     /// A name that no primvar can have: one ending in `:indices`, which names
     /// the indices attribute a primvar keeps beside it.
     #[error("`{name}` is not a primvar name: `indices` is reserved for a primvar's indices attribute")]
@@ -730,11 +738,23 @@ pub(crate) mod tests {
         reason = "which families' tests reach for it depends on the features enabled"
     )]
     pub(crate) fn from_usda(usda: &str) -> Result<(tempfile::TempDir, Stage)> {
+        from_usda_with(usda, |builder| builder)
+    }
+
+    /// [`from_usda`], with the stage builder configured by `configure` before
+    /// it opens: a population mask, a load rule.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn from_usda_with(
+        usda: &str,
+        configure: impl FnOnce(usd::StageBuilder) -> usd::StageBuilder,
+    ) -> Result<(tempfile::TempDir, Stage)> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("scene.usda");
         fs::write(&path, usda)?;
-        let stage = Stage::builder()
-            .schema_registry(schema_registry())
+        let stage = configure(Stage::builder().schema_registry(schema_registry()))
             .open(path.to_str().expect("utf-8 temp path"))?;
         Ok((dir, stage))
     }

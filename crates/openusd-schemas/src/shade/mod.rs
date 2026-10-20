@@ -29,6 +29,9 @@
 //! as far as [`ProducerFilter`] admits. [`NodeGraphInterface`] maps interface
 //! inputs in the reverse direction to their consumers. Specialized consumers
 //! include [`Material::surface_source`] and [`read_preview_surface`].
+//! [`MaterialBindingAPI::resolve_binding`] is material resolution over a prim
+//! and its ancestors, answering the [`ResolvedBinding`] that wins among the
+//! [`DirectBinding`]s and [`CollectionBinding`]s they carry.
 //! [`Shader::implementation_source`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
 //! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
@@ -78,6 +81,10 @@ mod preview;
 mod traits;
 mod utils;
 
+pub use binding::{
+    BindingCache, CollectionBinding, DirectBinding, MATERIAL_PURPOSES, ResolvedBinding, binding_strength,
+    set_binding_strength,
+};
 pub use connectable::{
     AttributeType, ConnectedSources, ConnectionSource, ConnectionTarget, ShadingAttribute, base_name,
     base_name_and_type,

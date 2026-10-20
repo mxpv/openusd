@@ -315,7 +315,7 @@ mod tests {
     use crate::SchemaError;
     use crate::geom::{self, Cube, CubeSchema, StageMetadata as _, UpAxis, Xform, XformCache, XformableExt};
     use crate::physics::{CollisionAPI, MATERIAL_PURPOSE, MassAPI, MaterialAPI, RigidBodyAPI, StageMetadata as _};
-    use crate::shade::{BindingStrength, Material, MaterialBindingAPI};
+    use crate::shade::{Material, MaterialBindingAPI};
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -421,11 +421,7 @@ mod tests {
         MaterialAPI::apply(material.prim())?
             .create_density_attr()?
             .set(density)?;
-        MaterialBindingAPI::apply(prim)?.bind_for_purpose(
-            MATERIAL_PURPOSE,
-            material.path().clone(),
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        MaterialBindingAPI::apply(prim)?.bind_for_purpose(MATERIAL_PURPOSE, material.path().clone(), None)?;
         Ok(())
     }
 
