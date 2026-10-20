@@ -38,7 +38,7 @@ use crate::{PrimvarIndexError, SchemaError};
 /// let heat = geom::PrimvarsAPI::from_prim_unchecked(mesh.prim().clone())
 ///     .primvar_builder("heat", "float[]")
 ///     .interpolation(geom::Interpolation::Vertex)
-///     .set(sdf::Value::FloatVec(vec![20.0, 35.0]))
+///     .set(sdf::Value::FloatVec((vec![20.0, 35.0]).into()))
 ///     .indices(vec![0, 1, 1, 0])
 ///     .build()?;
 ///
@@ -254,7 +254,7 @@ impl Primvar {
     pub fn set_indices(&self, indices: Vec<i32>, time: impl Into<Option<usd::TimeCode>>) -> Result<(), SchemaError> {
         self.require_array()?;
         self.indices_builder()
-            .set_at(sdf::Value::IntVec(indices), time)
+            .set_at(sdf::Value::IntVec(indices.into()), time)
             .build()?;
         Ok(())
     }
@@ -596,7 +596,7 @@ mod tests {
     fn floats(values: &[f32]) -> Result<Primvar> {
         mesh()?
             .primvar_builder("x", "float[]")
-            .set(sdf::Value::FloatVec(values.to_vec()))
+            .set(sdf::Value::FloatVec((values.to_vec()).into()))
             .build()
     }
 
@@ -953,8 +953,8 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0, 2.0]), one)?
-            .set_at(sdf::Value::FloatVec(vec![3.0, 4.0]), two)?;
+            .set_at(sdf::Value::FloatVec((vec![1.0, 2.0]).into()), one)?
+            .set_at(sdf::Value::FloatVec((vec![3.0, 4.0]).into()), two)?;
         primvar.set_indices(vec![1, 0], one)?;
         primvar.set_indices(Vec::new(), two)?;
 
@@ -1082,8 +1082,8 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0]), at(1.0))?
-            .set_at(sdf::Value::FloatVec(vec![2.0]), at(2.0))?;
+            .set_at(sdf::Value::FloatVec((vec![1.0]).into()), at(1.0))?
+            .set_at(sdf::Value::FloatVec((vec![2.0]).into()), at(2.0))?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0, 2.0]);
 
         primvar.set_indices(vec![0], at(0.0))?;
@@ -1101,7 +1101,7 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0]), TimeCode::new(1.0))?;
+            .set_at(sdf::Value::FloatVec((vec![1.0]).into()), TimeCode::new(1.0))?;
         primvar.set_indices(vec![0], TimeCode::new(5.0))?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0, 5.0]);
 
@@ -1129,7 +1129,7 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0]), one)?;
+            .set_at(sdf::Value::FloatVec((vec![1.0]).into()), one)?;
         primvar.set_indices(vec![0], one)?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0]);
         assert!(!primvar.might_be_time_varying()?);

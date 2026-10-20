@@ -301,7 +301,9 @@ fn traverse(stage: &Stage, predicate: PrimPredicate) -> Result<Vec<sdf::Path>> {
     // One cache scope over the traversal, as over the array reads.
     let _scope = ar::CacheScope::begin();
     let mut prims = Vec::new();
-    stage.traverse(predicate, |path| prims.push(path.clone()))?;
+    for prim in stage.prim("/")?.filtered_descendants(predicate)? {
+        prims.push(prim?.path().clone());
+    }
     for path in &prims {
         stage.prim(path.clone())?.type_name()?;
     }

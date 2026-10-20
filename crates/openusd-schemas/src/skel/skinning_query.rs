@@ -464,7 +464,7 @@ fn influences(indices: Option<&Primvar>, weights: Option<&Primvar>) -> Result<Op
 /// `float[]`. Weights authored as `double[]` are narrowed to `f32`.
 fn joint_weights(weights: &Primvar, time: Option<TimeCode>) -> Result<Option<Vec<f32>>, SchemaError> {
     Ok(match weights.flattened::<sdf::Value>(time)? {
-        Some(sdf::Value::FloatVec(weights)) => Some(weights),
+        Some(sdf::Value::FloatVec(weights)) => Some(weights.into_vec()),
         Some(sdf::Value::DoubleVec(weights)) => Some(weights.into_iter().map(|weight| weight as f32).collect()),
         _ => None,
     })

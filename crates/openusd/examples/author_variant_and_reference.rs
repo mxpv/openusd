@@ -41,7 +41,7 @@ fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> openus
 
     let attr_spec = data.create_spec(prim.append_property("primvars:displayColor")?, SpecType::Attribute);
     attr_spec.add(FieldKey::TypeName, Value::Token("color3f[]".into()));
-    attr_spec.add(FieldKey::Default, Value::Vec3fVec(vec![color]));
+    attr_spec.add(FieldKey::Default, Value::Vec3fVec((vec![color]).into()));
 
     Ok(())
 }
@@ -62,15 +62,15 @@ fn write_scene(path: &str) -> openusd::Result<()> {
     // Declare the "color" variant set and choose "blue" as the default selection.
     sphere_spec.add(
         FieldKey::VariantSetNames,
-        Value::StringListOp(ListOp::prepended(vec!["color".to_owned()])),
+        Value::StringListOp(Box::new(ListOp::prepended(vec!["color".to_owned()]))),
     );
     sphere_spec.add(
         FieldKey::VariantSelection,
-        Value::VariantSelectionMap({
+        Value::VariantSelectionMap(Box::new({
             let mut map = HashMap::new();
             map.insert("color".into(), "blue".into());
             map
-        }),
+        })),
     );
     sphere_spec.add(ChildrenKey::VariantSetChildren, Value::TokenVec(vec!["color".into()]));
 
@@ -115,7 +115,7 @@ fn add_variant(
         layer_offset: LayerOffset::IDENTITY,
         custom_data: HashMap::new(),
     }]);
-    variant_spec.add(FieldKey::References, Value::ReferenceListOp(ref_list));
+    variant_spec.add(FieldKey::References, Value::ReferenceListOp(Box::new(ref_list)));
 
     Ok(())
 }

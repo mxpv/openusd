@@ -1,0 +1,788 @@
+{
+  "date": "2026-10-19",
+  "baseline_commit": "4ce5df786f0a48be7b26f088a24f4fd960a7dcc0",
+  "candidate_branch": "perf/moana-read-followup",
+  "candidate_source_sha256": {
+    "crates/openusd/src/sdf/path.rs": "9e376f2231f3b3c151ccf8ce13e4bda275adf9f1ed61266781888b16a3bf6449",
+    "crates/openusd/src/usdc/reader.rs": "c71c1da6f70677fb9bf362429ccb80733ae460c1f387b572c5f7bd6bea7b8c03"
+  },
+  "environment": {
+    "cpu": "Intel Xeon E5-2699 v4 @ 2.20GHz",
+    "virtual_cpus": 72,
+    "rustc": "1.96.1 (31fca3adb 2026-06-26)",
+    "gcc": "11.5.0",
+    "cpp_reference": "usd-core 26.8 wheel",
+    "cpp_headers_commit": "70c45e83b08a7b45588cd6cdbd2ae67f5147befb",
+    "cpp_flags": "-O3",
+    "rust_build": "release, locked, mmap feature compiled; ordinary file reads"
+  },
+  "interpretation": {
+    "controlled": "Five retained rounds with both Rust builds pinned to CPU 0, alternating executable order. C++ keeps default affinity.",
+    "unrestricted": "Three retained rounds with default affinity and fixed executable order. Overall Rust medians are effectively unchanged.",
+    "workload": "Open, traverse every instance placement, enumerate authored attributes, read default-time values and count arrays and elements. Values are dropped after reads.",
+    "warmups": "One untimed warm-up per executable before each series.",
+    "timing_isolation": "No concurrent builds or profiling during retained measurements."
+  },
+  "pinned": {
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+    "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+    "cpu_count": 72,
+    "binaries": {
+      "before": "/tmp/openusd-followup/before",
+      "rust": "/tmp/openusd-followup/after-owner",
+      "cpp": "/tmp/openusd-reference/open_bench"
+    },
+    "binary_sha256": {
+      "before": "c4b5bd1fa1df9c199d3226af17c62c0748acebc0778d3416dfefac1f8a07e238",
+      "rust": "f42e660b84c38698379a529ae592c43e5ba89118a5a520cac6344590d7d4158e",
+      "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+    },
+    "options": [
+      "--proxies",
+      "--authored",
+      "--no-heap"
+    ],
+    "commands": {
+      "before": [
+        "taskset",
+        "--cpu-list",
+        "0",
+        "/tmp/openusd-followup/before",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "rust": [
+        "taskset",
+        "--cpu-list",
+        "0",
+        "/tmp/openusd-followup/after-owner",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp": [
+        "/tmp/openusd-reference/open_bench",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ]
+    },
+    "warmups": 1,
+    "rust_cpu": 0,
+    "run_order": [
+      {
+        "round": 0,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 1,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 2,
+        "labels": [
+          "cpp",
+          "rust",
+          "before"
+        ]
+      },
+      {
+        "round": 3,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 4,
+        "labels": [
+          "cpp",
+          "rust",
+          "before"
+        ]
+      },
+      {
+        "round": 5,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      }
+    ],
+    "results": {
+      "before": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 24.12,
+            "arrays": 23.551
+          },
+          "total": 47.672,
+          "process_seconds": 53.63576544800162,
+          "peak_rss_mib": 6684.9,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 24.101,
+            "arrays": 22.976
+          },
+          "total": 47.078,
+          "process_seconds": 53.30092821300059,
+          "peak_rss_mib": 6684.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 25.007,
+            "arrays": 23.546
+          },
+          "total": 48.554,
+          "process_seconds": 54.77354431799904,
+          "peak_rss_mib": 6685.2,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 25.936,
+            "arrays": 23.847
+          },
+          "total": 49.784000000000006,
+          "process_seconds": 55.94273402500403,
+          "peak_rss_mib": 6684.9,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 25.907,
+            "arrays": 23.54
+          },
+          "total": 49.448,
+          "process_seconds": 55.54528010600188,
+          "peak_rss_mib": 6685.0,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "rust": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 25.054,
+            "arrays": 20.647
+          },
+          "total": 45.702,
+          "process_seconds": 52.24157863800065,
+          "peak_rss_mib": 6685.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 24.442,
+            "arrays": 20.209
+          },
+          "total": 44.653,
+          "process_seconds": 50.808412007005245,
+          "peak_rss_mib": 6685.7,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 26.613,
+            "arrays": 21.48
+          },
+          "total": 48.095,
+          "process_seconds": 54.47729259500193,
+          "peak_rss_mib": 6684.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 23.603,
+            "arrays": 20.362
+          },
+          "total": 43.967,
+          "process_seconds": 50.19578030000412,
+          "peak_rss_mib": 6684.9,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 26.26,
+            "arrays": 21.631
+          },
+          "total": 47.893,
+          "process_seconds": 54.00225537799997,
+          "peak_rss_mib": 6685.7,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "cpp": [
+        {
+          "phases": {
+            "open": 4.675048,
+            "metadata": 1.101604,
+            "arrays": 9.927506
+          },
+          "total": 15.704158,
+          "process_seconds": 16.09321277199342,
+          "peak_rss_mib": 1806.4296875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.261943,
+            "metadata": 1.413114,
+            "arrays": 11.514323
+          },
+          "total": 17.18938,
+          "process_seconds": 17.850849497997842,
+          "peak_rss_mib": 1793.35546875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.188538,
+            "metadata": 1.326997,
+            "arrays": 11.410032
+          },
+          "total": 16.925567,
+          "process_seconds": 17.373399787997187,
+          "peak_rss_mib": 1780.98828125,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.560545,
+            "metadata": 1.074198,
+            "arrays": 10.234873
+          },
+          "total": 15.869616,
+          "process_seconds": 16.271304330999556,
+          "peak_rss_mib": 1795.0859375,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.130207,
+            "metadata": 1.072329,
+            "arrays": 10.058734
+          },
+          "total": 15.26127,
+          "process_seconds": 15.788212127998122,
+          "peak_rss_mib": 1780.6015625,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ]
+    },
+    "status_records_matched": 416549
+  },
+  "unrestricted": {
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+    "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+    "cpu_count": 72,
+    "binaries": {
+      "before": "/tmp/openusd-followup/before",
+      "rust": "/tmp/openusd-followup/after-owner",
+      "cpp": "/tmp/openusd-reference/open_bench"
+    },
+    "binary_sha256": {
+      "before": "c4b5bd1fa1df9c199d3226af17c62c0748acebc0778d3416dfefac1f8a07e238",
+      "rust": "f42e660b84c38698379a529ae592c43e5ba89118a5a520cac6344590d7d4158e",
+      "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+    },
+    "options": [
+      "--proxies",
+      "--authored",
+      "--no-heap"
+    ],
+    "commands": {
+      "before": [
+        "/tmp/openusd-followup/before",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "rust": [
+        "/tmp/openusd-followup/after-owner",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp": [
+        "/tmp/openusd-reference/open_bench",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ]
+    },
+    "warmups": 1,
+    "results": {
+      "before": [
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 25.301,
+            "arrays": 23.642
+          },
+          "total": 48.94499999999999,
+          "process_seconds": 55.2890056469987,
+          "peak_rss_mib": 6684.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 24.474,
+            "arrays": 22.958
+          },
+          "total": 47.434,
+          "process_seconds": 53.5272571280002,
+          "peak_rss_mib": 6685.4,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 24.068,
+            "arrays": 23.707
+          },
+          "total": 47.777,
+          "process_seconds": 53.94221533700329,
+          "peak_rss_mib": 6684.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "rust": [
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 25.541,
+            "arrays": 22.15
+          },
+          "total": 47.693,
+          "process_seconds": 55.67697070500435,
+          "peak_rss_mib": 6684.9,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 23.082,
+            "arrays": 19.639
+          },
+          "total": 42.723,
+          "process_seconds": 49.067163552004786,
+          "peak_rss_mib": 6684.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 26.233,
+            "arrays": 22.14
+          },
+          "total": 48.375,
+          "process_seconds": 54.99107525800355,
+          "peak_rss_mib": 6684.3,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "cpp": [
+        {
+          "phases": {
+            "open": 4.675937,
+            "metadata": 1.10517,
+            "arrays": 10.823106
+          },
+          "total": 16.604213,
+          "process_seconds": 16.989160338998772,
+          "peak_rss_mib": 1796.2265625,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.546431,
+            "metadata": 1.22409,
+            "arrays": 10.571282
+          },
+          "total": 16.341803,
+          "process_seconds": 16.712356035000994,
+          "peak_rss_mib": 1788.79296875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.541875,
+            "metadata": 1.048163,
+            "arrays": 9.577634
+          },
+          "total": 15.167672,
+          "process_seconds": 15.5337331740011,
+          "peak_rss_mib": 1801.29296875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ]
+    },
+    "status_records_matched": 416549
+  },
+  "instruction_profile": {
+    "tool": "Callgrind 3.26.0",
+    "asset": "usd/elements/isBayCedarA1/isBayCedarA1_bonsaiA_model.usd",
+    "options": [
+      "--proxies",
+      "--no-heap"
+    ],
+    "before_instructions": 3739037694,
+    "after_instructions": 3315311185,
+    "reduction_percent": 11.332501666938267
+  },
+  "validation": {
+    "workspace_tests_passed": 3975,
+    "ignored": 1,
+    "ignored_test": "text_parser::test_variants",
+    "strict_clippy": "passed, workspace/all-targets/all-features",
+    "documentation": "passed, workspace/no-deps/all-features",
+    "formatting": "passed",
+    "secondary_checks": {
+      "nested_instancing": {
+        "root": "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda",
+        "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+        "cpu_count": 72,
+        "binaries": {
+          "before": "/tmp/openusd-followup/before",
+          "rust": "/tmp/openusd-followup/after-owner",
+          "cpp": "/tmp/openusd-reference/open_bench"
+        },
+        "binary_sha256": {
+          "before": "c4b5bd1fa1df9c199d3226af17c62c0748acebc0778d3416dfefac1f8a07e238",
+          "rust": "f42e660b84c38698379a529ae592c43e5ba89118a5a520cac6344590d7d4158e",
+          "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+        },
+        "options": [
+          "--proxies",
+          "--authored",
+          "--no-heap"
+        ],
+        "commands": {
+          "before": [
+            "/tmp/openusd-followup/before",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+          ],
+          "rust": [
+            "/tmp/openusd-followup/after-owner",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+          ],
+          "cpp": [
+            "/tmp/openusd-reference/open_bench",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+          ]
+        },
+        "warmups": 0,
+        "rust_cpu": null,
+        "run_order": [
+          {
+            "round": 1,
+            "labels": [
+              "before",
+              "rust",
+              "cpp"
+            ]
+          }
+        ],
+        "results": {
+          "before": [
+            {
+              "phases": {
+                "open": 0.001,
+                "metadata": 0.0,
+                "arrays": 0.0
+              },
+              "total": 0.001,
+              "process_seconds": 0.0041224329979741015,
+              "peak_rss_mib": 5.8,
+              "counts": {
+                "prims": 9,
+                "arrays": 0,
+                "elements": 0
+              }
+            }
+          ],
+          "rust": [
+            {
+              "phases": {
+                "open": 0.001,
+                "metadata": 0.0,
+                "arrays": 0.0
+              },
+              "total": 0.001,
+              "process_seconds": 0.00529665299836779,
+              "peak_rss_mib": 6.0,
+              "counts": {
+                "prims": 9,
+                "arrays": 0,
+                "elements": 0
+              }
+            }
+          ],
+          "cpp": [
+            {
+              "phases": {
+                "open": 0.022427,
+                "metadata": 5.9e-05,
+                "arrays": 0.009844
+              },
+              "total": 0.03233,
+              "process_seconds": 0.06429635699896608,
+              "peak_rss_mib": 41.625,
+              "counts": {
+                "prims": 9,
+                "arrays": 0,
+                "elements": 0
+              }
+            }
+          ]
+        },
+        "status_records_matched": 9
+      },
+      "alab_book_encyclopedia01": {
+        "root": "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda",
+        "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+        "cpu_count": 72,
+        "binaries": {
+          "before": "/tmp/openusd-followup/before",
+          "rust": "/tmp/openusd-followup/after-owner",
+          "cpp": "/tmp/openusd-reference/open_bench"
+        },
+        "binary_sha256": {
+          "before": "c4b5bd1fa1df9c199d3226af17c62c0748acebc0778d3416dfefac1f8a07e238",
+          "rust": "f42e660b84c38698379a529ae592c43e5ba89118a5a520cac6344590d7d4158e",
+          "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+        },
+        "options": [
+          "--proxies",
+          "--authored",
+          "--no-heap"
+        ],
+        "commands": {
+          "before": [
+            "/tmp/openusd-followup/before",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+          ],
+          "rust": [
+            "/tmp/openusd-followup/after-owner",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+          ],
+          "cpp": [
+            "/tmp/openusd-reference/open_bench",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+          ]
+        },
+        "warmups": 0,
+        "rust_cpu": null,
+        "run_order": [
+          {
+            "round": 1,
+            "labels": [
+              "before",
+              "rust",
+              "cpp"
+            ]
+          }
+        ],
+        "results": {
+          "before": [
+            {
+              "phases": {
+                "open": 0.001,
+                "metadata": 0.001,
+                "arrays": 0.0
+              },
+              "total": 0.002,
+              "process_seconds": 0.0051430149978841655,
+              "peak_rss_mib": 6.2,
+              "counts": {
+                "prims": 8,
+                "arrays": 50,
+                "elements": 16530
+              }
+            }
+          ],
+          "rust": [
+            {
+              "phases": {
+                "open": 0.001,
+                "metadata": 0.001,
+                "arrays": 0.0
+              },
+              "total": 0.002,
+              "process_seconds": 0.005259722995106131,
+              "peak_rss_mib": 6.2,
+              "counts": {
+                "prims": 8,
+                "arrays": 50,
+                "elements": 16530
+              }
+            }
+          ],
+          "cpp": [
+            {
+              "phases": {
+                "open": 0.02907,
+                "metadata": 2.2e-05,
+                "arrays": 0.006962
+              },
+              "total": 0.036054,
+              "process_seconds": 0.05695787200238556,
+              "peak_rss_mib": 42.1875,
+              "counts": {
+                "prims": 8,
+                "arrays": 50,
+                "elements": 16530
+              }
+            }
+          ]
+        },
+        "status_records_matched": 8
+      }
+    }
+  }
+}

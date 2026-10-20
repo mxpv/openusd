@@ -231,13 +231,6 @@ impl PrototypeRegistry {
         (path, true)
     }
 
-    /// The prototype registered at `prototype`, holding the canonical
-    /// instance's load rules and population mask re-rooted onto the path it
-    /// composes at. `None` for an unknown path.
-    fn get(&self, prototype: &Path) -> Option<&Prototype> {
-        self.by_root.get(prototype)
-    }
-
     /// The canonical instance backing the prototype at `prototype` — the first
     /// registered, which seeded its materialization — or `None` for an unknown
     /// path.
@@ -277,11 +270,15 @@ impl PrototypeRegistry {
         self.by_instance.contains_key(path) || self.by_root.contains_key(path)
     }
 
-    /// Returns the nearest registered `/__Prototype_N` root at or above `path`,
-    /// inclusive of `path` itself, or `None` when it is outside every
-    /// registered prototype namespace.
-    fn enclosing_root(&self, path: &Path) -> Option<Path> {
-        self.by_root.nearest_ancestor(path).map(|(root, _)| root.clone())
+    /// The registered prototype enclosing `path`, together with its root key.
+    /// Prototype roots are direct children of the absolute root.
+    fn enclosing(&self, path: &Path) -> Option<(&Path, &Prototype)> {
+        if !is_prototype_namespace(path) {
+            return None;
+        }
+        let name = path.root_prim_name()?;
+        let root = &path.as_str()[..name.len() + 1];
+        self.by_root.get_key_value_str(root)
     }
 
     /// Removes every prototype the change set could have invalidated, returning
@@ -610,7 +607,7 @@ impl IndexCache {
     /// prototype registered there — a path that composes to nothing today and
     /// to shared content once some instance mints its root.
     pub(super) fn in_unregistered_prototype(&self, path: &Path) -> bool {
-        is_prototype_namespace(path) && self.prototype_root_of(path).is_none()
+        is_prototype_namespace(path) && self.prototypes.enclosing(path).is_none()
     }
 
     /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
@@ -682,9 +679,15 @@ impl IndexCache {
         // and materialized root, and the identity it registers under.
         let composed = self.effective_path(graph, instance)?;
         self.ensure_index(graph, &composed)?;
-        // Load rules are authored against the stage namespace, so they scope at
-        // the path the instance composes at; `scoped_load_rules` translates a
-        // path inside a prototype onto that prototype's stored relative rules.
+        // Registered mappings live until prototype invalidation. An indexed
+        // instance has a settled composition, so its mapping can be reused.
+        if self.is_indexed(&composed)
+            && let Some(prototype) = self.prototypes.by_instance.get(&composed)
+        {
+            return Ok(prototype.clone());
+        }
+        // Namespace-dependent load rules scope at the instance's composed path.
+        // Inside a prototype, that uses its stored relative rules.
         let relative_load_rules = {
             let (rules, relative_instance) = self.scoped_load_rules(&composed);
             rules.make_relative_to(&relative_instance)
@@ -787,7 +790,7 @@ impl IndexCache {
     /// to no prim still answers `true` here, so a caller reporting prim state
     /// (`Prim::is_in_prototype`) checks existence itself.
     pub(crate) fn is_in_prototype(&self, path: &Path) -> bool {
-        self.prototypes.enclosing_root(path).is_some()
+        self.prototypes.enclosing(path).is_some()
     }
 
     /// Returns the registered `/__Prototype_N` root enclosing `path` (inclusive
@@ -796,15 +799,7 @@ impl IndexCache {
     /// scopes load rules and the population mask onto a prototype's stored,
     /// instance-relative tables.
     pub(crate) fn prototype_root_of(&self, path: &Path) -> Option<Path> {
-        // Every registered root is `/__Prototype_N`, so a path the syntactic
-        // test rejects can match nothing — and skipping the walk keeps this off
-        // the cost of every ordinary query, which reaches it through
-        // [`Self::scoped_mask`] and `scoped_load_rules`.
-        if is_prototype_namespace(path) {
-            self.prototypes.enclosing_root(path)
-        } else {
-            None
-        }
+        self.prototypes.enclosing(path).map(|(root, _)| root.clone())
     }
 
     /// The stage-namespace policy governing `path`, and `path` translated into
@@ -824,30 +819,28 @@ impl IndexCache {
         global: &'a T,
         stored: impl FnOnce(&'a Prototype) -> &'a T,
     ) -> (&'a T, Cow<'a, Path>) {
-        let Some(root) = self.prototype_root_of(path) else {
+        let Some((root, prototype)) = self.prototypes.enclosing(path) else {
             return (global, Cow::Borrowed(path));
         };
         let relative = path
-            .replace_prefix(&root, &Path::abs_root())
+            .replace_prefix(root, &Path::abs_root())
             .unwrap_or_else(Path::abs_root);
-        let prototype = self
-            .prototypes
-            .get(&root)
-            .expect("a registered prototype root has stored tables");
         (stored(prototype), Cow::Owned(relative))
     }
 
-    /// The population mask governing `path`, in `path`'s scope — see
-    /// [`Self::scoped`].
+    /// The governing population mask and query path in a common namespace.
+    /// An all-inclusive mask applies to the path unchanged.
     pub(super) fn scoped_mask<'a>(&'a self, path: &'a Path) -> (&'a PopulationMask, Cow<'a, Path>) {
+        if self.population_mask.is_all() {
+            return (&self.population_mask, Cow::Borrowed(path));
+        }
         self.scoped(path, &self.population_mask, |p| &p.relative_mask)
     }
 
     /// Whether the stage's population exposes `path` (the mask test C++ makes
-    /// in `_ComposeChildren`). Prototype content resolves through
-    /// [`Self::scoped_mask`], so the question is always asked in the instance
-    /// namespace the mask names — where C++ asks it of the prototype's source
-    /// prim index path, which is the same place.
+    /// in `_ComposeChildren`). Namespace-dependent masks resolve through
+    /// [`Self::scoped_mask`] in instance coordinates, matching C++'s check
+    /// against the prototype's source prim index path.
     ///
     /// A pure registry read: it composes nothing and takes `&self`, so a caller
     /// already holding the cache can use it.
@@ -878,7 +871,7 @@ impl IndexCache {
             .into_iter()
             .filter(|name| {
                 relative
-                    .append_path(name.as_str())
+                    .append_child(name.as_str())
                     .is_ok_and(|child| mask.includes(&child))
             })
             .collect()

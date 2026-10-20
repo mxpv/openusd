@@ -16,6 +16,10 @@ use super::*;
 /// representing any value that can appear in a scene description layer. Each variant corresponds
 /// to a USD data type.
 ///
+/// Large scalar payloads, dictionaries, and list operations are boxed so
+/// scalar fields and array handles occupy compact slots. [`From`] accepts
+/// unboxed payloads; typed [`TryFrom`] conversions return them by value.
+///
 /// Vector and matrix variant suffixes indicate the element type:
 /// - `d` — `f64` (double)
 /// - `f` — `f32` (float)
@@ -24,6 +28,8 @@ use super::*;
 ///
 /// Type-safe extraction is supported via [`TryFrom<Value>`] implementations for common Rust
 /// types (e.g. `f32`, `String`, `gf::Vec3f`).
+// Boxing collections keeps each value slot compact.
+#[allow(clippy::box_collection)]
 #[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr, EnumDiscriminants, derive_more::From)]
 #[strum_discriminants(
     name(ValueKind),
@@ -43,28 +49,28 @@ pub enum Value {
     BoolVec(Vec<bool>),
 
     Uchar(u8),
-    UcharVec(Vec<u8>),
+    UcharVec(super::Array<u8>),
 
     Int(i32),
-    IntVec(Vec<i32>),
+    IntVec(super::Array<i32>),
 
     Uint(u32),
-    UintVec(Vec<u32>),
+    UintVec(super::Array<u32>),
 
     Int64(i64),
-    Int64Vec(Vec<i64>),
+    Int64Vec(super::Array<i64>),
 
     Uint64(u64),
-    Uint64Vec(Vec<u64>),
+    Uint64Vec(super::Array<u64>),
 
     Half(f16),
-    HalfVec(Vec<f16>),
+    HalfVec(super::Array<f16>),
 
     Float(f32),
-    FloatVec(Vec<f32>),
+    FloatVec(super::Array<f32>),
 
     Double(f64),
-    DoubleVec(Vec<f64>),
+    DoubleVec(super::Array<f64>),
 
     String(String),
     StringVec(Vec<String>),
@@ -72,7 +78,7 @@ pub enum Value {
     Token(Token),
     TokenVec(Vec<Token>),
 
-    AssetPath(AssetPath),
+    AssetPath(Box<AssetPath>),
     AssetPathVec(Vec<AssetPath>),
 
     /// The value of an `opaque` or `group` attribute (C++ `SdfOpaqueValue`).
@@ -85,65 +91,65 @@ pub enum Value {
     Quath(gf::Quath),
     Quatf(gf::Quatf),
     Quatd(gf::Quatd),
-    QuathVec(Vec<gf::Quath>),
-    QuatfVec(Vec<gf::Quatf>),
-    QuatdVec(Vec<gf::Quatd>),
+    QuathVec(super::Array<gf::Quath>),
+    QuatfVec(super::Array<gf::Quatf>),
+    QuatdVec(super::Array<gf::Quatd>),
 
     Vec2h(gf::Vec2h),
     Vec2f(gf::Vec2f),
     Vec2d(gf::Vec2d),
     Vec2i(gf::Vec2i),
-    Vec2hVec(Vec<gf::Vec2h>),
-    Vec2fVec(Vec<gf::Vec2f>),
-    Vec2dVec(Vec<gf::Vec2d>),
-    Vec2iVec(Vec<gf::Vec2i>),
+    Vec2hVec(super::Array<gf::Vec2h>),
+    Vec2fVec(super::Array<gf::Vec2f>),
+    Vec2dVec(super::Array<gf::Vec2d>),
+    Vec2iVec(super::Array<gf::Vec2i>),
 
     Vec3h(gf::Vec3h),
     Vec3f(gf::Vec3f),
     Vec3d(gf::Vec3d),
     Vec3i(gf::Vec3i),
-    Vec3hVec(Vec<gf::Vec3h>),
-    Vec3fVec(Vec<gf::Vec3f>),
-    Vec3dVec(Vec<gf::Vec3d>),
-    Vec3iVec(Vec<gf::Vec3i>),
+    Vec3hVec(super::Array<gf::Vec3h>),
+    Vec3fVec(super::Array<gf::Vec3f>),
+    Vec3dVec(super::Array<gf::Vec3d>),
+    Vec3iVec(super::Array<gf::Vec3i>),
 
     Vec4h(gf::Vec4h),
     Vec4f(gf::Vec4f),
     Vec4d(gf::Vec4d),
     Vec4i(gf::Vec4i),
-    Vec4hVec(Vec<gf::Vec4h>),
-    Vec4fVec(Vec<gf::Vec4f>),
-    Vec4dVec(Vec<gf::Vec4d>),
-    Vec4iVec(Vec<gf::Vec4i>),
+    Vec4hVec(super::Array<gf::Vec4h>),
+    Vec4fVec(super::Array<gf::Vec4f>),
+    Vec4dVec(super::Array<gf::Vec4d>),
+    Vec4iVec(super::Array<gf::Vec4i>),
 
     Matrix2d(gf::Mat2d),
-    Matrix3d(gf::Mat3d),
-    Matrix4d(gf::Mat4d),
-    Matrix2dVec(Vec<gf::Mat2d>),
-    Matrix3dVec(Vec<gf::Mat3d>),
-    Matrix4dVec(Vec<gf::Mat4d>),
+    Matrix3d(Box<gf::Mat3d>),
+    Matrix4d(Box<gf::Mat4d>),
+    Matrix2dVec(super::Array<gf::Mat2d>),
+    Matrix3dVec(super::Array<gf::Mat3d>),
+    Matrix4dVec(super::Array<gf::Mat4d>),
 
     Specifier(Specifier),
     Permission(Permission),
     Variability(Variability),
 
-    Dictionary(HashMap<String, Value>),
+    Dictionary(Box<HashMap<String, Value>>),
 
-    TokenListOp(TokenListOp),
-    StringListOp(StringListOp),
-    PathListOp(PathListOp),
-    ReferenceListOp(ReferenceListOp),
-    IntListOp(IntListOp),
-    Int64ListOp(Int64ListOp),
-    UIntListOp(UintListOp),
-    UInt64ListOp(Uint64ListOp),
-    PayloadListOp(PayloadListOp),
+    TokenListOp(Box<TokenListOp>),
+    StringListOp(Box<StringListOp>),
+    PathListOp(Box<PathListOp>),
+    ReferenceListOp(Box<ReferenceListOp>),
+    IntListOp(Box<IntListOp>),
+    Int64ListOp(Box<Int64ListOp>),
+    UIntListOp(Box<UintListOp>),
+    UInt64ListOp(Box<Uint64ListOp>),
+    PayloadListOp(Box<PayloadListOp>),
 
-    Payload(Payload),
+    Payload(Box<Payload>),
     PathVec(Vec<Path>),
     /// Layer-level relocates: `(source, target)` path pairs for namespace remapping.
     Relocates(RelocateList),
-    VariantSelectionMap(HashMap<String, String>),
+    VariantSelectionMap(Box<HashMap<String, String>>),
     /// A sample map, ordered as a
     /// [`TimeSampleMap`](super::TimeSampleMap) is.
     TimeSamples(TimeSampleMap),
@@ -161,7 +167,7 @@ pub enum Value {
     #[from(skip)]
     UnregisteredValue(String),
     #[from(skip)]
-    UnregisteredValueListOp(StringListOp),
+    UnregisteredValueListOp(Box<StringListOp>),
     /// A dictionary authored under a field nothing declares.
     ///
     /// Apart from [`Dictionary`](Self::Dictionary) because the field is what
@@ -169,13 +175,94 @@ pub enum Value {
     /// it survives as one, and this is what remembers that no schema asked
     /// for it (C++ wraps the same thing in `SdfUnregisteredValue`).
     #[from(skip)]
-    UnregisteredDictionary(HashMap<String, Value>),
+    UnregisteredDictionary(Box<HashMap<String, Value>>),
 
     TimeCode(TimeCode),
     TimeCodeVec(Vec<TimeCode>),
-    PathExpression(super::PathExpression),
+    PathExpression(Box<super::PathExpression>),
     PathExpressionVec(Vec<super::PathExpression>),
 }
+
+// Numeric vectors enter their corresponding array value by ownership.
+macro_rules! impl_array_value {
+    ($($kind:ident($ty:ty)),+ $(,)?) => {$(
+        impl From<Vec<$ty>> for Value {
+            fn from(value: Vec<$ty>) -> Self { Self::$kind(value.into()) }
+        }
+
+        impl TryFrom<Value> for super::Array<$ty> {
+            type Error = CastError;
+            fn try_from(value: Value) -> Result<Self, Self::Error> {
+                match value {
+                    Value::$kind(array) => Ok(array),
+                    other => Err(CastError::mismatch::<Self>((&other).into())),
+                }
+            }
+        }
+
+        impl FromValue for super::Array<$ty> {
+            fn accepts_kind(kind: ValueKind) -> bool { kind == ValueKind::$kind }
+        }
+    )+};
+}
+impl_array_value!(
+    UcharVec(u8),
+    IntVec(i32),
+    UintVec(u32),
+    Int64Vec(i64),
+    Uint64Vec(u64),
+    HalfVec(f16),
+    FloatVec(f32),
+    DoubleVec(f64),
+    QuathVec(gf::Quath),
+    QuatfVec(gf::Quatf),
+    QuatdVec(gf::Quatd),
+    Vec2hVec(gf::Vec2h),
+    Vec2fVec(gf::Vec2f),
+    Vec2dVec(gf::Vec2d),
+    Vec2iVec(gf::Vec2i),
+    Vec3hVec(gf::Vec3h),
+    Vec3fVec(gf::Vec3f),
+    Vec3dVec(gf::Vec3d),
+    Vec3iVec(gf::Vec3i),
+    Vec4hVec(gf::Vec4h),
+    Vec4fVec(gf::Vec4f),
+    Vec4dVec(gf::Vec4d),
+    Vec4iVec(gf::Vec4i),
+    Matrix2dVec(gf::Mat2d),
+    Matrix3dVec(gf::Mat3d),
+    Matrix4dVec(gf::Mat4d),
+);
+
+// Constructs boxed variants from their unboxed payloads.
+macro_rules! impl_boxed_value {
+    ($($kind:ident($ty:ty)),+ $(,)?) => {
+        $(impl From<$ty> for Value {
+            fn from(value: $ty) -> Self {
+                Self::$kind(Box::new(value))
+            }
+        })+
+    };
+}
+
+impl_boxed_value!(
+    Matrix3d(gf::Mat3d),
+    Matrix4d(gf::Mat4d),
+    AssetPath(AssetPath),
+    Payload(Payload),
+    PathExpression(super::PathExpression),
+    Dictionary(HashMap<String, Value>),
+    VariantSelectionMap(HashMap<String, String>),
+    TokenListOp(TokenListOp),
+    StringListOp(StringListOp),
+    PathListOp(PathListOp),
+    ReferenceListOp(ReferenceListOp),
+    IntListOp(IntListOp),
+    Int64ListOp(Int64ListOp),
+    UIntListOp(UintListOp),
+    UInt64ListOp(Uint64ListOp),
+    PayloadListOp(PayloadListOp),
+);
 
 #[cfg(feature = "serde")]
 impl serde::Serialize for Value {
@@ -385,7 +472,7 @@ impl Value {
     /// the expression a value already holds is handed over for.
     pub fn into_path_expression(self) -> Option<PathExpression> {
         match self {
-            Value::PathExpression(expr) => Some(expr),
+            Value::PathExpression(expr) => Some(*expr),
             other => other.as_path_expression().map(Cow::into_owned),
         }
     }
@@ -453,14 +540,14 @@ impl Value {
     /// only [`remap_paths`](Self::remap_paths) does, for copies.
     pub fn map_path_expressions(self, f: &mut impl FnMut(super::PathExpression) -> super::PathExpression) -> Value {
         match self {
-            Value::PathExpression(expr) => Value::PathExpression(f(expr)),
+            Value::PathExpression(expr) => Value::PathExpression(Box::new(f(*expr))),
             Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(f).collect()),
-            Value::Dictionary(entries) => Value::Dictionary(
+            Value::Dictionary(entries) => Value::Dictionary(Box::new(
                 entries
                     .into_iter()
                     .map(|(key, value)| (key, value.map_path_expressions(f)))
                     .collect(),
-            ),
+            )),
             Value::ValueVec(values) => {
                 Value::ValueVec(values.into_iter().map(|value| value.map_path_expressions(f)).collect())
             }
@@ -485,14 +572,14 @@ impl Value {
     /// wants the nested ones too, which is what flattening a stage needs.
     pub fn map_asset_paths(self, f: &mut impl FnMut(super::AssetPath) -> super::AssetPath) -> Value {
         match self {
-            Value::AssetPath(asset) => Value::AssetPath(f(asset)),
+            Value::AssetPath(asset) => Value::AssetPath(Box::new(f(*asset))),
             Value::AssetPathVec(assets) => Value::AssetPathVec(assets.into_iter().map(&mut *f).collect()),
-            Value::Dictionary(entries) => Value::Dictionary(
+            Value::Dictionary(entries) => Value::Dictionary(Box::new(
                 entries
                     .into_iter()
                     .map(|(key, value)| (key, value.map_asset_paths(f)))
                     .collect(),
-            ),
+            )),
             Value::ValueVec(values) => {
                 Value::ValueVec(values.into_iter().map(|value| value.map_asset_paths(f)).collect())
             }
@@ -539,7 +626,7 @@ impl Value {
         let remap = &remap;
         match self {
             Value::PathVec(paths) => Value::PathVec(paths.iter().filter_map(remap).collect()),
-            Value::PathListOp(op) => Value::PathListOp(op.clone().convert(|_, p| remap(&p))),
+            Value::PathListOp(op) => Value::PathListOp(Box::new(op.as_ref().clone().convert(|_, p| remap(&p)))),
             Value::Relocates(relocates) => Value::Relocates(
                 relocates
                     .iter()
@@ -548,19 +635,23 @@ impl Value {
                     .filter_map(|(s, t)| remap(s).map(|s| (s, remap(t).unwrap_or_else(|| t.clone()))))
                     .collect(),
             ),
-            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().convert(|_, mut reference| {
-                if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
-                    reference.prim_path = remap(&reference.prim_path)?;
-                }
-                Some(reference)
-            })),
-            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().convert(|_, mut payload| {
-                if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
-                    payload.prim_path = remap(&payload.prim_path)?;
-                }
-                Some(payload)
-            })),
-            Value::PathExpression(expr) => Value::PathExpression(expr.clone().map_paths(remap)),
+            Value::ReferenceListOp(op) => {
+                Value::ReferenceListOp(Box::new(op.as_ref().clone().convert(|_, mut reference| {
+                    if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
+                        reference.prim_path = remap(&reference.prim_path)?;
+                    }
+                    Some(reference)
+                })))
+            }
+            Value::PayloadListOp(op) => {
+                Value::PayloadListOp(Box::new(op.as_ref().clone().convert(|_, mut payload| {
+                    if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
+                        payload.prim_path = remap(&payload.prim_path)?;
+                    }
+                    Some(payload)
+                })))
+            }
+            Value::PathExpression(expr) => Value::PathExpression(Box::new(expr.as_ref().clone().map_paths(remap))),
             Value::PathExpressionVec(exprs) => {
                 Value::PathExpressionVec(exprs.iter().map(|e| e.clone().map_paths(remap)).collect())
             }
@@ -569,10 +660,9 @@ impl Value {
     }
 }
 
-// Exact extraction: owned conversions that move data out of `Value` without
-// cloning, each requiring the exact held variant, which is also the one kind
-// the type's `FromValue` accepts. Cross-type coercion (`token` → `string`,
-// numeric and vector precision) is the separate, opt-in `Value::cast` tier.
+// Exact extraction consumes the matching Value variant. Numeric arrays copy
+// shared elements when converted to owned vectors. Cross-type coercion
+// (`token` → `string`, numeric and vector precision) uses Value::cast.
 
 macro_rules! impl_try_from_value {
     // Exact: unwrap the matching variant.
@@ -582,7 +672,7 @@ macro_rules! impl_try_from_value {
     // Unwrap the matching variant, then convert each element via `Into` — used
     // by the `gf`-vector-array conversions (`Vec<Vec3f>` → `Vec<[f32; 3]>`).
     ($target:ty, $kind:ident, $label:literal, map_into) => {
-        impl_try_from_value!($target, $kind, $label, |v: Vec<_>| v
+        impl_try_from_value!($target, $kind, $label, |v: super::Array<_>| v
             .into_iter()
             .map(Into::into)
             .collect());
@@ -622,12 +712,12 @@ impl_try_from_value!(f64, Double, "Double");
 impl_try_from_value!(u8, Uchar, "Uchar");
 impl_try_from_value!(f16, Half, "Half");
 impl_try_from_value!(TimeCode, TimeCode, "TimeCode");
-impl_try_from_value!(super::PathExpression, PathExpression, "PathExpression");
+impl_try_from_value!(super::PathExpression, PathExpression, "PathExpression", |v: Box<_>| *v);
 impl_try_from_value!(Specifier, Specifier, "Specifier");
 impl_try_from_value!(Variability, Variability, "Variability");
-impl_try_from_value!(ReferenceListOp, ReferenceListOp, "ReferenceListOp");
-impl_try_from_value!(PayloadListOp, PayloadListOp, "PayloadListOp");
-impl_try_from_value!(PathListOp, PathListOp, "PathListOp");
+impl_try_from_value!(ReferenceListOp, ReferenceListOp, "ReferenceListOp", |v: Box<_>| *v);
+impl_try_from_value!(PayloadListOp, PayloadListOp, "PayloadListOp", |v: Box<_>| *v);
+impl_try_from_value!(PathListOp, PathListOp, "PathListOp", |v: Box<_>| *v);
 
 // gf scalar types — trivially unwrap the matching variant.
 impl_try_from_value!(gf::Vec2f, Vec2f, "gf::Vec2f");
@@ -646,28 +736,31 @@ impl_try_from_value!(gf::Quatf, Quatf, "gf::Quatf");
 impl_try_from_value!(gf::Quatd, Quatd, "gf::Quatd");
 impl_try_from_value!(gf::Quath, Quath, "gf::Quath");
 impl_try_from_value!(gf::Mat2d, Matrix2d, "gf::Mat2d");
-impl_try_from_value!(gf::Mat3d, Matrix3d, "gf::Mat3d");
-impl_try_from_value!(gf::Mat4d, Matrix4d, "gf::Mat4d");
+impl_try_from_value!(gf::Mat3d, Matrix3d, "gf::Mat3d", |v: Box<_>| *v);
+impl_try_from_value!(gf::Mat4d, Matrix4d, "gf::Mat4d", |v: Box<_>| *v);
 
 // gf array types.
-impl_try_from_value!(Vec<gf::Vec2f>, Vec2fVec, "Vec2fVec");
-impl_try_from_value!(Vec<gf::Vec2d>, Vec2dVec, "Vec2dVec");
-impl_try_from_value!(Vec<gf::Vec2i>, Vec2iVec, "Vec2iVec");
-impl_try_from_value!(Vec<gf::Vec2h>, Vec2hVec, "Vec2hVec");
-impl_try_from_value!(Vec<gf::Vec3f>, Vec3fVec, "Vec3fVec");
-impl_try_from_value!(Vec<gf::Vec3d>, Vec3dVec, "Vec3dVec");
-impl_try_from_value!(Vec<gf::Vec3i>, Vec3iVec, "Vec3iVec");
-impl_try_from_value!(Vec<gf::Vec3h>, Vec3hVec, "Vec3hVec");
-impl_try_from_value!(Vec<gf::Vec4f>, Vec4fVec, "Vec4fVec");
-impl_try_from_value!(Vec<gf::Vec4d>, Vec4dVec, "Vec4dVec");
-impl_try_from_value!(Vec<gf::Vec4i>, Vec4iVec, "Vec4iVec");
-impl_try_from_value!(Vec<gf::Vec4h>, Vec4hVec, "Vec4hVec");
-impl_try_from_value!(Vec<gf::Quatf>, QuatfVec, "QuatfVec");
-impl_try_from_value!(Vec<gf::Quatd>, QuatdVec, "QuatdVec");
-impl_try_from_value!(Vec<gf::Quath>, QuathVec, "QuathVec");
-impl_try_from_value!(Vec<gf::Mat2d>, Matrix2dVec, "Matrix2dVec");
-impl_try_from_value!(Vec<gf::Mat3d>, Matrix3dVec, "Matrix3dVec");
-impl_try_from_value!(Vec<gf::Mat4d>, Matrix4dVec, "Matrix4dVec");
+impl_try_from_value!(Vec<gf::Vec2f>, Vec2fVec, "Vec2fVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec2d>, Vec2dVec, "Vec2dVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec2i>, Vec2iVec, "Vec2iVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec2h>, Vec2hVec, "Vec2hVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec3f>, Vec3fVec, "Vec3fVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec3d>, Vec3dVec, "Vec3dVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec3i>, Vec3iVec, "Vec3iVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec3h>, Vec3hVec, "Vec3hVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec4f>, Vec4fVec, "Vec4fVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec4d>, Vec4dVec, "Vec4dVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec4i>, Vec4iVec, "Vec4iVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Vec4h>, Vec4hVec, "Vec4hVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Quatf>, QuatfVec, "QuatfVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Quatd>, QuatdVec, "QuatdVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Quath>, QuathVec, "QuathVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<gf::Mat2d>, Matrix2dVec, "Matrix2dVec", |v: super::Array<_>| v
+    .into_vec());
+impl_try_from_value!(Vec<gf::Mat3d>, Matrix3dVec, "Matrix3dVec", |v: super::Array<_>| v
+    .into_vec());
+impl_try_from_value!(Vec<gf::Mat4d>, Matrix4dVec, "Matrix4dVec", |v: super::Array<_>| v
+    .into_vec());
 
 // Single-variant string and asset extraction. Coercing `token` → `string`
 // is [`Value::cast`]'s job.
@@ -675,12 +768,12 @@ impl_try_from_value!(String, String, "String");
 impl_try_from_value!(Token, Token, "Token");
 impl_try_from_value!(Vec<Token>, TokenVec, "TokenVec");
 impl_try_from_value!(Vec<String>, StringVec, "StringVec");
-impl_try_from_value!(AssetPath, AssetPath, "AssetPath");
+impl_try_from_value!(AssetPath, AssetPath, "AssetPath", |v: Box<_>| *v);
 impl_try_from_value!(Vec<AssetPath>, AssetPathVec, "AssetPathVec");
 
 // List ops, relocations, time samples, and layer offsets — composite payloads
 // read through the typed spec accessors.
-impl_try_from_value!(TokenListOp, TokenListOp, "TokenListOp");
+impl_try_from_value!(TokenListOp, TokenListOp, "TokenListOp", |v: Box<_>| *v);
 impl_try_from_value!(RelocateList, Relocates, "Relocates");
 impl_try_from_value!(TimeSampleMap, TimeSamples, "TimeSamples");
 impl_try_from_value!(Vec<LayerOffset>, LayerOffsetVec, "LayerOffsetVec");
@@ -688,14 +781,14 @@ impl_try_from_value!(Vec<LayerOffset>, LayerOffsetVec, "LayerOffsetVec");
 // Exact scalar arrays (`float[]`, `int[]`, …). Flattening a single vector
 // into a scalar array is a coercion, so it lives in [`Value::cast`].
 impl_try_from_value!(Vec<bool>, BoolVec, "BoolVec");
-impl_try_from_value!(Vec<u8>, UcharVec, "UcharVec");
-impl_try_from_value!(Vec<i32>, IntVec, "IntVec");
-impl_try_from_value!(Vec<u32>, UintVec, "UintVec");
-impl_try_from_value!(Vec<i64>, Int64Vec, "Int64Vec");
-impl_try_from_value!(Vec<u64>, Uint64Vec, "Uint64Vec");
-impl_try_from_value!(Vec<f16>, HalfVec, "HalfVec");
-impl_try_from_value!(Vec<f32>, FloatVec, "FloatVec");
-impl_try_from_value!(Vec<f64>, DoubleVec, "DoubleVec");
+impl_try_from_value!(Vec<u8>, UcharVec, "UcharVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<i32>, IntVec, "IntVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<u32>, UintVec, "UintVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<i64>, Int64Vec, "Int64Vec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<u64>, Uint64Vec, "Uint64Vec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<f16>, HalfVec, "HalfVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<f32>, FloatVec, "FloatVec", |v: super::Array<_>| v.into_vec());
+impl_try_from_value!(Vec<f64>, DoubleVec, "DoubleVec", |v: super::Array<_>| v.into_vec());
 impl_try_from_value!(Vec<TimeCode>, TimeCodeVec, "TimeCodeVec");
 impl_try_from_value!(Vec<super::PathExpression>, PathExpressionVec, "PathExpressionVec");
 
@@ -759,7 +852,7 @@ impl From<[i32; 4]> for Value {
 }
 impl From<[f64; 16]> for Value {
     fn from(v: [f64; 16]) -> Self {
-        Value::Matrix4d(gf::Mat4d(v))
+        Value::Matrix4d(Box::new(gf::Mat4d(v)))
     }
 }
 
@@ -1113,7 +1206,7 @@ impl FromValueCast for gf::Vec3f {
 impl FromValueCast for Vec<f32> {
     fn cast_from(value: Value) -> Result<Self, CastError> {
         match value {
-            Value::FloatVec(v) => Ok(v),
+            Value::FloatVec(v) => Ok(v.into_vec()),
             Value::DoubleVec(v) => Ok(v.into_iter().map(|d| d as f32).collect()),
             Value::HalfVec(v) => Ok(v.into_iter().map(f32::from).collect()),
             Value::Vec2f(v) => Ok(vec![v.x, v.y]),
@@ -1127,7 +1220,7 @@ impl FromValueCast for Vec<f32> {
 impl FromValueCast for Vec<gf::Vec3f> {
     fn cast_from(value: Value) -> Result<Self, CastError> {
         match value {
-            Value::Vec3fVec(v) => Ok(v),
+            Value::Vec3fVec(v) => Ok(v.into_vec()),
             Value::Vec3dVec(v) => Ok(v
                 .into_iter()
                 .map(|d| gf::vec3f(d.x as f32, d.y as f32, d.z as f32))
@@ -1144,7 +1237,7 @@ impl FromValueCast for Vec<gf::Vec3f> {
 impl FromValueCast for Vec<gf::Quatf> {
     fn cast_from(value: Value) -> Result<Self, CastError> {
         match value {
-            Value::QuatfVec(v) => Ok(v),
+            Value::QuatfVec(v) => Ok(v.into_vec()),
             Value::QuatdVec(v) => Ok(v.into_iter().map(gf::Quatd::to_f32).collect()),
             Value::QuathVec(v) => Ok(v
                 .into_iter()
@@ -1169,7 +1262,7 @@ pub fn dictionary_over(stronger: &mut super::Dictionary, weaker: super::Dictiona
             Entry::Occupied(mut entry) => {
                 if let (Value::Dictionary(strong_dict), Value::Dictionary(weak_dict)) = (entry.get_mut(), weaker_value)
                 {
-                    dictionary_over(strong_dict, weak_dict);
+                    dictionary_over(strong_dict, *weak_dict);
                 }
             }
             Entry::Vacant(entry) => {
@@ -1183,12 +1276,17 @@ pub fn dictionary_over(stronger: &mut super::Dictionary, weaker: super::Dictiona
 mod tests {
     use super::*;
 
+    #[test]
+    fn compact_field_slots() {
+        assert!(std::mem::size_of::<Value>() <= 40);
+    }
+
     /// An array answers how many elements it holds; a single value answers
     /// that it is not an array at all.
     #[test]
     fn len_of_arrays() {
-        assert_eq!(Value::FloatVec(vec![1.0, 2.0]).array_len(), Some(2));
-        assert_eq!(Value::Vec3fVec(Vec::new()).array_len(), Some(0));
+        assert_eq!(Value::FloatVec((vec![1.0, 2.0]).into()).array_len(), Some(2));
+        assert_eq!(Value::Vec3fVec((Vec::new()).into()).array_len(), Some(0));
         assert_eq!(Value::TokenVec(vec![Token::from("a")]).array_len(), Some(1));
         // An array no attribute holds still answers, the table it is missing
         // from being about attribute values.
@@ -1196,7 +1294,7 @@ mod tests {
         assert_eq!(Value::Float(1.0).array_len(), None);
         assert_eq!(Value::None.array_len(), None);
         assert_eq!(
-            Value::Dictionary(Dictionary::new()).array_len(),
+            Value::Dictionary(Box::default()).array_len(),
             None,
             "a dictionary is named, not counted"
         );
@@ -1205,7 +1303,10 @@ mod tests {
     #[test]
     fn kind_of_value() {
         assert_eq!(ValueKind::from(&Value::Float(1.0)), ValueKind::Float);
-        assert_eq!(ValueKind::from(&Value::Vec3fVec(Vec::new())), ValueKind::Vec3fVec);
+        assert_eq!(
+            ValueKind::from(&Value::Vec3fVec((Vec::new()).into())),
+            ValueKind::Vec3fVec
+        );
         assert_eq!(ValueKind::from(&Value::Opaque), ValueKind::Opaque);
         assert_eq!(<&'static str>::from(ValueKind::Vec3f), "Vec3f");
         assert_eq!(ValueKind::Opaque.to_string(), "Opaque");
@@ -1221,7 +1322,7 @@ mod tests {
         assert!(!Value::Float(1.44).is_bool());
         assert!(!Value::Float(1.44).is_float_vec());
 
-        assert!(Value::PayloadListOp(Default::default()).is_payload_list_op());
+        assert!(Value::PayloadListOp(Box::default()).is_payload_list_op());
         assert!(Value::UnregisteredValue(String::new()).is_unregistered_value());
     }
 
@@ -1231,7 +1332,7 @@ mod tests {
         let remap = |path: &Path| path.replace_prefix(&p("/A"), &p("/B")).unwrap_or_else(|| path.clone());
 
         // PathListOp: an in-subtree path re-roots, an outside path is untouched.
-        let op = Value::PathListOp(PathListOp::explicit([p("/A/Child"), p("/Other")]));
+        let op = Value::PathListOp(Box::new(PathListOp::explicit([p("/A/Child"), p("/Other")])));
         let items: Vec<String> = op
             .remap_paths(remap)
             .try_as_path_list_op()
@@ -1261,7 +1362,7 @@ mod tests {
         let remap = |path: &Path| path.replace_prefix(&p("/A"), &p("/B")).unwrap_or_else(|| path.clone());
 
         // Pattern prefixes and reference paths re-root with the namespace.
-        let expr = Value::PathExpression(sdf::PathExpression::parse("/A/Kids// %/A/Sets:heroes"));
+        let expr = Value::PathExpression(Box::new(sdf::PathExpression::parse("/A/Kids// %/A/Sets:heroes")));
         assert!(expr.has_embedded_paths());
         assert_eq!(
             expr.remap_paths(remap).try_as_path_expression().unwrap().to_string(),
@@ -1276,7 +1377,7 @@ mod tests {
         );
 
         // A dropped path collapses the atom to the empty expression.
-        let dropped = Value::PathExpression(sdf::PathExpression::parse("/A/Kids//"))
+        let dropped = Value::PathExpression(Box::new(sdf::PathExpression::parse("/A/Kids//")))
             .filter_map_paths(|_| None)
             .try_as_path_expression()
             .unwrap();
@@ -1312,7 +1413,7 @@ mod tests {
         assert_eq!(gf::Quatf::try_from(Value::Quatf(q)).unwrap(), q);
 
         let m = gf::Mat4d::IDENTITY;
-        assert_eq!(gf::Mat4d::try_from(Value::Matrix4d(m)).unwrap(), m);
+        assert_eq!(gf::Mat4d::try_from(Value::Matrix4d(Box::new(m))).unwrap(), m);
     }
 
     #[test]
@@ -1334,20 +1435,38 @@ mod tests {
     fn try_from_vec() {
         // Exact extraction takes the array variant only; flattening a single
         // vector into a scalar array is `cast`, not `try_from`.
-        assert_eq!(Vec::<f32>::try_from(Value::FloatVec(vec![1.0])).unwrap(), vec![1.0]);
+        assert_eq!(
+            Vec::<f32>::try_from(Value::FloatVec((vec![1.0]).into())).unwrap(),
+            vec![1.0]
+        );
         assert!(Vec::<f32>::try_from(Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0))).is_err());
 
-        assert_eq!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).unwrap(), vec![1.0]);
+        assert_eq!(
+            Vec::<f64>::try_from(Value::DoubleVec((vec![1.0]).into())).unwrap(),
+            vec![1.0]
+        );
         assert!(Vec::<f64>::try_from(Value::Vec2d(gf::vec2d(1.0, 2.0))).is_err());
 
-        assert_eq!(Vec::<i32>::try_from(Value::IntVec(vec![1, 2])).unwrap(), vec![1, 2]);
-        assert_eq!(Vec::<u32>::try_from(Value::UintVec(vec![3])).unwrap(), vec![3]);
-        assert_eq!(Vec::<i64>::try_from(Value::Int64Vec(vec![-4])).unwrap(), vec![-4]);
-        assert_eq!(Vec::<u64>::try_from(Value::Uint64Vec(vec![5])).unwrap(), vec![5]);
-        assert_eq!(Vec::<u8>::try_from(Value::UcharVec(vec![6])).unwrap(), vec![6]);
+        assert_eq!(
+            Vec::<i32>::try_from(Value::IntVec((vec![1, 2]).into())).unwrap(),
+            vec![1, 2]
+        );
+        assert_eq!(Vec::<u32>::try_from(Value::UintVec((vec![3]).into())).unwrap(), vec![3]);
+        assert_eq!(
+            Vec::<i64>::try_from(Value::Int64Vec((vec![-4]).into())).unwrap(),
+            vec![-4]
+        );
+        assert_eq!(
+            Vec::<u64>::try_from(Value::Uint64Vec((vec![5]).into())).unwrap(),
+            vec![5]
+        );
+        assert_eq!(Vec::<u8>::try_from(Value::UcharVec((vec![6]).into())).unwrap(), vec![6]);
         assert_eq!(Vec::<bool>::try_from(Value::BoolVec(vec![true])).unwrap(), vec![true]);
         let half = f16::from_f32(0.5);
-        assert_eq!(Vec::<f16>::try_from(Value::HalfVec(vec![half])).unwrap(), vec![half]);
+        assert_eq!(
+            Vec::<f16>::try_from(Value::HalfVec((vec![half]).into())).unwrap(),
+            vec![half]
+        );
         assert_eq!(
             Vec::<TimeCode>::try_from(Value::TimeCodeVec(vec![TimeCode(3.0)])).unwrap(),
             vec![TimeCode(3.0)]
@@ -1362,7 +1481,7 @@ mod tests {
 
     #[test]
     fn try_from_asset_path() {
-        let scalar = AssetPath::try_from(Value::AssetPath("./tex.png".into())).unwrap();
+        let scalar = AssetPath::try_from(Value::AssetPath(Box::new("./tex.png".into()))).unwrap();
         assert_eq!(scalar, AssetPath::new("./tex.png"));
 
         let array = Vec::<AssetPath>::try_from(Value::AssetPathVec(vec!["a.png".into(), "b.png".into()])).unwrap();
@@ -1372,7 +1491,7 @@ mod tests {
         assert!(AssetPath::try_from(Value::String("a.png".into())).is_err());
 
         // Round-trips back through the authoring `From` impls.
-        assert_eq!(Value::from(scalar), Value::AssetPath("./tex.png".into()));
+        assert_eq!(Value::from(scalar), Value::AssetPath(Box::new("./tex.png".into())));
         assert_eq!(
             Value::from(array),
             Value::AssetPathVec(vec!["a.png".into(), "b.png".into()])
@@ -1462,15 +1581,15 @@ mod tests {
         // component order kept, and a non-quaternion array does not.
         let doubles = vec![gf::quatd(1.0, 2.0, 3.0, 4.0)];
         assert_eq!(
-            Value::QuatdVec(doubles).cast::<Vec<gf::Quatf>>().unwrap(),
+            Value::QuatdVec(doubles.into()).cast::<Vec<gf::Quatf>>().unwrap(),
             vec![gf::quatf(1.0, 2.0, 3.0, 4.0)]
         );
         let halves = vec![gf::quath(gf::f16::ONE, gf::f16::ZERO, gf::f16::ZERO, gf::f16::ZERO)];
         assert_eq!(
-            Value::QuathVec(halves).cast::<Vec<gf::Quatf>>().unwrap(),
+            Value::QuathVec(halves.into()).cast::<Vec<gf::Quatf>>().unwrap(),
             vec![gf::quatf(1.0, 0.0, 0.0, 0.0)]
         );
-        assert!(Value::FloatVec(vec![1.0]).cast::<Vec<gf::Quatf>>().is_err());
+        assert!(Value::FloatVec((vec![1.0]).into()).cast::<Vec<gf::Quatf>>().is_err());
     }
 
     #[test]
@@ -1479,7 +1598,7 @@ mod tests {
         assert_eq!(Value::from(v), Value::Vec3f(v));
 
         let m = gf::Mat4d::IDENTITY;
-        assert_eq!(Value::from(m), Value::Matrix4d(m));
+        assert_eq!(Value::from(m), Value::Matrix4d(Box::new(m)));
     }
 
     #[test]
@@ -1488,7 +1607,7 @@ mod tests {
 
         let expr = sdf::PathExpression::parse("/World//");
         let value = Value::from(expr.clone());
-        assert_eq!(value, Value::PathExpression(expr.clone()));
+        assert_eq!(value, Value::PathExpression(Box::new(expr.clone())));
         assert_eq!(sdf::PathExpression::try_from(value).unwrap(), expr);
 
         let exprs = vec![expr];

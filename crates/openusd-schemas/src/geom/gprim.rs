@@ -27,7 +27,7 @@ use crate::SchemaError;
 /// let color = mesh.create_display_color_primvar(Interpolation::Uniform, None)?;
 /// color
 ///     .into_attribute()
-///     .set(sdf::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 0.0, 1.0)]))?;
+///     .set(sdf::Value::Vec3fVec((vec![gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 0.0, 1.0)]).into()))?;
 ///
 /// assert_eq!(mesh.display_color_primvar().interpolation()?, Interpolation::Uniform);
 /// // Opacity is declared by the schema and authored by nothing.

@@ -1,5 +1,6 @@
 //! Binary file format (`usdc`) implementation.
 
+use std::collections::{HashMap, hash_map::Entry};
 use std::{borrow::Cow, fmt::Debug, fs, io, mem, path::Path, str};
 
 use layout::ValueRep;
@@ -180,12 +181,16 @@ impl Spec {
 /// and `tf::Token` are, which the schema registry waits on too.
 pub struct CrateData {
     file: CrateFile,
-    data: sdf::PathMap<Spec>,
+    data: hashbrown::HashMap<sdf::Path, Spec, FxBuildHasher>,
+    /// Decoded inline values and token vectors, shared by their on-disk
+    /// representation across specs. Composition reads these through borrows.
+    values: HashMap<u64, sdf::Value, FxBuildHasher>,
 }
 
 impl CrateData {
-    /// Read binary data from `bytes`, which the data keeps and decodes
-    /// values from on demand.
+    /// Reads binary data and retains its backing bytes. Inline values and
+    /// token-vector metadata are shared after open; other values decode on
+    /// demand.
     pub fn open(bytes: impl Into<ar::AssetBuffer>, safe: bool) -> Result<Self, ReadError> {
         Self::from_file(CrateFile::open(bytes)?, safe)
     }
@@ -202,7 +207,7 @@ impl CrateData {
         // its fieldset. The fields themselves stay in the file's compact,
         // deduplicated arrays and are resolved on demand.
         let specs = mem::take(&mut file.specs);
-        let mut data = sdf::PathMap::with_capacity_and_hasher(specs.len(), FxBuildHasher);
+        let mut data = hashbrown::HashMap::with_capacity_and_hasher(specs.len(), FxBuildHasher);
 
         for spec in &specs {
             let path = file.paths[spec.path_index].clone();
@@ -216,11 +221,59 @@ impl CrateData {
             );
         }
 
-        Ok(Self { file, data })
+        let mut values = HashMap::with_hasher(FxBuildHasher);
+        for field in &file.fields {
+            let rep = field.value_rep;
+            // A corrupt value is left for `try_field` to report with the
+            // queried spec path and field name.
+            if (rep.is_inlined() || matches!(rep.ty(), Ok(layout::Type::TokenVector)))
+                && let Entry::Vacant(entry) = values.entry(rep.0)
+                && let Ok(value) = file.value(rep)
+            {
+                entry.insert(value);
+            }
+        }
+
+        Ok(Self { file, data, values })
+    }
+    /// Reads one stored spec's field, preserving its path in decode errors.
+    fn read_field<'a>(
+        &'a self,
+        path: &sdf::Path,
+        spec: &'a Spec,
+        field: &str,
+    ) -> Result<Option<Cow<'a, sdf::Value>>, sdf::DataError> {
+        if let Some(authored) = spec.authored(field) {
+            return Ok(authored.as_ref().map(Cow::Borrowed));
+        }
+        let Some(start) = spec.fieldset else {
+            return Ok(None);
+        };
+        let rep = crate_fields(&self.file, start)
+            .find(|(name, _)| *name == field)
+            .map(|(_, rep)| rep);
+        let Some(rep) = rep else {
+            return Ok(None);
+        };
+        if let Some(value) = self.values.get(&rep.0) {
+            return Ok(Some(Cow::Borrowed(value)));
+        }
+        // The decoder's typed `ReadError` is boxed as the `DataError`'s source:
+        // the box is the layering seam that keeps `sdf` below this format.
+        let value = self.file.value(rep).map_err(|e| sdf::DataError::Decode {
+            path: path.clone(),
+            field: field.to_owned(),
+            source: Box::new(e),
+        })?;
+        Ok(Some(Cow::Owned(value)))
     }
 }
 
 impl sdf::AbstractData for CrateData {
+    fn property_spec(&self, prim: &sdf::Path, name: &str) -> Option<(Cow<'_, sdf::Path>, sdf::SpecType)> {
+        let (path, spec) = self.data.get_key_value(&sdf::PathQuery::property(prim, name)?)?;
+        Some((Cow::Borrowed(path), spec.ty))
+    }
     #[inline]
     fn has_spec(&self, path: &sdf::Path) -> bool {
         self.data.contains_key(path)
@@ -274,26 +327,18 @@ impl sdf::AbstractData for CrateData {
         let Some(spec) = self.data.get(path) else {
             return Ok(None);
         };
-        if let Some(authored) = spec.authored(field) {
-            return Ok(authored.as_ref().map(Cow::Borrowed));
-        }
-        let Some(start) = spec.fieldset else {
+        self.read_field(path, spec, field)
+    }
+
+    fn try_field_query(
+        &self,
+        query: &sdf::PathQuery<'_>,
+        field: &str,
+    ) -> Result<Option<Cow<'_, sdf::Value>>, sdf::DataError> {
+        let Some((path, spec)) = self.data.get_key_value(query) else {
             return Ok(None);
         };
-        let rep = crate_fields(&self.file, start)
-            .find(|(name, _)| *name == field)
-            .map(|(_, rep)| rep);
-        let Some(rep) = rep else {
-            return Ok(None);
-        };
-        // The decoder's typed `ReadError` is boxed as the `DataError`'s source:
-        // the box is the layering seam that keeps `sdf` below this format.
-        let value = self.file.value(rep).map_err(|e| sdf::DataError::Decode {
-            path: path.clone(),
-            field: field.to_owned(),
-            source: Box::new(e),
-        })?;
-        Ok(Some(Cow::Owned(value)))
+        self.read_field(path, spec, field)
     }
 
     fn list_fields(&self, path: &sdf::Path) -> Option<Vec<String>> {
@@ -405,6 +450,10 @@ pub fn read_file(path: impl AsRef<Path>) -> crate::Result<Box<dyn sdf::AbstractD
 pub struct UsdcFileFormat;
 
 impl sdf::FileFormat for UsdcFileFormat {
+    fn reads_only_bytes(&self) -> bool {
+        true
+    }
+
     fn format_id(&self) -> tf::Token {
         tf::Token::new("usdc")
     }
@@ -428,8 +477,7 @@ impl sdf::FileFormat for UsdcFileFormat {
         CrateWriter::write(data, &mut sink)
     }
 
-    /// The data is built from the writer's own tables over the bytes it
-    /// wrote. Nothing is decoded again.
+    /// The data reuses the writer's tables and backing bytes.
     fn write_bytes(&self, data: &dyn sdf::AbstractData) -> Result<sdf::Written, sdf::FormatError> {
         let file = CrateWriter::write_file(data)?;
         let bytes = file.bytes().clone().into_shared();
@@ -450,11 +498,73 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ptr;
     use std::sync::Arc;
 
     use super::*;
     use crate::Result;
     use crate::sdf::{AbstractData, FileFormat};
+
+    #[test]
+    fn property_fields_decode_and_edit() -> Result<()> {
+        let prim = sdf::Path::new("/World")?;
+        let property = prim.append_property("points")?;
+        let mut source = sdf::Data::new();
+        source.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        source
+            .create_spec(property.clone(), sdf::SpecType::Attribute)
+            .add("default", sdf::Value::IntVec((vec![1, 2, 3]).into()));
+        let mut data = CrateData::from_file(CrateWriter::write_file(&source)?, false)?;
+        assert_eq!(
+            data.try_field_query(&sdf::PathQuery::property(&prim, "points").unwrap(), "default")?
+                .unwrap()
+                .as_ref(),
+            &sdf::Value::IntVec((vec![1, 2, 3]).into())
+        );
+        data.erase_field(&property, "default");
+        assert!(
+            data.try_field_query(&sdf::PathQuery::property(&prim, "points").unwrap(), "default")?
+                .is_none()
+        );
+        data.set_field(&property, "default", sdf::Value::Int(9));
+        assert_eq!(
+            data.try_field_query(&sdf::PathQuery::property(&prim, "points").unwrap(), "default")?
+                .unwrap()
+                .as_ref(),
+            &sdf::Value::Int(9)
+        );
+        data.erase_spec(&property);
+        assert!(
+            data.try_field_query(&sdf::PathQuery::property(&prim, "points").unwrap(), "default")?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn property_paths_follow_crate_edits() -> Result<()> {
+        let prim = sdf::Path::new("/World/日本語")?;
+        let property = prim.append_property("primvars:色")?;
+        let mut source = sdf::Data::new();
+        source.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        source
+            .create_spec(property.clone(), sdf::SpecType::Attribute)
+            .add("default", 7);
+        let mut data = CrateData::from_file(CrateWriter::write_file(&source)?, false)?;
+        let (found, _) = data.property_spec(&prim, "primvars:色").unwrap();
+        assert!(matches!(found, Cow::Borrowed(_)));
+        assert_eq!(data.field(&found, "default")?.as_ref(), &sdf::Value::Int(7));
+        data.set_field(&property, "default", sdf::Value::Int(9));
+        let (found, _) = data.property_spec(&prim, "primvars:色").unwrap();
+        assert_eq!(data.field(&found, "default")?.as_ref(), &sdf::Value::Int(9));
+        data.erase_spec(&property);
+        assert!(data.property_spec(&prim, "primvars:色").is_none());
+        data.create_spec(property, sdf::SpecType::Relationship);
+        let (found, _) = data.property_spec(&prim, "primvars:色").unwrap();
+        assert_eq!(data.spec_type(&found), Some(sdf::SpecType::Relationship));
+        assert!(data.property_spec(&prim, "missing").is_none());
+        Ok(())
+    }
 
     /// A crate layer read from an asset that shares its bytes decodes from
     /// those bytes and keeps a reference to them.
@@ -510,6 +620,62 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn shared_metadata_values() -> Result<()> {
+        let mut source = sdf::Data::new();
+        source.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let a = sdf::Path::new("/A")?;
+        let b = sdf::Path::new("/B")?;
+        for path in [&a, &b] {
+            let spec = source.create_spec(path.clone(), sdf::SpecType::Prim);
+            spec.add("active", true);
+            spec.add("primChildren", sdf::Value::TokenVec(vec!["Mesh".into()]));
+        }
+        let mut data = CrateData::from_file(CrateWriter::write_file(&source)?, false)?;
+        for field in ["active", "primChildren"] {
+            let Some(Cow::Borrowed(first)) = data.try_field(&a, field)? else {
+                panic!("metadata must borrow its shared value");
+            };
+            let Some(Cow::Borrowed(second)) = data.try_field(&b, field)? else {
+                panic!("metadata must borrow its shared value");
+            };
+            assert_eq!(first, second);
+            let again = data.try_field(&a, field)?.unwrap();
+            assert!(ptr::eq(first, again.as_ref()));
+            if field == "active" {
+                assert!(ptr::eq(first, second));
+            }
+        }
+        data.set_field(&a, "active", sdf::Value::Bool(false));
+        assert_eq!(data.try_field(&a, "active")?.as_deref(), Some(&sdf::Value::Bool(false)));
+        assert_eq!(data.try_field(&b, "active")?.as_deref(), Some(&sdf::Value::Bool(true)));
+        data.erase_field(&a, "primChildren");
+        assert!(data.try_field(&a, "primChildren")?.is_none());
+        assert!(data.try_field(&b, "primChildren")?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_metadata_keeps_query_context() -> Result<()> {
+        let mut source = sdf::Data::new();
+        source.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let path = sdf::Path::new("/A")?;
+        source
+            .create_spec(path.clone(), sdf::SpecType::Prim)
+            .add("active", true);
+        let mut file = CrateWriter::write_file(&source)?;
+        let active = file
+            .fields
+            .iter_mut()
+            .find(|field| field.value_rep.is_inlined())
+            .unwrap();
+        active.value_rep = ValueRep((255u64 << 48) | (1u64 << 62));
+        let data = CrateData::from_file(file, false)?;
+        let error = data.try_field(&path, "active").unwrap_err();
+        assert!(matches!(error, sdf::DataError::Decode { path: p, field, .. } if p == path && field == "active"));
+        Ok(())
+    }
+
     /// A value nested `MAX_NESTING` deep writes and reads back; one level
     /// deeper is refused by the writer, as the reader would refuse it.
     #[test]
@@ -517,7 +683,7 @@ mod tests {
         fn nested(depth: usize) -> sdf::Value {
             let mut value = sdf::Value::Int(1);
             for _ in 0..depth {
-                value = sdf::Value::Dictionary(HashMap::from([("inner".to_owned(), value)]));
+                value = sdf::Value::Dictionary(Box::new(HashMap::from([("inner".to_owned(), value)])));
             }
             value
         }

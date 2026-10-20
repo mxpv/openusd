@@ -142,14 +142,17 @@ fn reads_extent_when_authored() -> Result<()> {
     let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
     assert_eq!(
         hero.extent_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![
-            openusd::gf::Vec3f {
-                x: -1.0,
-                y: -1.0,
-                z: -1.0
-            },
-            openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 1.0 },
-        ]))
+        Some(sdf::Value::Vec3fVec(
+            (vec![
+                openusd::gf::Vec3f {
+                    x: -1.0,
+                    y: -1.0,
+                    z: -1.0
+                },
+                openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 1.0 },
+            ])
+            .into()
+        ))
     );
     Ok(())
 }
@@ -671,10 +674,13 @@ fn mesh_returns_topology() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(array_len(&m.points_attr(), vec3f_len)?, 4);
-    assert_eq!(m.face_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(
+        m.face_vertex_counts_attr().get()?,
+        Some(sdf::Value::IntVec((vec![4]).into()))
+    );
     assert_eq!(
         m.face_vertex_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 1, 2, 3]))
+        Some(sdf::Value::IntVec((vec![0, 1, 2, 3]).into()))
     );
     Ok(())
 }
@@ -687,10 +693,13 @@ fn mesh_gprim_attrs_round_trip() -> Result<()> {
     assert_eq!(m.orientation_attr().get::<Token>()?.as_deref(), Some("leftHanded"));
     assert_eq!(
         m.extent_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![
-            openusd::gf::Vec3f { x: 0.0, y: 0.0, z: 0.0 },
-            openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 0.0 },
-        ]))
+        Some(sdf::Value::Vec3fVec(
+            (vec![
+                openusd::gf::Vec3f { x: 0.0, y: 0.0, z: 0.0 },
+                openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 0.0 },
+            ])
+            .into()
+        ))
     );
     Ok(())
 }
@@ -704,19 +713,25 @@ fn mesh_subdivision_attrs() -> Result<()> {
         m.interpolate_boundary_attr().get::<Token>()?.as_deref(),
         Some("edgeAndCorner")
     );
-    assert_eq!(m.corner_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 2])));
+    assert_eq!(
+        m.corner_indices_attr().get()?,
+        Some(sdf::Value::IntVec((vec![0, 2]).into()))
+    );
     assert_eq!(
         m.corner_sharpnesses_attr().get()?,
-        Some(sdf::Value::FloatVec(vec![10.0, 5.0]))
+        Some(sdf::Value::FloatVec((vec![10.0, 5.0]).into()))
     );
     assert_eq!(
         m.crease_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 1, 1, 2]))
+        Some(sdf::Value::IntVec((vec![0, 1, 1, 2]).into()))
     );
-    assert_eq!(m.crease_lengths_attr().get()?, Some(sdf::Value::IntVec(vec![2, 2])));
+    assert_eq!(
+        m.crease_lengths_attr().get()?,
+        Some(sdf::Value::IntVec((vec![2, 2]).into()))
+    );
     assert_eq!(
         m.crease_sharpnesses_attr().get()?,
-        Some(sdf::Value::FloatVec(vec![3.0, 4.0]))
+        Some(sdf::Value::FloatVec((vec![3.0, 4.0]).into()))
     );
     Ok(())
 }
@@ -755,11 +770,9 @@ fn mesh_display_color() -> Result<()> {
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(
         m.display_color_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![openusd::gf::Vec3f {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0
-        }]))
+        Some(sdf::Value::Vec3fVec(
+            (vec![openusd::gf::Vec3f { x: 1.0, y: 0.0, z: 0.0 }]).into()
+        ))
     );
     assert_eq!(
         m.display_color_attr().metadata::<Token>("interpolation")?.as_deref(),
@@ -783,7 +796,7 @@ fn geom_subset_round_trip() -> Result<()> {
     let s = Subset::get(&stage, sdf::path("/World/FancyMesh/Front")?)?.expect("Subset");
     assert_eq!(s.element_type_attr().get::<Token>()?.as_deref(), Some("face"));
     assert_eq!(s.family_name_attr().get::<Token>()?.as_deref(), Some("materialBind"));
-    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec(vec![0])));
+    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec((vec![0]).into())));
     Ok(())
 }
 
@@ -825,7 +838,10 @@ fn basis_curves_topology_and_type() -> Result<()> {
     let stage = open()?;
     let c = BasisCurves::get(&stage, sdf::path("/World/Curves/Linear")?)?.expect("BasisCurves");
     assert_eq!(array_len(&c.points_attr(), vec3f_len)?, 4);
-    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(
+        c.curve_vertex_counts_attr().get()?,
+        Some(sdf::Value::IntVec((vec![4]).into()))
+    );
     assert_eq!(c.type_attr().get::<Token>()?.as_deref(), Some("linear"));
     assert_eq!(c.wrap_attr().get::<Token>()?.as_deref(), Some("nonperiodic"));
     assert_eq!(
@@ -844,7 +860,7 @@ fn basis_curves_topology_and_type() -> Result<()> {
 fn nurbs_curves_order_and_weights() -> Result<()> {
     let stage = open()?;
     let c = NurbsCurves::get(&stage, sdf::path("/World/Curves/Smooth")?)?.expect("NurbsCurves");
-    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec((vec![4]).into())));
     assert_eq!(
         c.knots_attr()
             .get::<sdf::Value>()?
@@ -894,7 +910,7 @@ fn hermite_curves_carry_tangents() -> Result<()> {
     assert_eq!(array_len(&c.tangents_attr(), vec3f_len)?, 4);
     assert_eq!(
         c.curve_vertex_counts_attr().get()?,
-        Some(sdf::Value::IntVec(vec![2, 2]))
+        Some(sdf::Value::IntVec((vec![2, 2]).into()))
     );
     Ok(())
 }
@@ -906,9 +922,12 @@ fn points_with_ids_and_widths() -> Result<()> {
     assert_eq!(array_len(&p.points_attr(), vec3f_len)?, 3);
     assert_eq!(
         p.widths_attr().get()?,
-        Some(sdf::Value::FloatVec(vec![0.05, 0.05, 0.05]))
+        Some(sdf::Value::FloatVec((vec![0.05, 0.05, 0.05]).into()))
     );
-    assert_eq!(p.ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![10, 20, 30])));
+    assert_eq!(
+        p.ids_attr().get()?,
+        Some(sdf::Value::Int64Vec((vec![10, 20, 30]).into()))
+    );
     Ok(())
 }
 
@@ -952,7 +971,7 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
     );
     assert_eq!(
         pi.proto_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 0, 0, 0]))
+        Some(sdf::Value::IntVec((vec![0, 0, 0, 0]).into()))
     );
     assert_eq!(array_len(&pi.positions_attr(), vec3f_len)?, 4);
     let scales = pi
@@ -964,9 +983,12 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
     assert_eq!(scales[1], openusd::gf::Vec3f { x: 2.0, y: 2.0, z: 2.0 });
     assert_eq!(
         pi.ids_attr().get()?,
-        Some(sdf::Value::Int64Vec(vec![100, 200, 300, 400]))
+        Some(sdf::Value::Int64Vec((vec![100, 200, 300, 400]).into()))
     );
-    assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![300])));
+    assert_eq!(
+        pi.invisible_ids_attr().get()?,
+        Some(sdf::Value::Int64Vec((vec![300]).into()))
+    );
     assert_eq!(array_len(&pi.velocities_attr(), vec3f_len)?, 4);
     // Unauthored attributes read back `None`.
     assert!(pi.orientations_attr().get::<sdf::Value>()?.is_none());
@@ -1063,18 +1085,21 @@ fn camera_roundtrip() -> Result<()> {
 fn basis_curves_roundtrip() -> Result<()> {
     let stage = memory()?;
     let c = BasisCurves::define(&stage, "/C")?;
-    c.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
-        [0.0_f32, 0.0, 0.0].into(),
-        [1.0, 0.0, 0.0].into(),
-    ]))?;
-    c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
+    c.create_points_attr()?.set(sdf::Value::Vec3fVec(
+        (vec![[0.0_f32, 0.0, 0.0].into(), [1.0, 0.0, 0.0].into()]).into(),
+    ))?;
+    c.create_curve_vertex_counts_attr()?
+        .set(sdf::Value::IntVec((vec![2]).into()))?;
     c.create_type_attr()?.set(sdf::Value::Token("linear".into()))?;
     c.create_widths_attr()?
         .set_metadata(geom::tokens::INTERPOLATION, sdf::Value::Token("vertex".into()))?
-        .set(sdf::Value::FloatVec(vec![0.1, 0.1]))?;
+        .set(sdf::Value::FloatVec((vec![0.1, 0.1]).into()))?;
 
     let c = BasisCurves::get(&stage, "/C")?.expect("BasisCurves");
-    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![2])));
+    assert_eq!(
+        c.curve_vertex_counts_attr().get()?,
+        Some(sdf::Value::IntVec((vec![2]).into()))
+    );
     assert_eq!(c.type_attr().get()?, Some(sdf::Value::Token("linear".into())));
     assert_eq!(
         c.widths_attr().metadata(geom::tokens::INTERPOLATION)?,
@@ -1088,15 +1113,14 @@ fn basis_curves_roundtrip() -> Result<()> {
 fn hermite_curves_tangents() -> Result<()> {
     let stage = memory()?;
     let c = HermiteCurves::define(&stage, "/H")?;
-    c.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
-        [0.0_f32, 0.0, 0.0].into(),
-        [1.0, 0.0, 0.0].into(),
-    ]))?;
-    c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
-    c.create_tangents_attr()?.set(sdf::Value::Vec3fVec(vec![
-        [1.0_f32, 0.0, 0.0].into(),
-        [1.0, 0.0, 0.0].into(),
-    ]))?;
+    c.create_points_attr()?.set(sdf::Value::Vec3fVec(
+        (vec![[0.0_f32, 0.0, 0.0].into(), [1.0, 0.0, 0.0].into()]).into(),
+    ))?;
+    c.create_curve_vertex_counts_attr()?
+        .set(sdf::Value::IntVec((vec![2]).into()))?;
+    c.create_tangents_attr()?.set(sdf::Value::Vec3fVec(
+        (vec![[1.0_f32, 0.0, 0.0].into(), [1.0, 0.0, 0.0].into()]).into(),
+    ))?;
 
     let c = HermiteCurves::get(&stage, "/H")?.expect("HermiteCurves");
     assert_eq!(
@@ -1114,12 +1138,13 @@ fn nurbs_curves_attrs() -> Result<()> {
     let stage = memory()?;
     let c = NurbsCurves::define(&stage, "/N")?;
     c.create_order_attr()?.set(vec![4])?;
-    c.create_knots_attr()?
-        .set(sdf::Value::DoubleVec(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]))?;
+    c.create_knots_attr()?.set(sdf::Value::DoubleVec(
+        (vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]).into(),
+    ))?;
     c.create_point_weights_attr()?.set(vec![1.0_f64, 1.0, 1.0, 1.0])?;
 
     let c = NurbsCurves::get(&stage, "/N")?.expect("NurbsCurves");
-    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec((vec![4]).into())));
     assert_eq!(
         c.point_weights_attr()
             .get::<sdf::Value>()?
@@ -1153,18 +1178,30 @@ fn point_instancer_roundtrip() -> Result<()> {
 
     let pi = PointInstancer::define(&stage, "/Instances")?;
     pi.create_prototypes_rel()?.set_targets(["/Proto/Marker"])?;
-    pi.create_proto_indices_attr()?.set(sdf::Value::IntVec(vec![0, 0, 0]))?;
-    pi.create_positions_attr()?.set(sdf::Value::Vec3fVec(vec![
-        [0.0_f32, 0.0, 0.0].into(),
-        [1.0, 0.0, 0.0].into(),
-        [2.0, 0.0, 0.0].into(),
-    ]))?;
-    pi.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![100, 200, 300]))?;
-    pi.create_invisible_ids_attr()?.set(sdf::Value::Int64Vec(vec![200]))?;
+    pi.create_proto_indices_attr()?
+        .set(sdf::Value::IntVec((vec![0, 0, 0]).into()))?;
+    pi.create_positions_attr()?.set(sdf::Value::Vec3fVec(
+        (vec![
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+            [2.0, 0.0, 0.0].into(),
+        ])
+        .into(),
+    ))?;
+    pi.create_ids_attr()?
+        .set(sdf::Value::Int64Vec((vec![100, 200, 300]).into()))?;
+    pi.create_invisible_ids_attr()?
+        .set(sdf::Value::Int64Vec((vec![200]).into()))?;
 
     let pi = PointInstancer::get(&stage, "/Instances")?.expect("PointInstancer");
-    assert_eq!(pi.proto_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 0, 0])));
-    assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![200])));
+    assert_eq!(
+        pi.proto_indices_attr().get()?,
+        Some(sdf::Value::IntVec((vec![0, 0, 0]).into()))
+    );
+    assert_eq!(
+        pi.invisible_ids_attr().get()?,
+        Some(sdf::Value::Int64Vec((vec![200]).into()))
+    );
     assert_eq!(pi.prototypes_rel().targets()?, vec![sdf::path("/Proto/Marker")?]);
     // Inherited Boundable / Xformable accessors are available.
     assert_eq!(pi.extent_attr().get::<sdf::Value>()?, None);
@@ -1179,11 +1216,11 @@ fn geom_subset_is_typed_not_imageable() -> Result<()> {
     s.create_element_type_attr()?.set(sdf::Value::Token("face".into()))?;
     s.create_family_name_attr()?
         .set(sdf::Value::Token("materialBind".into()))?;
-    s.create_indices_attr()?.set(sdf::Value::IntVec(vec![0]))?;
+    s.create_indices_attr()?.set(sdf::Value::IntVec((vec![0]).into()))?;
 
     let s = Subset::get(&stage, "/M/RedFaces")?.expect("Subset");
     assert_eq!(s.element_type_attr().get()?, Some(sdf::Value::Token("face".into())));
-    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec(vec![0])));
+    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec((vec![0]).into())));
     assert_eq!(Subset::KIND, openusd::usd::SchemaKind::ConcreteTyped);
     Ok(())
 }
@@ -1192,27 +1229,34 @@ fn geom_subset_is_typed_not_imageable() -> Result<()> {
 fn mesh_topology_and_subdiv() -> Result<()> {
     let stage = memory()?;
     let m = Mesh::define(&stage, "/M")?;
-    m.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
-        [0.0_f32, 0.0, 0.0].into(),
-        [1.0, 0.0, 0.0].into(),
-        [1.0, 1.0, 0.0].into(),
-        [0.0, 1.0, 0.0].into(),
-    ]))?;
-    m.create_face_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![4]))?;
+    m.create_points_attr()?.set(sdf::Value::Vec3fVec(
+        (vec![
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+            [1.0, 1.0, 0.0].into(),
+            [0.0, 1.0, 0.0].into(),
+        ])
+        .into(),
+    ))?;
+    m.create_face_vertex_counts_attr()?
+        .set(sdf::Value::IntVec((vec![4]).into()))?;
     m.create_face_vertex_indices_attr()?
-        .set(sdf::Value::IntVec(vec![0, 1, 2, 3]))?;
+        .set(sdf::Value::IntVec((vec![0, 1, 2, 3]).into()))?;
     m.create_subdivision_scheme_attr()?
         .set(sdf::Value::Token("none".into()))?;
     m.create_orientation_attr()?
         .set(sdf::Value::Token("leftHanded".into()))?;
     m.create_display_color_attr()?
-        .set(sdf::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))?;
+        .set(sdf::Value::Vec3fVec((vec![[1.0_f32, 0.0, 0.0].into()]).into()))?;
 
     let m = Mesh::get(&stage, "/M")?.expect("Mesh");
-    assert_eq!(m.face_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(
+        m.face_vertex_counts_attr().get()?,
+        Some(sdf::Value::IntVec((vec![4]).into()))
+    );
     assert_eq!(
         m.face_vertex_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 1, 2, 3]))
+        Some(sdf::Value::IntVec((vec![0, 1, 2, 3]).into()))
     );
     assert_eq!(
         m.subdivision_scheme_attr().get()?,
@@ -1232,7 +1276,7 @@ fn mesh_topology_and_subdiv() -> Result<()> {
     );
     assert_eq!(
         m.display_color_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))
+        Some(sdf::Value::Vec3fVec((vec![[1.0_f32, 0.0, 0.0].into()]).into()))
     );
     Ok(())
 }
@@ -1241,16 +1285,19 @@ fn mesh_topology_and_subdiv() -> Result<()> {
 fn points_widths_and_ids() -> Result<()> {
     let stage = memory()?;
     let p = Points::define(&stage, "/Cloud")?;
-    p.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
-        [0.0_f32, 0.0, 0.0].into(),
-        [1.0, 0.0, 0.0].into(),
-    ]))?;
-    p.create_widths_attr()?.set(sdf::Value::FloatVec(vec![0.1, 0.1]))?;
-    p.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![10, 20]))?;
+    p.create_points_attr()?.set(sdf::Value::Vec3fVec(
+        (vec![[0.0_f32, 0.0, 0.0].into(), [1.0, 0.0, 0.0].into()]).into(),
+    ))?;
+    p.create_widths_attr()?
+        .set(sdf::Value::FloatVec((vec![0.1, 0.1]).into()))?;
+    p.create_ids_attr()?.set(sdf::Value::Int64Vec((vec![10, 20]).into()))?;
 
     let p = Points::get(&stage, "/Cloud")?.expect("Points");
-    assert_eq!(p.widths_attr().get()?, Some(sdf::Value::FloatVec(vec![0.1, 0.1])));
-    assert_eq!(p.ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![10, 20])));
+    assert_eq!(
+        p.widths_attr().get()?,
+        Some(sdf::Value::FloatVec((vec![0.1, 0.1]).into()))
+    );
+    assert_eq!(p.ids_attr().get()?, Some(sdf::Value::Int64Vec((vec![10, 20]).into())));
     Ok(())
 }
 

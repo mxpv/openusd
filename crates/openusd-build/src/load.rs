@@ -364,7 +364,7 @@ pub struct CustomData(sdf::Dictionary);
 impl CustomData {
     /// Reads one, empty when the field is absent or holds something else.
     fn read(value: Option<sdf::Value>) -> Self {
-        Self(value.and_then(sdf::Value::try_as_dictionary).unwrap_or_default())
+        Self(*value.and_then(sdf::Value::try_as_dictionary).unwrap_or_default())
     }
 
     /// One entry as a string, written either as a string or as a token.
@@ -403,10 +403,17 @@ impl CustomData {
         self.0
             .get(key)
             .and_then(sdf::Value::try_as_dictionary_ref)
+            .map(Box::as_ref)
             .into_iter()
             .flatten()
             .map(|(id, entry)| {
-                let entry = CustomData(entry.try_as_dictionary_ref().cloned().unwrap_or_default());
+                let entry = CustomData(
+                    entry
+                        .try_as_dictionary_ref()
+                        .map(Box::as_ref)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 DeclaredToken {
                     value: entry.string("value").unwrap_or_else(|| id.clone()),
                     documentation: entry.string("doc"),
@@ -426,10 +433,12 @@ impl CustomData {
         self.0
             .get("apiSchemaInstances")
             .and_then(sdf::Value::try_as_dictionary_ref)
+            .map(Box::as_ref)
             .into_iter()
             .flatten()
             .filter_map(|(instance, entry)| {
-                let allowed = CustomData(entry.try_as_dictionary_ref()?.clone()).tokens("apiSchemaCanOnlyApplyTo");
+                let allowed =
+                    CustomData(entry.try_as_dictionary_ref()?.as_ref().clone()).tokens("apiSchemaCanOnlyApplyTo");
                 (!allowed.is_empty()).then(|| (tf::Token::from(instance.as_str()), allowed))
             })
             .collect()

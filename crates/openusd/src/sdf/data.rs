@@ -5,7 +5,10 @@
 
 use std::{borrow::Cow, collections::HashSet};
 
-use crate::sdf::{Path, PathMap, SpecData, SpecType, Value};
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+
+use crate::sdf::{Path, PathMap, PathQuery, SpecData, SpecType, Value};
 
 /// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
 ///
@@ -28,6 +31,15 @@ pub trait AbstractData {
     /// Returns the type of the spec at the given path.
     fn spec_type(&self, path: &Path) -> Option<SpecType>;
 
+    /// The path and type of the spec at `prim.name`. Borrows the stored path
+    /// when the backend retains path keys. Returns `None` for an invalid
+    /// property name or when the spec is absent.
+    fn property_spec(&self, prim: &Path, name: &str) -> Option<(Cow<'_, Path>, SpecType)> {
+        let path = prim.append_property(name).ok()?;
+        let kind = self.spec_type(&path)?;
+        Some((Cow::Owned(path), kind))
+    }
+
     /// Returns the value for a field, or `None` if not authored.
     ///
     /// The value can be either owned or borrowed depending on internals.
@@ -39,6 +51,12 @@ pub trait AbstractData {
     /// Errors propagate I/O or decoding failures; a missing spec or field is
     /// signalled by `Ok(None)`.
     fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError>;
+
+    /// Reads a field through a borrowed path query.
+    /// Backends with stored keys can resolve compound queries directly.
+    fn try_field_query(&self, query: &PathQuery<'_>, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        self.try_field(&query.to_path(), field)
+    }
 
     /// Returns the value for a field, erroring if not authored.
     ///
@@ -144,7 +162,7 @@ pub enum DataError {
 /// In-memory mutable layer data.
 #[derive(Default, Debug, Clone)]
 pub struct Data {
-    specs: PathMap<SpecData>,
+    specs: HashMap<Path, SpecData, FxBuildHasher>,
 }
 
 impl Data {
@@ -156,7 +174,9 @@ impl Data {
     /// Build a container from a map of pre-parsed spec records, the form a
     /// reader (e.g. the usda parser) produces.
     pub fn from_specs(specs: PathMap<SpecData>) -> Self {
-        Self { specs }
+        Self {
+            specs: specs.into_iter().collect(),
+        }
     }
 
     /// Copy every spec and field from `src` into a new `Data`.
@@ -225,6 +245,17 @@ impl Data {
 }
 
 impl AbstractData for Data {
+    fn try_field_query(&self, query: &PathQuery<'_>, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        Ok(self
+            .specs
+            .get(query)
+            .and_then(|spec| spec.get(field))
+            .map(Cow::Borrowed))
+    }
+    fn property_spec(&self, prim: &Path, name: &str) -> Option<(Cow<'_, Path>, SpecType)> {
+        let (path, spec) = self.specs.get_key_value(&PathQuery::property(prim, name)?)?;
+        Some((Cow::Borrowed(path), spec.ty))
+    }
     fn has_spec(&self, path: &Path) -> bool {
         self.specs.contains_key(path)
     }
@@ -244,7 +275,7 @@ impl AbstractData for Data {
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
         self.specs
             .get(path)
-            .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
+            .map(|spec| spec.fields.iter().map(|(k, _)| k.to_string()).collect())
     }
 
     fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
@@ -282,6 +313,12 @@ impl AbstractData for Data {
 }
 
 impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
+    fn try_field_query(&self, query: &PathQuery<'_>, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        (**self).try_field_query(query, field)
+    }
+    fn property_spec(&self, prim: &Path, name: &str) -> Option<(Cow<'_, Path>, SpecType)> {
+        (**self).property_spec(prim, name)
+    }
     fn has_spec(&self, path: &Path) -> bool {
         (**self).has_spec(path)
     }
@@ -479,6 +516,27 @@ impl<T: AbstractData> CowData<T> {
 }
 
 impl<T: AbstractData> AbstractData for CowData<T> {
+    fn try_field_query(&self, query: &PathQuery<'_>, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        if self.overlay.is_empty() {
+            return self.base.try_field_query(query, field);
+        }
+        self.try_field(&query.to_path(), field)
+    }
+    fn property_spec(&self, prim: &Path, name: &str) -> Option<(Cow<'_, Path>, SpecType)> {
+        if self.overlay.is_empty() {
+            return self.base.property_spec(prim, name);
+        }
+        if let Some((path, kind)) = self.base.property_spec(prim, name) {
+            return match self.staged(&path) {
+                Some(Patch::Tombstone) => None,
+                Some(Patch::Created(spec)) => Some((path, spec.ty)),
+                _ => Some((path, kind)),
+            };
+        }
+        let path = prim.append_property(name).ok()?;
+        let kind = self.spec_type(&path)?;
+        Some((Cow::Owned(path), kind))
+    }
     fn has_spec(&self, path: &Path) -> bool {
         match self.staged(path) {
             Some(Patch::Tombstone) => false,
@@ -526,7 +584,7 @@ impl<T: AbstractData> AbstractData for CowData<T> {
 
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
         match self.staged(path) {
-            Some(Patch::Created(spec)) => Some(spec.fields.iter().map(|(k, _)| k.clone()).collect()),
+            Some(Patch::Created(spec)) => Some(spec.fields.iter().map(|(k, _)| k.to_string()).collect()),
             Some(Patch::Tombstone) => None,
             Some(Patch::Edited { set, erased }) => {
                 // Base fields in authored order minus the erased ones, then the
@@ -659,6 +717,64 @@ pub(crate) fn mask_of(fields: &[&str], mut authors: impl FnMut(&str) -> bool) ->
 mod tests {
     use super::*;
     use crate::sdf::path;
+
+    #[test]
+    fn property_paths_follow_edits() {
+        let prim = path("/World/日本語").unwrap();
+        let property = prim.append_property("primvars:色").unwrap();
+        let mut data: Box<dyn AbstractData> = Box::new(Data::new());
+        data.create_spec(property.clone(), SpecType::Attribute);
+        let (found, _) = data.property_spec(&prim, "primvars:色").unwrap();
+        assert!(matches!(found, Cow::Borrowed(_)));
+        assert_eq!(found.as_ref(), &property);
+        data.set_field(&property, "default", Value::Int(7));
+        let (found, _) = data.property_spec(&prim, "primvars:色").unwrap();
+        assert_eq!(data.field(&found, "default").unwrap().as_ref(), &Value::Int(7));
+        assert!(data.property_spec(&prim, "missing").is_none());
+        assert!(data.property_spec(&prim, "bad/name").is_none());
+        assert!(data.property_spec(&property, "child").is_none());
+        let mut staged = CowData::new(data);
+        assert!(matches!(
+            staged.property_spec(&prim, "primvars:色"),
+            Some((Cow::Borrowed(_), _))
+        ));
+        staged.erase_spec(&property);
+        assert!(staged.property_spec(&prim, "primvars:色").is_none());
+        staged.create_spec(property.clone(), SpecType::Relationship);
+        let (found, _) = staged.property_spec(&prim, "primvars:色").unwrap();
+        assert_eq!(staged.spec_type(&found), Some(SpecType::Relationship));
+    }
+
+    #[test]
+    fn property_fields_follow_overlay() {
+        let prim = path("/World/日本語").unwrap();
+        let property = prim.append_property("primvars:色").unwrap();
+        let mut base: Box<dyn AbstractData> = Box::new(Data::new());
+        base.create_spec(property.clone(), SpecType::Attribute);
+        base.set_field(&property, "default", Value::Int(7));
+        let mut data = CowData::new(base);
+        let read = |data: &dyn AbstractData| {
+            data.try_field_query(&PathQuery::property(&prim, "primvars:色").unwrap(), "default")
+                .unwrap()
+                .map(Cow::into_owned)
+        };
+        assert_eq!(read(&data), Some(Value::Int(7)));
+        data.set_field(&property, "default", Value::Int(9));
+        assert_eq!(read(&data), Some(Value::Int(9)));
+        data.erase_field(&property, "default");
+        assert_eq!(read(&data), None);
+        data.erase_spec(&property);
+        assert_eq!(read(&data), None);
+        data.create_spec(property.clone(), SpecType::Attribute);
+        assert_eq!(read(&data), None);
+        data.set_field(&property, "default", Value::Int(11));
+        assert_eq!(read(&data), Some(Value::Int(11)));
+        assert!(
+            data.try_field_query(&PathQuery::property(&prim, "missing").unwrap(), "default")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn create_and_query_spec() {

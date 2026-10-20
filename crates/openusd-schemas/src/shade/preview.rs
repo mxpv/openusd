@@ -241,7 +241,7 @@ mod tests {
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
         tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
-            .set(sdf::Value::AssetPath("./albedo.png".into()))?;
+            .set(sdf::Value::AssetPath(Box::new("./albedo.png".into())))?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
@@ -275,7 +275,7 @@ mod tests {
         // than authored directly on the texture.
         let mat = Material::define(&stage, "/Mat")?;
         mat.create_input("diffuseTexFile", "asset")?
-            .set(sdf::Value::AssetPath("./albedo.png".into()))?;
+            .set(sdf::Value::AssetPath(Box::new("./albedo.png".into())))?;
 
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
         tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;

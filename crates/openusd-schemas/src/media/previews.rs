@@ -46,14 +46,17 @@ impl AssetPreviewsAPI {
             FieldKey::AssetInfo.as_str(),
             |local| {
                 let mut asset_info = match local {
-                    Some(Value::Dictionary(d)) => d,
+                    Some(Value::Dictionary(d)) => *d,
                     _ => HashMap::new(),
                 };
                 let previews = nested_dict_mut(&mut asset_info, tokens::PREVIEWS);
                 let thumbnails = nested_dict_mut(previews, tokens::THUMBNAILS);
                 let default = nested_dict_mut(thumbnails, DEFAULT);
-                default.insert(tokens::DEFAULT_IMAGE.to_string(), Value::AssetPath(image.into()));
-                Some(Value::Dictionary(asset_info))
+                default.insert(
+                    tokens::DEFAULT_IMAGE.to_string(),
+                    Value::AssetPath(Box::new(image.into())),
+                );
+                Some(Value::Dictionary(Box::new(asset_info)))
             },
         )?;
         Ok(Self(prim))
@@ -65,9 +68,9 @@ impl AssetPreviewsAPI {
 fn nested_dict_mut<'a>(d: &'a mut HashMap<String, Value>, key: &str) -> &'a mut HashMap<String, Value> {
     let entry = d
         .entry(key.to_string())
-        .or_insert_with(|| Value::Dictionary(HashMap::new()));
+        .or_insert_with(|| Value::Dictionary(Box::default()));
     if !matches!(entry, Value::Dictionary(_)) {
-        *entry = Value::Dictionary(HashMap::new());
+        *entry = Value::Dictionary(Box::default());
     }
     let Value::Dictionary(inner) = entry else {
         unreachable!("entry was just ensured to be a dictionary")
@@ -88,7 +91,7 @@ mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         let a = SpatialAudio::define(&stage, "/World/Audio")?;
         a.create_file_path_attr()?
-            .set(sdf::Value::AssetPath("./ambient.wav".into()))?;
+            .set(sdf::Value::AssetPath(Box::new("./ambient.wav".into())))?;
         a.create_aural_mode_attr()?
             .set(sdf::Value::Token(AuralMode::NonSpatial.as_token().into()))?;
         a.create_playback_mode_attr()?
@@ -101,7 +104,7 @@ mod tests {
         let a = SpatialAudio::get(&stage, "/World/Audio")?.expect("SpatialAudio");
         assert_eq!(
             a.file_path_attr().get::<sdf::Value>()?,
-            Some(sdf::Value::AssetPath("./ambient.wav".into()))
+            Some(sdf::Value::AssetPath(Box::new("./ambient.wav".into())))
         );
         assert_eq!(a.start_time()?, Some(sdf::TimeCode(24.0)));
         assert_eq!(a.media_offset()?, Some(2.5));
@@ -147,7 +150,7 @@ mod tests {
         let chair = stage
             .define_prim("/Chair")?
             .set_type_name("Xform")?
-            .set_metadata("assetInfo", Value::Dictionary(info))?;
+            .set_metadata("assetInfo", Value::Dictionary(Box::new(info)))?;
         AssetPreviewsAPI::apply(&chair)?.set_default_thumbnail("./t.jpg")?;
 
         // The pre-existing `name` entry survives alongside the new previews.

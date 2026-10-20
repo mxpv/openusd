@@ -144,8 +144,8 @@ fn lerp_value(a: &Value, b: &Value, t: f64) -> Option<Value> {
         (V::TimeCode(x), V::TimeCode(y)) => V::TimeCode(gf::lerp(x.0, y.0, t).into()),
 
         (V::Matrix2d(x), V::Matrix2d(y)) => V::Matrix2d(x.lerp(*y, t)),
-        (V::Matrix3d(x), V::Matrix3d(y)) => V::Matrix3d(x.lerp(*y, t)),
-        (V::Matrix4d(x), V::Matrix4d(y)) => V::Matrix4d(x.lerp(*y, t)),
+        (V::Matrix3d(x), V::Matrix3d(y)) => V::Matrix3d(Box::new(x.lerp(**y, t))),
+        (V::Matrix4d(x), V::Matrix4d(y)) => V::Matrix4d(Box::new(x.lerp(**y, t))),
 
         (V::Vec2h(x), V::Vec2h(y)) => V::Vec2h(x.lerp(*y, t32)),
         (V::Vec2f(x), V::Vec2f(y)) => V::Vec2f(x.lerp(*y, t32)),
@@ -328,8 +328,8 @@ mod tests {
         a[0] = 1.0;
         b[0] = 3.0;
         let s = vec![
-            (0.0, Value::Matrix4d(gf::Mat4d(a))),
-            (10.0, Value::Matrix4d(gf::Mat4d(b))),
+            (0.0, Value::Matrix4d(Box::new(gf::Mat4d(a)))),
+            (10.0, Value::Matrix4d(Box::new(gf::Mat4d(b)))),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
         if let Value::Matrix4d(m) = out {
@@ -344,25 +344,25 @@ mod tests {
         let s = vec![
             (
                 0.0,
-                Value::Vec3fVec(vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(10.0, 0.0, 0.0)]),
+                Value::Vec3fVec((vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(10.0, 0.0, 0.0)]).into()),
             ),
             (
                 10.0,
-                Value::Vec3fVec(vec![gf::vec3f(10.0, 0.0, 0.0), gf::vec3f(10.0, 20.0, 0.0)]),
+                Value::Vec3fVec((vec![gf::vec3f(10.0, 0.0, 0.0), gf::vec3f(10.0, 20.0, 0.0)]).into()),
             ),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
         assert_eq!(
             out,
-            Value::Vec3fVec(vec![gf::vec3f(5.0, 0.0, 0.0), gf::vec3f(10.0, 10.0, 0.0)])
+            Value::Vec3fVec((vec![gf::vec3f(5.0, 0.0, 0.0), gf::vec3f(10.0, 10.0, 0.0)]).into())
         );
     }
 
     #[test]
     fn linear_quatf_array_slerps_per_element() {
         let s = vec![
-            (0.0, Value::QuatfVec(vec![gf::quatf(1.0, 0.0, 0.0, 0.0)])),
-            (10.0, Value::QuatfVec(vec![gf::quatf(0.0, 1.0, 0.0, 0.0)])),
+            (0.0, Value::QuatfVec((vec![gf::quatf(1.0, 0.0, 0.0, 0.0)]).into())),
+            (10.0, Value::QuatfVec((vec![gf::quatf(0.0, 1.0, 0.0, 0.0)]).into())),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
         if let Value::QuatfVec(v) = out {
@@ -380,11 +380,11 @@ mod tests {
         // Spec: when bracketing arrays differ in length, linear is
         // undefined; behaviour matches Held (return the previous sample).
         let s = vec![
-            (0.0, Value::FloatVec(vec![1.0, 2.0, 3.0])),
-            (10.0, Value::FloatVec(vec![4.0, 5.0])),
+            (0.0, Value::FloatVec((vec![1.0, 2.0, 3.0]).into())),
+            (10.0, Value::FloatVec((vec![4.0, 5.0]).into())),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
-        assert_eq!(out, Value::FloatVec(vec![1.0, 2.0, 3.0]));
+        assert_eq!(out, Value::FloatVec((vec![1.0, 2.0, 3.0]).into()));
     }
 
     #[test]

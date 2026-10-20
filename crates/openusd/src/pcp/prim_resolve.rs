@@ -136,15 +136,14 @@ impl Composing {
 
     /// Folds in one source's `value`, weaker than everything folded so far.
     ///
-    /// `query_path` and `map_to_root` are what place a path expression in the
-    /// root namespace: the node's own namespace is not the one the result is
-    /// read in, and two nodes' expressions cannot compose until both are
-    /// rooted.
-    pub(crate) fn fold(&mut self, value: Value, query_path: &Path, map_to_root: &MapFunction) -> Folded {
+    /// `query_path` lazily supplies the anchor that, with `map_to_root`, places
+    /// a path expression in the root namespace. Expressions from different
+    /// nodes must be rooted before they can compose.
+    pub(crate) fn fold(&mut self, value: Value, query_path: impl Fn() -> Path, map_to_root: &MapFunction) -> Folded {
         // The anchor is built inside the rooting, so only a source that turns
         // out to hold an expression pays for it.
         self.compose(value, &|expr| {
-            PrimIndex::map_expression_to_root(expr, &query_path.prim_path(), map_to_root)
+            PrimIndex::map_expression_to_root(expr, &query_path().prim_path(), map_to_root)
         })
     }
 
@@ -166,7 +165,7 @@ impl Composing {
             // The strongest source stands on its own; what it holds decides
             // whether anything weaker is read at all.
             let value = match value {
-                Value::PathExpression(expr) => Value::PathExpression(root(expr)),
+                Value::PathExpression(expr) => Value::PathExpression(Box::new(root(*expr))),
                 // Array elements translate across arcs like the scalar form,
                 // with no per-element weaker stack for a reference to draw on,
                 // so only the strongest source's array is ever read.
@@ -182,7 +181,7 @@ impl Composing {
         };
         match (composed, value) {
             (Value::Dictionary(mut merged), Value::Dictionary(weaker)) => {
-                sdf::dictionary_over(&mut merged, weaker);
+                sdf::dictionary_over(&mut merged, *weaker);
                 self.value = Some(Value::Dictionary(merged));
                 Folded::Composed
             }
@@ -198,7 +197,7 @@ impl Composing {
                     true => Folded::Composed,
                     false => Folded::Closed,
                 };
-                self.value = Some(Value::PathExpression(expr));
+                self.value = Some(Value::PathExpression(Box::new(expr)));
                 folded
             }
             (composed, _) => {
@@ -447,7 +446,7 @@ impl Series<Composed> {
 /// caller that builds a [`Composed`] of its own.
 pub(crate) fn rooted_at(value: Value, site: &OpinionSite<'_>) -> Value {
     let mut composing = Composing::new();
-    composing.fold(value, &site.query_path, site.node.map_to_root());
+    composing.fold(value, || site.query_path(), site.node.map_to_root());
     composing.into_open().unwrap_or(Value::ValueBlock)
 }
 
@@ -488,7 +487,7 @@ pub(crate) fn composes_over_weaker(value: &Value) -> bool {
 fn close_value(value: Value) -> Value {
     let close = |expr: sdf::PathExpression| expr.compose_over(&sdf::PathExpression::nothing());
     match value {
-        Value::PathExpression(expr) => Value::PathExpression(close(expr)),
+        Value::PathExpression(expr) => Value::PathExpression(Box::new(close(*expr))),
         Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(close).collect()),
         other => other,
     }
@@ -642,7 +641,7 @@ impl PrimIndex {
                             // An explicit opinion replaces everything weaker,
                             // so the walk stops with it.
                             let explicit = op.is_explicit();
-                            ops.push(op);
+                            ops.push(*op);
                             if explicit {
                                 break;
                             }
@@ -650,7 +649,7 @@ impl PrimIndex {
                         _ => {}
                     }
                 }
-                Value::$variant(sdf::ListOp::explicit(compose_list_ops(&ops)))
+                Value::$variant(Box::new(sdf::ListOp::explicit(compose_list_ops(&ops))))
             }};
         }
 
@@ -711,7 +710,7 @@ impl PrimIndex {
             } = opinion?;
             let list_op = match value.into_owned() {
                 Value::ValueBlock => break,
-                Value::PathListOp(op) => op,
+                Value::PathListOp(op) => *op,
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
@@ -795,7 +794,7 @@ impl PrimIndex {
             } = opinion?;
             let list_op = match value.into_owned() {
                 Value::ValueBlock => break,
-                Value::PathListOp(op) => op,
+                Value::PathListOp(op) => *op,
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
@@ -1012,7 +1011,11 @@ impl PrimIndex {
         for opinion in self.opinions(field, stack, prop_suffix) {
             let opinion = opinion?;
             let anchor = opinion.query_path.prim_path();
-            let folded = composing.fold(opinion.value.into_owned(), &anchor, opinion.node.map_to_root());
+            let folded = composing.fold(
+                opinion.value.into_owned(),
+                || anchor.clone(),
+                opinion.node.map_to_root(),
+            );
             if folded.step().stop() {
                 break;
             }
@@ -1130,7 +1133,7 @@ impl PrimIndex {
             match opinion?.value.into_owned() {
                 // Stop weaker opinions while keeping any stronger composed edits.
                 Value::ValueBlock => break,
-                Value::StringListOp(op) => ops.push(op),
+                Value::StringListOp(op) => ops.push(*op),
                 Value::TokenListOp(op) => ops.push(op.convert(|_, token| Some(String::from(token)))),
                 Value::StringVec(names) => ops.push(sdf::StringListOp::explicit(names)),
                 Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(
@@ -1198,7 +1201,7 @@ impl PrimIndex {
             match value.into_owned() {
                 Value::ValueBlock => break,
                 Value::Dictionary(dict) => {
-                    for (set_name, set_value) in dict {
+                    for (set_name, set_value) in *dict {
                         if blocked_sets.contains(&set_name) {
                             continue;
                         }
@@ -1209,7 +1212,7 @@ impl PrimIndex {
                             continue;
                         };
                         let composed = sets.entry(set_name.clone()).or_default();
-                        for (field, value) in fields {
+                        for (field, value) in *fields {
                             if composed.contains_key(&field) {
                                 continue;
                             }
@@ -1285,11 +1288,11 @@ impl PrimIndex {
         let order = self.clip_sets_order(stack)?;
         evaluate_clip_assets(stack, &mut sets, order.as_deref(), &asset_sites, errors);
 
-        let clips = Value::Dictionary(
+        let clips = Value::Dictionary(Box::new(
             sets.into_iter()
-                .map(|(name, fields)| (name, Value::Dictionary(fields)))
+                .map(|(name, fields)| (name, Value::Dictionary(Box::new(fields))))
                 .collect(),
-        );
+        ));
 
         Ok(clip::ClipSet::parse(&clips, order.as_deref())
             .into_iter()
@@ -1525,11 +1528,11 @@ mod tests {
     fn dict(key: &str) -> Value {
         let mut d = sdf::Dictionary::new();
         d.insert(key.to_string(), Value::Int(1));
-        Value::Dictionary(d)
+        Value::Dictionary(Box::new(d))
     }
 
     fn expr(text: &str) -> Value {
-        Value::PathExpression(sdf::PathExpression::parse(text))
+        Value::PathExpression(Box::new(sdf::PathExpression::parse(text)))
     }
 
     /// A dictionary merges every weaker dictionary, ignores a source of another
@@ -1701,7 +1704,10 @@ mod tests {
     /// query about *when* a value changes off the values of animated geometry.
     #[test]
     fn dense_sample_is_not_carried() {
-        assert!(matches!(supplies(Value::DoubleVec(vec![1.0; 128])), Supplied::Opaque));
+        assert!(matches!(
+            supplies(Value::DoubleVec((vec![1.0; 128]).into())),
+            Supplied::Opaque
+        ));
     }
 
     /// A sample holds backwards from where it begins, so a weaker source names

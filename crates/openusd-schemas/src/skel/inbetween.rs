@@ -85,7 +85,7 @@ impl InbetweenShape {
     /// Author the inbetween's point offsets at the default time (C++
     /// `SetOffsets`).
     pub fn set_offsets(&self, offsets: Vec<gf::Vec3f>) -> Result<(), StageAuthoringError> {
-        self.attribute.clone().set(Value::Vec3fVec(offsets))?;
+        self.attribute.clone().set(Value::Vec3fVec(offsets.into()))?;
         Ok(())
     }
 
@@ -115,7 +115,8 @@ impl InbetweenShape {
     /// the `<name>:normalOffsets` attribute where it does not exist (C++
     /// `SetNormalOffsets`).
     pub fn set_normal_offsets(&self, offsets: Vec<gf::Vec3f>) -> Result<(), StageAuthoringError> {
-        self.create_normal_offsets_attr()?.set(Value::Vec3fVec(offsets))?;
+        self.create_normal_offsets_attr()?
+            .set(Value::Vec3fVec(offsets.into()))?;
         Ok(())
     }
 
@@ -197,7 +198,7 @@ mod tests {
         let shape = BlendShape::define(&stage, "/Smile")?;
         shape
             .create_offsets_attr()?
-            .set(Value::Vec3fVec(vec![gf::vec3f(0.0, 1.0, 0.0)]))?;
+            .set(Value::Vec3fVec((vec![gf::vec3f(0.0, 1.0, 0.0)]).into()))?;
         assert!(!shape.has_inbetween("half")?);
         assert!(shape.inbetweens()?.is_empty());
 

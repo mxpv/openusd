@@ -651,7 +651,7 @@ fn compose_fields(strong: Option<&sdf::SpecData>, weak: &sdf::SpecData) -> Optio
         }
 
         let strong_value = strong.filter(|_| mergeable).and_then(|strong| strong.get(field));
-        merged.push((field.clone(), merge_over(strong_value, weak_value.clone())));
+        merged.push((field.to_string(), merge_over(strong_value, weak_value.clone())));
     }
 
     (!merged.is_empty()).then_some(merged)
@@ -675,7 +675,7 @@ fn merge_over(strong: Option<&sdf::Value>, weak: sdf::Value) -> sdf::Value {
         }
         (Some(sdf::Value::Dictionary(strong)), sdf::Value::Dictionary(weak)) => {
             let mut merged = strong.clone();
-            sdf::dictionary_over(&mut merged, weak);
+            sdf::dictionary_over(&mut merged, *weak);
             sdf::Value::Dictionary(merged)
         }
         (_, weak) => weak,

@@ -2708,10 +2708,10 @@ class Marker "Marker"
             .define_prim("/Inst")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     ..Default::default()
-                }])),
+                }]))),
             )?
             .set_instanceable(true)?;
 
@@ -2739,11 +2739,11 @@ class Marker "Marker"
             .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
         stage.define_prim("/Prim")?.set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Source")?,
                 layer_offset: sdf::LayerOffset::new(10.0, 1.0),
                 ..Default::default()
-            }])),
+            }]))),
         )?;
 
         let attr = stage.attribute("/Prim.x")?;
@@ -2955,7 +2955,7 @@ class Marker "Marker"
             .attribute_builder("/A.x", "float[]")
             .metadata("interpolation", sdf::Value::Token(tf::Token::from("vertex")))
             .metadata("elementSize", sdf::Value::Int(2))
-            .set(sdf::Value::FloatVec(vec![1.0, 2.0]))
+            .set(sdf::Value::FloatVec((vec![1.0, 2.0]).into()))
             .build()?;
 
         assert_eq!(commits.get(), 1);
@@ -4126,7 +4126,9 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage
             .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
-            .set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
+            .set(sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(
+                "Child",
+            ))))?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "/Source/Child"
@@ -4134,9 +4136,9 @@ class Marker "Marker"
         // The absolute form is anchored in stage namespace, then mapped.
         stage
             .attribute("/World/MyPrim.expr")?
-            .set(sdf::Value::PathExpression(sdf::PathExpression::parse(
+            .set(sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(
                 "/World/MyPrim/Child//",
-            )))?;
+            ))))?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "/Source/Child//"
@@ -4161,15 +4163,17 @@ class Marker "Marker"
             let mut prim = e.prim_mut("/Prim")?.expect("the prim spec");
             prim.set(
                 sdf::FieldKey::VariantSetNames.as_str(),
-                sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
+                sdf::Value::StringListOp(Box::new(sdf::StringListOp::prepended(["set".to_owned()]))),
             );
             prim.set(
                 sdf::FieldKey::VariantSelection.as_str(),
-                sdf::Value::VariantSelectionMap(HashMap::from([("set".to_string(), "sel".to_string())])),
+                sdf::Value::VariantSelectionMap(Box::new(HashMap::from([("set".to_string(), "sel".to_string())]))),
             );
             Ok(())
         })?;
-        attr.set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
+        attr.set(sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(
+            "Child",
+        ))))?;
         assert_eq!(
             expr_field(&stage, &root, "/Prim{set=sel}.expr", "default"),
             "/Prim{set=sel}Child"
@@ -4200,13 +4204,13 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage.prim("/World/MyPrim")?.set_metadata(
             "customExpr",
-            sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+            sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse("Child"))),
         )?;
         assert_eq!(expr_field(&stage, &layer_id, "/Source", "customExpr"), "/Source/Child");
 
         stage.create_relationship("/World/MyPrim.rel")?.set_metadata(
             "customExpr",
-            sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+            sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse("Child"))),
         )?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.rel", "customExpr"),
@@ -4217,7 +4221,7 @@ class Marker "Marker"
             .create_attribute("/World/MyPrim.x", sdf::ValueTypeName::FLOAT)?
             .set_metadata(
                 "customExpr",
-                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+                sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse("Child"))),
             )?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.x", "customExpr"),
@@ -4246,10 +4250,10 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage.prim("/World/MyPrim")?.set_metadata(
             "customData",
-            sdf::Value::Dictionary(HashMap::from([(
+            sdf::Value::Dictionary(Box::new(HashMap::from([(
                 "expr".to_string(),
-                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
-            )])),
+                sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse("Child"))),
+            )]))),
         )?;
         let dict = layer_field(&stage, &layer_id, "/Source", "customData").expect("authored");
         let entries = dict.try_as_dictionary().expect("a dictionary");
@@ -4267,7 +4271,7 @@ class Marker "Marker"
         stage
             .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
             .set_at(
-                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+                sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse("Child"))),
                 TimeCode::new(1.0),
             )?;
         let samples = layer_field(&stage, &layer_id, "/Source.expr", "timeSamples").expect("authored");
@@ -4286,7 +4290,9 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage
             .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
-            .set(sdf::Value::PathExpression(sdf::PathExpression::parse("%:lights Child")))?;
+            .set(sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(
+                "%:lights Child",
+            ))))?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "%:lights /Source/Child",
@@ -4341,6 +4347,78 @@ class Marker "Marker"
         assert_eq!(attr.get::<f64>()?, Some(2.0));
         assert_eq!(attr.get::<sdf::Value>()?, Some(sdf::Value::Double(2.0)));
         assert_eq!(AttributeQuery::new(&attr).get::<f32>()?, Some(3.0));
+        Ok(())
+    }
+
+    #[test]
+    fn array_snapshots_survive_edits() -> Result<()> {
+        let root = r#"
+def "A" (instanceable = true references = @strong.usda@</Model>) {}
+def "B" (instanceable = true references = @strong.usda@</Model>) {}
+"#;
+        let strong = r#"(subLayers = [@weak.usda@])
+over "Model" { over "Child" { custom float[] x } }"#;
+        let weak = r#"def "Model" { def "Child" { custom float[] x = [1, 2, 3] } }"#;
+        let (_dir, stage) = scene(&[("root.usda", root), ("strong.usda", strong), ("weak.usda", weak)])?;
+        assert!(stage.prim("/B")?.is_instance()?);
+        let a = stage.attribute("/A/Child.x")?;
+        let b = stage.attribute("/B/Child.x")?;
+        assert!(a.get::<sdf::Value>()?.is_some());
+        let snapshot = b.get::<sdf::Array<f32>>()?.unwrap();
+        assert_eq!(snapshot.as_slice(), &[1.0, 2.0, 3.0]);
+        let layer = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|id| file_name(id) == "strong.usda")
+            .unwrap();
+        let path = sdf::Path::new("/Model/Child.x")?;
+        for (value, expected) in [
+            (Some(sdf::Value::from(vec![4.0f32, 5.0])), Some(vec![4.0f32, 5.0])),
+            (None, Some(vec![1.0, 2.0, 3.0])),
+            (Some(sdf::Value::ValueBlock), None),
+        ] {
+            stage.layer_mut(&layer).unwrap().edit(|edit| {
+                let mut attr = edit.attribute_mut(&path)?.unwrap();
+                if let Some(value) = value {
+                    attr.set("default", value);
+                } else {
+                    attr.erase("default");
+                }
+                Ok(())
+            })?;
+            assert_eq!(a.get::<sdf::Value>()?, expected.clone().map(sdf::Value::from));
+            assert_eq!(a.get::<Vec<f32>>()?, expected);
+            assert_eq!(b.get::<Vec<f32>>()?, expected);
+        }
+        assert_eq!(snapshot.as_slice(), &[1.0, 2.0, 3.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_reads_preserve_types() -> Result<()> {
+        let root = r#"def "A" (instanceable = true references = @strong.usda@</Model>) {}
+def "B" (instanceable = true references = @strong.usda@</Model>) {}"#;
+        let strong = r#"(subLayers = [@weak.usda@])
+over "Model" { over "Child" {
+    custom double[] x = [2]
+    custom double y = 20
+    double[] x.timeSamples = { 1: [3], 2: [4] }
+} }"#;
+        let weak = r#"def "Model" { def "Child" { custom float[] x = [1]
+    custom float y = 10 } }"#;
+        let (_dir, stage) = scene(&[("root.usda", root), ("strong.usda", strong), ("weak.usda", weak)])?;
+        assert!(stage.prim("/B")?.is_instance()?);
+        let attr = stage.attribute("/A/Child.x")?;
+        let scalar = stage.attribute("/A/Child.y")?;
+        for _ in 0..2 {
+            assert_eq!(scalar.get::<sdf::Value>()?, Some(sdf::Value::Double(20.0)));
+            assert_eq!(scalar.get::<f32>()?, Some(10.0));
+            assert_eq!(scalar.get::<f64>()?, Some(20.0));
+            assert_eq!(attr.get::<sdf::Value>()?, Some(sdf::Value::from(vec![2.0f64])));
+            assert_eq!(attr.get::<Vec<f32>>()?, Some(vec![1.0]));
+            assert_eq!(attr.get::<sdf::Array<f64>>()?.unwrap().as_slice(), &[2.0]);
+            assert_eq!(attr.get_at::<Vec<f64>>(TimeCode::new(1.0))?, Some(vec![3.0]));
+        }
         Ok(())
     }
 
@@ -4429,7 +4507,7 @@ class Marker "Marker"
             let attr = stage.attribute("/P.e")?;
             let untyped = attr.get::<sdf::Value>()?.expect("the expression composes");
             let typed = attr.get::<sdf::PathExpression>()?.expect("the expression composes");
-            assert_eq!(sdf::Value::PathExpression(typed.clone()), untyped, "{weak}");
+            assert_eq!(sdf::Value::PathExpression(Box::new(typed.clone())), untyped, "{weak}");
             assert!(typed.to_string().contains("/Target"), "{weak}: {typed}");
         }
         Ok(())

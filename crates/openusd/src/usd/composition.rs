@@ -548,6 +548,23 @@ impl StageComposition {
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
+        let mut reads = {
+            let graph = self.layers.borrow();
+            let mut seen = HashSet::new();
+            let identifiers: Vec<String> = pending
+                .iter()
+                .filter(|demand| {
+                    graph.id_of(&demand.asset_path).is_none() && graph.load_failure(&demand.asset_path).is_none()
+                })
+                .filter(|demand| seen.insert(demand.asset_path.as_str()))
+                .map(|demand| demand.asset_path.clone())
+                .collect();
+            if identifiers.len() > 1 {
+                graph.layer_registry().prepare_reads(&identifiers)
+            } else {
+                Default::default()
+            }
+        };
         // The layers that join the graph this pass.
         let mut joined: HashSet<pcp::LayerId> = HashSet::new();
         let mut newly_failed = false;
@@ -593,7 +610,8 @@ impl StageComposition {
                 // pass below, which regenerates each one's diagnostic per stack.
                 let opened = {
                     let graph = self.layers.borrow();
-                    graph.layer_registry().open_stack(
+                    reads.open_stack(
+                        graph.layer_registry(),
                         asset_path,
                         graph.stack_variables(demand.context),
                         reload,

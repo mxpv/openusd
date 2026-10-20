@@ -92,7 +92,7 @@ pub fn read_variables(data: &dyn sdf::AbstractData) -> Result<Cow<'_, HashMap<St
     Ok(
         match data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
             Some(Cow::Borrowed(sdf::Value::Dictionary(dict))) => Cow::Borrowed(dict),
-            Some(Cow::Owned(sdf::Value::Dictionary(dict))) => Cow::Owned(dict),
+            Some(Cow::Owned(sdf::Value::Dictionary(dict))) => Cow::Owned(*dict),
             _ => Cow::Owned(HashMap::new()),
         },
     )
@@ -651,13 +651,13 @@ fn eval_array(elements: &[Expr], ctx: &mut EvalContext<'_>) -> EvalResult {
                 list = Some(sdf::Value::StringVec(vec![s]));
             }
             (None, Some(EvaluationValue::Value(sdf::Value::Int64(n)))) => {
-                list = Some(sdf::Value::Int64Vec(vec![n]));
+                list = Some(sdf::Value::Int64Vec((vec![n]).into()));
             }
             (None, Some(EvaluationValue::Value(sdf::Value::Bool(b)))) => {
                 list = Some(sdf::Value::BoolVec(vec![b]));
             }
             (Some(sdf::Value::StringVec(v)), Some(EvaluationValue::Value(sdf::Value::String(s)))) => v.push(s),
-            (Some(sdf::Value::Int64Vec(v)), Some(EvaluationValue::Value(sdf::Value::Int64(n)))) => v.push(n),
+            (Some(sdf::Value::Int64Vec(v)), Some(EvaluationValue::Value(sdf::Value::Int64(n)))) => v.make_mut().push(n),
             (Some(sdf::Value::BoolVec(v)), Some(EvaluationValue::Value(sdf::Value::Bool(b)))) => v.push(b),
             (_, other) => errors.push(format!(
                 "Unexpected value of type {} in list at element {i}",
@@ -1647,7 +1647,7 @@ mod tests {
             sdf::Value::Int64(42),
             sdf::Value::Bool(true),
             sdf::Value::StringVec(vec!["foo".into(), "bar".into()]),
-            sdf::Value::Int64Vec(vec![1, 2, 3]),
+            sdf::Value::Int64Vec((vec![1, 2, 3]).into()),
             sdf::Value::BoolVec(vec![true, false]),
         ];
         for value in cases {
@@ -1664,8 +1664,8 @@ mod tests {
         let vars = make_vars(&[("FOO", sdf::Value::Int(7))]);
         assert_eq!(eval_value("${FOO}", &vars), sdf::Value::Int64(7));
 
-        let vars = make_vars(&[("FOO", sdf::Value::IntVec(vec![1, 2]))]);
-        assert_eq!(eval_value("${FOO}", &vars), sdf::Value::Int64Vec(vec![1, 2]));
+        let vars = make_vars(&[("FOO", sdf::Value::IntVec((vec![1, 2]).into()))]);
+        assert_eq!(eval_value("${FOO}", &vars), sdf::Value::Int64Vec((vec![1, 2]).into()));
     }
 
     #[test]
@@ -1764,8 +1764,14 @@ mod tests {
     fn eval_lists() {
         let vars = make_vars(&[("FOO", sdf::Value::Int64(2))]);
         assert_eq!(eval("[]", &vars), Some(EvaluationValue::EmptyList));
-        assert_eq!(eval_value("[1, 2, 3]", &vars), sdf::Value::Int64Vec(vec![1, 2, 3]));
-        assert_eq!(eval_value("[1, ${FOO}, 3]", &vars), sdf::Value::Int64Vec(vec![1, 2, 3]));
+        assert_eq!(
+            eval_value("[1, 2, 3]", &vars),
+            sdf::Value::Int64Vec((vec![1, 2, 3]).into())
+        );
+        assert_eq!(
+            eval_value("[1, ${FOO}, 3]", &vars),
+            sdf::Value::Int64Vec((vec![1, 2, 3]).into())
+        );
         assert_eq!(
             eval_value(r#"['a', 'b']"#, &vars),
             sdf::Value::StringVec(vec!["a".into(), "b".into()])
@@ -1806,7 +1812,7 @@ mod tests {
             eval_errors("[${L}]", &vars),
             vec!["Unexpected value of type list in list at element 0"]
         );
-        let vars = make_vars(&[("L", sdf::Value::IntVec(vec![1, 2]))]);
+        let vars = make_vars(&[("L", sdf::Value::IntVec((vec![1, 2]).into()))]);
         assert_eq!(
             eval_errors("[${L}]", &vars),
             vec!["Unexpected value of type list in list at element 0"]
@@ -2113,7 +2119,7 @@ mod tests {
 
     #[test]
     fn eval_contains() {
-        let vars = make_vars(&[("L", sdf::Value::IntVec(vec![]))]);
+        let vars = make_vars(&[("L", sdf::Value::IntVec((vec![]).into()))]);
         assert_eq!(eval_value("contains([], 1)", &vars), sdf::Value::Bool(false));
         assert_eq!(eval_value("contains(${L}, 1)", &vars), sdf::Value::Bool(false));
 

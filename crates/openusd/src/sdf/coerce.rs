@@ -134,7 +134,7 @@ fn convert(value: Value, target: ValueKind) -> Result<Value, CastError> {
 
         (Value::Token(t), K::String) => Value::String(t.into()),
         (Value::String(s), K::Token) => Value::token(s),
-        (Value::String(s), K::AssetPath) => Value::AssetPath(AssetPath::new(s)),
+        (Value::String(s), K::AssetPath) => Value::AssetPath(Box::new(AssetPath::new(s))),
 
         (value, K::Vec2h) => Value::Vec2h(vector::<f16, _, 2>(vec2_as_f64(&value), actual, no_conversion)?),
         (value, K::Vec2f) => Value::Vec2f(vector::<f32, _, 2>(vec2_as_f64(&value), actual, no_conversion)?),
@@ -152,23 +152,47 @@ fn convert(value: Value, target: ValueKind) -> Result<Value, CastError> {
         (value, K::Quatf) => Value::Quatf(vector::<f32, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
         (value, K::Quatd) => Value::Quatd(vector::<f64, _, 4>(vec4_as_f64(&value), actual, no_conversion)?),
 
-        (value, K::HalfVec) => Value::HalfVec(array::<f16>(scalar_array(value), actual, no_conversion)?),
-        (value, K::FloatVec) => Value::FloatVec(array::<f32>(scalar_array(value), actual, no_conversion)?),
-        (value, K::DoubleVec) => Value::DoubleVec(array::<f64>(scalar_array(value), actual, no_conversion)?),
+        (value, K::HalfVec) => Value::HalfVec((array::<f16>(scalar_array(value), actual, no_conversion)?).into()),
+        (value, K::FloatVec) => Value::FloatVec((array::<f32>(scalar_array(value), actual, no_conversion)?).into()),
+        (value, K::DoubleVec) => Value::DoubleVec((array::<f64>(scalar_array(value), actual, no_conversion)?).into()),
 
-        (value, K::QuathVec) => Value::QuathVec(vector_array::<f16, _, 4>(quat_array(value), actual, no_conversion)?),
-        (value, K::QuatfVec) => Value::QuatfVec(vector_array::<f32, _, 4>(quat_array(value), actual, no_conversion)?),
-        (value, K::QuatdVec) => Value::QuatdVec(vector_array::<f64, _, 4>(quat_array(value), actual, no_conversion)?),
+        (value, K::QuathVec) => {
+            Value::QuathVec((vector_array::<f16, _, 4>(quat_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::QuatfVec) => {
+            Value::QuatfVec((vector_array::<f32, _, 4>(quat_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::QuatdVec) => {
+            Value::QuatdVec((vector_array::<f64, _, 4>(quat_array(value), actual, no_conversion)?).into())
+        }
 
-        (value, K::Vec2hVec) => Value::Vec2hVec(vector_array::<f16, _, 2>(vec2_array(value), actual, no_conversion)?),
-        (value, K::Vec2fVec) => Value::Vec2fVec(vector_array::<f32, _, 2>(vec2_array(value), actual, no_conversion)?),
-        (value, K::Vec2dVec) => Value::Vec2dVec(vector_array::<f64, _, 2>(vec2_array(value), actual, no_conversion)?),
-        (value, K::Vec3hVec) => Value::Vec3hVec(vector_array::<f16, _, 3>(vec3_array(value), actual, no_conversion)?),
-        (value, K::Vec3fVec) => Value::Vec3fVec(vector_array::<f32, _, 3>(vec3_array(value), actual, no_conversion)?),
-        (value, K::Vec3dVec) => Value::Vec3dVec(vector_array::<f64, _, 3>(vec3_array(value), actual, no_conversion)?),
-        (value, K::Vec4hVec) => Value::Vec4hVec(vector_array::<f16, _, 4>(vec4_array(value), actual, no_conversion)?),
-        (value, K::Vec4fVec) => Value::Vec4fVec(vector_array::<f32, _, 4>(vec4_array(value), actual, no_conversion)?),
-        (value, K::Vec4dVec) => Value::Vec4dVec(vector_array::<f64, _, 4>(vec4_array(value), actual, no_conversion)?),
+        (value, K::Vec2hVec) => {
+            Value::Vec2hVec((vector_array::<f16, _, 2>(vec2_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec2fVec) => {
+            Value::Vec2fVec((vector_array::<f32, _, 2>(vec2_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec2dVec) => {
+            Value::Vec2dVec((vector_array::<f64, _, 2>(vec2_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec3hVec) => {
+            Value::Vec3hVec((vector_array::<f16, _, 3>(vec3_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec3fVec) => {
+            Value::Vec3fVec((vector_array::<f32, _, 3>(vec3_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec3dVec) => {
+            Value::Vec3dVec((vector_array::<f64, _, 3>(vec3_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec4hVec) => {
+            Value::Vec4hVec((vector_array::<f16, _, 4>(vec4_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec4fVec) => {
+            Value::Vec4fVec((vector_array::<f32, _, 4>(vec4_array(value), actual, no_conversion)?).into())
+        }
+        (value, K::Vec4dVec) => {
+            Value::Vec4dVec((vector_array::<f64, _, 4>(vec4_array(value), actual, no_conversion)?).into())
+        }
 
         _ => return Err(no_conversion()),
     })
@@ -288,7 +312,7 @@ fn scalar_array(value: Value) -> Option<Vec<f64>> {
     Some(match value {
         Value::HalfVec(v) => v.into_iter().map(Into::into).collect(),
         Value::FloatVec(v) => v.into_iter().map(Into::into).collect(),
-        Value::DoubleVec(v) => v,
+        Value::DoubleVec(v) => v.into_vec(),
         _ => return None,
     })
 }
@@ -345,8 +369,8 @@ mod tests {
             Ok(Value::Quatf(gf::Quatf::IDENTITY))
         );
         assert_eq!(
-            Value::QuatfVec(vec![gf::Quatf::IDENTITY]).coerce_to_kind(ValueKind::QuatdVec),
-            Ok(Value::QuatdVec(vec![gf::Quatd::IDENTITY])),
+            Value::QuatfVec((vec![gf::Quatf::IDENTITY]).into()).coerce_to_kind(ValueKind::QuatdVec),
+            Ok(Value::QuatdVec((vec![gf::Quatd::IDENTITY]).into())),
             "an array converts element-wise like its scalar"
         );
         // Nothing normalizes an authored quaternion, so a component out of
@@ -410,10 +434,10 @@ mod tests {
         );
         assert_eq!(
             Value::String("a".into()).coerce_to_kind(ValueKind::AssetPath),
-            Ok(Value::AssetPath(AssetPath::new("a")))
+            Ok(Value::AssetPath(Box::new(AssetPath::new("a"))))
         );
         assert!(matches!(
-            Value::AssetPath(AssetPath::new("a")).coerce_to_kind(ValueKind::String),
+            Value::AssetPath(Box::new(AssetPath::new("a"))).coerce_to_kind(ValueKind::String),
             Err(CastError::TypeMismatch { .. })
         ));
     }
@@ -421,20 +445,20 @@ mod tests {
     #[test]
     fn coerce_kind_elementwise() {
         assert_eq!(
-            Value::DoubleVec(vec![1.5, 2.5]).coerce_to_kind(ValueKind::FloatVec),
-            Ok(Value::FloatVec(vec![1.5, 2.5]))
+            Value::DoubleVec((vec![1.5, 2.5]).into()).coerce_to_kind(ValueKind::FloatVec),
+            Ok(Value::FloatVec((vec![1.5, 2.5]).into()))
         );
         let one = f16::from_f32(1.0);
         assert_eq!(
-            Value::Vec3dVec(vec![gf::vec3d(1.0, 1.0, 1.0)]).coerce_to_kind(ValueKind::Vec3hVec),
-            Ok(Value::Vec3hVec(vec![gf::vec3h(one, one, one)]))
+            Value::Vec3dVec((vec![gf::vec3d(1.0, 1.0, 1.0)]).into()).coerce_to_kind(ValueKind::Vec3hVec),
+            Ok(Value::Vec3hVec((vec![gf::vec3h(one, one, one)]).into()))
         );
         assert!(matches!(
-            Value::IntVec(vec![1]).coerce_to_kind(ValueKind::FloatVec),
+            Value::IntVec((vec![1]).into()).coerce_to_kind(ValueKind::FloatVec),
             Err(CastError::TypeMismatch { .. })
         ));
         assert!(matches!(
-            Value::Vec3iVec(vec![gf::vec3i(1, 1, 1)]).coerce_to_kind(ValueKind::Vec3fVec),
+            Value::Vec3iVec((vec![gf::vec3i(1, 1, 1)]).into()).coerce_to_kind(ValueKind::Vec3fVec),
             Err(CastError::TypeMismatch { .. })
         ));
     }
@@ -454,7 +478,7 @@ mod tests {
             Err(CastError::TypeMismatch { .. })
         ));
         assert!(matches!(
-            Value::FloatVec(vec![1.0]).coerce_to_kind(ValueKind::Float),
+            Value::FloatVec((vec![1.0]).into()).coerce_to_kind(ValueKind::Float),
             Err(CastError::TypeMismatch { .. })
         ));
     }
@@ -486,12 +510,12 @@ mod tests {
     #[test]
     fn array_cast_overflow() {
         assert!(matches!(
-            Value::DoubleVec(vec![1.0, 1e300]).coerce_to_kind(ValueKind::FloatVec),
+            Value::DoubleVec((vec![1.0, 1e300]).into()).coerce_to_kind(ValueKind::FloatVec),
             Err(CastError::OutOfRange { .. })
         ));
         assert_eq!(
-            Value::DoubleVec(vec![1.5, 2.0]).coerce_to_kind(ValueKind::FloatVec),
-            Ok(Value::FloatVec(vec![1.5, 2.0]))
+            Value::DoubleVec((vec![1.5, 2.0]).into()).coerce_to_kind(ValueKind::FloatVec),
+            Ok(Value::FloatVec((vec![1.5, 2.0]).into()))
         );
     }
 }

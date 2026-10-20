@@ -17,7 +17,12 @@
 
 use std::collections::BTreeSet;
 
-use crate::sdf::{Path, PathMap};
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+
+use crate::sdf::Path;
+
+use super::path::PathRef;
 
 /// A map from [`Path`] to `V` that also tracks the namespace parent/child
 /// hierarchy, supporting efficient subtree queries and erasure. Keys are
@@ -31,7 +36,7 @@ use crate::sdf::{Path, PathMap};
 /// value-bearing entries.
 #[derive(Debug, Clone)]
 pub struct PathTable<V> {
-    nodes: PathMap<Node<V>>,
+    nodes: HashMap<Path, Node<V>, FxBuildHasher>,
     len: usize,
 }
 
@@ -47,7 +52,7 @@ struct Node<V> {
 impl<V> Default for PathTable<V> {
     fn default() -> Self {
         Self {
-            nodes: PathMap::default(),
+            nodes: HashMap::default(),
             len: 0,
         }
     }
@@ -90,6 +95,13 @@ impl<V> PathTable<V> {
     /// path to hand on rather than the one it built.
     pub fn get_key_value(&self, path: &Path) -> Option<(&Path, &V)> {
         let (key, node) = self.nodes.get_key_value(path)?;
+        node.value.as_ref().map(|value| (key, value))
+    }
+
+    /// Looks up a path's text, borrowing the table's stored key and value.
+    /// The text may be a namespace prefix sliced from another path.
+    pub(crate) fn get_key_value_str(&self, path: &str) -> Option<(&Path, &V)> {
+        let (key, node) = self.nodes.get_key_value(&PathRef(path))?;
         node.value.as_ref().map(|value| (key, value))
     }
 
@@ -176,7 +188,20 @@ impl<V> PathTable<V> {
     /// Returns the nearest value-bearing entry at or above `path`, or `None`
     /// when neither `path` nor any ancestor holds a value.
     pub fn nearest_ancestor(&self, path: &Path) -> Option<(&Path, &V)> {
-        self.ancestors(path).next()
+        if self.is_empty() {
+            return None;
+        }
+        if let Some(entry) = self.get_key_value(path) {
+            return Some(entry);
+        }
+        let mut ancestor = path.parent();
+        while let Some(path) = ancestor {
+            if let Some(entry) = self.get_key_value(&path) {
+                return Some(entry);
+            }
+            ancestor = path.parent();
+        }
+        None
     }
 
     /// Returns `true` if `path` or any of its ancestors holds a value.
@@ -299,6 +324,40 @@ mod tests {
         assert_eq!(t.remove(&p("/A/B")), Some(2));
         assert_eq!(t.remove(&p("/A/B")), None);
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn borrowed_text_lookup() {
+        let mut table = PathTable::new();
+        let texts = [
+            "",
+            "/",
+            "/A",
+            "/A/Child.attr",
+            "/A{v=s}B",
+            "/A.rel[/Other]",
+            "../Relative",
+        ];
+        for (index, text) in texts.into_iter().enumerate() {
+            let path = if text.is_empty() { Path::default() } else { p(text) };
+            table.insert(path, index);
+        }
+        for (index, text) in texts.into_iter().enumerate() {
+            assert_eq!(
+                table.get_key_value_str(text).map(|(p, v)| (p.as_str(), *v)),
+                Some((text, index))
+            );
+        }
+        let descendant = p("/A/Child/Grandchild");
+        assert_eq!(
+            table.get_key_value_str(&descendant.as_str()[..2]).map(|(_, v)| *v),
+            Some(2)
+        );
+        assert!(table.get_key_value_str("/Ab").is_none());
+        assert!(table.get_key_value_str("/A/").is_none());
+        table.remove_subtree(&p("/A"));
+        assert!(table.get_key_value_str("/A").is_none());
+        assert!(table.get_key_value_str("/A/Child.attr").is_none());
     }
 
     #[test]

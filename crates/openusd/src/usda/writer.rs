@@ -348,7 +348,7 @@ impl<W: Write> Emitter<'_, W> {
 
         // Knots
         let knot_custom = match dict.get("knotCustomData") {
-            Some(Value::Dictionary(m)) => Some(m),
+            Some(Value::Dictionary(m)) => Some(m.as_ref()),
             _ => None,
         };
         if let Some(Value::ValueVec(knots)) = dict.get("knots") {
@@ -1516,7 +1516,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit(["1, 2".to_owned()]);
 
         let mut out = String::new();
-        format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
+        format_value(&mut out, &Value::UnregisteredValueListOp(Box::new(op))).expect("writes");
         assert_eq!(out, "[1, 2]");
     }
 
@@ -1526,7 +1526,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit([]);
 
         let mut out = String::new();
-        format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
+        format_value(&mut out, &Value::UnregisteredValueListOp(Box::new(op))).expect("writes");
         assert_eq!(out, "[]");
     }
 
@@ -1677,8 +1677,12 @@ def \"P\" (
         let root = sdf::Path::abs_root();
         data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
         let inner = sdf::Dictionary::from([("k".to_owned(), Value::Int(1))]);
-        let outer = sdf::Dictionary::from([("nested".to_owned(), Value::UnregisteredDictionary(inner))]);
-        data.set_field(&root, FieldKey::CustomLayerData.as_str(), Value::Dictionary(outer));
+        let outer = sdf::Dictionary::from([("nested".to_owned(), Value::UnregisteredDictionary(Box::new(inner)))]);
+        data.set_field(
+            &root,
+            FieldKey::CustomLayerData.as_str(),
+            Value::Dictionary(Box::new(outer)),
+        );
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
         assert!(text.contains("dictionary nested"), "{text}");
@@ -1864,8 +1868,8 @@ def "Mesh"
         sub.insert("n".to_owned(), Value::Int(1));
         let mut custom = HashMap::new();
         custom.insert("v".to_owned(), Value::vec3f(1.0, 2.0, 3.0));
-        custom.insert("sub".to_owned(), Value::Dictionary(sub));
-        prim.add(FieldKey::CustomData, Value::Dictionary(custom));
+        custom.insert("sub".to_owned(), Value::Dictionary(Box::new(sub)));
+        prim.add(FieldKey::CustomData, Value::Dictionary(Box::new(custom)));
 
         let emitted = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         assert!(emitted.contains("float3 v = "), "emitted: {emitted}");
@@ -1907,7 +1911,10 @@ def "Mesh"
         );
         assert_eq!(
             samples("/Anim.indices"),
-            vec![(0.0, Value::IntVec(vec![1, 2, 3])), (1.0, Value::IntVec(Vec::new()))]
+            vec![
+                (0.0, Value::IntVec((vec![1, 2, 3]).into())),
+                (1.0, Value::IntVec((Vec::new()).into()))
+            ]
         );
         assert_eq!(
             samples("/Anim.velocity"),
@@ -1988,7 +1995,7 @@ def "Mesh"
         dict.insert("ns:colon:key".to_string(), Value::Int(2));
         dict.insert("key with space".to_string(), Value::Int(3));
         dict.insert("1leading-digit".to_string(), Value::Int(4));
-        root_spec.add(FieldKey::CustomLayerData, Value::Dictionary(dict));
+        root_spec.add(FieldKey::CustomLayerData, Value::Dictionary(Box::new(dict)));
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         let parsed = Parser::new(&text)

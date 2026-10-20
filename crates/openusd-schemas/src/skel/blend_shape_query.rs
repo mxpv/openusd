@@ -228,7 +228,7 @@ impl BlendShapeQuery {
                     return Ok(Vec::new());
                 };
                 Ok(match shape.point_indices_attr().get::<Value>()? {
-                    Some(Value::IntVec(indices)) => indices,
+                    Some(Value::IntVec(indices)) => indices.into_vec(),
                     Some(Value::UintVec(indices)) => indices
                         .into_iter()
                         .map(|index| i32::try_from(index).unwrap_or(0))

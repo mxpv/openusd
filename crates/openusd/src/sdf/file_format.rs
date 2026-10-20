@@ -169,6 +169,12 @@ pub trait FileFormat: Sync {
     /// asset it came from (see [`ar::AssetBuffer`]).
     fn read_bytes(&self, bytes: ar::AssetBuffer, source_name: &str) -> Result<LayerData, FormatError>;
 
+    /// Whether `read_bytes` completely implements this format's layer read.
+    /// Asset acquisition and decoding may then run as separate operations.
+    fn reads_only_bytes(&self) -> bool {
+        false
+    }
+
     /// Read a layer's data from `resolved`, opening the asset (and any
     /// sibling assets) through `resolver`.
     ///

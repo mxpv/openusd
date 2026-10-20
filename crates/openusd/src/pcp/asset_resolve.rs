@@ -177,7 +177,7 @@ mod tests {
     fn expr_asset_without_site() {
         let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
         let mut errors = Diagnostics::default();
-        let value = Value::AssetPath(sdf::AssetPath::new("`${A}`"));
+        let value = Value::AssetPath(Box::new(sdf::AssetPath::new("`${A}`")));
         let resolved = resolve_values(&graph, value, None, &mut errors)
             .try_as_asset_path()
             .expect("an asset value stays one");

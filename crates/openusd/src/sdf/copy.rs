@@ -499,10 +499,10 @@ mod tests {
         data.set_field(
             &path("/A.rel").unwrap(),
             FieldKey::TargetPaths.as_str(),
-            Value::PathListOp(PathListOp::explicit([
+            Value::PathListOp(Box::new(PathListOp::explicit([
                 path("/A/Child").unwrap(),
                 path("/Outside").unwrap(),
-            ])),
+            ]))),
         );
         sdf::AttributeSpecMut::new(
             &mut data,
@@ -515,12 +515,12 @@ mod tests {
         data.set_field(
             &path("/A.attr").unwrap(),
             FieldKey::ConnectionPaths.as_str(),
-            Value::PathListOp(PathListOp::explicit([path("/A/Child.attr").unwrap()])),
+            Value::PathListOp(Box::new(PathListOp::explicit([path("/A/Child.attr").unwrap()]))),
         );
         data.set_field(
             &path("/A").unwrap(),
             FieldKey::InheritPaths.as_str(),
-            Value::PathListOp(PathListOp::explicit([path("/A/Class").unwrap()])),
+            Value::PathListOp(Box::new(PathListOp::explicit([path("/A/Class").unwrap()]))),
         );
         data
     }
@@ -720,7 +720,7 @@ mod tests {
         src.set_field(
             &path("/A").unwrap(),
             FieldKey::References.as_str(),
-            Value::ReferenceListOp(sdf::ReferenceListOp::prepended([
+            Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([
                 sdf::Reference {
                     prim_path: path("/A/Inner").unwrap(),
                     ..Default::default()
@@ -731,7 +731,7 @@ mod tests {
                     ..Default::default()
                 },
                 sdf::Reference::default(),
-            ])),
+            ]))),
         );
 
         let mut dst = Data::new();

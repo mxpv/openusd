@@ -12,14 +12,18 @@
 //! value-clip cache) around the store's index and dependency queries.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::sdf::{self, Path};
+use crate::tf;
 
 use super::dependencies::Dependencies;
 use super::diagnostics::Diagnostics;
 use super::layer_graph::LayerGraph;
 use super::layer_stack::{LayerStackId, StackMarks};
+use super::prim_index::{ChildNames, PropertyKinds};
 use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
 use super::{CompositionDiagnostic, LayerId, QueryError};
@@ -44,7 +48,7 @@ pub(super) struct IndexStore {
     /// the cache keeps alive — the mark set
     /// ([`mark_live_stacks`](Self::mark_live_stacks)) without walking any
     /// arena.
-    stack_owners: HashMap<LayerStackId, usize>,
+    stack_owners: FxHashMap<LayerStackId, usize>,
     /// Whether some stack lost its last cache owner since the last sweep —
     /// the signal that schedules a reclamation pass at the next edit seam,
     /// deliberately unthresholded: a single deletion, mute, or unload that
@@ -115,10 +119,63 @@ pub(crate) enum ValueScope {
     Subtree,
 }
 
-#[cfg(test)]
 impl IndexStore {
+    /// The property-name fold while its composition revision still matches.
+    pub(super) fn property_kinds(&self, path: &Path) -> Option<&[(tf::Token, Option<sdf::SpecType>)]> {
+        let entry = self.entries.get(path)?;
+        let kinds = entry.property_kinds.as_deref()?;
+        (kinds.revision == entry.revision).then_some(&kinds.items)
+    }
+
+    /// Records property names and types on the entry that supplied them.
+    pub(super) fn cache_property_kinds(&mut self, path: &Path, items: Vec<(tf::Token, Option<sdf::SpecType>)>) {
+        if let Some(entry) = self.entries.get_mut(path) {
+            entry.property_kinds = Some(Box::new(PropertyKinds {
+                revision: entry.revision,
+                items,
+            }));
+        }
+    }
+
+    /// Borrows child names while their index revision, population epoch, and
+    /// local partition match the query.
+    pub(super) fn child_names(
+        &self,
+        path: &Path,
+        drop_local: bool,
+        population_epoch: u64,
+    ) -> Option<(&[tf::Token], &[tf::Token])> {
+        let entry = self.entries.get(path)?;
+        let names = entry.child_names.as_deref()?;
+        (names.revision == entry.revision
+            && names.population_epoch == population_epoch
+            && names.drop_local == drop_local)
+            .then_some((&names.order, &names.prohibited))
+    }
+
+    /// Records a completed child-name fold on the entry that supplied it.
+    pub(super) fn cache_child_names(
+        &mut self,
+        path: &Path,
+        drop_local: bool,
+        population_epoch: u64,
+        order: Vec<tf::Token>,
+        prohibited: Vec<tf::Token>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(path) {
+            entry.child_names = Some(Box::new(ChildNames {
+                revision: entry.revision,
+                population_epoch,
+                drop_local,
+                order,
+                prohibited,
+            }));
+        }
+    }
+
     /// Every cached entry's path and current stamp, for a test that measures how
     /// far an edit's restaling reached by diffing two snapshots.
+    #[cfg(test)]
     pub(super) fn revisions(&self) -> Vec<(Path, PrimRevision)> {
         self.entries
             .iter()
@@ -246,6 +303,8 @@ impl IndexStore {
                 property_errors: Diagnostics::default(),
                 resolved_targets: HashMap::new(),
                 instanceable: None,
+                child_names: None,
+                property_kinds: None,
                 revision,
             },
         );
@@ -649,7 +708,7 @@ impl IndexStore {
 /// The distinct non-root layer stacks an index's arena references — the
 /// stacks a cached entry owns. The full arena counts, inert and culled nodes
 /// included, since query paths still dereference their stacks.
-fn owned_stacks(index: &PrimIndex) -> HashSet<LayerStackId> {
+fn owned_stacks(index: &PrimIndex) -> FxHashSet<LayerStackId> {
     index
         .arena()
         .map(|node| node.layer_stack_id())

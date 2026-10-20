@@ -464,10 +464,10 @@ mod tests {
             .define_prim("/Instance")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     ..Default::default()
-                }])),
+                }]))),
             )?
             .set_instanceable(true)?;
         let instance = NodeGraph::get(&stage, "/Instance")?.expect("node graph instance");

@@ -1752,7 +1752,7 @@ fn deepen(site: &Path, parent_path: &Path, child_path: &Path, child_name: &str) 
     if site == parent_path {
         return (child_path.clone(), true);
     }
-    match site.append_path(child_name) {
+    match site.append_child(child_name) {
         Ok(deeper) => (deeper, true),
         Err(_) => (site.clone(), false),
     }

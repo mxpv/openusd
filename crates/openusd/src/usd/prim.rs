@@ -998,7 +998,7 @@ impl Prim {
         Ok(self
             .child_names()?
             .into_iter()
-            .filter_map(|name| self.path.append_path(name.as_str()).ok())
+            .filter_map(|name| self.path.append_child(name.as_str()).ok())
             .map(|path| Prim::new(&self.stage, path))
             .collect())
     }
@@ -1255,26 +1255,23 @@ impl Prim {
     /// namespace and the kind narrow the ordered names, so a property keeps
     /// the place the whole list gave it.
     fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
-        let info = self.prim_type_info()?;
-        let definition = info.prim_definition();
-        let declared_kind = |name: &Token| definition.property(name).map(|property| property.spec_type());
-        let mut properties: Vec<TypedName> = self
-            .stage
-            .masked_opinions(&self.path, |g, cache| cache.prim_property_kinds(g, &self.path))?
-            .into_iter()
-            .map(|(name, kind)| {
-                let kind = match source {
-                    // A property with no composed spec takes its kind from
-                    // the schema declaration.
-                    PropertySource::Composed => kind.or_else(|| declared_kind(&name)),
-                    // Nothing a schema declares is authored, so a name with no
-                    // composed spec belongs to neither kind.
-                    PropertySource::Authored => kind,
-                };
-                TypedName { name, kind }
-            })
-            .collect();
+        let mut properties: Vec<TypedName> = self.stage.masked_opinions(&self.path, |g, cache| {
+            Ok(cache
+                .prim_property_kinds(g, &self.path)?
+                .iter()
+                .map(|(name, kind)| TypedName {
+                    name: name.clone(),
+                    kind: *kind,
+                })
+                .collect())
+        })?;
         if source == PropertySource::Composed {
+            let info = self.prim_type_info()?;
+            let definition = info.prim_definition();
+            let declared_kind = |name: &Token| definition.property(name).map(|property| property.spec_type());
+            for property in &mut properties {
+                property.kind = property.kind.or_else(|| declared_kind(&property.name));
+            }
             add_declared(&mut properties, definition.property_names(), |name| TypedName {
                 name: name.clone(),
                 kind: declared_kind(name),
@@ -1292,7 +1289,7 @@ impl Prim {
     /// empty path, so the returned handle resolves nothing — the analog of
     /// C++'s invalid `UsdProperty` handle.
     fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
-        self.path.append_property(name).unwrap_or_default()
+        self.path.append_property(name.into()).unwrap_or_default()
     }
 
     /// Returns the variant sets composed onto this prim. Mirrors C++
@@ -1501,7 +1498,7 @@ impl PrimIndexRef {
     /// The path of the property `name` on this prim, or the empty path for an
     /// invalid name, which composes nothing.
     fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
-        self.path.append_property(name).unwrap_or_default()
+        self.path.append_property(name.into()).unwrap_or_default()
     }
 
     /// Composes the names of the properties this prim's layers author, in the
@@ -1916,10 +1913,10 @@ mod tests {
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set(
                     "fallbackPrimTypes",
-                    sdf::Value::Dictionary(HashMap::from([(
+                    sdf::Value::Dictionary(Box::new(HashMap::from([(
                         "MyStudioLight".to_owned(),
                         sdf::Value::token_vec(["Unregistered", "DistantLight"]),
-                    )])),
+                    )]))),
                 );
                 Ok(())
             })?;
@@ -2523,7 +2520,7 @@ mod tests {
     #[test]
     fn prim_custom_data() -> Result<()> {
         let stage = stage()?;
-        let dict = sdf::Value::Dictionary([("note".to_string(), sdf::Value::String("hi".into()))].into());
+        let dict = sdf::Value::Dictionary(Box::new([("note".to_string(), sdf::Value::String("hi".into()))].into()));
         stage
             .define_prim("/A")?
             .set_metadata(sdf::FieldKey::CustomData.as_str(), dict)?;
@@ -2572,7 +2569,7 @@ mod tests {
             layer.data_mut().set_field(
                 &path,
                 sdf::FieldKey::ApiSchemas.as_str(),
-                sdf::Value::TokenListOp(sdf::TokenListOp::appended(vec![Token::from("ExistingAPI")])),
+                sdf::Value::TokenListOp(Box::new(sdf::TokenListOp::appended(vec![Token::from("ExistingAPI")]))),
             );
             Ok(())
         })?;
@@ -2600,7 +2597,7 @@ mod tests {
         dict.insert("hint".to_string(), sdf::Value::String("v".to_string()));
         stage
             .define_prim("/World")?
-            .set_metadata("customData", sdf::Value::Dictionary(dict))?;
+            .set_metadata("customData", sdf::Value::Dictionary(Box::new(dict)))?;
 
         let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
             panic!("expected customData dictionary");
@@ -2616,7 +2613,7 @@ mod tests {
         dict.insert("a".to_string(), sdf::Value::Int(1));
         stage
             .define_prim("/World")?
-            .set_metadata("customData", sdf::Value::Dictionary(dict))?;
+            .set_metadata("customData", sdf::Value::Dictionary(Box::new(dict)))?;
 
         // The closure receives the local opinion and merges into it.
         stage.define_prim("/World")?.update_metadata("customData", |local| {

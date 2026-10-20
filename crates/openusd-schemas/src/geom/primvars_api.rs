@@ -365,11 +365,11 @@ impl PrimvarsAPI {
 ///     let prim = edit.prim(mesh.path().clone())?;
 ///     PrimvarBuilder::in_edit(&prim, "st", "texCoord2f[]")
 ///         .interpolation(Interpolation::FaceVarying)
-///         .set(sdf::Value::Vec2fVec(vec![gf::vec2f(0.0, 0.0), gf::vec2f(1.0, 1.0)]))
+///         .set(sdf::Value::Vec2fVec((vec![gf::vec2f(0.0, 0.0), gf::vec2f(1.0, 1.0)]).into()))
 ///         .indices(vec![0, 1, 0])
 ///         .build()?;
 ///     PrimvarBuilder::in_edit(&prim, "displayOpacity", "float[]")
-///         .set(sdf::Value::FloatVec(vec![0.5]))
+///         .set(sdf::Value::FloatVec((vec![0.5]).into()))
 ///         .build()?;
 ///     Ok::<_, SchemaError>(())
 /// })?;
@@ -504,7 +504,9 @@ impl<'a> PrimvarBuilder<'a> {
 
         let indices = match self.indexing {
             Indexing::Untouched => None,
-            Indexing::Indexed(indices) => Some(indices_builder(edit, name).set_at(sdf::Value::IntVec(indices), time)),
+            Indexing::Indexed(indices) => {
+                Some(indices_builder(edit, name).set_at(sdf::Value::IntVec(indices.into()), time))
+            }
             Indexing::Unindexed => Some(indices_builder(edit, name).block()),
         };
         // A builder with no declaration to report holds a failure, which its
@@ -638,7 +640,7 @@ mod tests {
     }
 
     fn floats(values: &[f32]) -> sdf::Value {
-        sdf::Value::FloatVec(values.to_vec())
+        sdf::Value::FloatVec((values.to_vec()).into())
     }
 
     /// The attribute path of each primvar, in the order given.
@@ -1484,7 +1486,7 @@ mod tests {
         let s = chain()?;
         let color = s[1]
             .primvar_builder("displayColor", "color3f[]")
-            .set(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0].into()]))
+            .set(sdf::Value::Vec3fVec((vec![[1.0, 0.0, 0.0].into()]).into()))
             .build()?;
 
         assert!(s[4].has_primvar("displayColor")?);

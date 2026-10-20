@@ -82,7 +82,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Matrix4d(
+                                    || ::openusd::sdf::Value::from(
                                         ::openusd::gf::Mat4d([
                                             1f64, 0f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 0f64,
                                             1f64, 0f64, 0f64, 0f64, 0f64, 1f64,
@@ -97,7 +97,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Matrix2d(
+                                    || ::openusd::sdf::Value::from(
                                         ::openusd::gf::Mat2d([1f64, 0f64, 0f64, 1f64]),
                                     ),
                                 ),
@@ -109,7 +109,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Matrix3d(
+                                    || ::openusd::sdf::Value::from(
                                         ::openusd::gf::Mat3d([
                                             1f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 1f64,
                                         ]),
@@ -164,7 +164,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::AssetPath(
+                                    || ::openusd::sdf::Value::from(
                                         ::openusd::sdf::AssetPath::new("./texture.png"),
                                     ),
                                 ),
@@ -186,7 +186,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 &[
                     ::openusd::usd::Field::new(
                         "assetInfo",
-                        || ::openusd::sdf::Value::Dictionary(
+                        || ::openusd::sdf::Value::from(
                             ::openusd::sdf::Dictionary::from([
                                 (
                                     ::std::string::String::from("version"),
@@ -196,7 +196,9 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ),
                                 (
                                     ::std::string::String::from("weights"),
-                                    ::openusd::sdf::Value::DoubleVec(::std::vec![0.5f64, 1f64]),
+                                    ::openusd::sdf::Value::DoubleVec(
+                                        (::std::vec![0.5f64, 1f64]).into(),
+                                    ),
                                 ),
                             ]),
                         ),

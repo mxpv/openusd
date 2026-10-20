@@ -97,7 +97,7 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         sdf::ValueKind::Bool => sdf::Value::Bool(parse_bool(cursor)?),
         sdf::ValueKind::BoolVec => sdf::Value::BoolVec(parse_array_with(cursor, parse_bool)?),
 
-        sdf::ValueKind::AssetPath => sdf::Value::AssetPath(cursor.expect_asset_ref()?.into()),
+        sdf::ValueKind::AssetPath => sdf::Value::AssetPath(Box::new(cursor.expect_asset_ref()?.into())),
         sdf::ValueKind::AssetPathVec => {
             sdf::Value::AssetPathVec(parse_array_with(cursor, |c| Ok(c.expect_asset_ref()?.into()))?)
         }
@@ -111,57 +111,57 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         ),
 
         sdf::ValueKind::Uchar => sdf::Value::Uchar(parse_token(cursor)?),
-        sdf::ValueKind::UcharVec => sdf::Value::UcharVec(parse_array(cursor)?),
+        sdf::ValueKind::UcharVec => sdf::Value::UcharVec((parse_array(cursor)?).into()),
 
         sdf::ValueKind::Int => sdf::Value::Int(parse_token(cursor)?),
-        sdf::ValueKind::IntVec => sdf::Value::IntVec(parse_array(cursor)?),
+        sdf::ValueKind::IntVec => sdf::Value::IntVec((parse_array(cursor)?).into()),
         sdf::ValueKind::Vec2i => sdf::Value::Vec2i(parse_gf::<i32, _, 2>(cursor)?),
-        sdf::ValueKind::Vec2iVec => sdf::Value::Vec2iVec(parse_gf_array::<i32, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2iVec => sdf::Value::Vec2iVec((parse_gf_array::<i32, _, 2>(cursor)?).into()),
         sdf::ValueKind::Vec3i => sdf::Value::Vec3i(parse_gf::<i32, _, 3>(cursor)?),
-        sdf::ValueKind::Vec3iVec => sdf::Value::Vec3iVec(parse_gf_array::<i32, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3iVec => sdf::Value::Vec3iVec((parse_gf_array::<i32, _, 3>(cursor)?).into()),
         sdf::ValueKind::Vec4i => sdf::Value::Vec4i(parse_gf::<i32, _, 4>(cursor)?),
-        sdf::ValueKind::Vec4iVec => sdf::Value::Vec4iVec(parse_gf_array::<i32, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4iVec => sdf::Value::Vec4iVec((parse_gf_array::<i32, _, 4>(cursor)?).into()),
         sdf::ValueKind::Uint => sdf::Value::Uint(parse_token(cursor)?),
-        sdf::ValueKind::UintVec => sdf::Value::UintVec(parse_array(cursor)?),
+        sdf::ValueKind::UintVec => sdf::Value::UintVec((parse_array(cursor)?).into()),
         sdf::ValueKind::Int64 => sdf::Value::Int64(parse_token(cursor)?),
-        sdf::ValueKind::Int64Vec => sdf::Value::Int64Vec(parse_array(cursor)?),
+        sdf::ValueKind::Int64Vec => sdf::Value::Int64Vec((parse_array(cursor)?).into()),
         sdf::ValueKind::Uint64 => sdf::Value::Uint64(parse_token(cursor)?),
-        sdf::ValueKind::Uint64Vec => sdf::Value::Uint64Vec(parse_array(cursor)?),
+        sdf::ValueKind::Uint64Vec => sdf::Value::Uint64Vec((parse_array(cursor)?).into()),
 
         sdf::ValueKind::Half => sdf::Value::Half(parse_token(cursor)?),
-        sdf::ValueKind::HalfVec => sdf::Value::HalfVec(parse_array(cursor)?),
+        sdf::ValueKind::HalfVec => sdf::Value::HalfVec((parse_array(cursor)?).into()),
         sdf::ValueKind::Vec2h => sdf::Value::Vec2h(parse_gf::<gf::f16, _, 2>(cursor)?),
-        sdf::ValueKind::Vec2hVec => sdf::Value::Vec2hVec(parse_gf_array::<gf::f16, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2hVec => sdf::Value::Vec2hVec((parse_gf_array::<gf::f16, _, 2>(cursor)?).into()),
         sdf::ValueKind::Vec3h => sdf::Value::Vec3h(parse_gf::<gf::f16, _, 3>(cursor)?),
-        sdf::ValueKind::Vec3hVec => sdf::Value::Vec3hVec(parse_gf_array::<gf::f16, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3hVec => sdf::Value::Vec3hVec((parse_gf_array::<gf::f16, _, 3>(cursor)?).into()),
         sdf::ValueKind::Vec4h => sdf::Value::Vec4h(parse_gf::<gf::f16, _, 4>(cursor)?),
-        sdf::ValueKind::Vec4hVec => sdf::Value::Vec4hVec(parse_gf_array::<gf::f16, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4hVec => sdf::Value::Vec4hVec((parse_gf_array::<gf::f16, _, 4>(cursor)?).into()),
 
         sdf::ValueKind::Float => sdf::Value::Float(parse_token(cursor)?),
-        sdf::ValueKind::FloatVec => sdf::Value::FloatVec(parse_array(cursor)?),
+        sdf::ValueKind::FloatVec => sdf::Value::FloatVec((parse_array(cursor)?).into()),
         sdf::ValueKind::Vec2f => sdf::Value::Vec2f(parse_gf::<f32, _, 2>(cursor)?),
-        sdf::ValueKind::Vec2fVec => sdf::Value::Vec2fVec(parse_gf_array::<f32, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2fVec => sdf::Value::Vec2fVec((parse_gf_array::<f32, _, 2>(cursor)?).into()),
         sdf::ValueKind::Vec3f => sdf::Value::Vec3f(parse_gf::<f32, _, 3>(cursor)?),
-        sdf::ValueKind::Vec3fVec => sdf::Value::Vec3fVec(parse_gf_array::<f32, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3fVec => sdf::Value::Vec3fVec((parse_gf_array::<f32, _, 3>(cursor)?).into()),
         sdf::ValueKind::Vec4f => sdf::Value::Vec4f(parse_gf::<f32, _, 4>(cursor)?),
-        sdf::ValueKind::Vec4fVec => sdf::Value::Vec4fVec(parse_gf_array::<f32, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4fVec => sdf::Value::Vec4fVec((parse_gf_array::<f32, _, 4>(cursor)?).into()),
 
         sdf::ValueKind::Double => sdf::Value::Double(parse_token(cursor)?),
-        sdf::ValueKind::DoubleVec => sdf::Value::DoubleVec(parse_array(cursor)?),
+        sdf::ValueKind::DoubleVec => sdf::Value::DoubleVec((parse_array(cursor)?).into()),
         sdf::ValueKind::Vec2d => sdf::Value::Vec2d(parse_gf::<f64, _, 2>(cursor)?),
-        sdf::ValueKind::Vec2dVec => sdf::Value::Vec2dVec(parse_gf_array::<f64, _, 2>(cursor)?),
+        sdf::ValueKind::Vec2dVec => sdf::Value::Vec2dVec((parse_gf_array::<f64, _, 2>(cursor)?).into()),
         sdf::ValueKind::Vec3d => sdf::Value::Vec3d(parse_gf::<f64, _, 3>(cursor)?),
-        sdf::ValueKind::Vec3dVec => sdf::Value::Vec3dVec(parse_gf_array::<f64, _, 3>(cursor)?),
+        sdf::ValueKind::Vec3dVec => sdf::Value::Vec3dVec((parse_gf_array::<f64, _, 3>(cursor)?).into()),
         sdf::ValueKind::Vec4d => sdf::Value::Vec4d(parse_gf::<f64, _, 4>(cursor)?),
-        sdf::ValueKind::Vec4dVec => sdf::Value::Vec4dVec(parse_gf_array::<f64, _, 4>(cursor)?),
+        sdf::ValueKind::Vec4dVec => sdf::Value::Vec4dVec((parse_gf_array::<f64, _, 4>(cursor)?).into()),
 
         // Quaternion fields in USDA are (w, x, y, z) — same as gf::Quat* field order.
         sdf::ValueKind::Quath => sdf::Value::Quath(parse_gf::<gf::f16, _, 4>(cursor)?),
         sdf::ValueKind::Quatf => sdf::Value::Quatf(parse_gf::<f32, _, 4>(cursor)?),
         sdf::ValueKind::Quatd => sdf::Value::Quatd(parse_gf::<f64, _, 4>(cursor)?),
-        sdf::ValueKind::QuathVec => sdf::Value::QuathVec(parse_gf_array::<gf::f16, _, 4>(cursor)?),
-        sdf::ValueKind::QuatfVec => sdf::Value::QuatfVec(parse_gf_array::<f32, _, 4>(cursor)?),
-        sdf::ValueKind::QuatdVec => sdf::Value::QuatdVec(parse_gf_array::<f64, _, 4>(cursor)?),
+        sdf::ValueKind::QuathVec => sdf::Value::QuathVec((parse_gf_array::<gf::f16, _, 4>(cursor)?).into()),
+        sdf::ValueKind::QuatfVec => sdf::Value::QuatfVec((parse_gf_array::<f32, _, 4>(cursor)?).into()),
+        sdf::ValueKind::QuatdVec => sdf::Value::QuatdVec((parse_gf_array::<f64, _, 4>(cursor)?).into()),
 
         sdf::ValueKind::String => sdf::Value::String(cursor.expect_string()?.into_owned()),
         sdf::ValueKind::StringVec => sdf::Value::StringVec(parse_array(cursor)?),
@@ -169,7 +169,7 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         sdf::ValueKind::TokenVec => sdf::Value::token_vec(parse_array::<String>(cursor)?),
 
         sdf::ValueKind::PathExpression => {
-            sdf::Value::PathExpression(sdf::PathExpression::parse(cursor.expect_string()?.as_ref()))
+            sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(cursor.expect_string()?.as_ref())))
         }
         sdf::ValueKind::PathExpressionVec => sdf::Value::PathExpressionVec(
             parse_array::<String>(cursor)?
@@ -179,8 +179,8 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         ),
 
         sdf::ValueKind::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(parse_matrix::<2, 4>(cursor)?)),
-        sdf::ValueKind::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(parse_matrix::<3, 9>(cursor)?)),
-        sdf::ValueKind::Matrix4d => sdf::Value::Matrix4d(gf::Mat4d(parse_matrix::<4, 16>(cursor)?)),
+        sdf::ValueKind::Matrix3d => sdf::Value::Matrix3d(Box::new(gf::Mat3d(parse_matrix::<3, 9>(cursor)?))),
+        sdf::ValueKind::Matrix4d => sdf::Value::Matrix4d(Box::new(gf::Mat4d(parse_matrix::<4, 16>(cursor)?))),
         sdf::ValueKind::Matrix2dVec => {
             sdf::Value::Matrix2dVec(parse_matrix_array::<2, 4>(cursor)?.into_iter().map(gf::Mat2d).collect())
         }
@@ -251,7 +251,7 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
             Some(sdf::Value::AssetPath(_)) => sdf::Value::AssetPathVec(
                 values
                     .into_iter()
-                    .map(|v| v.try_as_asset_path().unwrap_or_default())
+                    .map(|v| *v.try_as_asset_path().unwrap_or_default())
                     .collect(),
             ),
             _ => sdf::Value::StringVec(
@@ -269,14 +269,14 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
 
     // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
     if cursor.at_punctuation('{')? {
-        return Ok(sdf::Value::Dictionary(parse_dictionary(cursor)?));
+        return Ok(sdf::Value::Dictionary(Box::new(parse_dictionary(cursor)?)));
     }
 
     let token = cursor.bump()?;
     match token {
         Token::None => Ok(sdf::Value::ValueBlock),
         Token::String(value) => Ok(sdf::Value::String(value.into_owned())),
-        Token::AssetRef(asset_path) => Ok(sdf::Value::AssetPath(sdf::AssetPath::new(asset_path))),
+        Token::AssetRef(asset_path) => Ok(sdf::Value::AssetPath(Box::new(sdf::AssetPath::new(asset_path)))),
         Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::token(value)),
         Token::Number(raw) => {
             if let Ok(int) = raw.parse::<i64>() {
@@ -315,7 +315,7 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<HashMap<String
         c.expect_punctuation('=')?;
 
         let value = if nested {
-            sdf::Value::Dictionary(parse_dictionary(c)?)
+            sdf::Value::Dictionary(Box::new(parse_dictionary(c)?))
         } else if let Some(ty) = type_hint {
             // An entry spells its own type, and a dictionary keeps no room to
             // record one alongside a literal, so an unregistered spelling
@@ -403,13 +403,13 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                     c.expect_punctuation(':')?;
                 }
                 let vals = parse_tuple::<f64, 5>(c)?;
-                loop_params = sdf::Value::Dictionary(HashMap::from([
+                loop_params = sdf::Value::Dictionary(Box::new(HashMap::from([
                     ("protoStart".to_owned(), sdf::Value::Double(vals[0])),
                     ("protoEnd".to_owned(), sdf::Value::Double(vals[1])),
                     ("numPreLoops".to_owned(), sdf::Value::Double(vals[2])),
                     ("numPostLoops".to_owned(), sdf::Value::Double(vals[3])),
                     ("valueOffset".to_owned(), sdf::Value::Double(vals[4])),
-                ]));
+                ])));
             }
             // Knot: `time : value [& preValue] [; pre (...)] [; post mode [...]] [; { customData }]`
             Token::Number(time_str) => {
@@ -441,7 +441,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                         } else {
                             format!("{time}")
                         };
-                        knot_custom_data.insert(time_key, sdf::Value::Dictionary(dict));
+                        knot_custom_data.insert(time_key, sdf::Value::Dictionary(Box::new(dict)));
                         continue;
                     }
 
@@ -466,7 +466,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                     }
                 }
 
-                knots.push(sdf::Value::Dictionary(HashMap::from([
+                knots.push(sdf::Value::Dictionary(Box::new(HashMap::from([
                     ("time".to_owned(), sdf::Value::Double(time)),
                     ("value".to_owned(), sdf::Value::Double(value)),
                     ("preValue".to_owned(), sdf::Value::Double(pre_value)),
@@ -475,14 +475,14 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                     ("postTangentSlope".to_owned(), sdf::Value::Double(post_slope)),
                     ("postTangentWidth".to_owned(), sdf::Value::Double(post_width)),
                     ("nextInterpolationMode".to_owned(), sdf::Value::token(interp_mode)),
-                ])));
+                ]))));
             }
             other => bail!("Unexpected spline token: {other:?}"),
         }
         Ok(())
     })?;
 
-    Ok(sdf::Value::Dictionary(HashMap::from([
+    Ok(sdf::Value::Dictionary(Box::new(HashMap::from([
         (
             "curveType".to_owned(),
             sdf::Value::token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
@@ -491,8 +491,11 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
         ("postExtrapolation".to_owned(), post_extrapolation),
         ("loopParameters".to_owned(), loop_params),
         ("knots".to_owned(), sdf::Value::ValueVec(knots)),
-        ("knotCustomData".to_owned(), sdf::Value::Dictionary(knot_custom_data)),
-    ])))
+        (
+            "knotCustomData".to_owned(),
+            sdf::Value::Dictionary(Box::new(knot_custom_data)),
+        ),
+    ]))))
 }
 
 /// Parses a single `<...>` path reference token into an `sdf::Path`.
@@ -651,10 +654,10 @@ fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> 
     } else {
         0.0
     };
-    Ok(sdf::Value::Dictionary(HashMap::from([
+    Ok(sdf::Value::Dictionary(Box::new(HashMap::from([
         ("mode".to_owned(), sdf::Value::token(mode)),
         ("slope".to_owned(), sdf::Value::Double(slope)),
-    ])))
+    ]))))
 }
 
 /// Parse `(offset = ...; scale = ...; customData = {...})` blocks attached to

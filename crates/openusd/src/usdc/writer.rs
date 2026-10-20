@@ -596,8 +596,8 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Vec4i(a) => self.write_pod_out(Type::Vec4i, a),
 
             Value::Matrix2d(a) => self.write_pod_out(Type::Matrix2d, a),
-            Value::Matrix3d(a) => self.write_pod_out(Type::Matrix3d, a),
-            Value::Matrix4d(a) => self.write_pod_out(Type::Matrix4d, a),
+            Value::Matrix3d(a) => self.write_pod_out(Type::Matrix3d, a.as_ref()),
+            Value::Matrix4d(a) => self.write_pod_out(Type::Matrix4d, a.as_ref()),
 
             // Arrays — all out-of-line, uncompressed.
             Value::BoolVec(v) => {

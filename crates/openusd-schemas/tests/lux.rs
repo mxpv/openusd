@@ -73,7 +73,7 @@ fn rect_light_with_shaping_and_shadow() -> Result<()> {
     assert_eq!(rect.height_attr().get()?, Some(sdf::Value::Float(1.0)));
     assert_eq!(
         rect.texture_file_attr().get()?,
-        Some(sdf::Value::AssetPath("./textures/softbox.exr".into()))
+        Some(sdf::Value::AssetPath(Box::new("./textures/softbox.exr".into())))
     );
 
     let shaping = ShapingAPI::get(&stage, &prim)?.expect("ShapingAPI");
@@ -84,7 +84,7 @@ fn rect_light_with_shaping_and_shadow() -> Result<()> {
     );
     assert_eq!(
         shaping.shaping_ies_file_attr().get()?,
-        Some(sdf::Value::AssetPath("./ies/profile.ies".into()))
+        Some(sdf::Value::AssetPath(Box::new("./ies/profile.ies".into())))
     );
     assert_eq!(
         shaping.shaping_ies_normalize_attr().get()?,
@@ -127,7 +127,7 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
     let dome = DomeLight::get(&stage, sdf::path("/World/Dome")?)?.expect("DomeLight");
     assert_eq!(
         dome.texture_file_attr().get()?,
-        Some(sdf::Value::AssetPath("./hdri/studio.hdr".into()))
+        Some(sdf::Value::AssetPath(Box::new("./hdri/studio.hdr".into())))
     );
     assert_eq!(
         dome.texture_format_attr()
@@ -386,7 +386,7 @@ fn rect_light_texture_and_filters() -> Result<()> {
     let r = RectLight::define(&stage, "/Rect")?;
     r.create_width_attr()?.set(2.0_f32)?;
     r.create_texture_file_attr()?
-        .set(sdf::Value::AssetPath("./softbox.exr".into()))?;
+        .set(sdf::Value::AssetPath(Box::new("./softbox.exr".into())))?;
     r.create_filters_rel()?.set_targets(["/Filter"])?;
 
     let r = RectLight::get(&stage, "/Rect")?.expect("RectLight");

@@ -882,10 +882,10 @@ mod tests {
             .define_prim("/foo/props")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/_prototype")?,
                     ..Default::default()
-                }])),
+                }]))),
             )?
             .set_instanceable(true)?;
         foo.create_visibility_attr()?.set(Visibility::Invisible)?;
@@ -1083,10 +1083,10 @@ def Xform "World"
             .clone()
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/_prototype")?,
                     ..Default::default()
-                }])),
+                }]))),
             )?
             .set_instanceable(true)?;
 

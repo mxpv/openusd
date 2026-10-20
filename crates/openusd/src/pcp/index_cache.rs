@@ -14,6 +14,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
+use rustc_hash::FxHashMap;
+
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType, Value};
@@ -266,30 +268,30 @@ pub(super) fn block_to_none(value: Value) -> Option<Value> {
 ///
 /// Driven by both walks that build a property stack, so the rule is stated once.
 #[derive(Default)]
-struct DefiningKind {
-    defining: Option<(SpecType, String, Path)>,
+struct DefiningKind<'a> {
+    defining: Option<(SpecType, &'a str, Path)>,
 }
 
-impl DefiningKind {
+impl<'a> DefiningKind<'a> {
     /// Offers one spec to the rule. `None` admits it to the stack; `Some`
     /// rejects it and carries the conflict to report.
     fn admit(
         &mut self,
         spec_type: SpecType,
-        layer: &str,
+        layer: &'a str,
         path: &Path,
-        prop_path: &Path,
+        property: impl FnOnce() -> Option<Path>,
         prim_path: &Path,
     ) -> Option<CompositionDiagnostic> {
         match &self.defining {
             None => {
-                self.defining = Some((spec_type, layer.to_string(), path.clone()));
+                self.defining = Some((spec_type, layer, path.clone()));
                 None
             }
             Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
                 Some(CompositionDiagnostic::InconsistentPropertyType {
-                    property: prop_path.clone(),
-                    defining_layer: def_layer.clone(),
+                    property: property()?,
+                    defining_layer: (*def_layer).to_owned(),
                     defining_path: def_path.clone(),
                     defining_is_attribute: *def_type == SpecType::Attribute,
                     conflicting_layer: layer.to_string(),
@@ -435,7 +437,7 @@ fn probe_source(composing: &mut Composing, value: Cow<'_, Value>, site: &Opinion
     if composing.is_empty() && !composes_over_weaker(&value) {
         return Folded::Closed;
     }
-    composing.fold(value.into_owned(), &site.query_path, site.node.map_to_root())
+    composing.fold(value.into_owned(), || site.query_path(), site.node.map_to_root())
 }
 
 /// Resolves an attribute's value (the resolver behind
@@ -477,7 +479,7 @@ impl ValueAtResolver<'_> {
             self.anchor = (anchors && value.is_asset_valued()).then(|| site.select());
         }
         self.composing
-            .fold(value, &site.query_path, site.node.map_to_root())
+            .fold(value, || site.query_path(), site.node.map_to_root())
             .step()
     }
 }
@@ -971,7 +973,7 @@ struct StackResolver<'a> {
     time: Option<f64>,
     sites: Vec<SpecSiteRecord>,
     conflicts: Diagnostics,
-    defining: DefiningKind,
+    defining: DefiningKind<'a>,
 }
 
 /// How much composition-graph node data a cache holds, and how much composing
@@ -1076,7 +1078,8 @@ impl StandingResolver<'_> {
 
 impl OpinionResolver for StandingResolver<'_> {
     fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
-        self.reached = (site.layer == self.layer && site.query_path == *self.spec_path)
+        let query_path = site.query_path();
+        self.reached = (site.layer == self.layer && query_path == *self.spec_path)
             || self
                 .culled
                 .as_ref()
@@ -1084,7 +1087,7 @@ impl OpinionResolver for StandingResolver<'_> {
             || self
                 .stronger_sites
                 .as_ref()
-                .is_some_and(|sites| !sites.contains(&(site.layer, site.query_path.clone())));
+                .is_some_and(|sites| !sites.contains(&(site.layer, query_path)));
         match self.reached {
             true => Step::Stop,
             false => Step::Continue,
@@ -1127,14 +1130,18 @@ impl OpinionResolver for StandingResolver<'_> {
 
 impl OpinionResolver for StackResolver<'_> {
     fn on_site(&mut self, site: &OpinionSite<'_>) -> Step {
-        let Some(spec_type) = self.graph.layer(site.layer).data().spec_type(&site.query_path) else {
+        let query_path = site.query_path();
+        let Some(spec_type) = self.graph.layer(site.layer).data().spec_type(&query_path) else {
             return Step::Continue;
         };
         let layer = self.graph.identifier(site.layer);
-        match self
-            .defining
-            .admit(spec_type, layer, &site.query_path, self.prop_path, self.prim_path)
-        {
+        match self.defining.admit(
+            spec_type,
+            layer,
+            &query_path,
+            || Some(self.prop_path.clone()),
+            self.prim_path,
+        ) {
             None => self.sites.push(site.spec_record(self.graph)),
             Some(conflict) => self.conflicts.report(conflict),
         }
@@ -1486,23 +1493,21 @@ impl IndexCache {
         // weaker site (a `ValueBlock` blocks weaker opinions for any field).
         let mut samples_blocked = false;
 
-        // The query path depends only on the node, and `live_sites` yields a
-        // node's layers together, so each node's is built once.
-        let mut node_query: Option<(NodeId, Path)> = None;
+        let mut node_query: Option<(NodeId, sdf::PathQuery<'_>)> = None;
         for (node, layer, offset) in index.live_sites(graph, scope) {
-            let query_path = match &node_query {
-                Some((id, path)) if *id == node.id() => path.clone(),
+            let query = match node_query {
+                Some((id, query)) if id == node.id() => query,
                 _ => {
-                    let path = PrimIndex::query_path(node, Some(suffix)).into_owned();
-                    node_query = Some((node.id(), path.clone()));
-                    path
+                    let query = sdf::PathQuery::from_suffix(node.path(), suffix);
+                    node_query = Some((node.id(), query));
+                    query
                 }
             };
             let site = OpinionSite {
                 node,
                 layer,
                 offset,
-                query_path,
+                query,
             };
 
             if resolver.on_site(&site).stop() {
@@ -1516,13 +1521,13 @@ impl IndexCache {
             // The wider walk reaches layers that author no spec for this prim,
             // so that a clip introduced there is still consulted; one lookup
             // rules the field probes out at those.
-            if node.has_specs() && data.has_spec(node.path()) {
+            if scope == SiteScope::SpecStack || (node.has_specs() && data.has_spec(node.path())) {
                 // At the default time the field is read only for a resolver
                 // that reports what it walked past; the value read skips it.
                 let probes_samples = mode.visits_time_samples() || resolver.wants_unresolved_samples();
                 if !samples_blocked
                     && probes_samples
-                    && let Some(value) = data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
+                    && let Some(value) = data.try_field_query(&site.query, FieldKey::TimeSamples.as_str())?
                 {
                     // What the field holds decides whether there is an opinion
                     // here at all; the mode then decides what to do with it.
@@ -1551,7 +1556,7 @@ impl IndexCache {
                         Step::Continue => {}
                     }
                 }
-                if let Some(value) = data.try_field(&site.query_path, FieldKey::Default.as_str())? {
+                if let Some(value) = data.try_field_query(&site.query, FieldKey::Default.as_str())? {
                     found_opinion = true;
                     let step = match value_resolve::is_block(&value) {
                         true => resolver.on_withheld(Withheld::DefaultBlock, &site),
@@ -2269,21 +2274,35 @@ impl IndexCache {
     /// [`own_status`](Self::own_status) composed afresh.
     fn compose_own_status(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<OwnStatus>, QueryError> {
         let at = &self.effective_path(graph, path)?;
+        if at != path {
+            let Some(mut own) = self.own_status(graph, at)? else {
+                return Ok(None);
+            };
+            // Prototype opinions are shared; payload inclusion is decided in
+            // the queried instance's namespace.
+            own.payload_included = self.payload_included(graph, path, at)?;
+            return Ok(Some(own));
+        }
         if !self.has_spec_at(graph, at)? {
             return Ok(None);
         }
         let active = self.active_at(graph, at)?;
         let specifier = self.specifier_at(graph, at)?;
-        // No rule anywhere means every path resolves loaded (`LoadRules`'
-        // documented default). The rules are keyed by the prim's own path,
-        // not by the index it reads through.
-        let payload_included = self.load_rules().is_empty() || !self.has_payload_at(graph, at)? || self.is_loaded(path);
+        let payload_included = self.payload_included(graph, path, at)?;
         Ok(Some(OwnStatus {
             active,
             defining: matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)),
             class: specifier == Some(sdf::Specifier::Class),
             payload_included,
         }))
+    }
+
+    /// Whether the queried prim's payload is included by its load rules.
+    /// An empty rule table includes every payload.
+    /// `at` supplies the composed opinion in the prototype namespace where
+    /// applicable; load rules address `path` in the queried namespace.
+    fn payload_included(&mut self, graph: &LayerGraph, path: &Path, at: &Path) -> Result<bool, QueryError> {
+        Ok(self.load_rules().is_empty() || !self.has_payload_at(graph, at)? || self.is_loaded(path))
     }
 
     /// The composed specifier at `path`, a path already redirected onto the
@@ -2870,7 +2889,7 @@ impl IndexCache {
                         continue;
                     };
                     let list_op = match value.into_owned() {
-                        Value::PathListOp(op) => op,
+                        Value::PathListOp(op) => *op,
                         Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                         _ => continue,
                     };
@@ -2994,6 +3013,7 @@ impl IndexCache {
         graph: &LayerGraph,
         path: &Path,
     ) -> Result<(Vec<Token>, Vec<Token>), QueryError> {
+        let pending_before = self.pending_loads.len();
         let path = self.effective_path(graph, path)?;
         self.ensure_index(graph, &path)?;
 
@@ -3002,6 +3022,9 @@ impl IndexCache {
         // the ancestral arcs the instance is nested under — are discarded
         // (spec 11.3.3). The instance prim's own index is otherwise left intact.
         let drop_local = self.is_instance(graph, &path)?;
+        if let Some((order, prohibited)) = self.store.child_names(&path, drop_local, self.population_epoch) {
+            return Ok((order.to_vec(), prohibited.to_vec()));
+        }
 
         let index = self.cached(&path);
         // The instance-local partition is keyed by the prim's own namespace depth
@@ -3078,6 +3101,15 @@ impl IndexCache {
         // Order the prohibited set the same way as the child names (spec §8.2),
         // so the two outputs of this function stay consistent.
         prohibited.sort_by(|a, b| sdf::element_cmp(a.as_str(), b.as_str()));
+        if !self.provisional(&path, pending_before) {
+            self.store.cache_child_names(
+                &path,
+                drop_local,
+                self.population_epoch,
+                name_order.clone(),
+                prohibited.clone(),
+            );
+        }
         Ok((name_order, prohibited))
     }
 
@@ -3100,35 +3132,37 @@ impl IndexCache {
         &mut self,
         graph: &LayerGraph,
         path: &Path,
-    ) -> Result<Vec<(Token, Option<SpecType>)>, QueryError> {
+    ) -> Result<&[(Token, Option<SpecType>)], QueryError> {
         let path = &self.effective_path(graph, path)?;
         self.ensure_index(graph, path)?;
-        let index = self.cached(path);
-        let mut names: Vec<Token> = Vec::new();
-        // The strongest site listing each name, by position in `names`. The fold
-        // runs weakest to strongest, and each listing replaces the one before.
-        let mut strongest: Vec<(&Path, LayerId)> = Vec::new();
-        let mut position: HashMap<Token, usize> = HashMap::new();
-        fold_property_children(index, graph, |name, node, site| {
-            if let Some(&at) = position.get(name) {
-                strongest[at] = (node.path(), site.layer);
-            } else {
-                position.insert(name.clone(), names.len());
-                names.push(name.clone());
-                strongest.push((node.path(), site.layer));
-            }
-        });
-        Ok(names
-            .into_iter()
-            .zip(strongest)
-            .map(|(name, (prim, layer))| {
-                let kind = prim
-                    .append_property(&name)
-                    .ok()
-                    .and_then(|property| graph.layer(layer).data().spec_type(&property));
-                (name, kind)
-            })
-            .collect())
+        if self.store.property_kinds(path).is_none() {
+            let index = self.cached(path);
+            let mut names: Vec<Token> = Vec::new();
+            // The strongest site listing each name, by position in `names`. The fold
+            // runs weakest to strongest, and each listing replaces the one before.
+            let mut strongest: Vec<(&Path, LayerId)> = Vec::new();
+            let mut position: FxHashMap<Token, usize> = FxHashMap::default();
+            fold_property_children(index, graph, |name, node, site| {
+                if let Some(&at) = position.get(name) {
+                    strongest[at] = (node.path(), site.layer);
+                } else {
+                    position.insert(name.clone(), names.len());
+                    names.push(name.clone());
+                    strongest.push((node.path(), site.layer));
+                }
+            });
+            let items = names
+                .into_iter()
+                .zip(strongest)
+                .map(|(name, (prim, layer))| {
+                    let data = graph.layer(layer).data();
+                    let kind = data.property_spec(prim, &name).map(|(_, kind)| kind);
+                    (name, kind)
+                })
+                .collect();
+            self.store.cache_property_kinds(path, items);
+        }
+        Ok(self.store.property_kinds(path).unwrap_or_default())
     }
 
     /// Reports a [`CompositionDiagnostic::InconsistentPropertyType`] for each
@@ -3153,10 +3187,7 @@ impl IndexCache {
         };
         let mut conflicts = Diagnostics::default();
         for name in contested_property_names(graph, index) {
-            let Ok(prop_path) = prim_path.append_property(&name) else {
-                continue;
-            };
-            conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &prop_path));
+            conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &name));
         }
         let cached = self.store.replace_property_errors(prim_path, conflicts);
         debug_assert!(
@@ -3165,34 +3196,29 @@ impl IndexCache {
         );
     }
 
-    /// Walks a property's specs strongest-first across the prim's composition
-    /// graph, returning its `(layer identifier, spec path)` stack and the
-    /// inconsistent-spec-type errors. The first spec's kind (attribute vs
-    /// relationship) is the defining type; weaker specs of the other kind are
-    /// inconsistent (C++ `PcpErrorInconsistentPropertyType`) — dropped from the
-    /// stack and reported. `prop_path` is the property in `prim_path`'s namespace.
+    /// Reports specs whose attribute/relationship kind differs from the
+    /// strongest spec for property `name` on `prim_path`.
     ///
     /// Reads the memoized prim spec stack as the candidate set: a property spec
     /// requires its owning prim spec, so every layer that authors the property
     /// also authors the prim spec the stack records. Inert and culled nodes are
     /// skipped (matching the structural node walk); permission-denied sites stay.
-    fn property_type_conflicts(
-        graph: &LayerGraph,
-        index: &PrimIndex,
-        prim_path: &Path,
-        prop_path: &Path,
-    ) -> Diagnostics {
+    fn property_type_conflicts(graph: &LayerGraph, index: &PrimIndex, prim_path: &Path, name: &Token) -> Diagnostics {
         let mut conflicts = Diagnostics::default();
         let mut defining = DefiningKind::default();
         for (site, node) in index.live_spec_sites() {
-            let Some(p) = prop_path.replace_prefix(prim_path, node.path()) else {
-                continue;
-            };
-            let Some(spec_type) = graph.layer(site.layer).data().spec_type(&p) else {
+            let data = graph.layer(site.layer).data();
+            let Some((p, spec_type)) = data.property_spec(node.path(), name) else {
                 continue;
             };
             let layer_id = graph.identifier(site.layer);
-            if let Some(conflict) = defining.admit(spec_type, layer_id, &p, prop_path, prim_path) {
+            if let Some(conflict) = defining.admit(
+                spec_type,
+                layer_id,
+                &p,
+                || prim_path.append_property(name).ok(),
+                prim_path,
+            ) {
                 conflicts.report(conflict);
             }
         }
@@ -3496,16 +3522,17 @@ impl IndexCache {
         // is a pure function of the layer stack, path, and parent context, so
         // building ancestors eagerly only fixes the parent context — it does
         // not change any prim's resolved opinions.
-        if let Some(parent) = path.parent()
+        let parent = path.parent();
+        if let Some(parent) = &parent
             && !parent.is_abs_root()
-            && !self.is_indexed(&parent)
+            && !self.is_indexed(parent)
         {
-            self.precache_path(graph, &parent);
+            self.precache_path(graph, parent);
         }
 
-        let parent_ctx = path
-            .parent()
-            .and_then(|p| self.store.context_at(&p))
+        let parent_ctx = parent
+            .as_ref()
+            .and_then(|p| self.store.context_at(p))
             .copied()
             .unwrap_or_default();
         // Computed per path, not inherited from the parent context: two
@@ -3579,8 +3606,9 @@ impl IndexCache {
         // leaving only the arcs introduced at the instance and their subtrees.
         // Runs before deriving instance state below so the
         // suppressed opinions are already inert.
-        if let Some(depth) = parent_ctx.instance_depth {
-            index.mark_instance_local_inert(path.prim_element_count() as u16, depth);
+        let depth = path.prim_element_count() as u16;
+        if let Some(instance_depth) = parent_ctx.instance_depth {
+            index.mark_instance_local_inert(depth, instance_depth);
         }
 
         // This prim is an instance when its composition declares
@@ -3588,14 +3616,14 @@ impl IndexCache {
         // inherit `within_instance`. A nested instance therefore re-arms the
         // flag for its own subtree. The answer is recorded on the entry below,
         // where a later `Prim::is_instance` reads it.
-        let is_instance = index.is_instanceable(graph, path.prim_element_count() as u16)?;
+        let is_instance = index.is_instanceable(graph, depth)?;
 
         let mut child_context = index.context_for_children(&parent_ctx);
         // A nested instance re-arms the depth to its own (deeper) level, so an
         // inner instance's descendants drop opinions above its instanceable arc
         // rather than the outer instance's.
         child_context.instance_depth = if is_instance {
-            Some(path.prim_element_count() as u16)
+            Some(depth)
         } else {
             parent_ctx.instance_depth
         };
@@ -3702,7 +3730,7 @@ fn contested_property_names(graph: &LayerGraph, index: &PrimIndex) -> Vec<Token>
         return contested;
     }
     // Whether each name seen so far has been found at a second site.
-    let mut names: HashMap<&Token, bool> = HashMap::new();
+    let mut names: FxHashMap<&Token, bool> = FxHashMap::default();
     for list in &lists {
         let Value::TokenVec(list) = list.as_ref() else {
             continue;
@@ -3797,6 +3825,8 @@ fn unculled_entry(index: PrimIndex, context: CompositionContext) -> PrimEntry {
         property_errors: Diagnostics::default(),
         resolved_targets: HashMap::new(),
         instanceable: None,
+        child_names: None,
+        property_kinds: None,
         revision: PrimRevision::placeholder(),
     }
 }
@@ -6445,7 +6475,11 @@ def "Model" (
                 prim_path: sdf::path("/Class").unwrap(),
                 ..Default::default()
             }]);
-            data.set_field(&inst, sdf::FieldKey::References.as_str(), Value::ReferenceListOp(refs));
+            data.set_field(
+                &inst,
+                sdf::FieldKey::References.as_str(),
+                Value::ReferenceListOp(Box::new(refs)),
+            );
             Ok(())
         })
         .unwrap();
@@ -7143,11 +7177,11 @@ def \"Ref\" {}
             resolve_stacked(
                 "order",
                 &[
-                    Value::IntListOp(sdf::ListOp::prepended(vec![1])),
-                    Value::IntListOp(sdf::ListOp::explicit(vec![2, 3])),
+                    Value::IntListOp(Box::new(sdf::ListOp::prepended(vec![1]))),
+                    Value::IntListOp(Box::new(sdf::ListOp::explicit(vec![2, 3]))),
                 ]
             )?,
-            Some(Value::IntListOp(sdf::ListOp::explicit(vec![1, 2, 3])))
+            Some(Value::IntListOp(Box::new(sdf::ListOp::explicit(vec![1, 2, 3]))))
         );
         Ok(())
     }
@@ -7160,11 +7194,13 @@ def \"Ref\" {}
             resolve_stacked(
                 "expr",
                 &[
-                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
-                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/add// %_"))),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/base//"))),
                 ]
             )?,
-            Some(Value::PathExpression(sdf::PathExpression::parse("/add// /base//")))
+            Some(Value::PathExpression(Box::new(sdf::PathExpression::parse(
+                "/add// /base//"
+            ))))
         );
 
         // Without a weaker reference the strongest opinion stands alone.
@@ -7172,11 +7208,11 @@ def \"Ref\" {}
             resolve_stacked(
                 "expr",
                 &[
-                    Value::PathExpression(sdf::PathExpression::parse("/strong//")),
-                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/strong//"))),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/base//"))),
                 ]
             )?,
-            Some(Value::PathExpression(sdf::PathExpression::parse("/strong//")))
+            Some(Value::PathExpression(Box::new(sdf::PathExpression::parse("/strong//"))))
         );
         Ok(())
     }
@@ -7189,12 +7225,12 @@ def \"Ref\" {}
             resolve_stacked(
                 "expr",
                 &[
-                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/add// %_"))),
                     Value::ValueBlock,
-                    Value::PathExpression(sdf::PathExpression::parse("/base//")),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/base//"))),
                 ]
             )?,
-            Some(Value::PathExpression(sdf::PathExpression::parse("/add//")))
+            Some(Value::PathExpression(Box::new(sdf::PathExpression::parse("/add//"))))
         );
         Ok(())
     }
@@ -7214,7 +7250,9 @@ def \"Ref\" {}
             l.data_mut().set_field(
                 &class,
                 "expr",
-                Value::PathExpression(sdf::PathExpression::parse("child// /Class/Sets// /Elsewhere//")),
+                Value::PathExpression(Box::new(sdf::PathExpression::parse(
+                    "child// /Class/Sets// /Elsewhere//",
+                ))),
             );
             Ok(())
         })
@@ -7224,9 +7262,9 @@ def \"Ref\" {}
         let mut cache = fresh_cache();
         assert_eq!(
             cache.resolve_field(&graph, &sdf::path("/Inst")?, "expr")?,
-            Some(Value::PathExpression(sdf::PathExpression::parse(
+            Some(Value::PathExpression(Box::new(sdf::PathExpression::parse(
                 "/Inst/child// /Inst/Sets//"
-            )))
+            ))))
         );
         Ok(())
     }
@@ -7239,11 +7277,13 @@ def \"Ref\" {}
             resolve_stacked(
                 "expr",
                 &[
-                    Value::PathExpression(sdf::PathExpression::parse("/add// %_")),
+                    Value::PathExpression(Box::new(sdf::PathExpression::parse("/add// %_"))),
                     Value::String("/base//".to_string()),
                 ]
             )?,
-            Some(Value::PathExpression(sdf::PathExpression::parse("/add// /base//")))
+            Some(Value::PathExpression(Box::new(sdf::PathExpression::parse(
+                "/add// /base//"
+            ))))
         );
         Ok(())
     }
@@ -7301,9 +7341,9 @@ def \"Ref\" {}
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
             cache.value_at(&graph, &sdf::path("/Inst.e")?, Some(0.0), &interp, None)?,
-            TimedValue::Value(Value::PathExpression(sdf::PathExpression::parse(
+            TimedValue::Value(Value::PathExpression(Box::new(sdf::PathExpression::parse(
                 "/local// /Inst/child//"
-            )))
+            ))))
         );
         Ok(())
     }
@@ -7316,12 +7356,12 @@ def \"Ref\" {}
             resolve_stacked(
                 "order",
                 &[
-                    Value::IntListOp(sdf::ListOp::prepended(vec![1])),
+                    Value::IntListOp(Box::new(sdf::ListOp::prepended(vec![1]))),
                     Value::ValueBlock,
-                    Value::IntListOp(sdf::ListOp::explicit(vec![2])),
+                    Value::IntListOp(Box::new(sdf::ListOp::explicit(vec![2]))),
                 ]
             )?,
-            Some(Value::IntListOp(sdf::ListOp::explicit(vec![1])))
+            Some(Value::IntListOp(Box::new(sdf::ListOp::explicit(vec![1]))))
         );
         Ok(())
     }
@@ -7331,13 +7371,13 @@ def \"Ref\" {}
     /// value resolution is strongest-wins.
     #[test]
     fn default_field_never_folds() -> Result<()> {
-        let strongest = Value::TokenListOp(sdf::ListOp::prepended(vec![Token::new("a")]));
+        let strongest = Value::TokenListOp(Box::new(sdf::ListOp::prepended(vec![Token::new("a")])));
         assert_eq!(
             resolve_stacked(
                 FieldKey::Default.as_str(),
                 &[
                     strongest.clone(),
-                    Value::TokenListOp(sdf::ListOp::explicit(vec![Token::new("b")])),
+                    Value::TokenListOp(Box::new(sdf::ListOp::explicit(vec![Token::new("b")]))),
                 ]
             )?,
             Some(strongest)
@@ -7355,10 +7395,12 @@ def \"Ref\" {}
                 FieldKey::ApiSchemas.as_str(),
                 &[
                     Value::TokenVec(vec![Token::new("IllTypedAPI")]),
-                    Value::TokenListOp(sdf::ListOp::prepended(vec![Token::new("GoodAPI")])),
+                    Value::TokenListOp(Box::new(sdf::ListOp::prepended(vec![Token::new("GoodAPI")]))),
                 ]
             )?,
-            Some(Value::TokenListOp(sdf::ListOp::explicit(vec![Token::new("GoodAPI")])))
+            Some(Value::TokenListOp(Box::new(sdf::ListOp::explicit(vec![Token::new(
+                "GoodAPI"
+            )]))))
         );
         Ok(())
     }

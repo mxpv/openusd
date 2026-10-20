@@ -83,7 +83,7 @@ fn authored(stage: &Stage, layer: &str, path: &str) -> (Option<Vec<Vec3f>>, Samp
     let Some(spec) = layer.attribute(path).expect("attribute path") else {
         return (None, Vec::new());
     };
-    let array = |value: Value| value.try_as_vec_3f_vec().expect("vector array");
+    let array = |value: Value| value.try_as_vec_3f_vec().expect("vector array").into_vec();
     let samples = spec.time_samples().unwrap_or_default();
     (
         spec.default().map(array),
@@ -743,7 +743,7 @@ fn baked_xform(stage: &Stage, prim: &str) -> (Vec<(f64, gf::Mat4d)>, Option<Vec<
     (
         samples
             .into_iter()
-            .map(|(time, xform)| (time, xform.try_as_matrix_4d().expect("matrix")))
+            .map(|(time, xform)| (time, *xform.try_as_matrix_4d().expect("matrix")))
             .collect(),
         order,
     )

@@ -55,9 +55,10 @@ impl ClipsAPI {
     /// [`sdf::StringListOp::explicit`] for a plain ordered list, or with the
     /// prepend/append/delete operators to edit a composed order.
     pub fn set_clip_sets(&self, clip_sets: sdf::StringListOp) -> Result<(), StageAuthoringError> {
-        self.prim()
-            .clone()
-            .set_metadata(sdf::FieldKey::ClipSets.as_str(), Value::StringListOp(clip_sets))?;
+        self.prim().clone().set_metadata(
+            sdf::FieldKey::ClipSets.as_str(),
+            Value::StringListOp(Box::new(clip_sets)),
+        )?;
         Ok(())
     }
 
@@ -68,7 +69,8 @@ impl ClipsAPI {
         Ok(self
             .stage()
             .field::<Value>(self.path(), sdf::FieldKey::Clips)?
-            .and_then(Value::try_as_dictionary))
+            .and_then(Value::try_as_dictionary)
+            .map(|value| *value))
     }
 
     /// Replace the entire `clips` dictionary (C++ `UsdClipsAPI::SetClips`).
@@ -77,7 +79,7 @@ impl ClipsAPI {
     pub fn set_clips(&self, clips: sdf::Dictionary) -> Result<(), StageAuthoringError> {
         self.prim()
             .clone()
-            .set_metadata(sdf::FieldKey::Clips.as_str(), Value::Dictionary(clips))?;
+            .set_metadata(sdf::FieldKey::Clips.as_str(), Value::Dictionary(Box::new(clips)))?;
         Ok(())
     }
 
@@ -96,7 +98,8 @@ impl ClipsAPI {
         Ok(self
             .field(clip_set, keys::ACTIVE)?
             .and_then(Value::try_as_vec_2d_vec)
-            .unwrap_or_default())
+            .unwrap_or_default()
+            .into_vec())
     }
 
     /// `(stageTime, clipTime)` timing pairs for `clip_set` (`times`), each a
@@ -105,7 +108,8 @@ impl ClipsAPI {
         Ok(self
             .field(clip_set, keys::TIMES)?
             .and_then(Value::try_as_vec_2d_vec)
-            .unwrap_or_default())
+            .unwrap_or_default()
+            .into_vec())
     }
 
     /// Prim path queried within each clip for `clip_set` (`primPath`), if authored.
@@ -122,7 +126,8 @@ impl ClipsAPI {
     pub fn clip_manifest_asset_path(&self, clip_set: &str) -> Result<Option<AssetPath>> {
         Ok(self
             .field(clip_set, keys::MANIFEST_ASSET_PATH)?
-            .and_then(Value::try_as_asset_path))
+            .and_then(Value::try_as_asset_path)
+            .map(|value| *value))
     }
 
     /// Whether gaps in `clip_set` interpolate across surrounding clips rather
@@ -172,12 +177,12 @@ impl ClipsAPI {
 
     /// Author the `(stageTime, clipIndex)` activation pairs for `clip_set` (`active`).
     pub fn set_clip_active(&self, clip_set: &str, active: Vec<gf::Vec2d>) -> Result<(), StageAuthoringError> {
-        self.set_field(clip_set, keys::ACTIVE, Value::Vec2dVec(active))
+        self.set_field(clip_set, keys::ACTIVE, Value::Vec2dVec(active.into()))
     }
 
     /// Author the `(stageTime, clipTime)` timing pairs for `clip_set` (`times`).
     pub fn set_clip_times(&self, clip_set: &str, times: Vec<gf::Vec2d>) -> Result<(), StageAuthoringError> {
-        self.set_field(clip_set, keys::TIMES, Value::Vec2dVec(times))
+        self.set_field(clip_set, keys::TIMES, Value::Vec2dVec(times.into()))
     }
 
     /// Author the per-clip prim path for `clip_set` (`primPath`).
@@ -191,7 +196,11 @@ impl ClipsAPI {
         clip_set: &str,
         asset_path: impl Into<AssetPath>,
     ) -> Result<(), StageAuthoringError> {
-        self.set_field(clip_set, keys::MANIFEST_ASSET_PATH, Value::AssetPath(asset_path.into()))
+        self.set_field(
+            clip_set,
+            keys::MANIFEST_ASSET_PATH,
+            Value::AssetPath(Box::new(asset_path.into())),
+        )
     }
 
     /// Author the interpolate-missing flag for `clip_set` (`interpolateMissingClipValues`).
@@ -331,16 +340,16 @@ impl ClipsAPI {
             .update_metadata(sdf::FieldKey::Clips.as_str(), move |current| {
                 let mut sets = match current {
                     Some(Value::Dictionary(d)) => d,
-                    _ => HashMap::new(),
+                    _ => Box::default(),
                 };
                 match sets
                     .entry(clip_set)
-                    .or_insert_with(|| Value::Dictionary(HashMap::new()))
+                    .or_insert_with(|| Value::Dictionary(Box::default()))
                 {
                     Value::Dictionary(set) => {
                         set.insert(key, value);
                     }
-                    other => *other = Value::Dictionary(HashMap::from([(key, value)])),
+                    other => *other = Value::Dictionary(Box::new(HashMap::from([(key, value)]))),
                 }
                 Some(Value::Dictionary(sets))
             })?;
@@ -406,25 +415,25 @@ mod tests {
     #[test]
     fn reads_remaining_fields_and_missing_edges() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let set = Value::Dictionary(
+        let set = Value::Dictionary(Box::new(
             [
                 (
                     keys::TIMES.to_string(),
-                    Value::Vec2dVec(vec![gf::vec2d(0.0, 0.0), gf::vec2d(10.0, 5.0)]),
+                    Value::Vec2dVec((vec![gf::vec2d(0.0, 0.0), gf::vec2d(10.0, 5.0)]).into()),
                 ),
                 (
                     keys::MANIFEST_ASSET_PATH.to_string(),
-                    Value::AssetPath("manifest.usda".into()),
+                    Value::AssetPath(Box::new("manifest.usda".into())),
                 ),
                 (keys::INTERPOLATE_MISSING.to_string(), Value::Bool(true)),
                 (keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(0.5)),
             ]
             .into_iter()
             .collect::<HashMap<_, _>>(),
-        );
+        ));
         stage.define_prim("/Anim")?.set_metadata(
             "clips",
-            Value::Dictionary([("default".to_string(), set)].into_iter().collect()),
+            Value::Dictionary(Box::new([("default".to_string(), set)].into_iter().collect())),
         )?;
         let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Anim")?);
 
@@ -533,7 +542,9 @@ mod tests {
         let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Anim")?);
         assert!(clips.clips()?.is_none());
 
-        let set = Value::Dictionary([(keys::PRIM_PATH.to_string(), Value::String("/Geo".into()))].into());
+        let set = Value::Dictionary(Box::new(
+            [(keys::PRIM_PATH.to_string(), Value::String("/Geo".into()))].into(),
+        ));
         clips.set_clips(sdf::Dictionary::from([("default".to_string(), set)]))?;
 
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string()]);

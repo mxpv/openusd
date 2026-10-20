@@ -37,7 +37,7 @@ macro_rules! gf_array {
                 quote! { ::openusd::gf::$ctor(#(#components),*) }
             })
             .collect();
-        quote! { ::openusd::sdf::Value::$variant(::std::vec![#(#items),*]) }
+        quote! { ::openusd::sdf::Value::$variant(::std::vec![#(#items),*].into()) }
     }};
 }
 
@@ -101,26 +101,28 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
         }
         sdf::Value::AssetPath(path) => {
             let path = path.authored_path.as_str();
-            quote! { ::openusd::sdf::Value::AssetPath(::openusd::sdf::AssetPath::new(#path)) }
+            quote! { ::openusd::sdf::Value::from(::openusd::sdf::AssetPath::new(#path)) }
         }
 
         sdf::Value::BoolVec(values) => quote! { ::openusd::sdf::Value::BoolVec(::std::vec![#(#values),*]) },
-        sdf::Value::UcharVec(values) => quote! { ::openusd::sdf::Value::UcharVec(::std::vec![#(#values),*]) },
-        sdf::Value::IntVec(values) => quote! { ::openusd::sdf::Value::IntVec(::std::vec![#(#values),*]) },
-        sdf::Value::UintVec(values) => quote! { ::openusd::sdf::Value::UintVec(::std::vec![#(#values),*]) },
-        sdf::Value::Int64Vec(values) => quote! { ::openusd::sdf::Value::Int64Vec(::std::vec![#(#values),*]) },
-        sdf::Value::Uint64Vec(values) => quote! { ::openusd::sdf::Value::Uint64Vec(::std::vec![#(#values),*]) },
+        sdf::Value::UcharVec(values) => quote! { ::openusd::sdf::Value::UcharVec((::std::vec![#(#values),*]).into()) },
+        sdf::Value::IntVec(values) => quote! { ::openusd::sdf::Value::IntVec((::std::vec![#(#values),*]).into()) },
+        sdf::Value::UintVec(values) => quote! { ::openusd::sdf::Value::UintVec((::std::vec![#(#values),*]).into()) },
+        sdf::Value::Int64Vec(values) => quote! { ::openusd::sdf::Value::Int64Vec((::std::vec![#(#values),*]).into()) },
+        sdf::Value::Uint64Vec(values) => {
+            quote! { ::openusd::sdf::Value::Uint64Vec((::std::vec![#(#values),*]).into()) }
+        }
         sdf::Value::HalfVec(values) => {
             let values = values.iter().map(|value| half(*value));
-            quote! { ::openusd::sdf::Value::HalfVec(::std::vec![#(#values),*]) }
+            quote! { ::openusd::sdf::Value::HalfVec((::std::vec![#(#values),*]).into()) }
         }
         sdf::Value::FloatVec(values) => {
             let values = values.iter().map(|value| float(*value));
-            quote! { ::openusd::sdf::Value::FloatVec(::std::vec![#(#values),*]) }
+            quote! { ::openusd::sdf::Value::FloatVec((::std::vec![#(#values),*]).into()) }
         }
         sdf::Value::DoubleVec(values) => {
             let values = values.iter().map(|value| double(*value));
-            quote! { ::openusd::sdf::Value::DoubleVec(::std::vec![#(#values),*]) }
+            quote! { ::openusd::sdf::Value::DoubleVec((::std::vec![#(#values),*]).into()) }
         }
         sdf::Value::AssetPathVec(paths) => {
             let paths = paths.iter().map(|path| path.authored_path.as_str());
@@ -162,9 +164,9 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
         sdf::Value::QuatdVec(values) => gf_array!(QuatdVec, quatd, double, values, w, x, y, z),
 
         // The matrix types are not named after the variants that carry them.
-        sdf::Value::Matrix2d(value) => matrix(&value.0, "Matrix2d", "Mat2d"),
-        sdf::Value::Matrix3d(value) => matrix(&value.0, "Matrix3d", "Mat3d"),
-        sdf::Value::Matrix4d(value) => matrix(&value.0, "Matrix4d", "Mat4d"),
+        sdf::Value::Matrix2d(value) => matrix(&value.0, "Mat2d"),
+        sdf::Value::Matrix3d(value) => matrix(&value.0, "Mat3d"),
+        sdf::Value::Matrix4d(value) => matrix(&value.0, "Mat4d"),
         sdf::Value::Matrix2dVec(values) => {
             matrices(values.iter().map(|value| value.0.as_slice()), "Matrix2dVec", "Mat2d")
         }
@@ -184,7 +186,7 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
         sdf::Value::PathExpression(expression) => {
             let text = expression.to_string();
             quote! {
-                ::openusd::sdf::Value::PathExpression(::openusd::sdf::PathExpression::parse(#text))
+                ::openusd::sdf::Value::from(::openusd::sdf::PathExpression::parse(#text))
             }
         }
         sdf::Value::PathExpressionVec(expressions) => {
@@ -197,7 +199,7 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
         }
         sdf::Value::Dictionary(entries) => {
             let entries = dictionary(entries)?;
-            quote! { ::openusd::sdf::Value::Dictionary(#entries) }
+            quote! { ::openusd::sdf::Value::from(#entries) }
         }
         // Named rather than caught by a wildcard: each is a shape no schema
         // can give a property, so a declaration holding one is a mistake to
@@ -234,12 +236,11 @@ pub(super) fn value_expr(value: &sdf::Value) -> Result<TokenStream, sdf::ValueKi
     })
 }
 
-/// A matrix as the row-major array it wraps. `variant` names the value it is
-/// held in and `matrix` the `gf` type, which are not always the same word.
-fn matrix(cells: &[f64], variant: &str, matrix: &str) -> TokenStream {
-    let (variant, matrix) = (ident(variant), ident(matrix));
+/// A matrix value constructed from its row-major cells and `gf` type.
+fn matrix(cells: &[f64], matrix: &str) -> TokenStream {
+    let matrix = ident(matrix);
     let cells = cells.iter().map(|cell| double(*cell));
-    quote! { ::openusd::sdf::Value::#variant(::openusd::gf::#matrix([#(#cells),*])) }
+    quote! { ::openusd::sdf::Value::from(::openusd::gf::#matrix([#(#cells),*])) }
 }
 
 /// An array of matrices, each written as [`matrix`] writes one.
@@ -250,7 +251,7 @@ fn matrices<'a>(cells: impl Iterator<Item = &'a [f64]>, variant: &str, matrix: &
         quote! { ::openusd::gf::#name([#(#cells),*]) }
     });
     let variant = ident(variant);
-    quote! { ::openusd::sdf::Value::#variant(::std::vec![#(#items),*]) }
+    quote! { ::openusd::sdf::Value::#variant(::std::vec![#(#items),*].into()) }
 }
 
 /// A dictionary as the map that rebuilds it.

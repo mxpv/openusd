@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::{panic, thread};
 
 use crate::ar;
 use crate::sdf::{self, expr};
@@ -157,6 +158,20 @@ pub(crate) struct PreparedLayer {
     pub resolved: ar::ResolvedPath,
     /// The layer's data.
     pub data: sdf::LayerData,
+}
+
+/// Resolved locations and decoded data prepared for one load barrier.
+#[derive(Default)]
+pub(crate) struct ReadBatch {
+    resolved: HashMap<String, Option<ar::ResolvedPath>>,
+    decoded: HashMap<String, Result<sdf::LayerData, LoadError>>,
+}
+
+/// One decoder's owned input. Resolvers and layer callbacks stay on the caller.
+struct Decode {
+    resolved: ar::ResolvedPath,
+    bytes: ar::AssetBuffer,
+    format: &'static dyn sdf::FileFormat,
 }
 
 impl Default for LayerRegistry {
@@ -353,6 +368,86 @@ impl LayerRegistry {
         }))
     }
 
+    /// Resolves and acquires inputs on the caller. Multiple inputs totaling
+    /// at least 1 MiB may decode on up to eight available CPUs.
+    pub(crate) fn prepare_reads(&self, identifiers: &[String]) -> ReadBatch {
+        let _scope = ar::CacheScope::begin();
+        let mut batch = ReadBatch::default();
+        let mut pending = Vec::new();
+        let mut seen = HashSet::new();
+        for identifier in identifiers {
+            let resolved = self.resolve_layer(identifier);
+            batch.resolved.insert(identifier.clone(), resolved.clone());
+            let Some(resolved) = resolved else { continue };
+            let name = resolved.to_string();
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let extension = resolved.extension();
+            let ambiguous = extension.eq_ignore_ascii_case("usd");
+            let format = Self::find_by_extension(&extension);
+            if !ambiguous && !format.is_some_and(sdf::FileFormat::reads_only_bytes) {
+                continue;
+            }
+            let bytes = match self
+                .resolver
+                .open_asset(&resolved)
+                .and_then(|asset| asset.into_buffer())
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    batch.decoded.insert(name, Err(sdf::FormatError::from(error).into()));
+                    continue;
+                }
+            };
+            let format = if ambiguous {
+                DEFAULT_FORMATS
+                    .iter()
+                    .copied()
+                    .find(|format| format.matches_content(&bytes))
+            } else {
+                format
+            };
+            match format {
+                Some(format) => pending.push(Decode {
+                    resolved,
+                    bytes,
+                    format,
+                }),
+                None => {
+                    batch
+                        .decoded
+                        .insert(name.clone(), Err(sdf::FormatError::Unrecognized(name.into()).into()));
+                }
+            }
+        }
+        batch.decode(pending);
+        batch
+    }
+
+    /// Opens a stack using data prepared for this barrier before reading afresh.
+    pub(crate) fn open_stack_in(
+        &self,
+        identifier: &str,
+        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        reload: bool,
+        on_error: &dyn Fn(Error) -> Result<(), Error>,
+        already_present: &dyn Fn(&str) -> bool,
+        reads: &mut ReadBatch,
+    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
+        let Some(resolved) = reads.resolve(self, identifier) else {
+            return Ok(None);
+        };
+        let data = reads.read(self, &resolved)?;
+        let root = PreparedLayer {
+            identifier: identifier.to_owned(),
+            resolved,
+            data,
+        };
+        self.open_prepared_stack_in(root, ancestor_expr_vars, reload, on_error, already_present, reads)
+            .map(Some)
+    }
+
     /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
     /// location it resolved to, which for a package is its default packaged
     /// layer, or `None` when it does not resolve.
@@ -456,6 +551,26 @@ impl LayerRegistry {
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Vec<sdf::Layer>, LoadError> {
+        self.open_prepared_stack_in(
+            root,
+            ancestor_expr_vars,
+            reload,
+            on_error,
+            already_present,
+            &mut ReadBatch::default(),
+        )
+    }
+
+    /// Collects a prepared stack, consuming matching decoded buffers in order.
+    fn open_prepared_stack_in(
+        &self,
+        root: PreparedLayer,
+        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        reload: bool,
+        on_error: &dyn Fn(Error) -> Result<(), Error>,
+        already_present: &dyn Fn(&str) -> bool,
+        reads: &mut ReadBatch,
+    ) -> Result<Vec<sdf::Layer>, LoadError> {
         let mut layers = Vec::new();
         let mut visited = HashSet::from([root.identifier.clone()]);
 
@@ -473,6 +588,7 @@ impl LayerRegistry {
             already_present,
             &mut visited,
             &mut layers,
+            reads,
         )?;
         Ok(layers)
     }
@@ -515,6 +631,7 @@ impl LayerRegistry {
             already_present,
             &mut visited,
             &mut layers,
+            &mut ReadBatch::default(),
         )?;
         Ok(Some(layers))
     }
@@ -564,6 +681,7 @@ impl LayerRegistry {
         already_present: &dyn Fn(&str) -> bool,
         visited: &mut HashSet<String>,
         layers: &mut Vec<sdf::Layer>,
+        reads: &mut ReadBatch,
     ) -> Result<(), LoadError> {
         let PreparedLayer {
             identifier,
@@ -644,7 +762,7 @@ impl LayerRegistry {
             // added to the pass-wide `visited`: each referencing layer records its own
             // edge, so a shared missing layer reached from several layers is reported
             // once per referrer and the composition layer can suppress by referrer.
-            let Some(sub_resolved) = self.resolve_layer(&sub_id) else {
+            let Some(sub_resolved) = reads.resolve(self, &sub_id) else {
                 on_error(Error::UnresolvedAsset {
                     asset_path: sub_asset,
                     referencing_layer: identifier.clone(),
@@ -656,7 +774,7 @@ impl LayerRegistry {
             // like a missing one — reported at this referencing site and, being a
             // leaf, left out of `visited` (dropping only this layer; the root's read
             // failure propagated from `open_stack`).
-            let sub_data = match self.read(&sub_resolved) {
+            let sub_data = match reads.read(self, &sub_resolved) {
                 Ok(data) => data,
                 Err(reason) => {
                     on_error(Error::UnreadableAsset {
@@ -684,6 +802,7 @@ impl LayerRegistry {
                 already_present,
                 visited,
                 layers,
+                reads,
             )?;
         }
 
@@ -698,11 +817,179 @@ impl LayerRegistry {
     }
 }
 
+impl Decode {
+    fn run(self) -> (String, Result<sdf::LayerData, LoadError>) {
+        let name = self.resolved.to_string();
+        let data = self.format.read_bytes(self.bytes, &name).map_err(LoadError::from);
+        (name, data)
+    }
+}
+
+impl ReadBatch {
+    /// Opens a stack with the reads prepared for this load barrier.
+    pub(crate) fn open_stack(
+        &mut self,
+        registry: &LayerRegistry,
+        identifier: &str,
+        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        reload: bool,
+        on_error: &dyn Fn(Error) -> Result<(), Error>,
+        already_present: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
+        if self.resolved.is_empty() && self.decoded.is_empty() {
+            registry.open_stack(identifier, ancestor_expr_vars, reload, on_error, already_present)
+        } else {
+            registry.open_stack_in(identifier, ancestor_expr_vars, reload, on_error, already_present, self)
+        }
+    }
+
+    fn decode(&mut self, pending: Vec<Decode>) {
+        let bytes: usize = pending
+            .iter()
+            .fold(0usize, |sum, input| sum.saturating_add(input.bytes.len()));
+        let workers = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(8)
+            .min(pending.len());
+        if workers < 2 || bytes < (1 << 20) {
+            self.decoded.extend(pending.into_iter().map(Decode::run));
+        } else {
+            let mut groups: Vec<Vec<Decode>> = (0..workers).map(|_| Vec::new()).collect();
+            for (index, input) in pending.into_iter().enumerate() {
+                groups[index % workers].push(input);
+            }
+            thread::scope(|scope| {
+                let handles: Vec<_> = groups
+                    .into_iter()
+                    .map(|group| scope.spawn(move || group.into_iter().map(Decode::run).collect::<Vec<_>>()))
+                    .collect();
+                for handle in handles {
+                    match handle.join() {
+                        Ok(decoded) => self.decoded.extend(decoded),
+                        Err(payload) => panic::resume_unwind(payload),
+                    }
+                }
+            });
+        }
+    }
+
+    fn resolve(&mut self, registry: &LayerRegistry, identifier: &str) -> Option<ar::ResolvedPath> {
+        self.resolved
+            .remove(identifier)
+            .unwrap_or_else(|| registry.resolve_layer(identifier))
+    }
+
+    fn read(&mut self, registry: &LayerRegistry, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
+        self.decoded
+            .remove(&resolved.to_string())
+            .unwrap_or_else(|| registry.read(resolved))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::fs;
+
     use super::*;
     use crate::Result;
     use crate::sdf::FileFormatCaps;
+
+    struct Marker;
+    static MARKER: Marker = Marker;
+
+    impl sdf::FileFormat for Marker {
+        fn format_id(&self) -> tf::Token {
+            "marker".into()
+        }
+        fn extensions(&self) -> &[&str] {
+            &["test"]
+        }
+        fn reads_only_bytes(&self) -> bool {
+            true
+        }
+        fn read_bytes(&self, _bytes: ar::AssetBuffer, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+            if source_name.contains("bad") {
+                return Err(sdf::FormatError::Unrecognized(source_name.into()));
+            }
+            let mut data = sdf::Data::new();
+            data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
+                .add("thread", sdf::Value::String(format!("{:?}", thread::current().id())));
+            Ok(Box::new(data))
+        }
+        fn write(&self, _data: &dyn sdf::AbstractData, _out: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
+            Err(sdf::FormatError::Encode {
+                reason: "test format".into(),
+            })
+        }
+    }
+
+    fn marker(name: &str, size: usize) -> Decode {
+        Decode {
+            resolved: ar::ResolvedPath::new(name),
+            bytes: vec![0; size].into(),
+            format: &MARKER,
+        }
+    }
+
+    #[test]
+    fn decoder_parallel_cutoff() -> Result<()> {
+        let owner = format!("{:?}", thread::current().id());
+        for size in [1, 1 << 20] {
+            let mut batch = ReadBatch::default();
+            batch.decode(vec![marker("one.test", size), marker("two.test", size)]);
+            let parallel = size >= (1 << 20) && thread::available_parallelism().is_ok_and(|n| n.get() > 1);
+            let mut threads = HashSet::new();
+            for data in batch.decoded.into_values() {
+                let name = data?
+                    .try_field(&sdf::Path::abs_root(), "thread")?
+                    .unwrap()
+                    .into_owned()
+                    .try_as_string()
+                    .unwrap();
+                assert_eq!(name != owner, parallel);
+                threads.insert(name);
+            }
+            assert_eq!(threads.len(), if parallel { 2 } else { 1 });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decoder_failures_isolated() {
+        let mut batch = ReadBatch::default();
+        batch.decode(vec![marker("good.test", 1 << 20), marker("bad.test", 1 << 20)]);
+        assert!(batch.decoded["good.test"].is_ok());
+        assert!(batch.decoded["bad.test"].is_err());
+    }
+
+    #[test]
+    fn prepared_sublayers_reused() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let first = dir.path().join("A.usd");
+        let second = dir.path().join("B.usda");
+        let padding = format!("# {}\n", "padding".repeat(90_000));
+        fs::write(
+            &first,
+            format!("#usda 1.0\n(subLayers = [@B.usda@])\ndef \"A\" {{}}\n{padding}"),
+        )?;
+        fs::write(&second, format!("#usda 1.0\ndef \"B\" {{}}\n{padding}"))?;
+        let registry = LayerRegistry::default();
+        let first = registry.create_identifier(first.to_str().unwrap(), None);
+        let second = registry.create_identifier(second.to_str().unwrap(), None);
+        let mut batch = registry.prepare_reads(&[first.clone(), second.clone()]);
+        assert_eq!(batch.decoded.len(), 2);
+        let layers = batch
+            .open_stack(&registry, &first, &HashMap::new(), false, &|_| Ok(()), &|_| false)?
+            .unwrap();
+        assert_eq!(
+            layers.iter().map(|layer| layer.identifier.as_str()).collect::<Vec<_>>(),
+            [first.as_str(), second.as_str()]
+        );
+        assert!(layers[1].data().has_spec(&sdf::Path::new("/B")?));
+        assert!(batch.decoded.is_empty());
+        assert!(batch.resolved.is_empty());
+        Ok(())
+    }
 
     /// Opens a root layer and the full transitive closure of its sublayers,
     /// references, and payloads — the layer set a fully-composed (and fully-
@@ -795,7 +1082,7 @@ pub(crate) mod tests {
                 && let sdf::Value::TokenVec(children) = value.into_owned()
             {
                 for name in children.iter().rev() {
-                    if let Ok(child) = path.append_path(name.as_str()) {
+                    if let Ok(child) = path.append_child(name.as_str()) {
                         queue.push(child);
                     }
                 }

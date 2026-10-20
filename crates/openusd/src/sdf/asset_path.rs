@@ -309,9 +309,9 @@ fn map_paths(
     let mut outcome = AssetOutcome::Evaluated;
     let value = match value {
         sdf::Value::AssetPath(asset) => {
-            let (asset, element) = f(asset);
+            let (asset, element) = f(*asset);
             outcome = element;
-            sdf::Value::AssetPath(asset)
+            sdf::Value::AssetPath(Box::new(asset))
         }
         sdf::Value::AssetPathVec(assets) => sdf::Value::AssetPathVec(
             assets
@@ -425,7 +425,7 @@ mod tests {
     fn no_scope_skips_expression() {
         let registry = sdf::LayerRegistry::default();
         let mut errors = Vec::new();
-        let value = sdf::Value::AssetPath(AssetPath::new("`${A}`"));
+        let value = sdf::Value::AssetPath(Box::new(AssetPath::new("`${A}`")));
 
         let value = resolve_asset_paths(&registry, None, None, value, &mut errors);
 
@@ -447,7 +447,7 @@ mod tests {
 
         let registry = sdf::LayerRegistry::default();
         let mut errors = Vec::new();
-        let value = sdf::Value::AssetPath(AssetPath::new(authored));
+        let value = sdf::Value::AssetPath(Box::new(AssetPath::new(authored)));
 
         let value = resolve_asset_paths(&registry, None, None, value, &mut errors);
 

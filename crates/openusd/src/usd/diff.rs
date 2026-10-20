@@ -1204,11 +1204,11 @@ mod tests {
             stage.define_prim("/Source")?.create_attribute("x", "double")?;
             stage.define_prim("/Prim")?.set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     layer_offset: sdf::LayerOffset::new(10.0, 1.0),
                     ..Default::default()
-                }])),
+                }]))),
             )?;
             Ok(stage)
         };
@@ -1264,11 +1264,11 @@ mod tests {
             stage.define_prim("/Source")?.create_attribute("t", "timecode")?;
             stage.define_prim("/Prim")?.set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     layer_offset: sdf::LayerOffset::new(10.0, 1.0),
                     ..Default::default()
-                }])),
+                }]))),
             )?;
             Ok(stage)
         };

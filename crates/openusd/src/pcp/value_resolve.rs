@@ -364,16 +364,16 @@ pub(crate) struct OpinionSite<'a> {
     /// That layer's time offset folded to the root namespace — C++
     /// `_GetLayerToStageOffset(node, layer)`, precomputed on the spec stack.
     pub(crate) offset: sdf::LayerOffset,
-    /// The property path queried in `layer`.
-    pub(crate) query_path: sdf::Path,
+    /// The borrowed property query in the node's namespace.
+    pub(crate) query: sdf::PathQuery<'a>,
 }
 
 /// A site the walk selected, kept by value so a consumer can act on it once the
 /// walk has released the index — the same three facts a C++ resolver stashes on
 /// its resolve info (`_layer`, `_layerStack`, `_primPathInLayerStack`).
 ///
-/// Cheap to build: no string is copied, unlike the [`AssetSite`] a consumer
-/// derives from it only for a value that turns out to hold asset paths.
+/// Retaining a site materializes its property path. Asset-valued answers
+/// also use it to derive their [`AssetSite`].
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedSite {
     pub(crate) layer: LayerId,
@@ -382,26 +382,31 @@ pub(crate) struct SelectedSite {
 }
 
 impl OpinionSite<'_> {
+    /// Materializes the property path in the node's namespace.
+    pub(crate) fn query_path(&self) -> sdf::Path {
+        self.query.to_path().into_owned()
+    }
+
     /// This site as a [`SelectedSite`], for a resolver whose answer is finished
     /// after the walk.
     pub(crate) fn select(&self) -> SelectedSite {
         SelectedSite {
             layer: self.layer,
             layer_stack: self.node.layer_stack_id(),
-            query_path: self.query_path.clone(),
+            query_path: self.query_path(),
         }
     }
 
     /// This site as a property stack lists it: the layer, the path inside it,
     /// and the offset that reaches it.
     pub(crate) fn spec_record(&self, graph: &LayerGraph) -> SpecSiteRecord {
-        SpecSiteRecord::in_graph(graph, self.layer, self.query_path.clone(), self.offset)
+        SpecSiteRecord::in_graph(graph, self.layer, self.query_path(), self.offset)
     }
 
     /// Provenance for an `asset` value authored here. Copies two strings, so
     /// build it only for a value that actually holds asset paths.
     pub(crate) fn asset_site(&self, graph: &LayerGraph) -> AssetSite {
-        AssetSite::in_graph(graph, self.node.layer_stack_id(), self.layer, &self.query_path)
+        AssetSite::in_graph(graph, self.node.layer_stack_id(), self.layer, &self.query_path())
     }
 }
 

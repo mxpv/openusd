@@ -31,11 +31,14 @@ source of truth for specifics.
 
 - **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model.
   `AbstractData` is the unified read/write backend interface the text, binary,
-  and archive readers all implement; `Value`, `Path`, and `Layer` (C++
-  `SdfLayer`) are the everyday types. A `Layer`'s edits run through
-  `Layer::edit` (a closure over a `LayerEdit` view) as atomic copy-on-write
-  transactions that derive a `ChangeList` for composition invalidation and fire
-  per-layer `LayerSink`s at the commit seam (`sdf/layer.rs`, `sdf/change.rs`,
+  and archive readers all implement; `Value`, `Array`, `Path`, and `Layer`
+  (C++ `SdfLayer`) are the everyday types. `Array` holds numeric elements with
+  shared storage. `PathQuery` is the borrowed lookup key for `PathMap` and
+  `PathTable`; `LayerData` is the thread-safe layer backend. A `Layer`'s edits
+  run through `Layer::edit` (a closure over a `LayerEdit` view) as atomic
+  copy-on-write transactions that derive a `ChangeList` for composition
+  invalidation and fire per-layer `LayerSink`s at the commit seam
+  (`sdf/layer.rs`, `sdf/change.rs`,
   `sdf/sink.rs`); spec authoring lives on the typed views (`PrimSpec::new` and
   friends). Also here: the pluggable `FileFormat` read/write seam, the
   `LayerRegistry` that owns asset loading and format dispatch (composition opens

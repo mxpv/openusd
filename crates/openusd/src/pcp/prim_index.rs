@@ -10,6 +10,7 @@ use std::{iter, mem};
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Value};
+use crate::tf;
 
 use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;
@@ -154,12 +155,33 @@ pub(crate) struct PrimEntry {
     /// while the revision matches: after a rebuild, a restale or a spec
     /// refresh, the next query answers afresh.
     pub(super) instanceable: Option<(PrimRevision, bool)>,
+    /// Composed child names under this revision, population epoch, and local
+    /// partition.
+    /// Population masks are applied by the caller after reading the names.
+    pub(super) child_names: Option<Box<ChildNames>>,
+    /// Composed property names and spec types under this revision.
+    pub(super) property_kinds: Option<Box<PropertyKinds>>,
     /// Validity token for answers resolved from this prim's composed state.
     ///
     /// Written only by [`IndexStore`](super::index_store::IndexStore), which
     /// mints every value and stamps a fresh one wherever it inserts an entry or
     /// mutates one in place. See [`PrimRevision`].
     pub(super) revision: PrimRevision,
+}
+
+/// A child-name fold tied to its index and instance-local partition.
+pub(super) struct ChildNames {
+    pub revision: PrimRevision,
+    pub population_epoch: u64,
+    pub drop_local: bool,
+    pub order: Vec<tf::Token>,
+    pub prohibited: Vec<tf::Token>,
+}
+
+/// A property-name fold tied to its prim's composition revision.
+pub(super) struct PropertyKinds {
+    pub revision: PrimRevision,
+    pub items: Vec<(tf::Token, Option<sdf::SpecType>)>,
 }
 
 /// Which path-list-op field a [`TargetMemo`] resolved. Narrower than
@@ -1474,6 +1496,8 @@ pub(crate) mod tests {
                         property_errors: Diagnostics::default(),
                         resolved_targets: HashMap::new(),
                         instanceable: None,
+                        child_names: None,
+                        property_kinds: None,
                         revision: PrimRevision::placeholder(),
                     },
                 );
@@ -1495,13 +1519,13 @@ pub(crate) mod tests {
     }
 
     /// Builds a single-layer stack from in-memory `root.usd` data.
-    fn one_layer_stack(root: Box<dyn sdf::AbstractData>) -> LayerGraph {
+    fn one_layer_stack(root: sdf::LayerData) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root)];
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
     /// Builds a two-layer stack from in-memory `root.usd` + `ref.usd` data.
-    fn two_layer_stack(root: Box<dyn sdf::AbstractData>, refl: Box<dyn sdf::AbstractData>) -> LayerGraph {
+    fn two_layer_stack(root: sdf::LayerData, refl: sdf::LayerData) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
@@ -2096,7 +2120,7 @@ def \"B\" { custom double y = 2 }
 
     // --- CompositionDiagnostic reporting ---
 
-    fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
+    fn parse_usda(text: &str) -> sdf::LayerData {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         Box::new(sdf::Data::from_specs(data))
     }

@@ -83,7 +83,7 @@ fn vec_f64(v: &Value) -> Vec<f64> {
     match v {
         Value::HalfVec(a) => a.iter().map(|x| x.to_f64()).collect(),
         Value::FloatVec(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::DoubleVec(a) => a.clone(),
+        Value::DoubleVec(a) => a.to_vec(),
         Value::TimeCodeVec(a) => a.iter().map(|t| t.value()).collect(),
         other => panic!("not a scalar float array: {other:?}"),
     }
@@ -298,7 +298,7 @@ fn uchar_values() {
     assert_eq!(value(&data, "/root.single", "default"), Value::Uchar(255));
     assert_eq!(
         value(&data, "/root.array", "default"),
-        Value::UcharVec(vec![0, 1, 2, 3, 4, 255])
+        Value::UcharVec((vec![0, 1, 2, 3, 4, 255]).into())
     );
 }
 
@@ -308,7 +308,7 @@ fn int_values() {
     assert_eq!(value(&data, "/root.single", "default"), Value::Int(-2147483647));
     assert_eq!(
         value(&data, "/root.array", "default"),
-        Value::IntVec(vec![-2147483647, 0, 1, 2, 3, 4, 2147483647])
+        Value::IntVec((vec![-2147483647, 0, 1, 2, 3, 4, 2147483647]).into())
     );
 }
 
@@ -318,7 +318,7 @@ fn uint_values() {
     assert_eq!(value(&data, "/root.single", "default"), Value::Uint(4294967295));
     assert_eq!(
         value(&data, "/root.array", "default"),
-        Value::UintVec(vec![0, 1, 2, 3, 4, 4294967295])
+        Value::UintVec((vec![0, 1, 2, 3, 4, 4294967295]).into())
     );
 }
 
@@ -331,7 +331,7 @@ fn int64_values() {
     );
     assert_eq!(
         value(&data, "/root.array", "default"),
-        Value::Int64Vec(vec![-9223372036854775807, 0, 1, 2, 3, 4, 9223372036854775807])
+        Value::Int64Vec((vec![-9223372036854775807, 0, 1, 2, 3, 4, 9223372036854775807]).into())
     );
 }
 
@@ -344,7 +344,7 @@ fn uint64_values() {
     );
     assert_eq!(
         value(&data, "/root.array", "default"),
-        Value::Uint64Vec(vec![0, 1, 2, 3, 4, 18446744073709551615])
+        Value::Uint64Vec((vec![0, 1, 2, 3, 4, 18446744073709551615]).into())
     );
 }
 
@@ -383,7 +383,7 @@ fn path_expression_values() {
     let data = scene("pathexpression");
     assert_eq!(
         value(&data, "/root.single", "default"),
-        Value::PathExpression(sdf::PathExpression::parse("/root/Foo"))
+        Value::PathExpression(Box::new(sdf::PathExpression::parse("/root/Foo")))
     );
     let array = str_vec(&value(&data, "/root.array", "default"));
     assert_eq!(array, vec!["/root/Spam", "/root/Eggs"]);

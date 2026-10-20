@@ -56,6 +56,15 @@ def main():
     parser.add_argument("--rust", type=Path, required=True)
     parser.add_argument("--cpp", type=Path, required=True)
     parser.add_argument("--before", type=Path)
+    parser.add_argument("--rust-variant", action="append", default=[], metavar="NAME=PATH",
+                        help="include another Rust build with authored enumeration")
+    parser.add_argument("--before-authored", action="store_true",
+                        help="use authored enumeration in a baseline that supports it")
+    parser.add_argument("--rust-cpu", type=int,
+                        help="pin all Rust builds to one CPU using taskset")
+    parser.add_argument("--rust-mmap", action="store_true",
+                        help="use mapped reads in all Rust builds")
+    parser.add_argument("--alternate-order", action="store_true")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=600)
@@ -64,9 +73,16 @@ def main():
     args = parser.parse_args()
     if args.runs < 1 or args.warmups < 0:
         parser.error("runs must be positive and warmups nonnegative")
-    binaries = {"rust": args.rust, "cpp": args.cpp}
-    if args.before:
-        binaries = {"before": args.before, **binaries}
+    if args.rust_cpu is not None and args.rust_cpu not in os.sched_getaffinity(0):
+        parser.error("rust-cpu must belong to the current CPU affinity set")
+    binaries = {"before": args.before} if args.before else {}
+    for variant in args.rust_variant:
+        name, separator, path = variant.partition("=")
+        if (not separator or not re.fullmatch(r"[A-Za-z0-9_-]+", name)
+                or not path or name in {*binaries, "before", "rust", "cpp"}):
+            parser.error("rust-variant requires a unique NAME=PATH")
+        binaries[name] = Path(path)
+    binaries.update(rust=args.rust, cpp=args.cpp)
     results = {name: [] for name in binaries}
     report = {
         "root": str(args.root.resolve()),
@@ -80,18 +96,29 @@ def main():
         "options": ["--proxies", "--authored", "--no-heap"],
         "commands": {},
         "warmups": args.warmups,
+        "rust_cpu": args.rust_cpu,
+        "rust_mmap": args.rust_mmap,
+        "run_order": [],
         "results": results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     expected = {}
     for run in range(-args.warmups, args.runs):
-        for name, binary in binaries.items():
+        ordered = list(binaries.items())
+        if args.alternate_order and run >= 0 and run % 2:
+            ordered.reverse()
+        report["run_order"].append({"round": run + 1, "labels": [name for name, _ in ordered]})
+        for name, binary in ordered:
             # Older Rust benchmarks enumerate the same authored-only domain
             # properties through their core-only schema registry.
             options = ["--proxies", "--no-heap"]
-            if name != "before":
+            if name != "before" or args.before_authored:
                 options.append("--authored")
+            if name != "cpp" and args.rust_mmap:
+                options.append("--mmap")
             command = [str(binary.resolve()), *options, str(args.root.resolve())]
+            if args.rust_cpu is not None and name != "cpp":
+                command = ["taskset", "--cpu-list", str(args.rust_cpu), *command]
             report["commands"][name] = command
             result = measure(command, args.timeout)
             for key, count in result["counts"].items():
@@ -113,6 +140,8 @@ def main():
             command = [str(binary.resolve()), "--proxies", "--no-heap",
                        "--until", "metadata", "--status", str(status.resolve()),
                        str(args.root.resolve())]
+            if name != "cpp" and args.rust_mmap:
+                command.insert(1, "--mmap")
             process = subprocess.run(command, capture_output=True, text=True,
                                      timeout=args.timeout)
             if process.returncode:

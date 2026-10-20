@@ -616,11 +616,11 @@ def "B" (
         let prim = sdf::path("/A")?;
         let payload = FieldKey::Payload.as_str();
         layer.edit(|edit| {
-            let value = Value::Payload(sdf::Payload {
+            let value = Value::Payload(Box::new(sdf::Payload {
                 asset_path: "./pay.usda".to_owned(),
                 prim_path: sdf::path("/P")?,
                 ..Default::default()
-            });
+            }));
             edit.data_mut().set_field(&prim, payload, value);
             Ok(())
         })?;

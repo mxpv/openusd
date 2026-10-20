@@ -1,0 +1,1364 @@
+{
+  "date": "2026-10-20",
+  "baseline_report": "moana-property-results.json",
+  "changes": [
+    "PathQuery retains borrowed path components and a cached hash; text and crate field reads use one compound-key lookup.",
+    "Box forwards borrowed field queries; CowData preserves overlay edits and forwards directly when its overlay is empty.",
+    "Value resolution reuses a key per node, materializes retained provenance paths, and obtains expression anchors lazily.",
+    "Spec-stack value walks use their recorded prim-spec presence; wider clip walks retain per-layer presence checks.",
+    "Compound-key equality compares byte ranges and is marked inline."
+  ],
+  "validation": {
+    "workspace_tests": {
+      "passed": 3994,
+      "failed": 0,
+      "ignored": 1
+    },
+    "clippy": "passed; workspace all targets all features -D warnings",
+    "docs": "passed; workspace no deps all features",
+    "deny": "passed offline with copied cached advisory DB and project policy",
+    "format": "passed",
+    "diff_check": "passed",
+    "ordinary_reader": {
+      "counts": {
+        "prims": 416549,
+        "arrays": 1425154,
+        "elements": 627170615
+      },
+      "status_records_matched": 416549,
+      "measurement": "One final-binary ordinary-reader correctness run; not a comparative timing series."
+    },
+    "nested": {
+      "root": "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda",
+      "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+      "cpu_count": 72,
+      "binaries": {
+        "before": "/tmp/openusd-query-equality/before",
+        "rust": "/tmp/openusd-query-equality/after",
+        "cpp": "/tmp/openusd-reference/open_bench"
+      },
+      "binary_sha256": {
+        "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+        "rust": "3fa42842e01e7e20e78f3fd0bdbba2e5ffe8cc42fc2c6be8fc42df6a08bd8b8a",
+        "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "options": [
+        "--proxies",
+        "--authored",
+        "--no-heap"
+      ],
+      "commands": {
+        "before": [
+          "/tmp/openusd-query-equality/before",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+        ],
+        "rust": [
+          "/tmp/openusd-query-equality/after",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+        ],
+        "cpp": [
+          "/tmp/openusd-reference/open_bench",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+        ]
+      },
+      "warmups": 0,
+      "rust_cpu": null,
+      "rust_mmap": false,
+      "run_order": [
+        {
+          "round": 1,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        }
+      ],
+      "results": {
+        "before": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 0.0,
+              "arrays": 0.0
+            },
+            "total": 0.001,
+            "process_seconds": 0.004316177000873722,
+            "peak_rss_mib": 6.0,
+            "counts": {
+              "prims": 9,
+              "arrays": 0,
+              "elements": 0
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.7 MiB  faults +65 (hard +0)  \nmetadata     0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +9 (hard +0)  prims: 9\narrays       0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +0 (hard +0)  arrays: 0  elements: 0  decoded: 0.0 MiB\ngraphs: 11  shared node data 8  copies 4  nodes copied 11\nheap peak: 0.0 MiB\nworking set peak: 6.0 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "rust": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 0.0,
+              "arrays": 0.0
+            },
+            "total": 0.001,
+            "process_seconds": 0.004494713008170947,
+            "peak_rss_mib": 6.0,
+            "counts": {
+              "prims": 9,
+              "arrays": 0,
+              "elements": 0
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.7 MiB  faults +64 (hard +0)  \nmetadata     0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +9 (hard +0)  prims: 9\narrays       0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +0 (hard +0)  arrays: 0  elements: 0  decoded: 0.0 MiB\ngraphs: 11  shared node data 8  copies 4  nodes copied 11\nheap peak: 0.0 MiB\nworking set peak: 6.0 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "cpp": [
+          {
+            "phases": {
+              "open": 0.023003,
+              "metadata": 5.9e-05,
+              "arrays": 0.006145
+            },
+            "total": 0.029207,
+            "process_seconds": 0.052570566011127084,
+            "peak_rss_mib": 40.5,
+            "counts": {
+              "prims": 9,
+              "arrays": 0,
+              "elements": 0
+            },
+            "output": "open 0.023003s\nmetadata 0.000059s prims: 9\narrays 0.006145s arrays: 0 elements: 0\nrss_kib: 41472\n"
+          }
+        ]
+      },
+      "status_records_matched": 9
+    },
+    "alab": {
+      "root": "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda",
+      "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+      "cpu_count": 72,
+      "binaries": {
+        "before": "/tmp/openusd-query-equality/before",
+        "rust": "/tmp/openusd-query-equality/after",
+        "cpp": "/tmp/openusd-reference/open_bench"
+      },
+      "binary_sha256": {
+        "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+        "rust": "3fa42842e01e7e20e78f3fd0bdbba2e5ffe8cc42fc2c6be8fc42df6a08bd8b8a",
+        "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "options": [
+        "--proxies",
+        "--authored",
+        "--no-heap"
+      ],
+      "commands": {
+        "before": [
+          "/tmp/openusd-query-equality/before",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+        ],
+        "rust": [
+          "/tmp/openusd-query-equality/after",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+        ],
+        "cpp": [
+          "/tmp/openusd-reference/open_bench",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+        ]
+      },
+      "warmups": 0,
+      "rust_cpu": null,
+      "rust_mmap": false,
+      "run_order": [
+        {
+          "round": 1,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        }
+      ],
+      "results": {
+        "before": [
+          {
+            "phases": {
+              "open": 0.0,
+              "metadata": 0.001,
+              "arrays": 0.0
+            },
+            "total": 0.001,
+            "process_seconds": 0.00417520799965132,
+            "peak_rss_mib": 6.3,
+            "counts": {
+              "prims": 8,
+              "arrays": 50,
+              "elements": 16530
+            },
+            "output": "open         0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.7 MiB  faults +68 (hard +0)  \nmetadata     0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.2 MiB  faults +39 (hard +0)  prims: 8\narrays       0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.3 MiB  faults +5 (hard +0)  arrays: 50  elements: 16530  decoded: 0.1 MiB\ngraphs: 9  shared node data 5  copies 3  nodes copied 12\nheap peak: 0.0 MiB\nworking set peak: 6.3 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "rust": [
+          {
+            "phases": {
+              "open": 0.0,
+              "metadata": 0.001,
+              "arrays": 0.0
+            },
+            "total": 0.001,
+            "process_seconds": 0.004163621997577138,
+            "peak_rss_mib": 6.3,
+            "counts": {
+              "prims": 8,
+              "arrays": 50,
+              "elements": 16530
+            },
+            "output": "open         0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +71 (hard +0)  \nmetadata     0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.2 MiB  faults +37 (hard +0)  prims: 8\narrays       0.000s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.3 MiB  faults +4 (hard +0)  arrays: 50  elements: 16530  decoded: 0.1 MiB\ngraphs: 9  shared node data 5  copies 3  nodes copied 12\nheap peak: 0.0 MiB\nworking set peak: 6.3 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "cpp": [
+          {
+            "phases": {
+              "open": 0.021811,
+              "metadata": 1.5e-05,
+              "arrays": 0.006763
+            },
+            "total": 0.028589000000000003,
+            "process_seconds": 0.05442759000288788,
+            "peak_rss_mib": 41.625,
+            "counts": {
+              "prims": 8,
+              "arrays": 50,
+              "elements": 16530
+            },
+            "output": "open 0.021811s\nmetadata 0.000015s prims: 8\narrays 0.006763s arrays: 50 elements: 16530\nrss_kib: 42624\n"
+          }
+        ]
+      },
+      "status_records_matched": 8
+    }
+  },
+  "mapped_reads": {
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+    "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+    "cpu_count": 72,
+    "binaries": {
+      "before": "/tmp/openusd-query-equality/before",
+      "rust": "/tmp/openusd-query-equality/after",
+      "cpp": "/tmp/openusd-reference/open_bench"
+    },
+    "binary_sha256": {
+      "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+      "rust": "3fa42842e01e7e20e78f3fd0bdbba2e5ffe8cc42fc2c6be8fc42df6a08bd8b8a",
+      "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+    },
+    "options": [
+      "--proxies",
+      "--authored",
+      "--no-heap"
+    ],
+    "commands": {
+      "before": [
+        "/tmp/openusd-query-equality/before",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "--mmap",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "rust": [
+        "/tmp/openusd-query-equality/after",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "--mmap",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp": [
+        "/tmp/openusd-reference/open_bench",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ]
+    },
+    "warmups": 1,
+    "rust_cpu": null,
+    "rust_mmap": true,
+    "run_order": [
+      {
+        "round": 0,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 1,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 2,
+        "labels": [
+          "cpp",
+          "rust",
+          "before"
+        ]
+      },
+      {
+        "round": 3,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      }
+    ],
+    "results": {
+      "before": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.448,
+            "arrays": 14.786
+          },
+          "total": 29.235,
+          "process_seconds": 36.763277354999445,
+          "peak_rss_mib": 6138.4,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +118 (hard +0)  \nmetadata    14.448s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.5 MiB  faults +598468 (hard +0)  prims: 416549\narrays      14.786s  retained +   0.0 MiB  peak    0.0 MiB  ws 5877.7 MiB  faults +90648 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6138.4 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.485,
+            "arrays": 15.002
+          },
+          "total": 29.488,
+          "process_seconds": 36.624342744005844,
+          "peak_rss_mib": 6138.1,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +117 (hard +0)  \nmetadata    14.485s  retained +   0.0 MiB  peak    0.0 MiB  ws 2803.1 MiB  faults +600158 (hard +0)  prims: 416549\narrays      15.002s  retained +   0.0 MiB  peak    0.0 MiB  ws 5878.2 MiB  faults +91827 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6138.1 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.463,
+            "arrays": 15.487
+          },
+          "total": 29.951,
+          "process_seconds": 37.2216277270054,
+          "peak_rss_mib": 6138.2,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.7 MiB  faults +115 (hard +0)  \nmetadata    14.463s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.3 MiB  faults +595903 (hard +0)  prims: 416549\narrays      15.487s  retained +   0.0 MiB  peak    0.0 MiB  ws 5877.5 MiB  faults +91084 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6138.2 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+        }
+      ],
+      "rust": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.178,
+            "arrays": 14.379
+          },
+          "total": 28.558,
+          "process_seconds": 35.85409838799387,
+          "peak_rss_mib": 6135.0,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.8 MiB  faults +115 (hard +0)  \nmetadata    14.178s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.1 MiB  faults +597946 (hard +0)  prims: 416549\narrays      14.379s  retained +   0.0 MiB  peak    0.0 MiB  ws 5874.5 MiB  faults +90065 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6135.0 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.642,
+            "arrays": 14.191
+          },
+          "total": 28.834,
+          "process_seconds": 36.27675501500198,
+          "peak_rss_mib": 6135.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +119 (hard +0)  \nmetadata    14.642s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.9 MiB  faults +599668 (hard +0)  prims: 416549\narrays      14.191s  retained +   0.0 MiB  peak    0.0 MiB  ws 5875.4 MiB  faults +91394 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6135.8 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 15.097,
+            "arrays": 14.816
+          },
+          "total": 29.915,
+          "process_seconds": 37.375354971998604,
+          "peak_rss_mib": 6135.3,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open         0.002s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.8 MiB  faults +115 (hard +0)  \nmetadata    15.097s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.5 MiB  faults +596970 (hard +0)  prims: 416549\narrays      14.816s  retained +   0.0 MiB  peak    0.0 MiB  ws 5874.8 MiB  faults +89722 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6135.3 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+        }
+      ],
+      "cpp": [
+        {
+          "phases": {
+            "open": 4.183057,
+            "metadata": 1.107916,
+            "arrays": 9.406996
+          },
+          "total": 14.697968999999999,
+          "process_seconds": 15.0586076269974,
+          "peak_rss_mib": 1783.78515625,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open 4.183057s\nmetadata 1.107916s prims: 416549\narrays 9.406996s arrays: 1425154 elements: 627170615\nrss_kib: 1826596\n"
+        },
+        {
+          "phases": {
+            "open": 4.705529,
+            "metadata": 1.107227,
+            "arrays": 10.916082
+          },
+          "total": 16.728838,
+          "process_seconds": 17.10341553699982,
+          "peak_rss_mib": 1779.8671875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open 4.705529s\nmetadata 1.107227s prims: 416549\narrays 10.916082s arrays: 1425154 elements: 627170615\nrss_kib: 1822584\n"
+        },
+        {
+          "phases": {
+            "open": 4.034895,
+            "metadata": 1.001272,
+            "arrays": 10.655428
+          },
+          "total": 15.691595,
+          "process_seconds": 16.075772049996885,
+          "peak_rss_mib": 1788.76953125,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          },
+          "output": "open 4.034895s\nmetadata 1.001272s prims: 416549\narrays 10.655428s arrays: 1425154 elements: 627170615\nrss_kib: 1831700\n"
+        }
+      ]
+    },
+    "status_records_matched": 416549
+  },
+  "intermediate_candidate": {
+    "description": "Borrowed field-query candidate before the byte comparison refinement. Separate complete, isolated timing series; percentages are not combined with the final series.",
+    "provenance": {
+      "source_sha256": {
+        "Cargo.lock": "e60c88386e735600ba7af544edc068dc49114e57add3a70788eac661dda76fca",
+        "benchmarks/compare.py": "414fc039d1944ed341605d11be6459124fce1433afea38a4c1ffa53a6d3971ef",
+        "benchmarks/open_bench.cpp": "54f6344073bc105a4ed6e04af08c18ea2baef07457112a63298ec2a84770e093",
+        "crates/openusd-build/src/emit/value.rs": "a41cd3895c345a4ee362a5bb999465d40cbebcb0b05cea1e70f5e31735c00199",
+        "crates/openusd-build/src/load.rs": "34100e2870174077d0e0216bdd1a2233db3e5e872575ac2ecc42b88505fc8b51",
+        "crates/openusd-build/src/plug_info.rs": "005c4ed4ee9c8a6f4796afa68838486261ba308fb0fd0d8dfd81dd96e77b5f2c",
+        "crates/openusd-build/tests/values/generated.rs": "beac86cca02322ee376f2e70868d01171d437e8e890220d4bfd4d7de7694c10a",
+        "crates/openusd-schemas/src/geom/imageable.rs": "722d99be482cfc50072d448b3fc6146613097efa939cd616a3d123b6bcbd4fde",
+        "crates/openusd-schemas/src/geom/point_instancer.rs": "488b7d16693b429675d4e9ef918ee6c9c00bf7f1d43a88509d97c640bca4c98c",
+        "crates/openusd-schemas/src/geom/xform_op.rs": "465b6f3055e752b8435eef63916d38e542abe8da5951c099810c862fec1ca8f8",
+        "crates/openusd-schemas/src/media/previews.rs": "930d8ca77c0ec5ef3096675a66c886b697004d4f21253dc66240e2e9af7afc81",
+        "crates/openusd-schemas/src/shade/interface.rs": "d8f3ac3ac33a1b80c27558a79cb3994afcfb0a0c36bc24002ecb63f08e851b0c",
+        "crates/openusd-schemas/src/shade/node_def.rs": "841b7047a7ca16c2d297f88b5ad77407297e69c95631bb1a0e9ee5043830021f",
+        "crates/openusd-schemas/src/shade/preview.rs": "40e55196cda5f9bfc709ffa72e1fc478bd8c24e68223bd6fb8553064c29b70de",
+        "crates/openusd-schemas/src/skel/bake.rs": "c9c491759ccd93ea15f01c11d26138bb7dd0590ff26b7f076bb3c00b4fe6fd01",
+        "crates/openusd-schemas/tests/lux.rs": "0cd917b41b307af03431016d4c9167d45219ac29f1d624b42d4e94e973c37394",
+        "crates/openusd-schemas/tests/media.rs": "03bbc719a4fb4d9b37bc009cec8275adb449647b9816f7bb165a92f1b5ac231b",
+        "crates/openusd-schemas/tests/render.rs": "3216b84ad61f9a2ea512f3826393ca076ccf745ab4ccfd8336a27fe54b7ad6ba",
+        "crates/openusd-schemas/tests/shade.rs": "342519fc0c3fa7578f74da7b616e29acc6ef01852243989831f63c6580fdceb7",
+        "crates/openusd-schemas/tests/skel_bake.rs": "fdc6a88ff4b7b2876b61ef8cdc0e3a939f4ffa3eb1b8d1ac7b24370a115a8615",
+        "crates/openusd-schemas/tests/ui.rs": "e88deaef1a51a34150446193503fd07772c9fdb324f3a03c7769e3a342161275",
+        "crates/openusd-schemas/tests/vol.rs": "60e14fd0b79e0ddb56efd9460d9d59502328449b9a87072f76d623ffbb0f9197",
+        "crates/openusd/Cargo.toml": "a37b96ea2b5e989d23b07220b6a3ecb98d3058fcddcf9d4f893fa43c78608311",
+        "crates/openusd/examples/author_variant_and_reference.rs": "84ae5031b890f0c4a6fd461adbd5134bef1e63e74cfa3f493f2addccb876e9b1",
+        "crates/openusd/src/pcp/asset_resolve.rs": "2d588001f47577a8ed3965ca8a8cf38b387d294fad5a98e1118f1e15142caaa6",
+        "crates/openusd/src/pcp/clip.rs": "5f610fb94a983498c25db9da50f295717777a177f9d3de9f2b1d6b8896e15260",
+        "crates/openusd/src/pcp/compose_site.rs": "74b3662626fb15d528599e0fdd8a5eb33d93268aa92943a84f4104566a1afb55",
+        "crates/openusd/src/pcp/dependencies.rs": "8312ba71d670983d88d72d0a8f1b460b097e7b40108d8070b1b5b01f7fe7d724",
+        "crates/openusd/src/pcp/index_cache.rs": "5cd3ca3557087b8fef7b6b80061bed58c0129eb22dd05ba763a360721d1ce82f",
+        "crates/openusd/src/pcp/index_store.rs": "5c05727daf32c2875f19d359507b2bc6e73993a1b7f763f967294fdfae3d3318",
+        "crates/openusd/src/pcp/instancing.rs": "bed2904b9c88a9c856f8e89b2f986e756d6610cd2c7d28f10d796989a7b4abc6",
+        "crates/openusd/src/pcp/layer_graph.rs": "091b754e7081951fca8317a74a98719ae314807f676e261fcb8f1a2ad0b1731b",
+        "crates/openusd/src/pcp/load_rules.rs": "3f5cab7f5d427980f24f2761ea8576ea9df3f51fb7906a949b37a60d1af1fbec",
+        "crates/openusd/src/pcp/prim_graph.rs": "8ffbbd973b77a6e908d5c8a81a55a15de3eb708c977268b313aa5f5e8faea2d5",
+        "crates/openusd/src/pcp/prim_index.rs": "dbb8f9af004e7c0b0cdb24ca8ebaea34eb0573b679ce25d0e83d58ee03acef10",
+        "crates/openusd/src/pcp/prim_indexer.rs": "17cfd52bc214a403b2042acbefcb457149bf22c5d15a90a3452be436e33302d9",
+        "crates/openusd/src/pcp/prim_resolve.rs": "3616b3b8739de4b2a7826dbd11c1ddfb64da78a5e94c52291539f486a609fb8e",
+        "crates/openusd/src/pcp/value_resolve.rs": "4d59ec90e1919adef512f1e49796dbe73dd5fd6fe755a96f80f92be622aa71cc",
+        "crates/openusd/src/sdf/asset_path.rs": "9243273f313ae7541edf952cad3e587b313cc961a287bd01ceba11ed9968e89a",
+        "crates/openusd/src/sdf/change.rs": "cc208c0d4126195e02412195cecbd260a70b3aa403ec2a462d1c14504893335b",
+        "crates/openusd/src/sdf/coerce.rs": "dc4d3f06e0baa19fe756e1e2fe1281f6b6ce3da3865f62f92b622a275ac5d8ac",
+        "crates/openusd/src/sdf/copy.rs": "082ed024d8b8c5121fb2b61cc2f4fe84a90083822c834172fcb40b0ce88cb216",
+        "crates/openusd/src/sdf/data.rs": "1addc3a9d4669effc71aaab97bff8dc3097a365bc2273571f562ad8237d571c4",
+        "crates/openusd/src/sdf/expr.rs": "0f144db3571f039f2803de15d380671ec8599090bddd4ddb6f2c6afcf2255b8f",
+        "crates/openusd/src/sdf/layer_registry.rs": "94d9552de8963ab8d9de4d54d3220fda704b8b3a4a8788bbc90e67d5560ea227",
+        "crates/openusd/src/sdf/mod.rs": "6896eb0c9dc97b9651ba45126196d6facfdc9f6d317ac3d98793b91f41938945",
+        "crates/openusd/src/sdf/path.rs": "22f014177bdf529dc4b506db7ae92b82f97fbde4dda3ba94c63fdd5265a84053",
+        "crates/openusd/src/sdf/path_table.rs": "e70c0498b3f3f839ea8a9a69dbe0ca963cbbf22d25a69a1de7ad09a235aef5a1",
+        "crates/openusd/src/sdf/spec.rs": "a33a8d4345073ad9eff5174805f907edff139a211ed4dd679b613a0d9ca65242",
+        "crates/openusd/src/sdf/value.rs": "565bcd000d9bde0c5b9dd90d4afdfc4e7005360c7878b8de71a58af0d4ff9eb7",
+        "crates/openusd/src/sdf/value_type.rs": "5c6475021ded0bff5a3f5a4bdfee79596c0da5e8bb6414fb6af0b77dd36aba5b",
+        "crates/openusd/src/usd/attribute.rs": "0958dba64e5eac898107a618f7c0d12258c8de8a593f2fcbefdec8e1ef19ff2d",
+        "crates/openusd/src/usd/clips.rs": "089defe6ff10f8d57884ca9657e1f3f353a66cda4b0552e53ba6794009a06b71",
+        "crates/openusd/src/usd/diff.rs": "ffc3cbd973c163775a169898420c7048ce616ee35654c6b4ea1f9b857fc2e448",
+        "crates/openusd/src/usd/editor.rs": "464536fc6008895e184320dca578b72577ff3004bcfd116b0c941035c5d8930f",
+        "crates/openusd/src/usd/flatten.rs": "7d63417f013b71c17c251dfd4bde7dd4fa3dce8a40faa3ecff7f8aa5ea6a797c",
+        "crates/openusd/src/usd/interp.rs": "b18248b39944b00a0482c3111098195c86bd8480e74190b78166727addd080ca",
+        "crates/openusd/src/usd/prim.rs": "abcd561d4ce63545db33a9cd0d7bd7162db56a895ada7dd0a8e14bfbc8c1d9a7",
+        "crates/openusd/src/usd/prim_definition.rs": "0ca859c46bcc7975863aa92512f885f38d54a5628ab887769779c6c0cfd87903",
+        "crates/openusd/src/usd/schema_registry.rs": "a4e037421cf877e7f454a5b120529ceda0a2b884a05f0a1d18191dd130d00050",
+        "crates/openusd/src/usd/stage.rs": "d5dbd25e944981ced7c13bf1ab69685092b58ccaa3df3c20cf1b4149b5e9d2e0",
+        "crates/openusd/src/usd_utils/walk.rs": "dfa4c21ed78472a072e076ebd9d9e780f7ad075298b09b77ff77ca71f3cd6155",
+        "crates/openusd/src/usda/parser.rs": "3610d2d8bee19aefcebf7b19d53c709fc5f7295b800e1bcf030541a680c316bb",
+        "crates/openusd/src/usda/types.rs": "5ee3ff99ccb13e3f5a7c9b20dc9bf74b8aca330447dc2d756a088d5726e87c3a",
+        "crates/openusd/src/usda/writer.rs": "1dcfbd7efb69fd5e70e9d86ed3a896d3ede261c7caf34b9d7418d7f59ea26422",
+        "crates/openusd/src/usdc/mod.rs": "2af5b91fb91128fff74777082309681d8e9f9290c9ee5453c6cffa679dbac547",
+        "crates/openusd/src/usdc/reader.rs": "cbd616d62631e444bb5277c8791c6b5cf03204b3c8fea629b8dec89c67954de6",
+        "crates/openusd/src/usdc/writer.rs": "cf93badb125eb55521d5e046e1d84ab27a90c42a499bb491225a427862b7421d",
+        "crates/openusd/tests/binary_format.rs": "d8f4817e4f0489574c1bfbc6ac95f222d9f52ac6e92e9cad3666dbb65061f26d",
+        "crates/openusd/tests/binary_writer_roundtrip.rs": "9de1a4e82df39f4a5abec50f8470ea2277aaed3ad3f4ddeb1e5262b4112b9c89",
+        "crates/openusd/tests/changes.rs": "513afd24a931a8ae6df88fba3999146428806dc72a99222e81db6ae4fdcd7423",
+        "crates/openusd/tests/stage.rs": "02e26d9bdf36eb7336a0fdcea72ed22e7da953506aa9fa2c6562bc030f3fb44a"
+      },
+      "binary_sha256": {
+        "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+        "after": "ce42270036b38f84e1ce06a1118e5feef9f2d372908b399fa94ac93ff8c784db",
+        "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "build_command": "cargo build --release --locked -p openusd --example open_bench --features mmap",
+      "validation": {
+        "workspace_tests": {
+          "passed": 3994,
+          "failed": 0,
+          "ignored": 1
+        },
+        "clippy": "passed; workspace all targets all features -D warnings",
+        "docs": "passed; workspace no deps all features",
+        "deny": "passed offline with copied cached advisory DB and project policy",
+        "format": "passed",
+        "diff_check": "passed"
+      },
+      "discarded_series": {
+        "path": "/tmp/openusd-borrowed-query/island-mmap.json",
+        "reason": "Superseded candidate; later rounds overlapped builds and checks; interrupted before completion. Excluded from performance claims."
+      }
+    },
+    "mapped_reads": {
+      "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+      "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+      "cpu_count": 72,
+      "binaries": {
+        "before": "/tmp/openusd-query-key/before",
+        "rust": "/tmp/openusd-query-key/after",
+        "cpp": "/tmp/openusd-reference/open_bench"
+      },
+      "binary_sha256": {
+        "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+        "rust": "ce42270036b38f84e1ce06a1118e5feef9f2d372908b399fa94ac93ff8c784db",
+        "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "options": [
+        "--proxies",
+        "--authored",
+        "--no-heap"
+      ],
+      "commands": {
+        "before": [
+          "/tmp/openusd-query-key/before",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "--mmap",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ],
+        "rust": [
+          "/tmp/openusd-query-key/after",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "--mmap",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ],
+        "cpp": [
+          "/tmp/openusd-reference/open_bench",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ]
+      },
+      "warmups": 1,
+      "rust_cpu": null,
+      "rust_mmap": true,
+      "run_order": [
+        {
+          "round": 0,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        },
+        {
+          "round": 1,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        },
+        {
+          "round": 2,
+          "labels": [
+            "cpp",
+            "rust",
+            "before"
+          ]
+        },
+        {
+          "round": 3,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        }
+      ],
+      "results": {
+        "before": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 15.872,
+              "arrays": 15.941
+            },
+            "total": 31.814,
+            "process_seconds": 39.30485560500529,
+            "peak_rss_mib": 6137.4,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +117 (hard +0)  \nmetadata    15.872s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.3 MiB  faults +597429 (hard +0)  prims: 416549\narrays      15.941s  retained +   0.0 MiB  peak    0.0 MiB  ws 5877.4 MiB  faults +91974 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6137.4 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.002,
+              "metadata": 15.17,
+              "arrays": 15.358
+            },
+            "total": 30.53,
+            "process_seconds": 37.928974837996066,
+            "peak_rss_mib": 6137.8,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.002s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.8 MiB  faults +115 (hard +0)  \nmetadata    15.170s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.1 MiB  faults +599984 (hard +0)  prims: 416549\narrays      15.358s  retained +   0.0 MiB  peak    0.0 MiB  ws 5877.3 MiB  faults +91849 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6137.8 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 14.794,
+              "arrays": 15.033
+            },
+            "total": 29.828,
+            "process_seconds": 37.239319040003465,
+            "peak_rss_mib": 6137.9,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +118 (hard +0)  \nmetadata    14.794s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.2 MiB  faults +596403 (hard +0)  prims: 416549\narrays      15.033s  retained +   0.0 MiB  peak    0.0 MiB  ws 5877.4 MiB  faults +91057 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6137.9 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "rust": [
+          {
+            "phases": {
+              "open": 0.002,
+              "metadata": 15.283,
+              "arrays": 14.84
+            },
+            "total": 30.125,
+            "process_seconds": 37.76251280499855,
+            "peak_rss_mib": 6135.4,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.002s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +115 (hard +0)  \nmetadata    15.283s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.5 MiB  faults +599059 (hard +0)  prims: 416549\narrays      14.840s  retained +   0.0 MiB  peak    0.0 MiB  ws 5874.9 MiB  faults +90271 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6135.4 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 15.413,
+              "arrays": 15.17
+            },
+            "total": 30.584,
+            "process_seconds": 38.205802582000615,
+            "peak_rss_mib": 6135.1,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.8 MiB  faults +117 (hard +0)  \nmetadata    15.413s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.2 MiB  faults +596923 (hard +0)  prims: 416549\narrays      15.170s  retained +   0.0 MiB  peak    0.0 MiB  ws 5874.5 MiB  faults +89993 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6135.1 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 15.022,
+              "arrays": 14.502
+            },
+            "total": 29.525,
+            "process_seconds": 37.25307976499607,
+            "peak_rss_mib": 6135.5,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +115 (hard +0)  \nmetadata    15.022s  retained +   0.0 MiB  peak    0.0 MiB  ws 2802.6 MiB  faults +598520 (hard +0)  prims: 416549\narrays      14.502s  retained +   0.0 MiB  peak    0.0 MiB  ws 5874.9 MiB  faults +89228 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6135.5 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "cpp": [
+          {
+            "phases": {
+              "open": 3.807717,
+              "metadata": 1.010442,
+              "arrays": 10.736195
+            },
+            "total": 15.554354,
+            "process_seconds": 15.903385027995682,
+            "peak_rss_mib": 1781.83203125,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open 3.807717s\nmetadata 1.010442s prims: 416549\narrays 10.736195s arrays: 1425154 elements: 627170615\nrss_kib: 1824596\n"
+          },
+          {
+            "phases": {
+              "open": 4.047573,
+              "metadata": 1.050068,
+              "arrays": 9.675223
+            },
+            "total": 14.772864,
+            "process_seconds": 15.20004311100638,
+            "peak_rss_mib": 1789.39453125,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open 4.047573s\nmetadata 1.050068s prims: 416549\narrays 9.675223s arrays: 1425154 elements: 627170615\nrss_kib: 1832340\n"
+          },
+          {
+            "phases": {
+              "open": 4.53023,
+              "metadata": 1.05993,
+              "arrays": 9.723535
+            },
+            "total": 15.313695000000001,
+            "process_seconds": 15.795052485991619,
+            "peak_rss_mib": 1808.87109375,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open 4.530230s\nmetadata 1.059930s prims: 416549\narrays 9.723535s arrays: 1425154 elements: 627170615\nrss_kib: 1852284\n"
+          }
+        ]
+      },
+      "status_records_matched": 416549
+    },
+    "ordinary_reads": {
+      "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+      "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+      "cpu_count": 72,
+      "binaries": {
+        "before": "/tmp/openusd-query-key/before",
+        "rust": "/tmp/openusd-query-key/after",
+        "cpp": "/tmp/openusd-reference/open_bench"
+      },
+      "binary_sha256": {
+        "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+        "rust": "ce42270036b38f84e1ce06a1118e5feef9f2d372908b399fa94ac93ff8c784db",
+        "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "options": [
+        "--proxies",
+        "--authored",
+        "--no-heap"
+      ],
+      "commands": {
+        "before": [
+          "/tmp/openusd-query-key/before",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ],
+        "rust": [
+          "/tmp/openusd-query-key/after",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ],
+        "cpp": [
+          "/tmp/openusd-reference/open_bench",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ]
+      },
+      "warmups": 1,
+      "rust_cpu": null,
+      "rust_mmap": false,
+      "run_order": [
+        {
+          "round": 0,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        },
+        {
+          "round": 1,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        },
+        {
+          "round": 2,
+          "labels": [
+            "cpp",
+            "rust",
+            "before"
+          ]
+        },
+        {
+          "round": 3,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        }
+      ],
+      "results": {
+        "before": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 18.125,
+              "arrays": 15.53
+            },
+            "total": 33.656,
+            "process_seconds": 41.255224271008046,
+            "peak_rss_mib": 6233.0,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +115 (hard +0)  \nmetadata    18.125s  retained +   0.0 MiB  peak    0.0 MiB  ws 5702.9 MiB  faults +675670 (hard +0)  prims: 416549\narrays      15.530s  retained +   0.0 MiB  peak    0.0 MiB  ws 5881.5 MiB  faults +49226 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6233.0 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 16.545,
+              "arrays": 15.365
+            },
+            "total": 31.911,
+            "process_seconds": 39.6211058810004,
+            "peak_rss_mib": 6233.6,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    6.0 MiB  faults +117 (hard +0)  \nmetadata    16.545s  retained +   0.0 MiB  peak    0.0 MiB  ws 5703.6 MiB  faults +673270 (hard +0)  prims: 416549\narrays      15.365s  retained +   0.0 MiB  peak    0.0 MiB  ws 5882.2 MiB  faults +49100 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6233.6 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 17.353,
+              "arrays": 15.483
+            },
+            "total": 32.837,
+            "process_seconds": 40.3274458010128,
+            "peak_rss_mib": 6233.1,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.8 MiB  faults +113 (hard +0)  \nmetadata    17.353s  retained +   0.0 MiB  peak    0.0 MiB  ws 5703.3 MiB  faults +670173 (hard +0)  prims: 416549\narrays      15.483s  retained +   0.0 MiB  peak    0.0 MiB  ws 5881.9 MiB  faults +45490 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6233.1 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "rust": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 18.431,
+              "arrays": 14.935
+            },
+            "total": 33.367000000000004,
+            "process_seconds": 41.113565648003714,
+            "peak_rss_mib": 6230.4,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +116 (hard +0)  \nmetadata    18.431s  retained +   0.0 MiB  peak    0.0 MiB  ws 5703.0 MiB  faults +674684 (hard +0)  prims: 416549\narrays      14.935s  retained +   0.0 MiB  peak    0.0 MiB  ws 5878.9 MiB  faults +48560 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6230.4 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 17.51,
+              "arrays": 13.869
+            },
+            "total": 31.380000000000003,
+            "process_seconds": 38.76268988499942,
+            "peak_rss_mib": 6230.3,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.9 MiB  faults +116 (hard +0)  \nmetadata    17.510s  retained +   0.0 MiB  peak    0.0 MiB  ws 5703.0 MiB  faults +677220 (hard +0)  prims: 416549\narrays      13.869s  retained +   0.0 MiB  peak    0.0 MiB  ws 5878.8 MiB  faults +49052 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6230.3 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 17.824,
+              "arrays": 14.411
+            },
+            "total": 32.236000000000004,
+            "process_seconds": 39.54734111299331,
+            "peak_rss_mib": 6230.3,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open         0.001s  retained +   0.0 MiB  peak    0.0 MiB  ws    5.8 MiB  faults +115 (hard +0)  \nmetadata    17.824s  retained +   0.0 MiB  peak    0.0 MiB  ws 5702.9 MiB  faults +674136 (hard +0)  prims: 416549\narrays      14.411s  retained +   0.0 MiB  peak    0.0 MiB  ws 5878.8 MiB  faults +49551 (hard +0)  arrays: 1425154  elements: 627170615  decoded: 4602.0 MiB\ngraphs: 278816  shared node data 158897  copies 158996  nodes copied 1216166\nheap peak: 0.0 MiB\nworking set peak: 6230.3 MiB\npackages: opens 0  directory parses 0  cache hits 0\n"
+          }
+        ],
+        "cpp": [
+          {
+            "phases": {
+              "open": 4.200992,
+              "metadata": 1.203345,
+              "arrays": 9.379449
+            },
+            "total": 14.783786,
+            "process_seconds": 15.22909078298835,
+            "peak_rss_mib": 1799.859375,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open 4.200992s\nmetadata 1.203345s prims: 416549\narrays 9.379449s arrays: 1425154 elements: 627170615\nrss_kib: 1843056\n"
+          },
+          {
+            "phases": {
+              "open": 4.198724,
+              "metadata": 1.371447,
+              "arrays": 9.83825
+            },
+            "total": 15.408421,
+            "process_seconds": 15.806715847997111,
+            "peak_rss_mib": 1809.55078125,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open 4.198724s\nmetadata 1.371447s prims: 416549\narrays 9.838250s arrays: 1425154 elements: 627170615\nrss_kib: 1852980\n"
+          },
+          {
+            "phases": {
+              "open": 4.259223,
+              "metadata": 1.064595,
+              "arrays": 10.210048
+            },
+            "total": 15.533866,
+            "process_seconds": 16.22361070899933,
+            "peak_rss_mib": 1764.41015625,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            },
+            "output": "open 4.259223s\nmetadata 1.064595s prims: 416549\narrays 10.210048s arrays: 1425154 elements: 627170615\nrss_kib: 1806756\n"
+          }
+        ]
+      },
+      "status_records_matched": 416549
+    },
+    "sampling": {
+      "measurement": "Native first array-read phase. GDB interrupts the single-threaded Rust benchmark every approximately 10 milliseconds of resumed execution. Stage open, metadata traversal, and teardown are excluded. Sampling overhead means this is not a timing benchmark.",
+      "interval_seconds": 0.01,
+      "elapsed_seconds": 18.433994515013183,
+      "sample_count": 1571,
+      "self_top20": [
+        [
+          "__memmove_avx_unaligned_erms_rtm",
+          151
+        ],
+        [
+          "<openusd::sdf::path::PathQuery as hashbrown::Equivalent<openusd::sdf::path::Path>>::equivalent",
+          147
+        ],
+        [
+          "readlink",
+          111
+        ],
+        [
+          "__memcmp_avx2_movbe_rtm",
+          104
+        ],
+        [
+          "openusd::usdc::reader::Stream::read_encoded_ints",
+          95
+        ],
+        [
+          "openusd::usdc::reader::Stream::read_pod",
+          76
+        ],
+        [
+          "openusd::pcp::index_cache::IndexCache::value_at",
+          72
+        ],
+        [
+          "openusd::pcp::index_cache::IndexCache::prim_property_kinds",
+          50
+        ],
+        [
+          "openusd::sdf::path::PathQuery::from_parts",
+          45
+        ],
+        [
+          "openusd::sdf::path::Path::check_property",
+          42
+        ],
+        [
+          "open_bench::main",
+          42
+        ],
+        [
+          "openusd::sdf::path::Path::append_property",
+          31
+        ],
+        [
+          "<openusd::sdf::data::Data as openusd::sdf::data::AbstractData>::try_field_query",
+          26
+        ],
+        [
+          "<openusd::tf::Token as core::hash::Hash>::hash",
+          26
+        ],
+        [
+          "_int_malloc",
+          24
+        ],
+        [
+          "openusd::sdf::path::Path::is_valid_identifier",
+          20
+        ],
+        [
+          "core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &mut F>::call_once",
+          19
+        ],
+        [
+          "openusd::usd::stage::Stage::prim_type_info_composed",
+          19
+        ],
+        [
+          "openusd::usdc::CrateData::read_field",
+          17
+        ],
+        [
+          "openusd::pcp::instancing::<impl openusd::pcp::index_cache::IndexCache>::population_reaches",
+          16
+        ]
+      ],
+      "inclusive_top25": [
+        [
+          "std::rt::lang_start_internal",
+          1571
+        ],
+        [
+          "std::sys::backtrace::__rust_begin_short_backtrace",
+          1571
+        ],
+        [
+          "open_bench::main",
+          1571
+        ],
+        [
+          "main",
+          1571
+        ],
+        [
+          "std::rt::lang_start::{{closure}}",
+          1571
+        ],
+        [
+          "openusd::usd::composition::StageComposition::query",
+          1295
+        ],
+        [
+          "openusd::usd::stage::Stage::resolve_at",
+          874
+        ],
+        [
+          "openusd::pcp::index_cache::IndexCache::value_at",
+          830
+        ],
+        [
+          "<openusd::sdf::data::CowData<T> as openusd::sdf::data::AbstractData>::try_field_query",
+          525
+        ],
+        [
+          "openusd::usd::prim::Prim::authored_attributes",
+          508
+        ],
+        [
+          "openusd::usd::prim::Prim::properties_of_type",
+          506
+        ],
+        [
+          "core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &mut F>::call_once",
+          442
+        ],
+        [
+          "<openusd::usdc::CrateData as openusd::sdf::data::AbstractData>::try_field_query",
+          423
+        ],
+        [
+          "openusd::usd::stage::Stage::masked_opinions",
+          394
+        ],
+        [
+          "openusd::usdc::CrateData::read_field",
+          367
+        ],
+        [
+          "openusd::usdc::reader::CrateFile::value",
+          350
+        ],
+        [
+          "openusd::usdc::reader::Decoder::decode",
+          349
+        ],
+        [
+          "openusd::pcp::index_cache::IndexCache::prim_property_kinds",
+          323
+        ],
+        [
+          "<openusd::sdf::path::PathQuery as hashbrown::Equivalent<openusd::sdf::path::Path>>::equivalent",
+          216
+        ],
+        [
+          "openusd::usdc::reader::Stream::read_encoded_ints",
+          187
+        ],
+        [
+          "<alloc::vec::Vec<T> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<T,I>>::from_iter",
+          171
+        ],
+        [
+          "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::fold",
+          167
+        ],
+        [
+          "<openusd::sdf::data::CowData<T> as openusd::sdf::data::AbstractData>::property_spec",
+          159
+        ],
+        [
+          "__memmove_avx_unaligned_erms_rtm",
+          151
+        ],
+        [
+          "openusd::usdc::reader::Decoder::read_array",
+          139
+        ]
+      ],
+      "raw_path": "/tmp/openusd-query-key/array-samples.json",
+      "timings_excluded": true
+    }
+  },
+  "discarded_experiments": [
+    {
+      "path": "/tmp/openusd-borrowed-query/island-mmap.json",
+      "reason": "Superseded validating-name query API; later repetitions overlapped builds and checks. Series interrupted and excluded from performance claims."
+    },
+    {
+      "path": "/tmp/openusd-borrowed-query/island-mmap.log",
+      "reason": "Initial warmup attempt used a build without the mmap feature; no measured results were recorded."
+    }
+  ],
+  "source_sha256": {
+    "Cargo.lock": "e60c88386e735600ba7af544edc068dc49114e57add3a70788eac661dda76fca",
+    "benchmarks/compare.py": "414fc039d1944ed341605d11be6459124fce1433afea38a4c1ffa53a6d3971ef",
+    "benchmarks/open_bench.cpp": "54f6344073bc105a4ed6e04af08c18ea2baef07457112a63298ec2a84770e093",
+    "crates/openusd-build/src/emit/value.rs": "a41cd3895c345a4ee362a5bb999465d40cbebcb0b05cea1e70f5e31735c00199",
+    "crates/openusd-build/src/load.rs": "34100e2870174077d0e0216bdd1a2233db3e5e872575ac2ecc42b88505fc8b51",
+    "crates/openusd-build/src/plug_info.rs": "005c4ed4ee9c8a6f4796afa68838486261ba308fb0fd0d8dfd81dd96e77b5f2c",
+    "crates/openusd-build/tests/values/generated.rs": "beac86cca02322ee376f2e70868d01171d437e8e890220d4bfd4d7de7694c10a",
+    "crates/openusd-schemas/src/geom/imageable.rs": "722d99be482cfc50072d448b3fc6146613097efa939cd616a3d123b6bcbd4fde",
+    "crates/openusd-schemas/src/geom/point_instancer.rs": "488b7d16693b429675d4e9ef918ee6c9c00bf7f1d43a88509d97c640bca4c98c",
+    "crates/openusd-schemas/src/geom/xform_op.rs": "465b6f3055e752b8435eef63916d38e542abe8da5951c099810c862fec1ca8f8",
+    "crates/openusd-schemas/src/media/previews.rs": "930d8ca77c0ec5ef3096675a66c886b697004d4f21253dc66240e2e9af7afc81",
+    "crates/openusd-schemas/src/shade/interface.rs": "d8f3ac3ac33a1b80c27558a79cb3994afcfb0a0c36bc24002ecb63f08e851b0c",
+    "crates/openusd-schemas/src/shade/node_def.rs": "841b7047a7ca16c2d297f88b5ad77407297e69c95631bb1a0e9ee5043830021f",
+    "crates/openusd-schemas/src/shade/preview.rs": "40e55196cda5f9bfc709ffa72e1fc478bd8c24e68223bd6fb8553064c29b70de",
+    "crates/openusd-schemas/src/skel/bake.rs": "c9c491759ccd93ea15f01c11d26138bb7dd0590ff26b7f076bb3c00b4fe6fd01",
+    "crates/openusd-schemas/tests/lux.rs": "0cd917b41b307af03431016d4c9167d45219ac29f1d624b42d4e94e973c37394",
+    "crates/openusd-schemas/tests/media.rs": "03bbc719a4fb4d9b37bc009cec8275adb449647b9816f7bb165a92f1b5ac231b",
+    "crates/openusd-schemas/tests/render.rs": "3216b84ad61f9a2ea512f3826393ca076ccf745ab4ccfd8336a27fe54b7ad6ba",
+    "crates/openusd-schemas/tests/shade.rs": "342519fc0c3fa7578f74da7b616e29acc6ef01852243989831f63c6580fdceb7",
+    "crates/openusd-schemas/tests/skel_bake.rs": "fdc6a88ff4b7b2876b61ef8cdc0e3a939f4ffa3eb1b8d1ac7b24370a115a8615",
+    "crates/openusd-schemas/tests/ui.rs": "e88deaef1a51a34150446193503fd07772c9fdb324f3a03c7769e3a342161275",
+    "crates/openusd-schemas/tests/vol.rs": "60e14fd0b79e0ddb56efd9460d9d59502328449b9a87072f76d623ffbb0f9197",
+    "crates/openusd/Cargo.toml": "a37b96ea2b5e989d23b07220b6a3ecb98d3058fcddcf9d4f893fa43c78608311",
+    "crates/openusd/examples/author_variant_and_reference.rs": "84ae5031b890f0c4a6fd461adbd5134bef1e63e74cfa3f493f2addccb876e9b1",
+    "crates/openusd/src/pcp/asset_resolve.rs": "2d588001f47577a8ed3965ca8a8cf38b387d294fad5a98e1118f1e15142caaa6",
+    "crates/openusd/src/pcp/clip.rs": "5f610fb94a983498c25db9da50f295717777a177f9d3de9f2b1d6b8896e15260",
+    "crates/openusd/src/pcp/compose_site.rs": "74b3662626fb15d528599e0fdd8a5eb33d93268aa92943a84f4104566a1afb55",
+    "crates/openusd/src/pcp/dependencies.rs": "8312ba71d670983d88d72d0a8f1b460b097e7b40108d8070b1b5b01f7fe7d724",
+    "crates/openusd/src/pcp/index_cache.rs": "5cd3ca3557087b8fef7b6b80061bed58c0129eb22dd05ba763a360721d1ce82f",
+    "crates/openusd/src/pcp/index_store.rs": "5c05727daf32c2875f19d359507b2bc6e73993a1b7f763f967294fdfae3d3318",
+    "crates/openusd/src/pcp/instancing.rs": "bed2904b9c88a9c856f8e89b2f986e756d6610cd2c7d28f10d796989a7b4abc6",
+    "crates/openusd/src/pcp/layer_graph.rs": "091b754e7081951fca8317a74a98719ae314807f676e261fcb8f1a2ad0b1731b",
+    "crates/openusd/src/pcp/load_rules.rs": "3f5cab7f5d427980f24f2761ea8576ea9df3f51fb7906a949b37a60d1af1fbec",
+    "crates/openusd/src/pcp/prim_graph.rs": "8ffbbd973b77a6e908d5c8a81a55a15de3eb708c977268b313aa5f5e8faea2d5",
+    "crates/openusd/src/pcp/prim_index.rs": "dbb8f9af004e7c0b0cdb24ca8ebaea34eb0573b679ce25d0e83d58ee03acef10",
+    "crates/openusd/src/pcp/prim_indexer.rs": "17cfd52bc214a403b2042acbefcb457149bf22c5d15a90a3452be436e33302d9",
+    "crates/openusd/src/pcp/prim_resolve.rs": "3616b3b8739de4b2a7826dbd11c1ddfb64da78a5e94c52291539f486a609fb8e",
+    "crates/openusd/src/pcp/value_resolve.rs": "4d59ec90e1919adef512f1e49796dbe73dd5fd6fe755a96f80f92be622aa71cc",
+    "crates/openusd/src/sdf/asset_path.rs": "9243273f313ae7541edf952cad3e587b313cc961a287bd01ceba11ed9968e89a",
+    "crates/openusd/src/sdf/change.rs": "cc208c0d4126195e02412195cecbd260a70b3aa403ec2a462d1c14504893335b",
+    "crates/openusd/src/sdf/coerce.rs": "dc4d3f06e0baa19fe756e1e2fe1281f6b6ce3da3865f62f92b622a275ac5d8ac",
+    "crates/openusd/src/sdf/copy.rs": "082ed024d8b8c5121fb2b61cc2f4fe84a90083822c834172fcb40b0ce88cb216",
+    "crates/openusd/src/sdf/data.rs": "1addc3a9d4669effc71aaab97bff8dc3097a365bc2273571f562ad8237d571c4",
+    "crates/openusd/src/sdf/expr.rs": "0f144db3571f039f2803de15d380671ec8599090bddd4ddb6f2c6afcf2255b8f",
+    "crates/openusd/src/sdf/layer_registry.rs": "94d9552de8963ab8d9de4d54d3220fda704b8b3a4a8788bbc90e67d5560ea227",
+    "crates/openusd/src/sdf/mod.rs": "6896eb0c9dc97b9651ba45126196d6facfdc9f6d317ac3d98793b91f41938945",
+    "crates/openusd/src/sdf/path.rs": "7ccd37a5b1db638e42d2a43c1350e22ea3756835669b2464686d4aba2c058602",
+    "crates/openusd/src/sdf/path_table.rs": "e70c0498b3f3f839ea8a9a69dbe0ca963cbbf22d25a69a1de7ad09a235aef5a1",
+    "crates/openusd/src/sdf/spec.rs": "a33a8d4345073ad9eff5174805f907edff139a211ed4dd679b613a0d9ca65242",
+    "crates/openusd/src/sdf/value.rs": "565bcd000d9bde0c5b9dd90d4afdfc4e7005360c7878b8de71a58af0d4ff9eb7",
+    "crates/openusd/src/sdf/value_type.rs": "5c6475021ded0bff5a3f5a4bdfee79596c0da5e8bb6414fb6af0b77dd36aba5b",
+    "crates/openusd/src/usd/attribute.rs": "0958dba64e5eac898107a618f7c0d12258c8de8a593f2fcbefdec8e1ef19ff2d",
+    "crates/openusd/src/usd/clips.rs": "089defe6ff10f8d57884ca9657e1f3f353a66cda4b0552e53ba6794009a06b71",
+    "crates/openusd/src/usd/diff.rs": "ffc3cbd973c163775a169898420c7048ce616ee35654c6b4ea1f9b857fc2e448",
+    "crates/openusd/src/usd/editor.rs": "464536fc6008895e184320dca578b72577ff3004bcfd116b0c941035c5d8930f",
+    "crates/openusd/src/usd/flatten.rs": "7d63417f013b71c17c251dfd4bde7dd4fa3dce8a40faa3ecff7f8aa5ea6a797c",
+    "crates/openusd/src/usd/interp.rs": "b18248b39944b00a0482c3111098195c86bd8480e74190b78166727addd080ca",
+    "crates/openusd/src/usd/prim.rs": "abcd561d4ce63545db33a9cd0d7bd7162db56a895ada7dd0a8e14bfbc8c1d9a7",
+    "crates/openusd/src/usd/prim_definition.rs": "0ca859c46bcc7975863aa92512f885f38d54a5628ab887769779c6c0cfd87903",
+    "crates/openusd/src/usd/schema_registry.rs": "a4e037421cf877e7f454a5b120529ceda0a2b884a05f0a1d18191dd130d00050",
+    "crates/openusd/src/usd/stage.rs": "d5dbd25e944981ced7c13bf1ab69685092b58ccaa3df3c20cf1b4149b5e9d2e0",
+    "crates/openusd/src/usd_utils/walk.rs": "dfa4c21ed78472a072e076ebd9d9e780f7ad075298b09b77ff77ca71f3cd6155",
+    "crates/openusd/src/usda/parser.rs": "3610d2d8bee19aefcebf7b19d53c709fc5f7295b800e1bcf030541a680c316bb",
+    "crates/openusd/src/usda/types.rs": "5ee3ff99ccb13e3f5a7c9b20dc9bf74b8aca330447dc2d756a088d5726e87c3a",
+    "crates/openusd/src/usda/writer.rs": "1dcfbd7efb69fd5e70e9d86ed3a896d3ede261c7caf34b9d7418d7f59ea26422",
+    "crates/openusd/src/usdc/mod.rs": "2af5b91fb91128fff74777082309681d8e9f9290c9ee5453c6cffa679dbac547",
+    "crates/openusd/src/usdc/reader.rs": "cbd616d62631e444bb5277c8791c6b5cf03204b3c8fea629b8dec89c67954de6",
+    "crates/openusd/src/usdc/writer.rs": "cf93badb125eb55521d5e046e1d84ab27a90c42a499bb491225a427862b7421d",
+    "crates/openusd/tests/binary_format.rs": "d8f4817e4f0489574c1bfbc6ac95f222d9f52ac6e92e9cad3666dbb65061f26d",
+    "crates/openusd/tests/binary_writer_roundtrip.rs": "9de1a4e82df39f4a5abec50f8470ea2277aaed3ad3f4ddeb1e5262b4112b9c89",
+    "crates/openusd/tests/changes.rs": "513afd24a931a8ae6df88fba3999146428806dc72a99222e81db6ae4fdcd7423",
+    "crates/openusd/tests/stage.rs": "02e26d9bdf36eb7336a0fdcea72ed22e7da953506aa9fa2c6562bc030f3fb44a"
+  },
+  "binary_sha256": {
+    "before": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+    "after": "3fa42842e01e7e20e78f3fd0bdbba2e5ffe8cc42fc2c6be8fc42df6a08bd8b8a",
+    "intermediate": "ce42270036b38f84e1ce06a1118e5feef9f2d372908b399fa94ac93ff8c784db",
+    "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+  },
+  "build_command": "cargo build --release --locked -p openusd --example open_bench --features mmap",
+  "branch": "perf/moana-read-followup",
+  "head": "4ce5df786f0a48be7b26f088a24f4fd960a7dcc0",
+  "reference_environment": {
+    "USDC_USE_PREAD": null,
+    "USDC_ENABLE_ZERO_COPY_ARRAYS": null,
+    "PXR_WORK_THREAD_LIMIT": null
+  },
+  "workload": {
+    "prims": 416549,
+    "arrays": 1425154,
+    "elements": 627170615,
+    "array_payloads": "Retrieved and counted, without hashing; Rust arrays remain owned vectors."
+  },
+  "measurement_notes": [
+    "C++ uses its default mapped reader and worker count. All three listed override variables were unset.",
+    "Primary final timing series: one warmup and three measured fresh processes per executable, alternating order, default CPU affinity, no overlapping builds or profiles.",
+    "Timing ranges overlap. Attribute-read time improved in each paired repetition; metadata time did not improve consistently.",
+    "C++ deprecation warning lines are omitted from retained output here; raw output remains in the /tmp comparison reports."
+  ]
+}

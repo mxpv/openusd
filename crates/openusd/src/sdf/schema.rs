@@ -1,11 +1,12 @@
-use strum::VariantArray;
+use strum::{EnumString, VariantArray};
 
 use super::{ValueKind, ValueTypeName};
 
 /// The following fields are pre-registered by Sdf.
 ///
 /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/release/pxr/usd/sdf/schema.h#L597>
-#[derive(Debug, Clone, Copy, VariantArray)]
+#[derive(Debug, Clone, Copy, VariantArray, EnumString)]
+#[strum(serialize_all = "camelCase")]
 pub enum FieldKey {
     Active,
     AllowedTokens,
@@ -90,7 +91,7 @@ impl FieldKey {
     /// A schema may declare fields of its own, so a `None` here does not mean
     /// the field is unregistered; [`registered_field_type`] answers that.
     pub fn from_name(name: &str) -> Option<Self> {
-        FieldKey::VARIANTS.iter().copied().find(|key| key.as_str() == name)
+        name.parse().ok()
     }
 
     pub const fn as_str(&self) -> &'static str {
@@ -163,7 +164,8 @@ impl FieldKey {
 }
 
 /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/2864f3d04f396432f22ec5d6928fc37d34bb4c90/pxr/usd/sdf/schema.h#L652>
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EnumString)]
+#[strum(serialize_all = "camelCase")]
 pub enum ChildrenKey {
     ConnectionChildren,
     ExpressionChildren,
@@ -171,6 +173,7 @@ pub enum ChildrenKey {
     MapperChildren,
     PrimChildren,
     PropertyChildren,
+    #[strum(serialize = "targetChildren")]
     RelationshipTargetChildren,
     VariantChildren,
     VariantSetChildren,
@@ -189,6 +192,11 @@ impl AsRef<str> for ChildrenKey {
 }
 
 impl ChildrenKey {
+    /// The child-list field `name` denotes.
+    pub fn from_name(name: &str) -> Option<Self> {
+        name.parse().ok()
+    }
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             ChildrenKey::ConnectionChildren => "connectionChildren",

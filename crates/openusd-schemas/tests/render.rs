@@ -137,7 +137,7 @@ fn render_pass_roundtrip() -> Result<()> {
         "{fileName}".into(),
     ]))?;
     p.create_file_name_attr()?
-        .set(Value::AssetPath("./beauty.rib".into()))?;
+        .set(Value::AssetPath(Box::new("./beauty.rib".into())))?;
     p.create_render_source_rel()?.add_target("/Render/Settings")?;
 
     let p = Pass::get(&stage, "/Render/Passes/beauty")?.expect("Pass");

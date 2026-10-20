@@ -450,7 +450,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim").expect("path"),
                 sdf::FieldKey::InheritPaths.as_str(),
-                sdf::Value::PathListOp(inherits),
+                sdf::Value::PathListOp(Box::new(inherits)),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -480,7 +480,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.rel").expect("path"),
                 sdf::FieldKey::TargetPaths.as_str(),
-                sdf::Value::PathListOp(targets),
+                sdf::Value::PathListOp(Box::new(targets)),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -573,7 +573,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.sink").expect("path"),
                 sdf::FieldKey::ConnectionPaths.as_str(),
-                sdf::Value::PathListOp(connections),
+                sdf::Value::PathListOp(Box::new(connections)),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -614,7 +614,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.file").expect("path"),
                 "default",
-                sdf::Value::AssetPath(sdf::AssetPath::new("./texture.png")),
+                sdf::Value::AssetPath(Box::new(sdf::AssetPath::new("./texture.png"))),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -690,7 +690,10 @@ mod tests {
                 false,
             )
             .expect("attribute");
-            let samples: sdf::TimeSampleMap = vec![(0.0, sdf::Value::AssetPath(sdf::AssetPath::new("./texture.png")))];
+            let samples: sdf::TimeSampleMap = vec![(
+                0.0,
+                sdf::Value::AssetPath(Box::new(sdf::AssetPath::new("./texture.png"))),
+            )];
             data.set_field(
                 &sdf::Path::new("/Prim.file").expect("path"),
                 "timeSamples",

@@ -99,7 +99,11 @@ fn specs(family: &usd::SchemaFamily<'_>) -> Specs {
         .expect("the declarations build")
         .iter()
         .map(|(path, spec)| {
-            let fields = spec.fields.iter().cloned().collect();
+            let fields = spec
+                .fields
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect();
             (path.to_string(), (spec.ty, fields))
         })
         .collect()

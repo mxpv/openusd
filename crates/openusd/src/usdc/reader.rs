@@ -3,7 +3,7 @@
 use std::{any::type_name, collections::HashMap, hash::Hash, mem, str};
 
 use crate::gf::f16;
-use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, cast_slice_mut, pod_read_unaligned};
+use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, cast_slice_mut, pod_read_unaligned, try_cast_slice};
 use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::{
@@ -623,6 +623,9 @@ impl<'a> Stream<'a> {
             .checked_mul(mem::size_of::<T>())
             .ok_or_else(|| ReadError::corrupt(format!("vector of {count} elements overflows")))?;
         let raw = self.take(bytes).ctx("vec")?;
+        if let Ok(values) = try_cast_slice::<u8, T>(raw) {
+            return Ok(values.to_vec());
+        }
         let mut vec = vec![T::zeroed(); count];
         cast_slice_mut(&mut vec).copy_from_slice(raw);
         Ok(vec)
@@ -793,24 +796,24 @@ impl<'a> Decoder<'a> {
         Ok((count, compressed))
     }
 
-    fn read_ints<T: PrimInt + Pod + Default>(&mut self, value: ValueRep) -> Result<Vec<T>, ReadError>
+    fn read_ints<T: PrimInt + Pod + Default>(&mut self, value: ValueRep) -> Result<sdf::Array<T>, ReadError>
     where
         i64: AsPrimitive<T>,
     {
         let (count, compressed) = self.unpack_array_len(value, ArrayKind::Ints)?;
 
         if count == 0 {
-            return Ok(Vec::default());
+            return Ok(sdf::Array::new());
         }
 
         if compressed {
-            self.stream.read_encoded_ints(count)
+            self.stream.read_encoded_ints(count).map(Into::into)
         } else {
-            self.stream.read_vec(count)
+            self.read_numeric(count)
         }
     }
 
-    fn read_floats<T: Float + Default + Pod>(&mut self, value: ValueRep) -> Result<Vec<T>, ReadError> {
+    fn read_floats<T: Float + Default + Pod>(&mut self, value: ValueRep) -> Result<sdf::Array<T>, ReadError> {
         use num_traits::cast;
         corrupt!(!value.is_inlined());
 
@@ -856,10 +859,10 @@ impl<'a> Decoder<'a> {
                 }
             }
         } else {
-            self.stream.read_vec(count)?
+            return self.read_numeric(count);
         };
 
-        Ok(vec)
+        Ok(vec.into())
     }
 
     fn read_list_op<T: Clone + PartialEq + Hash>(
@@ -1032,23 +1035,32 @@ impl<'a> Decoder<'a> {
         Ok(items)
     }
 
-    /// Reads an array of plain values, `U` laid out as the on-disk element:
-    /// a scalar, a `[T; N]` group, or a `repr(C)` gf type.
-    ///
-    /// TODO(perf): the one copy left per array read, which zero-fills the
-    /// vector before copying into it. C++ aligns every array payload to 8
-    /// bytes, so for a file it wrote `bytemuck::try_cast_slice` over the
-    /// taken bytes followed by `to_vec` would copy once with no fill (the
-    /// crate writer here does not align, so the fill stays as the fallback).
-    /// C++ goes further and hands out arrays of at least 2048 bytes as views
-    /// into the mapped file when their address is aligned to the element
-    /// (`USDC_ENABLE_ZERO_COPY_ARRAYS`), copying them out only when the file
-    /// is replaced; that needs an `sdf::Value` array form over an
-    /// `ar::SharedBuffer` view.
-    fn read_array<U: NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
+    /// Reads uncompressed numeric elements, sharing eligible mapped bytes.
+    fn read_numeric<U: Pod>(&mut self, count: usize) -> Result<sdf::Array<U>, ReadError> {
+        let size = count
+            .checked_mul(mem::size_of::<U>())
+            .ok_or_else(|| ReadError::corrupt(format!("array of {count} elements overflows")))?;
+        let start = self.stream.position();
+        if cfg!(target_endian = "little")
+            && size >= 2048
+            && let ar::AssetBuffer::Shared(bytes) = &self.file.bytes
+            && bytes.is_mapping()
+        {
+            self.stream.take(size).ctx("numeric array")?;
+            let view = bytes.slice(start..start + size).expect("stream checked the range");
+            if let Some(values) = sdf::Array::from_shared(view) {
+                return Ok(values);
+            }
+            self.stream.rewind(start);
+        }
+        self.stream.read_vec(count).map(Into::into)
+    }
+
+    /// Reads an array whose elements match their on-disk representation.
+    fn read_array<U: Pod>(&mut self, value: ValueRep) -> Result<sdf::Array<U>, ReadError> {
         corrupt!(value.is_array() && !value.is_compressed());
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-        self.stream.read_vec::<U>(count)
+        self.read_numeric(count)
     }
 
     /// Decode the value `rep` describes as one nested in the value being
@@ -1160,7 +1172,7 @@ impl<'a> Decoder<'a> {
                 self.stream.seek(value.payload())?;
                 sdf::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
             }
-            Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?.into()),
+            Type::AssetPath => sdf::Value::AssetPath(Box::new(self.read_asset_path(value)?.into())),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
@@ -1270,15 +1282,15 @@ impl<'a> Decoder<'a> {
                 sdf::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
             }
             Type::Matrix3d if value.is_inlined() => {
-                sdf::Value::Matrix3d(gf::Mat3d(to_mat_diag::<3, 9>(self.unpack_value(value)?)))
+                sdf::Value::Matrix3d(Box::new(gf::Mat3d(to_mat_diag::<3, 9>(self.unpack_value(value)?))))
             }
             Type::Matrix4d if value.is_inlined() => {
-                sdf::Value::Matrix4d(gf::Mat4d(to_mat_diag::<4, 16>(self.unpack_value(value)?)))
+                sdf::Value::Matrix4d(Box::new(gf::Mat4d(to_mat_diag::<4, 16>(self.unpack_value(value)?))))
             }
 
             Type::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(self.unpack_value::<[f64; 4]>(value)?)),
-            Type::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(self.unpack_value::<[f64; 9]>(value)?)),
-            Type::Matrix4d => sdf::Value::Matrix4d(gf::Mat4d(self.unpack_value::<[f64; 16]>(value)?)),
+            Type::Matrix3d => sdf::Value::Matrix3d(Box::new(gf::Mat3d(self.unpack_value::<[f64; 9]>(value)?))),
+            Type::Matrix4d => sdf::Value::Matrix4d(Box::new(gf::Mat4d(self.unpack_value::<[f64; 16]>(value)?))),
 
             //
             // Quats
@@ -1292,19 +1304,25 @@ impl<'a> Decoder<'a> {
             // — without this, binary USDC quats from real production
             // assets (Isaac Sim Agilebot, Omniverse robotics scenes)
             // come out with axes scrambled.
-            Type::Quath if value.is_array() => Value::QuathVec(xyzw_to_wxyz_quath(self.read_array::<[f16; 4]>(value)?)),
+            Type::Quath if value.is_array() => {
+                Value::QuathVec((xyzw_to_wxyz_quath(self.read_array::<[f16; 4]>(value)?)).into())
+            }
             Type::Quath => {
                 let raw = self.unpack_value::<[f16; 4]>(value)?;
                 sdf::Value::quath(raw[3], raw[0], raw[1], raw[2])
             }
 
-            Type::Quatf if value.is_array() => Value::QuatfVec(xyzw_to_wxyz_quatf(self.read_array::<[f32; 4]>(value)?)),
+            Type::Quatf if value.is_array() => {
+                Value::QuatfVec((xyzw_to_wxyz_quatf(self.read_array::<[f32; 4]>(value)?)).into())
+            }
             Type::Quatf => {
                 let raw = self.unpack_value::<[f32; 4]>(value)?;
                 sdf::Value::quatf(raw[3], raw[0], raw[1], raw[2])
             }
 
-            Type::Quatd if value.is_array() => Value::QuatdVec(xyzw_to_wxyz_quatd(self.read_array::<[f64; 4]>(value)?)),
+            Type::Quatd if value.is_array() => {
+                Value::QuatdVec((xyzw_to_wxyz_quatd(self.read_array::<[f64; 4]>(value)?)).into())
+            }
             Type::Quatd => {
                 let raw = self.unpack_value::<[f64; 4]>(value)?;
                 sdf::Value::quatd(raw[3], raw[0], raw[1], raw[2])
@@ -1317,19 +1335,19 @@ impl<'a> Decoder<'a> {
                 corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_token_vec())?;
-                sdf::Value::TokenListOp(list)
+                sdf::Value::TokenListOp(Box::new(list))
             }
             Type::StringListOp => {
                 corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_string_vec())?;
-                sdf::Value::StringListOp(list)
+                sdf::Value::StringListOp(Box::new(list))
             }
             Type::PathListOp => {
                 corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_path_vec())?;
-                sdf::Value::PathListOp(list)
+                sdf::Value::PathListOp(Box::new(list))
             }
             Type::ReferenceListOp => {
                 corrupt!(!value.is_inlined());
@@ -1346,24 +1364,24 @@ impl<'a> Decoder<'a> {
                     Ok(vec)
                 })?;
 
-                sdf::Value::ReferenceListOp(list)
+                sdf::Value::ReferenceListOp(Box::new(list))
             }
 
             Type::IntListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::IntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                sdf::Value::IntListOp(Box::new(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?))
             }
             Type::Int64ListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::Int64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                sdf::Value::Int64ListOp(Box::new(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?))
             }
             Type::UIntListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::UIntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                sdf::Value::UIntListOp(Box::new(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?))
             }
             Type::UInt64ListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::UInt64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                sdf::Value::UInt64ListOp(Box::new(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?))
             }
 
             //
@@ -1431,7 +1449,7 @@ impl<'a> Decoder<'a> {
                 self.stream.seek(value.payload())?;
 
                 let payload = self.read_payload()?;
-                sdf::Value::Payload(payload)
+                sdf::Value::Payload(Box::new(payload))
             }
 
             Type::PayloadListOp => {
@@ -1446,7 +1464,7 @@ impl<'a> Decoder<'a> {
                     Ok(vec)
                 })?;
 
-                sdf::Value::PayloadListOp(list)
+                sdf::Value::PayloadListOp(Box::new(list))
             }
 
             Type::VariantSelectionMap => {
@@ -1465,7 +1483,7 @@ impl<'a> Decoder<'a> {
                     map.insert(key, value);
                 }
 
-                sdf::Value::VariantSelectionMap(map)
+                sdf::Value::VariantSelectionMap(Box::new(map))
             }
 
             Type::TimeSamples => {
@@ -1513,14 +1531,14 @@ impl<'a> Decoder<'a> {
             }
 
             // Empty dictionary.
-            Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
+            Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(Box::default()),
             Type::Dictionary => {
                 corrupt!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
                 corrupt!(!value.is_array(), "Dictionary {ty} can't be inlined");
 
                 self.stream.seek(value.payload())?;
 
-                sdf::Value::Dictionary(self.read_custom_data()?)
+                sdf::Value::Dictionary(Box::new(self.read_custom_data()?))
             }
 
             Type::ValueBlock => sdf::Value::ValueBlock,
@@ -1547,7 +1565,7 @@ impl<'a> Decoder<'a> {
             }
             Type::PathExpression => {
                 let expr = self.read_asset_path(value)?;
-                sdf::Value::PathExpression(sdf::PathExpression::parse(&expr))
+                sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(&expr)))
             }
 
             // An unregistered value wraps a nested, self-describing value,
@@ -1569,7 +1587,7 @@ impl<'a> Decoder<'a> {
             Type::UnregisteredValueListOp => {
                 corrupt!(!value.is_inlined());
                 let list = self.read_list_op(value, Self::read_unregistered_items)?;
-                sdf::Value::UnregisteredValueListOp(list)
+                sdf::Value::UnregisteredValueListOp(Box::new(list))
             }
 
             Type::Relocates => {
@@ -1677,7 +1695,7 @@ fn build_compressed_paths(
                     // to produce canonical paths like /Prim{set=sel}.
                     parent_path.append_variant_segment(element_token)?
                 } else {
-                    parent_path.append_path(element_token)?
+                    parent_path.append_child(element_token)?
                 };
             }
 
@@ -1732,15 +1750,15 @@ fn checked_path_slot(paths: &[sdf::Path], slot: usize) -> Result<(), ReadError> 
 /// `Value::Quat*` is always `(real, i, j, k)` regardless of whether the value
 /// came from USDC or USDA. Pixar's `GfQuat<T>` declares `_imaginary:
 /// GfVec3<T>` before `T _real`, so on-disk bytes are `[x, y, z, w]`.
-fn xyzw_to_wxyz_quatf(v: Vec<[f32; 4]>) -> Vec<gf::Quatf> {
+fn xyzw_to_wxyz_quatf(v: sdf::Array<[f32; 4]>) -> Vec<gf::Quatf> {
     v.into_iter().map(|q| gf::quatf(q[3], q[0], q[1], q[2])).collect()
 }
 
-fn xyzw_to_wxyz_quatd(v: Vec<[f64; 4]>) -> Vec<gf::Quatd> {
+fn xyzw_to_wxyz_quatd(v: sdf::Array<[f64; 4]>) -> Vec<gf::Quatd> {
     v.into_iter().map(|q| gf::quatd(q[3], q[0], q[1], q[2])).collect()
 }
 
-fn xyzw_to_wxyz_quath(v: Vec<[f16; 4]>) -> Vec<gf::Quath> {
+fn xyzw_to_wxyz_quath(v: sdf::Array<[f16; 4]>) -> Vec<gf::Quath> {
     v.into_iter().map(|q| gf::quath(q[3], q[0], q[1], q[2])).collect()
 }
 
@@ -1801,7 +1819,7 @@ mod tests {
         data.create_spec(sdf::Path::new("/P.link")?, sdf::SpecType::Relationship)
             .add(
                 "targetPaths",
-                sdf::Value::PathListOp(sdf::PathListOp::explicit([target.clone()])),
+                sdf::Value::PathListOp(Box::new(sdf::PathListOp::explicit([target.clone()]))),
             );
         let mut output = io::Cursor::new(Vec::new());
         usdc::CrateWriter::write(&data, &mut output)?;
@@ -1902,6 +1920,25 @@ mod tests {
         assert!(stream.read_vec::<[f64; 16]>(usize::MAX / 8).is_err());
         assert!(stream.read_vec::<u8>(9).is_err());
         assert_eq!(stream.read_vec::<u8>(8).unwrap(), bytes);
+    }
+
+    #[test]
+    fn vector_alignment() -> Result<()> {
+        let words = [0x0102_0304_0506_0708u64, 0x1112_1314_1516_1718, 0x2122_2324_2526_2728];
+        let bytes = bytes_of(&words);
+        assert_eq!(Stream::new(bytes).read_vec::<u64>(3)?, words);
+
+        let mut stream = Stream::new(bytes);
+        stream.seek(1)?;
+        let expected = [
+            u64::from_ne_bytes(bytes[1..9].try_into().unwrap()),
+            u64::from_ne_bytes(bytes[9..17].try_into().unwrap()),
+        ];
+        assert_eq!(stream.read_vec::<u64>(2)?, expected);
+        assert_eq!(stream.position(), 17);
+        assert!(stream.read_vec::<u64>(1).is_err());
+        assert!(stream.read_vec::<u64>(0)?.is_empty());
+        Ok(())
     }
 
     /// A time-sample block whose sample points back at the block itself is
@@ -2006,6 +2043,73 @@ mod tests {
         Ok(output.into_inner())
     }
 
+    #[test]
+    fn shared_numeric_arrays() -> Result<()> {
+        for count in [511, 512, 600] {
+            let values: Vec<f32> = (0..count).map(|i| i as f32 + 0.25).collect();
+            let bytes = attribute_crate("weights", "float[]", sdf::Value::from(values.clone()))?;
+            for mapped in [false, true] {
+                for padding in [0, 1] {
+                    let mut storage = vec![0u8; padding];
+                    storage.extend_from_slice(&bytes);
+                    let (buffer, _) = ar::tests::recording_source(storage, mapped);
+                    let file = CrateFile::open(buffer.slice(padding..padding + bytes.len()).unwrap())?;
+                    let rep = file
+                        .fields
+                        .iter()
+                        .map(|field| field.value_rep)
+                        .find(|rep| rep.is_array() && rep.ty().is_ok_and(|ty| ty == Type::Float))
+                        .unwrap();
+                    let start = rep.payload() as usize + mem::size_of::<u64>();
+                    let address = file.bytes[start..].as_ptr();
+                    let eligible = cfg!(target_endian = "little")
+                        && mapped
+                        && count >= 512
+                        && (address as usize).is_multiple_of(mem::align_of::<f32>());
+                    let array = file.value(rep)?.try_as_float_vec().unwrap();
+                    assert_eq!(
+                        array.is_shared(),
+                        eligible,
+                        "{count} values, mapped={mapped}, padding={padding}"
+                    );
+                    if eligible {
+                        assert_eq!(array.as_ptr().cast::<u8>(), address);
+                    }
+                    drop(file);
+                    assert_eq!(array.as_slice(), values.as_slice());
+                    let mut clone = array.clone();
+                    clone[0] = -1.0;
+                    assert_eq!(array[0], 0.25);
+                    assert_eq!(clone[0], -1.0);
+                    assert!(!clone.is_shared());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_array_bounds() -> Result<()> {
+        let values = sdf::Value::from(vec![0.25f32; 512]);
+        let bytes = attribute_crate("weights", "float[]", values)?;
+        let file = CrateFile::open(bytes.clone())?;
+        let rep = file
+            .fields
+            .iter()
+            .map(|field| field.value_rep)
+            .find(|rep| rep.is_array() && rep.ty().is_ok_and(|ty| ty == Type::Float))
+            .unwrap();
+        let start = rep.payload() as usize;
+        for count in [u64::MAX, bytes.len() as u64] {
+            let mut corrupt = bytes.clone();
+            corrupt[start..start + 8].copy_from_slice(&count.to_le_bytes());
+            let (buffer, _) = ar::tests::recording_source(corrupt, true);
+            let file = CrateFile::open(buffer)?;
+            assert!(file.value(rep).is_err());
+        }
+        Ok(())
+    }
+
     /// An integer array is compressed from sixteen elements on, the size
     /// below which a C++ reader takes it as stored uncompressed, and both
     /// forms read back.
@@ -2013,7 +2117,11 @@ mod tests {
     fn int_array_compression_threshold() -> Result<()> {
         for (len, compressed) in [(4, false), (15, false), (16, true), (40, true)] {
             let values: Vec<i32> = (0..len).collect();
-            let file = CrateFile::open(attribute_crate("ids", "int[]", sdf::Value::IntVec(values.clone()))?)?;
+            let file = CrateFile::open(attribute_crate(
+                "ids",
+                "int[]",
+                sdf::Value::IntVec((values.clone()).into()),
+            )?)?;
             let rep = file
                 .fields
                 .iter()
@@ -2021,7 +2129,7 @@ mod tests {
                 .find(|rep| rep.is_array() && rep.ty().is_ok_and(|ty| ty == Type::Int))
                 .expect("the integer array");
             assert_eq!(rep.is_compressed(), compressed, "{len} elements");
-            assert_eq!(file.value(rep)?, sdf::Value::IntVec(values), "{len} elements");
+            assert_eq!(file.value(rep)?, sdf::Value::IntVec(values.into()), "{len} elements");
         }
         Ok(())
     }
@@ -2029,7 +2137,7 @@ mod tests {
     /// A crate long enough for its bytes to be advised when it is opened:
     /// one attribute holding an array past [`MIN_ADVISED_BYTES`].
     fn long_crate() -> Result<Vec<u8>> {
-        let weights = sdf::Value::FloatVec(vec![0.5; MIN_ADVISED_BYTES / 4 + 1]);
+        let weights = sdf::Value::FloatVec((vec![0.5; MIN_ADVISED_BYTES / 4 + 1]).into());
         attribute_crate("weights", "float[]", weights)
     }
 

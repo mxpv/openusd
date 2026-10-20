@@ -171,8 +171,9 @@ impl LayerNode {
 /// the composed prim indices. Composition queries reach a layer by its
 /// [`LayerId`] in O(1).
 pub(crate) struct LayerGraph {
-    /// Every layer, keyed by id.
-    nodes: HashMap<LayerId, LayerNode>,
+    /// Layers in stable id slots. Nodes stay in the graph when detached
+    /// from a stack, so a handle remains valid for the graph's lifetime.
+    nodes: Vec<LayerNode>,
     /// Exact `identifier → id` index, so a layer is resolved by its canonical
     /// identifier (the public authoring surface) in O(1), and a re-added
     /// identifier collapses onto its existing id.
@@ -184,9 +185,6 @@ pub(crate) struct LayerGraph {
     /// consulted by `SdfLayer::Find` after the identifier). The first layer
     /// interned at a real path keeps it.
     by_real_path: HashMap<String, LayerId>,
-    /// Next id to mint. Monotonic for the life of the graph, so a removed id is
-    /// never reused for a different layer within a session.
-    next_id: u32,
     /// All layer ids in collection order. Iteration order is deterministic, so
     /// identifier listing and sublayer-stack composition are stable. The
     /// first [`session_layer_count`](Self::session_layer_count) entries are the
@@ -643,10 +641,9 @@ impl LayerGraph {
     /// [`from_layers`](Self::from_layers) is the all-at-once convenience.
     pub(crate) fn new(registry: sdf::LayerRegistry) -> Self {
         Self {
-            nodes: HashMap::new(),
+            nodes: Vec::new(),
             by_identifier: HashMap::new(),
             by_real_path: HashMap::new(),
-            next_id: 0,
             order: Vec::new(),
             session_layer_count: 0,
             root: None,
@@ -708,8 +705,8 @@ impl LayerGraph {
             self.by_identifier.insert(layer.identifier().to_string(), id);
             return (id, false);
         }
-        let id = LayerId::from_raw(self.next_id);
-        self.next_id += 1;
+        let id = LayerId::from_raw(u32::try_from(self.nodes.len()).expect("layer id space exhausted"));
+        assert!(id.is_valid(), "the invalid layer id is reserved");
         self.by_identifier.insert(layer.identifier().to_string(), id);
         if layer.real_path() != layer.identifier() {
             self.by_real_path.entry(layer.real_path().to_string()).or_insert(id);
@@ -718,7 +715,7 @@ impl LayerGraph {
         // change record left by prior write-through edits must not survive to
         // be drained by a later transaction the stage runs on it.
         layer.discard_changes();
-        self.nodes.insert(id, LayerNode::new(layer));
+        self.nodes.push(LayerNode::new(layer));
         self.order.push(id);
         (id, true)
     }
@@ -805,14 +802,14 @@ impl LayerGraph {
         let affected = match scope {
             EdgeScope::All => {
                 for (id, edges) in all_edges {
-                    self.nodes.get_mut(&id).expect("edge source exists").children = edges;
+                    self.nodes.get_mut(id.0 as usize).expect("edge source exists").children = edges;
                 }
                 None
             }
             EdgeScope::Edited(touched) | EdgeScope::Joined(touched) => {
                 let mut changed: HashSet<LayerId> = HashSet::new();
                 for (id, edges) in all_edges {
-                    let node = self.nodes.get_mut(&id).expect("edge source exists");
+                    let node = self.nodes.get_mut(id.0 as usize).expect("edge source exists");
                     if node.children != edges {
                         node.children = edges;
                         changed.insert(id);
@@ -856,7 +853,7 @@ impl LayerGraph {
         mut sink: Option<&mut EdgeSink>,
     ) -> SublayerEdges {
         let root_path = Path::abs_root();
-        let node = &self.nodes[&id];
+        let node = &self.nodes[id.0 as usize];
         let Ok(Value::StringVec(sub_paths)) = node
             .layer
             .data()
@@ -928,7 +925,7 @@ impl LayerGraph {
             if !anchored && let Some(sink) = sink.as_deref_mut() {
                 sink.fallbacks.push(id);
             }
-            let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
+            let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[sub_id.0 as usize].layer);
             let effective = offsets
                 .get(i)
                 .copied()
@@ -1029,7 +1026,7 @@ impl LayerGraph {
                 let nodes = &self.nodes;
                 self.detect_cycles(
                     root,
-                    |id| nodes.get(&id).map_or(&[][..], |n| n.children.as_slice()),
+                    |id| nodes.get(id.0 as usize).map_or(&[][..], |n| n.children.as_slice()),
                     &mut ancestors,
                     &mut errors,
                 );
@@ -1205,7 +1202,7 @@ impl LayerGraph {
             // An anonymous parent has no location to resolve the entry
             // against; the entry stays a graph-only lookup, satisfied when a
             // matching in-memory layer joins.
-            if self.nodes[&demand.parent].layer.is_anonymous() {
+            if self.nodes[demand.parent.0 as usize].layer.is_anonymous() {
                 continue;
             }
             if muted
@@ -1342,7 +1339,7 @@ impl LayerGraph {
         let sublayered: HashSet<LayerId> = self
             .order
             .iter()
-            .flat_map(|&id| self.nodes[&id].children.iter().map(|&(child, _)| child))
+            .flat_map(|&id| self.nodes[id.0 as usize].children.iter().map(|&(child, _)| child))
             .collect();
         let dag_roots: Vec<LayerId> = self
             .order
@@ -1397,8 +1394,8 @@ impl LayerGraph {
                 }
                 if ancestors.contains(&child) {
                     errors.report(CompositionDiagnostic::SublayerCycle {
-                        root_layer: self.nodes[&id].layer.identifier().to_string(),
-                        seen_layer: self.nodes[&child].layer.identifier().to_string(),
+                        root_layer: self.nodes[id.0 as usize].layer.identifier().to_string(),
+                        seen_layer: self.nodes[child.0 as usize].layer.identifier().to_string(),
                     });
                     continue;
                 }
@@ -1412,12 +1409,12 @@ impl LayerGraph {
 
     /// Read-only access to a layer node.
     pub(crate) fn get(&self, id: LayerId) -> Option<&LayerNode> {
-        self.nodes.get(&id)
+        self.nodes.get(id.0 as usize)
     }
 
     /// Mutable access to a layer node, for routed authoring writes.
     pub(crate) fn get_mut(&mut self, id: LayerId) -> Option<&mut LayerNode> {
-        self.nodes.get_mut(&id)
+        self.nodes.get_mut(id.0 as usize)
     }
 
     /// Borrow the layers named by `ids` together, in `ids` order, skipping any
@@ -1428,8 +1425,10 @@ impl LayerGraph {
         let mut by_id: HashMap<LayerId, &mut sdf::Layer> = self
             .nodes
             .iter_mut()
+            .enumerate()
+            .map(|(index, node)| (LayerId::from_raw(index as u32), node))
             .filter(|(id, _)| want.contains(id))
-            .map(|(id, node)| (*id, &mut node.layer))
+            .map(|(id, node)| (id, &mut node.layer))
             .collect();
         ids.iter()
             .filter_map(|id| by_id.remove(id).map(|layer| (*id, layer)))
@@ -1438,12 +1437,12 @@ impl LayerGraph {
 
     /// The layer with the given id. Panics if the id is unknown.
     pub(crate) fn layer(&self, id: LayerId) -> &sdf::Layer {
-        &self.nodes[&id].layer
+        &self.nodes[id.0 as usize].layer
     }
 
     /// The identifier of the layer with the given id. Panics if unknown.
     pub(crate) fn identifier(&self, id: LayerId) -> &str {
-        self.nodes[&id].layer.identifier()
+        self.nodes[id.0 as usize].layer.identifier()
     }
 
     /// The identifier of the layer with the given id, or `None` when the id
@@ -1451,7 +1450,7 @@ impl LayerGraph {
     /// [`identifier`](Self::identifier), for a caller holding an id that may
     /// have outlived its layer.
     pub(crate) fn try_identifier(&self, id: LayerId) -> Option<&str> {
-        self.nodes.get(&id).map(|node| node.layer.identifier())
+        self.nodes.get(id.0 as usize).map(|node| node.layer.identifier())
     }
 
     /// The resolved physical location of the layer with the given id — the
@@ -1461,7 +1460,7 @@ impl LayerGraph {
     /// through a resolver search directory, whose identifier is the search path.
     /// Panics if unknown.
     pub(crate) fn real_path(&self, id: LayerId) -> &str {
-        self.nodes[&id].layer.real_path()
+        self.nodes[id.0 as usize].layer.real_path()
     }
 
     /// The registry that opens reference/payload targets on demand.
@@ -1475,7 +1474,7 @@ impl LayerGraph {
     /// anonymous (no resolvable location, C++ `SdfLayer::GetRealPath` is
     /// empty).
     pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
-        self.nodes[&anchor?].layer.anchor_location()
+        self.nodes[(anchor?).0 as usize].layer.anchor_location()
     }
 
     /// Records that an on-demand open of `asset_path` failed, so composition
@@ -1695,7 +1694,9 @@ impl LayerGraph {
             if self.is_muted(id) || !visited.insert(id) {
                 continue;
             }
-            let Some(node) = self.nodes.get(&id) else { continue };
+            let Some(node) = self.nodes.get(id.0 as usize) else {
+                continue;
+            };
             if node.has_expr_sublayer {
                 return true;
             }
@@ -1726,7 +1727,7 @@ impl LayerGraph {
         match only {
             None => {
                 let mut any = false;
-                for node in self.nodes.values_mut() {
+                for node in self.nodes.iter_mut() {
                     node.has_expr_sublayer = has_expr(node);
                     any |= node.has_expr_sublayer;
                 }
@@ -1734,7 +1735,7 @@ impl LayerGraph {
             }
             Some(only) => {
                 for id in only {
-                    let node = self.nodes.get_mut(id).expect("a refreshed layer is live");
+                    let node = self.nodes.get_mut(id.0 as usize).expect("a refreshed layer is live");
                     node.has_expr_sublayer = has_expr(node);
                     self.sublayers.any_expr |= node.has_expr_sublayer;
                 }
@@ -1773,7 +1774,7 @@ impl LayerGraph {
     /// composition-time read of the same already-loaded layer cannot abort, so
     /// an unreadable field degrades to no variables.
     fn composed_stack_vars(&self, root: LayerId, seed_vars: &HashMap<String, Value>) -> HashMap<String, Value> {
-        expr::stack_variables(self.nodes[&root].layer.data(), seed_vars).unwrap_or_default()
+        expr::stack_variables(self.nodes[root.0 as usize].layer.data(), seed_vars).unwrap_or_default()
     }
 
     /// The single member-expansion policy for every "stack rooted at `root` under
@@ -1873,7 +1874,7 @@ impl LayerGraph {
     fn session_expression_variables(&self) -> HashMap<String, Value> {
         match self.session_layers().first() {
             Some(&session_root) if !self.is_muted(session_root) => {
-                expr::read_variables(self.nodes[&session_root].layer.data())
+                expr::read_variables(self.nodes[session_root.0 as usize].layer.data())
                     .map(|dict| dict.into_owned())
                     .unwrap_or_default()
             }
@@ -1891,13 +1892,13 @@ impl LayerGraph {
     /// drops out of is [`stack_variables`](Self::stack_variables).
     fn root_stack_structural_vars(&self) -> HashMap<String, Value> {
         let session = match self.session_layers().first() {
-            Some(&session_root) => expr::read_variables(self.nodes[&session_root].layer.data())
+            Some(&session_root) => expr::read_variables(self.nodes[session_root.0 as usize].layer.data())
                 .map(|dict| dict.into_owned())
                 .unwrap_or_default(),
             None => HashMap::new(),
         };
         match self.root {
-            Some(root) => expr::stack_variables(self.nodes[&root].layer.data(), &session).unwrap_or_default(),
+            Some(root) => expr::stack_variables(self.nodes[root.0 as usize].layer.data(), &session).unwrap_or_default(),
             None => session,
         }
     }
@@ -1932,7 +1933,7 @@ impl LayerGraph {
             &mut members,
             &mut ancestors,
             |id| muted.contains(&id),
-            |id| nodes.get(&id).map_or(&[][..], |n| n.children.as_slice()),
+            |id| nodes.get(id.0 as usize).map_or(&[][..], |n| n.children.as_slice()),
         );
         members
     }
@@ -2085,7 +2086,7 @@ impl LayerGraph {
     /// [`try_identifier`](Self::try_identifier): a queued edit reaches this
     /// holding an id that may have outlived its layer.
     pub(crate) fn default_prim_token(&self, layer: LayerId) -> Option<tf::Token> {
-        self.nodes.get(&layer)?.layer.pseudo_root()?.default_prim()
+        self.nodes.get(layer.0 as usize)?.layer.pseudo_root()?.default_prim()
     }
 
     /// The `defaultPrim` metadata from the root layer, if set.
@@ -2134,7 +2135,7 @@ impl LayerGraph {
         if let Some(id) = self.stacks.lookup_target(root_layer, VarsSource::Root) {
             return Cow::Borrowed(self.stacks.members(id));
         }
-        if !self.nodes.contains_key(&root_layer) {
+        if root_layer.0 as usize >= self.nodes.len() {
             return Cow::Borrowed(&[]);
         }
         // Only a `${VAR}` sublayer reads the stack's variables — the layer's own
@@ -2223,7 +2224,11 @@ impl LayerGraph {
         // Stack deltas matter only to `expressionVariables` change processing,
         // which a join is not.
         let _ = self.build_sublayer_edges(EdgeScope::Joined(joined));
-        if self.has_relocates || joined.iter().any(|id| !self.nodes[id].layer.relocates().is_empty()) {
+        if self.has_relocates
+            || joined
+                .iter()
+                .any(|id| !self.nodes[id.0 as usize].layer.relocates().is_empty())
+        {
             self.recompute_relocates()
         } else {
             HashSet::new()
@@ -2267,7 +2272,7 @@ impl LayerGraph {
         for &id in &self.order {
             let pairs = relocates.remove(&id).unwrap_or_default();
             self.has_relocates |= !pairs.is_empty();
-            let node = self.nodes.get_mut(&id).expect("layer node exists");
+            let node = self.nodes.get_mut(id.0 as usize).expect("layer node exists");
             if node.relocates != pairs {
                 changed.insert(id);
             }
@@ -2347,7 +2352,7 @@ impl LayerGraph {
     fn incremental_relocate_entries(&self, ambient: LayerStackId) -> Vec<(Path, Path, LayerId)> {
         let mut entries: Vec<(Path, Path, LayerId)> = Vec::new();
         for &(layer, _) in self.layer_stack(ambient).iter() {
-            let Some(node) = self.nodes.get(&layer) else {
+            let Some(node) = self.nodes.get(layer.0 as usize) else {
                 continue;
             };
             for (source, target) in &node.relocates {
@@ -2571,7 +2576,7 @@ impl LayerGraph {
 
     /// The identity a loaded layer is muted under: its interned identifier.
     fn identity(&self, id: LayerId) -> String {
-        self.nodes[&id].layer.identifier().to_string()
+        self.nodes[id.0 as usize].layer.identifier().to_string()
     }
 
     /// Recomposes the muting-dependent graph state for a just-changed muted set
@@ -2640,7 +2645,8 @@ impl LayerGraph {
         let mut growing = true;
         while growing {
             growing = false;
-            for (&id, node) in &self.nodes {
+            for (index, node) in self.nodes.iter().enumerate() {
+                let id = LayerId::from_raw(index as u32);
                 if found.contains(&id) {
                     continue;
                 }
@@ -3122,6 +3128,28 @@ mod tests {
         LayerGraph::from_layers(vec![root, sub, leaf], 0, sdf::LayerRegistry::default())
     }
 
+    /// Layer handles survive graph growth, and a batch borrows each requested
+    /// live layer once in request order while skipping unknown handles.
+    #[test]
+    fn handles_after_growth() {
+        let mut graph = chain_graph();
+        let root = graph.root_id().unwrap();
+        let leaf = graph.id_of("leaf.usda").unwrap();
+        for index in 0..128 {
+            graph.intern(sdf::Layer::new_in_memory(format!("extra{index}.usda")));
+        }
+        assert_eq!(graph.identifier(root), "root.usda");
+        assert_eq!(graph.identifier(leaf), "leaf.usda");
+        assert_eq!(graph.intern(sdf::Layer::new_in_memory("leaf.usda")), (leaf, false));
+        assert!(graph.get(LayerId::INVALID).is_none());
+        assert!(graph.get_mut(LayerId::INVALID).is_none());
+        assert!(graph.try_identifier(LayerId::INVALID).is_none());
+        let batch = graph.layers_mut(&[leaf, root, leaf, LayerId::INVALID]);
+        assert_eq!(batch.iter().map(|&(id, _)| id).collect::<Vec<_>>(), [leaf, root]);
+        assert_eq!(batch[0].1.identifier(), "leaf.usda");
+        assert_eq!(batch[1].1.identifier(), "root.usda");
+    }
+
     /// Muting a sublayer drops it and its whole subtree from `sublayer_stack`
     /// and `root_layer_stack`; unmuting restores them.
     #[test]
@@ -3191,9 +3219,10 @@ mod tests {
     fn set_expr_var(layer: &mut sdf::Layer, name: &str, value: &str) {
         edit_layer(layer, |e| {
             let dict = HashMap::from([(name.to_string(), Value::String(value.to_string()))]);
-            e.pseudo_root_mut()
-                .unwrap()
-                .set(FieldKey::ExpressionVariables.as_str(), Value::Dictionary(dict));
+            e.pseudo_root_mut().unwrap().set(
+                FieldKey::ExpressionVariables.as_str(),
+                Value::Dictionary(Box::new(dict)),
+            );
         });
     }
 
@@ -3285,7 +3314,11 @@ mod tests {
         );
 
         let root_id = graph.root_id().unwrap();
-        set_expr_var(&mut graph.nodes.get_mut(&root_id).unwrap().layer, "WHICH", "sub.usda");
+        set_expr_var(
+            &mut graph.nodes.get_mut(root_id.0 as usize).unwrap().layer,
+            "WHICH",
+            "sub.usda",
+        );
         graph.recompute_sublayers(Some(&HashSet::from([root_id])));
         assert!(
             graph.errors().is_empty(),
@@ -3631,7 +3664,7 @@ mod tests {
             "the stored set is the target's own V overlaid by the source's W"
         );
 
-        set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
+        set_expr_var(&mut graph.nodes.get_mut(target.0 as usize).unwrap().layer, "V", "b");
         graph.recompute_sublayers(Some(&HashSet::from([target])));
         assert_eq!(
             graph.stack_variables(id),
@@ -3664,7 +3697,7 @@ mod tests {
             "the muted root's own variables still compose the stored set"
         );
 
-        set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
+        set_expr_var(&mut graph.nodes.get_mut(target.0 as usize).unwrap().layer, "V", "b");
         graph.recompute_sublayers(Some(&HashSet::from([target])));
         assert_eq!(
             graph.stack_variables(id),
@@ -3839,7 +3872,7 @@ mod tests {
         };
         assert!(members(&graph, t_stack).contains(&a), "V=a selects a.usda");
 
-        set_expr_var(&mut graph.nodes.get_mut(&src).unwrap().layer, "V", "b");
+        set_expr_var(&mut graph.nodes.get_mut(src.0 as usize).unwrap().layer, "V", "b");
         graph.recompute_sublayers(Some(&HashSet::from([src])));
 
         let (resolved, fresh) = graph.intern_external(target, src_stack);
@@ -3878,10 +3911,10 @@ mod tests {
         let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
         let (old_t, fresh) = graph.intern_external(target, src_stack);
         assert!(fresh, "the authoring source mints a contextual instance");
-        edit_layer(&mut graph.nodes.get_mut(&src).unwrap().layer, |e| {
+        edit_layer(&mut graph.nodes.get_mut(src.0 as usize).unwrap().layer, |e| {
             e.pseudo_root_mut().unwrap().set(
                 FieldKey::ExpressionVariables.as_str(),
-                Value::Dictionary(HashMap::new()),
+                Value::Dictionary(Box::default()),
             );
         });
         graph.recompute_sublayers(Some(&HashSet::from([src])));
@@ -4334,7 +4367,11 @@ mod tests {
             "the root's V starts at leaf: {ids:?}"
         );
 
-        set_expr_var(&mut graph.nodes.get_mut(&root_id).unwrap().layer, "V", "leaf2");
+        set_expr_var(
+            &mut graph.nodes.get_mut(root_id.0 as usize).unwrap().layer,
+            "V",
+            "leaf2",
+        );
         graph.recompute_sublayers(Some(&HashSet::from([root_id])));
 
         let ids: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
@@ -4378,7 +4415,7 @@ mod tests {
 
         // Add the expression branch under `base` and rebuild with `base` edited: it
         // is a member of the interned target stack, so that stack rebuilds.
-        edit_layer(&mut graph.nodes.get_mut(&base_id).unwrap().layer, |e| {
+        edit_layer(&mut graph.nodes.get_mut(base_id.0 as usize).unwrap().layer, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["expr_mid.usda"]);
         });
         graph.recompute_sublayers(Some(&HashSet::from([base_id])));

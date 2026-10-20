@@ -16,10 +16,10 @@
 //! This is C++ `Pcp_Dependencies`, which also keys sites by layer stack.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 use std::mem;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::sdf::{self, Path};
 
@@ -37,15 +37,11 @@ pub(super) struct Dependencies {
     /// The inner map is an [`sdf::PathTable`] so
     /// [`subtree_lookup`](Self::subtree_lookup) is a subtree walk rather than a
     /// full scan.
-    per_stack: HashMap<LayerStackId, sdf::PathTable<Vec<Path>>>,
-    /// Reverse map for cheap removal: `prim_index_path` → list of (stack, site)
-    /// it registered. Avoids re-walking the index when invalidating.
-    by_prim: sdf::PathMap<Vec<(LayerStackId, Path)>>,
-    /// Layer-agnostic set of prim-index paths, each observing exactly its own
-    /// path. A prim self-registers here so an empty or cache-miss index stays
-    /// findable when a spec is first authored at its path on a layer its graph
-    /// does not yet touch; one entry per prim covers that prim on every layer.
-    by_path: sdf::PathSet,
+    per_stack: FxHashMap<LayerStackId, sdf::PathTable<Vec<Path>>>,
+    /// Per-prim registrations for retraction and layer-agnostic lookup.
+    /// Every cached index registers its own path, including an empty index.
+    /// This lets a first opinion at that path reach the cached index.
+    by_prim: sdf::PathMap<Registration>,
     /// Prim-index paths with a dependency node composing against the stage
     /// root layer stack, the self-Root edge included. A change to a layer of the
     /// root stack reaches these ([`indices_for_layers`](Self::indices_for_layers));
@@ -74,10 +70,10 @@ pub(super) struct Dependencies {
     /// named one — an unresolved default grafts no node, so no site records it —
     /// and read by [`prims_using_default_prim`](Self::prims_using_default_prim)
     /// to evict exactly those indices when the field is edited.
-    by_default_prim: HashMap<LayerId, sdf::PathSet>,
+    by_default_prim: FxHashMap<LayerId, sdf::PathSet>,
     /// The layers `prim_index_path` registered under in `by_default_prim`, for
     /// O(1) retraction on removal.
-    by_prim_default_prim: sdf::PathMap<HashSet<LayerId>>,
+    by_prim_default_prim: sdf::PathMap<FxHashSet<LayerId>>,
     /// Reverse `layer stack → prim-index-paths` map over the stacks each index's
     /// dependency nodes compose against. An `expressionVariables` edit whose
     /// stack delta demands a full resync — the variable source changed, or a
@@ -86,12 +82,7 @@ pub(super) struct Dependencies {
     /// stack is never recorded: every prim composes in it, so its entry would
     /// mirror every cached path; [`prims_for_stack`](Self::prims_for_stack)
     /// answers for it with the pseudo-root instead.
-    by_stack: HashMap<LayerStackId, sdf::PathSet>,
-    /// The stacks `prim_index_path` registered under — in
-    /// [`by_stack`](Self::by_stack), [`by_stack_vars`](Self::by_stack_vars), or
-    /// both — for O(1) retraction on removal. Absent for a prim with neither
-    /// registration, the common arc-free, expression-free case.
-    by_prim_stacks: sdf::PathMap<HashSet<LayerStackId>>,
+    by_stack: FxHashMap<LayerStackId, sdf::PathSet>,
     /// Per-stack expression-variable dependencies: `by_stack_vars[stack][prim]` =
     /// the variable names `prim`'s build read from `stack`'s composed set (C++
     /// `PcpExpressionVariablesDependencyData`). A variable edit that changes
@@ -100,7 +91,14 @@ pub(super) struct Dependencies {
     /// ([`prims_using_vars`](Self::prims_using_vars)). Unlike
     /// [`by_stack`](Self::by_stack), the root stack appears here — its per-prim
     /// names are exactly what the targeted lookup needs.
-    by_stack_vars: HashMap<LayerStackId, sdf::PathMap<HashSet<String>>>,
+    by_stack_vars: FxHashMap<LayerStackId, sdf::PathMap<HashSet<String>>>,
+}
+
+/// A prim's graph sites and stack registrations, retained for retraction.
+#[derive(Debug)]
+struct Registration {
+    sites: Vec<(LayerStackId, Path)>,
+    stacks: Vec<LayerStackId>,
 }
 
 impl Dependencies {
@@ -125,10 +123,9 @@ impl Dependencies {
         // Clear any previous registration before adding the new one.
         self.remove(prim_index_path);
 
-        // `seen` provides O(1) dedup as we walk graph nodes; the parallel
-        // `registered` Vec preserves insertion order for the reverse-map
-        // entry (the order is irrelevant to lookups but helps debug).
-        let mut seen: FxHashSet<(LayerStackId, Path)> = FxHashSet::default();
+        // Small site lists deduplicate in place. Larger lists use a hash set
+        // to bound the work as the graph grows.
+        let mut seen: Option<FxHashSet<(LayerStackId, Path)>> = None;
         let mut registered: Vec<(LayerStackId, Path)> = Vec::new();
         // Whether a node composes against the root stack, the self-Root edge the
         // site map skips included.
@@ -138,7 +135,7 @@ impl Dependencies {
         // every prim composes in it, so recording it in `by_stack` would mirror
         // the whole cache per prim; `prims_for_stack` answers for it with the
         // pseudo-root instead.
-        let mut stacks: HashSet<LayerStackId> = HashSet::new();
+        let mut stacks: Vec<LayerStackId> = Vec::new();
         // Include the culled nodes the graph keeps and inert relocation-source
         // nodes: authoring a spec at such a site must invalidate this prim so the
         // node un-culls / re-relocates on recomposition. A culled node the graph
@@ -165,16 +162,22 @@ impl Dependencies {
             if stack == LayerStackId::ROOT {
                 root_user = true;
             } else {
-                stacks.insert(stack);
+                stacks.push(stack);
             }
             if !registers {
                 continue;
             }
-            let key = (stack, path.clone());
-            if !seen.insert(key.clone()) {
+            if registered.len() < 8 {
+                if registered.iter().any(|(s, p)| *s == stack && p == path) {
+                    continue;
+                }
+            } else if !seen
+                .get_or_insert_with(|| registered.iter().cloned().collect())
+                .insert((stack, path.clone()))
+            {
                 continue;
             }
-            registered.push(key);
+            registered.push((stack, path.clone()));
             self.per_stack
                 .entry(stack)
                 .or_default()
@@ -188,12 +191,14 @@ impl Dependencies {
         // root stack included here, since its per-prim names are the step-4
         // lookup even though `by_stack` leaves it implicit.
         for (stack, names) in expr_var_deps {
-            stacks.insert(stack);
+            stacks.push(stack);
             self.by_stack_vars
                 .entry(stack)
                 .or_default()
                 .insert(prim_index_path.clone(), names);
         }
+        stacks.sort_unstable();
+        stacks.dedup();
         for &stack in &stacks {
             if stack != LayerStackId::ROOT {
                 self.by_stack.entry(stack).or_default().insert(prim_index_path.clone());
@@ -228,7 +233,7 @@ impl Dependencies {
         // Layers whose `defaultPrim` this index's composition consulted. Collected
         // through a set because one target reached by both a `references` and a
         // `payload` arc records twice.
-        let defaults: HashSet<LayerId> = index.default_prim_layers().iter().copied().collect();
+        let defaults: FxHashSet<LayerId> = index.default_prim_layers().iter().copied().collect();
         for &layer in &defaults {
             self.by_default_prim
                 .entry(layer)
@@ -236,12 +241,13 @@ impl Dependencies {
                 .insert(prim_index_path.clone());
         }
 
-        self.by_prim.insert(prim_index_path.clone(), registered);
-        // The common arc-free, expression-free index registers under no stack
-        // (its only stack is the implicit root), so skip an empty entry.
-        if !stacks.is_empty() {
-            self.by_prim_stacks.insert(prim_index_path.clone(), stacks);
-        }
+        self.by_prim.insert(
+            prim_index_path.clone(),
+            Registration {
+                sites: registered,
+                stacks,
+            },
+        );
         // The common unmuted index depends on no muted target, so skip an empty entry.
         if !muted.is_empty() {
             self.by_prim_muted.insert(prim_index_path.clone(), muted);
@@ -250,15 +256,6 @@ impl Dependencies {
         if !defaults.is_empty() {
             self.by_prim_default_prim.insert(prim_index_path.clone(), defaults);
         }
-
-        // Register the prim's own path once, independent of layer. Without
-        // this, cached misses (empty `PrimIndex`) and self-Root-only indices
-        // have no reverse-map entry, so an authoring change that names exactly
-        // this path on a layer the graph doesn't already touch cannot reach
-        // them. The per-layer lookups fold `by_path` in (see
-        // [`path_dependents`](Self::path_dependents)), so one layer-agnostic
-        // entry per prim keeps every layer covered.
-        self.by_path.insert(prim_index_path.clone());
     }
 
     /// Drop all registered `(layer stack, site)` entries for `prim_index_path`.
@@ -296,9 +293,7 @@ impl Dependencies {
     /// the per-site dependent lists, and returns the sites whose lists name
     /// it.
     fn retract(&mut self, prim_index_path: &Path) -> Option<Vec<(LayerStackId, Path)>> {
-        // Drop the prim's layer-agnostic self-registration so an eviction or
-        // rebuild leaves no stale `by_path` entry.
-        self.by_path.remove(prim_index_path);
+        let registration = self.by_prim.remove(prim_index_path)?;
         self.root_users.remove(prim_index_path);
         // Retract the two reverse-keyed registrations: the muted targets it
         // depends on the state of, and the layers whose `defaultPrim` it
@@ -310,24 +305,22 @@ impl Dependencies {
             prim_index_path,
         );
         // Retract both stack-keyed registrations — the `by_stack` users and the
-        // per-stack variable names — through the one per-prim stack set.
-        if let Some(stacks) = self.by_prim_stacks.remove(prim_index_path) {
-            for stack in stacks {
-                if let Some(set) = self.by_stack.get_mut(&stack) {
-                    set.remove(prim_index_path);
-                    if set.is_empty() {
-                        self.by_stack.remove(&stack);
-                    }
+        // per-stack variable names — through the prim's stack registrations.
+        for stack in registration.stacks {
+            if let Some(set) = self.by_stack.get_mut(&stack) {
+                set.remove(prim_index_path);
+                if set.is_empty() {
+                    self.by_stack.remove(&stack);
                 }
-                if let Some(map) = self.by_stack_vars.get_mut(&stack) {
-                    map.remove(prim_index_path);
-                    if map.is_empty() {
-                        self.by_stack_vars.remove(&stack);
-                    }
+            }
+            if let Some(map) = self.by_stack_vars.get_mut(&stack) {
+                map.remove(prim_index_path);
+                if map.is_empty() {
+                    self.by_stack_vars.remove(&stack);
                 }
             }
         }
-        self.by_prim.remove(prim_index_path)
+        Some(registration.sites)
     }
 
     /// Keeps the dependents of `(stack, site)` that `keep` accepts, dropping
@@ -377,14 +370,14 @@ impl Dependencies {
     }
 
     /// Whether `path` or an ancestor of it carries a layer-agnostic
-    /// [`by_path`](Self::by_path) self-registration, stopping at a
+    /// [`by_prim`](Self::by_prim) self-registration, stopping at a
     /// variant-selection boundary like [`ancestor_sites`](Self::ancestor_sites).
     ///
     /// A self-registration observes exactly its own path, so an ancestor holding
     /// one says only that the changed path itself is affected — which is what
     /// the caller contributes, at any depth.
     pub(super) fn has_path_ancestor(&self, path: &Path) -> bool {
-        ancestors_to_variant_boundary(path).any(|p| self.by_path.contains(&p))
+        ancestors_to_variant_boundary(path).any(|p| self.by_prim.contains_key(&p))
     }
 
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
@@ -413,7 +406,7 @@ impl Dependencies {
     /// `prefix` subtree of the dependency [`sdf::PathTable`] of each stack
     /// holding the layer.
     ///
-    /// The layer-agnostic [`by_path`](Self::by_path) self-registrations are not
+    /// The layer-agnostic [`by_prim`](Self::by_prim) self-registrations are not
     /// folded in here: a prim whose only registration is its own path under
     /// `prefix` is a namespace descendant of `prefix`, so the caller's
     /// literal-path subtree drop already reaches it.
@@ -525,7 +518,9 @@ impl Dependencies {
     /// authored at `path` reaches the prims registered there regardless of
     /// which layer carried it.
     fn path_dependents(&self, path: &Path) -> &[Path] {
-        self.by_path.get(path).map_or(&[], std::slice::from_ref)
+        self.by_prim
+            .get_key_value(path)
+            .map_or(&[], |(path, _)| std::slice::from_ref(path))
     }
 
     /// Collects the deduplicated union of dependent paths, preserving first-seen
@@ -556,13 +551,17 @@ fn ancestors_to_variant_boundary(path: &Path) -> impl Iterator<Item = Path> {
 }
 
 /// The prim indices registered under `key`, as an invalidation victim list.
-fn keyed_prims<K: Eq + Hash>(map: &HashMap<K, sdf::PathSet>, key: &K) -> Vec<Path> {
+fn keyed_prims<K: Eq + Hash, S: BuildHasher>(map: &HashMap<K, sdf::PathSet, S>, key: &K) -> Vec<Path> {
     map.get(key).into_iter().flatten().cloned().collect()
 }
 
 /// Drops `prim`'s registrations from a `key → prims` map and its `prim → keys`
 /// reverse, leaving no empty entry behind in either.
-fn retract<K: Eq + Hash>(forward: &mut HashMap<K, sdf::PathSet>, reverse: &mut sdf::PathMap<HashSet<K>>, prim: &Path) {
+fn retract<K: Eq + Hash, S: BuildHasher, T: BuildHasher>(
+    forward: &mut HashMap<K, sdf::PathSet, S>,
+    reverse: &mut sdf::PathMap<HashSet<K, T>>,
+    prim: &Path,
+) {
     for key in reverse.remove(prim).into_iter().flatten() {
         if let Some(set) = forward.get_mut(&key) {
             set.remove(prim);
@@ -575,6 +574,8 @@ fn retract<K: Eq + Hash>(forward: &mut HashMap<K, sdf::PathSet>, reverse: &mut s
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use super::*;
     use crate::pcp::LayerStackId;
     use crate::pcp::layer_graph::ExternalStack;
@@ -680,7 +681,7 @@ mod tests {
     fn empty_index_self_path() {
         // An index with only a self-Root edge contributes no graph-derived
         // dependencies (the Root-at-own-path is intentionally skipped to keep
-        // the map compact). The layer-agnostic `by_path` entry ensures the
+        // the map compact). The layer-agnostic self-registration ensures the
         // prim path is still findable on every layer, so a first opinion
         // authored at `/Foo` invalidates it regardless of which layer carries
         // the change.
@@ -880,6 +881,53 @@ mod tests {
         let mut found = deps.subtree_lookup(&g, l0, &p("/X"));
         found.sort();
         assert_eq!(found, vec![a.clone(), b.clone()]);
+    }
+
+    #[test]
+    fn duplicate_sites_register_once() {
+        let g = graph(2);
+        let layer = g.all_ids()[1];
+        let here = p("/Here");
+        let mut deps = Dependencies::default();
+        for count in [3, 20] {
+            let sites: Vec<_> = (0..count)
+                .map(|index| (ArcType::Reference, layer, p(&format!("/P{index}"))))
+                .collect();
+            let nodes = sites.iter().chain(&sites).cloned().collect();
+            let index = make_index(&g, &here, nodes);
+            deps.add(&here, &index, &g, ExprVarDeps::default());
+            assert_eq!(deps.by_prim[&here].sites.len(), count);
+            for (stack, site) in &deps.by_prim[&here].sites {
+                assert_eq!(deps.per_stack[stack].get(site).unwrap(), slice::from_ref(&here));
+            }
+        }
+        deps.remove(&here);
+        assert!(deps.per_stack.is_empty());
+    }
+
+    #[test]
+    fn replacement_retracts_stacks() {
+        let g = graph(3);
+        let (l0, l1, l2) = (g.all_ids()[0], g.all_ids()[1], g.all_ids()[2]);
+        let mut deps = Dependencies::default();
+        let here = p("/A");
+        let site = p("/Model");
+        deps.remove(&here);
+        for layer in [l1, l2] {
+            let index = make_index(&g, &here, vec![(ArcType::Reference, layer, site.clone())]);
+            deps.add(&here, &index, &g, ExprVarDeps::default());
+            assert_eq!(dependents(&deps, &g, layer, &site), vec![here.clone()]);
+        }
+        assert!(dependents(&deps, &g, l1, &site).is_empty());
+        let index = make_index(&g, &here, vec![(ArcType::Root, l0, here.clone())]);
+        deps.add(&here, &index, &g, ExprVarDeps::default());
+        assert!(dependents(&deps, &g, l2, &site).is_empty());
+        assert!(deps.by_stack.is_empty());
+        assert_eq!(deps.path_dependents(&here), slice::from_ref(&here));
+        deps.remove(&here);
+        deps.remove(&here);
+        assert!(deps.path_dependents(&here).is_empty());
+        assert!(deps.root_users.is_empty());
     }
 
     #[test]

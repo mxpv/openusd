@@ -69,7 +69,8 @@ fn nodegraph_node_roundtrip() -> Result<()> {
     n.create_size_attr()?.set(gf::vec2f(180.0, 90.0))?;
     n.create_stacking_order_attr()?.set(3)?;
     n.create_display_color_attr()?.set(gf::vec3f(0.2, 0.4, 0.8))?;
-    n.create_icon_attr()?.set(sdf::Value::AssetPath("./node.png".into()))?;
+    n.create_icon_attr()?
+        .set(sdf::Value::AssetPath(Box::new("./node.png".into())))?;
     n.create_expansion_state_attr()?.set(ExpansionState::Minimized)?;
     n.create_doc_uri_attr()?.set("https://example.com/node".to_string())?;
 

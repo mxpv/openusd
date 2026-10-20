@@ -329,9 +329,12 @@ mod tests {
         };
         assert_eq!(
             declared("double[]", "[0.0, 1.0]"),
-            sdf::Value::DoubleVec(vec![0.0, 1.0])
+            sdf::Value::DoubleVec((vec![0.0, 1.0]).into())
         );
-        assert_eq!(declared("float[]", "[0, 1]"), sdf::Value::FloatVec(vec![0.0, 1.0]));
+        assert_eq!(
+            declared("float[]", "[0, 1]"),
+            sdf::Value::FloatVec((vec![0.0, 1.0]).into())
+        );
         assert_eq!(declared("token[]", r#"["a", "b"]"#), sdf::Value::token_vec(["a", "b"]));
         assert_eq!(
             declared("double3", "[0, 1, 0]"),
@@ -339,11 +342,11 @@ mod tests {
         );
         assert_eq!(
             declared("float3[]", "[[0, 1, 0], [1, 0, 0]]"),
-            sdf::Value::Vec3fVec(vec![gf::vec3f(0.0, 1.0, 0.0), gf::vec3f(1.0, 0.0, 0.0)])
+            sdf::Value::Vec3fVec((vec![gf::vec3f(0.0, 1.0, 0.0), gf::vec3f(1.0, 0.0, 0.0)]).into())
         );
         assert_eq!(
             declared("asset", r#""./a.png""#),
-            sdf::Value::AssetPath("./a.png".into())
+            sdf::Value::AssetPath(Box::new("./a.png".into()))
         );
         assert_eq!(declared("bool", "true"), sdf::Value::Bool(true));
         assert_eq!(

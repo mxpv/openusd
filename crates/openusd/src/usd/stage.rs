@@ -3319,7 +3319,7 @@ impl Stage {
                 // that is not populated has none.
                 Ok(children) => {
                     for name in children.iter().rev() {
-                        if let Ok(child) = path.append_path(name.as_str()) {
+                        if let Ok(child) = path.append_child(name.as_str()) {
                             stack.push(child);
                         }
                     }
@@ -3423,6 +3423,43 @@ impl Stage {
         self.with_own_status(prim, status, mask)
     }
 
+    /// Composes sibling statuses through one demand-loading fixpoint.
+    fn child_statuses_masked(
+        &self,
+        children: &mut [(super::Prim, ComposedStatus)],
+        parent: PrimStatus,
+        mask: PrimStatus,
+    ) -> Result<()> {
+        for (prim, _) in children.iter() {
+            self.resolve_prototype_path(prim.path())?;
+        }
+        // Instance flags follow the inherited-status fixpoint so registrations
+        // follow sibling order.
+        self.with_cache(|graph, cache| {
+            for (prim, composed) in children.iter_mut() {
+                let path = prim.path();
+                composed.status = if mask.intersects(PrimStatus::INHERITED) && cache.population_reaches(graph, path)? {
+                    Self::status_below(cache, graph, parent, path)?
+                } else {
+                    PrimStatus::empty()
+                };
+            }
+            Ok(())
+        })?;
+        for (prim, composed) in children {
+            let path = prim.path();
+            let status = &mut composed.status;
+            if mask.contains(PrimStatus::INSTANCE) {
+                status.set(
+                    PrimStatus::INSTANCE,
+                    self.masked(path, |graph, cache| cache.is_instance(graph, path))?,
+                );
+            }
+            *status = self.with_own_status(path, *status, mask)?;
+        }
+        Ok(())
+    }
+
     /// The children of `parent` that match `predicate`, in the order
     /// [`Prim::children`](super::Prim::children) lists them, each with the
     /// status it composed (C++ `UsdPrim::GetFilteredChildren`).
@@ -3469,21 +3506,24 @@ impl Stage {
         let names = self.masked(parent, |g, cache| cache.populated_children(g, parent))?;
         let mut children = Vec::with_capacity(names.len());
         for name in names {
-            let Ok(child) = parent.append_path(name.as_str()) else {
+            let Ok(path) = parent.append_child(name.as_str()) else {
                 continue;
             };
-            let status = self.child_status_masked(&child, status, needed)?;
-            if predicate.matches(status) {
-                let child = super::Prim::new(self, child);
-                let composed = ComposedStatus {
-                    prim: child.clone(),
-                    status,
-                    instance_known,
-                    epoch,
-                };
-                children.push((child, composed));
-            }
+            let child = super::Prim::new(self, path);
+            let composed = ComposedStatus {
+                prim: child.clone(),
+                status: PrimStatus::empty(),
+                instance_known,
+                epoch,
+            };
+            children.push((child, composed));
         }
+        if children.len() > 1 {
+            self.child_statuses_masked(&mut children, status, needed)?;
+        } else if let Some((child, composed)) = children.first_mut() {
+            composed.status = self.child_status_masked(child.path(), status, needed)?;
+        }
+        children.retain(|(_, composed)| predicate.matches(composed.status));
         Ok(children)
     }
 
@@ -3789,7 +3829,7 @@ impl Stage {
             let children = self.masked(&path, |g, cache| cache.populated_children(g, &path))?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
-                if let Ok(child) = path.append_path(name.as_str()) {
+                if let Ok(child) = path.append_child(name.as_str()) {
                     stack.push((child, Some((epoch, status))));
                 }
             }
@@ -5871,10 +5911,10 @@ def "T" {
 
         prim.set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Source")?,
                 ..Default::default()
-            }])),
+            }]))),
         )?;
 
         assert_eq!(
@@ -6029,11 +6069,11 @@ def "T" {
             e.data_mut().set_field(
                 &sdf::path("/P").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
-                }])),
+                }]))),
             );
         });
         let mut target = sdf::Layer::new_in_memory("target.usda");
@@ -6072,11 +6112,11 @@ def "T" {
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
-                }])),
+                }]))),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Indep", sdf::Specifier::Def, "").unwrap();
         });
@@ -6152,11 +6192,11 @@ def "T" {
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
-                }])),
+                }]))),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Indep", sdf::Specifier::Def, "").unwrap();
         });
@@ -6194,11 +6234,11 @@ def "T" {
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/A").unwrap(),
                     ..Default::default()
-                }])),
+                }]))),
             );
         });
         let mut target = sdf::Layer::new_in_memory("target.usda");
@@ -6268,11 +6308,11 @@ def "T" {
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/T").unwrap(),
                     ..Default::default()
-                }])),
+                }]))),
             );
         });
         let mut target = sdf::Layer::new_in_memory("target.usda");
@@ -6554,11 +6594,11 @@ def "T" {
             e.data_mut().set_field(
                 &sdf::path("/P").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
-                }])),
+                }]))),
             );
         });
         let mut target = sdf::Layer::new_in_memory("target.usda");

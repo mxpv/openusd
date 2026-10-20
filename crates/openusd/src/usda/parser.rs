@@ -227,7 +227,7 @@ impl<'a> Parser<'a> {
             bail!("Expected prim name string, got {name_token:?}");
         };
         parent_children.push(name.to_string());
-        let prim_path = current_path.append_path(name.as_ref())?;
+        let prim_path = current_path.append_child(name.as_ref())?;
 
         let mut properties = Vec::new();
 
@@ -500,7 +500,7 @@ impl<'a> Parser<'a> {
                     .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
 
                 let list_op = apply_list_op(list_op, targets).context("Unable to build connection listOp")?;
-                spec.add_list_op(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::ConnectionPaths, sdf::Value::PathListOp(Box::new(list_op)));
             }
             return Ok(());
         }
@@ -664,7 +664,7 @@ impl<'a> Parser<'a> {
             .collect();
 
         let list_op = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
-        spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
+        spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(Box::new(list_op)));
 
         if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
@@ -715,21 +715,21 @@ impl<'a> Parser<'a> {
                     .parse_one_or_list(types::parse_token::<tf::Token>)
                     .context("Unable to parse apiSchemas list")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build apiSchemas listOp")?;
-                spec.add_list_op("apiSchemas", sdf::Value::TokenListOp(list_op));
+                spec.add_list_op("apiSchemas", sdf::Value::TokenListOp(Box::new(list_op)));
             }
             n if n == FieldKey::References.as_str() => {
                 let references = self
                     .parse_one_or_list(types::parse_reference)
                     .context("Unable to parse references")?;
                 let list_op = apply_list_op(list_op, references).context("Unable to build references listOp")?;
-                spec.add_list_op(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
+                spec.add_list_op(FieldKey::References, sdf::Value::ReferenceListOp(Box::new(list_op)));
             }
             n if n == FieldKey::Payload.as_str() => {
                 let payloads = self
                     .parse_one_or_list(types::parse_payload)
                     .context("Unable to parse payloads")?;
                 let list_op = apply_list_op(list_op, payloads).context("Unable to build payload listOp")?;
-                spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
+                spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(Box::new(list_op)));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
                 let paths = self.parse_one_or_list(types::parse_path_reference)?;
@@ -740,7 +740,7 @@ impl<'a> Parser<'a> {
                     types::reject_variant_selection_in_path(p, "Inherit")?;
                 }
                 let list_op = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
-                spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(Box::new(list_op)));
             }
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
@@ -761,7 +761,7 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::AssetInfo.as_str() => {
                 ensure!(list_op.is_none(), "assetInfo does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse assetInfo")?;
-                spec.add(FieldKey::AssetInfo, sdf::Value::Dictionary(value));
+                spec.add(FieldKey::AssetInfo, sdf::Value::Dictionary(Box::new(value)));
             }
             n if n == FieldKey::VariantSelection.as_str() => {
                 ensure!(list_op.is_none(), "variants does not support list ops");
@@ -770,7 +770,10 @@ impl<'a> Parser<'a> {
                     .into_iter()
                     .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s)))
                     .collect();
-                spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
+                spec.add(
+                    FieldKey::VariantSelection,
+                    sdf::Value::VariantSelectionMap(Box::new(selections)),
+                );
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
                 // Names, not tokens: C++ registers the field as an
@@ -780,7 +783,7 @@ impl<'a> Parser<'a> {
                     .parse_one_or_list(types::parse_token::<String>)
                     .context("Unable to parse variantSets")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
-                spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::StringListOp(list_op));
+                spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::StringListOp(Box::new(list_op)));
             }
             n if n == FieldKey::Specializes.as_str() => {
                 let paths = self.parse_one_or_list(types::parse_path_reference)?;
@@ -788,7 +791,7 @@ impl<'a> Parser<'a> {
                     types::reject_variant_selection_in_path(p, "Specializes")?;
                 }
                 let list_op = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
-                spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(Box::new(list_op)));
             }
             n if n == FieldKey::Instanceable.as_str() => {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
@@ -823,14 +826,14 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse clips dictionary")?;
-                spec.add(FieldKey::Clips, sdf::Value::Dictionary(value));
+                spec.add(FieldKey::Clips, sdf::Value::Dictionary(Box::new(value)));
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
                     .parse_one_or_list(|c| Ok(c.expect_string()?.into_owned()))
                     .context("Unable to parse clipSets list")?;
                 let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
-                spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
+                spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(Box::new(list_op)));
             }
             other => match sdf::registered_field_type(other) {
                 // A registered field none of the productions above claims.
@@ -887,16 +890,14 @@ impl<'a> Parser<'a> {
             }
         };
         let value = match element.kind() {
-            Some(ValueKind::Int) => self.read_list_op(list_op, types::parse_token::<i32>, Value::IntListOp)?,
-            Some(ValueKind::Int64) => self.read_list_op(list_op, types::parse_token::<i64>, Value::Int64ListOp)?,
-            Some(ValueKind::Uint) => self.read_list_op(list_op, types::parse_token::<u32>, Value::UIntListOp)?,
-            Some(ValueKind::Uint64) => self.read_list_op(list_op, types::parse_token::<u64>, Value::UInt64ListOp)?,
-            Some(ValueKind::Token) => {
-                self.read_list_op(list_op, types::parse_token::<tf::Token>, Value::TokenListOp)?
-            }
+            Some(ValueKind::Int) => self.read_list_op(list_op, types::parse_token::<i32>, Value::from)?,
+            Some(ValueKind::Int64) => self.read_list_op(list_op, types::parse_token::<i64>, Value::from)?,
+            Some(ValueKind::Uint) => self.read_list_op(list_op, types::parse_token::<u32>, Value::from)?,
+            Some(ValueKind::Uint64) => self.read_list_op(list_op, types::parse_token::<u64>, Value::from)?,
+            Some(ValueKind::Token) => self.read_list_op(list_op, types::parse_token::<tf::Token>, Value::from)?,
             Some(ValueKind::String) => {
                 let string = |cursor: &mut Cursor<'a>| Ok(cursor.expect_string()?.into_owned());
-                self.read_list_op(list_op, string, Value::StringListOp)?
+                self.read_list_op(list_op, string, Value::from)?
             }
             _ => bail!("{name} is declared a list op of an element type the text format has no list for"),
         };
@@ -952,7 +953,7 @@ fn record_unregistered_metadata(
 ) -> Result<(), RawError> {
     if cursor.at_punctuation('{')? {
         let entries = types::parse_dictionary(cursor)?;
-        spec.add(name, sdf::Value::UnregisteredDictionary(entries));
+        spec.add(name, sdf::Value::UnregisteredDictionary(Box::new(entries)));
         return Ok(());
     }
 
@@ -978,7 +979,7 @@ fn record_unregistered_metadata(
         Some(_) => {}
         None => {
             let stored = sdf::ListOp::default().with(list_op_type(op)?, items);
-            spec.add(name, sdf::Value::UnregisteredValueListOp(stored));
+            spec.add(name, sdf::Value::UnregisteredValueListOp(Box::new(stored)));
         }
     }
     Ok(())
@@ -1010,6 +1011,14 @@ mod tests {
     use std::error::Error as StdError;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn prim_name_is_identifier() {
+        for name in ["", ".", "..", "/A", "A/B", "A.attr", "A{v=x}", "A:B"] {
+            let text = format!("#usda 1.0\ndef \"{name}\" {{}}\n");
+            assert!(crate::usda::parse(&text).is_err(), "{name:?}");
+        }
+    }
 
     #[test]
     fn relationship_variability() {
@@ -1474,7 +1483,7 @@ def Shader "Image_Texture"
         assert!(matches!(
             file_spec
                 .get(FieldKey::Default.as_str()),
-            Some(sdf::Value::AssetPath(path)) if path == "./texture.png"
+            Some(sdf::Value::AssetPath(path)) if path.as_ref() == "./texture.png"
         ));
 
         let output_spec = data
@@ -2639,7 +2648,7 @@ def Xform "Anim"
             vec![(1.0, sdf::Value::Float(4.0)), (2.0, sdf::Value::ValueBlock)]
         );
         assert_eq!(samples("/P.t"), vec![(1.0, sdf::Value::token("on"))]);
-        assert_eq!(samples("/P.i"), vec![(1.0, sdf::Value::IntVec(vec![3]))]);
+        assert_eq!(samples("/P.i"), vec![(1.0, sdf::Value::IntVec((vec![3]).into()))]);
         assert!(parse_error("#usda 1.0\ndef \"P\" {\n    int[] i.timeSamples = { 1: 3 }\n}\n").contains("array type"));
     }
 
@@ -2765,7 +2774,7 @@ def Scope "Root" {
             spec.get(FieldKey::TypeName.as_str()),
             Some(&sdf::Value::Token("int[]".into()))
         );
-        assert_eq!(spec.get("default"), Some(&sdf::Value::IntVec(vec![5, 6, 7])));
+        assert_eq!(spec.get("default"), Some(&sdf::Value::IntVec((vec![5, 6, 7]).into())));
     }
 
     /// `over` with a type name should parse the type and prim name.
@@ -2965,14 +2974,17 @@ def \"R\" (
 }
 ";
         let edited = sdf::Int64ListOp::deleted([4, -1]).with(sdf::ListOpType::Appended, [7]);
-        assert_eq!(field(text, "/P", "inactiveIds"), Some(sdf::Value::Int64ListOp(edited)));
+        assert_eq!(
+            field(text, "/P", "inactiveIds"),
+            Some(sdf::Value::Int64ListOp(Box::new(edited)))
+        );
         assert_eq!(
             field(text, "/Q", "inactiveIds"),
-            Some(sdf::Value::Int64ListOp(sdf::ListOp::explicit([1, 2])))
+            Some(sdf::Value::Int64ListOp(Box::new(sdf::ListOp::explicit([1, 2]))))
         );
         assert_eq!(
             field(text, "/R", "inactiveIds"),
-            Some(sdf::Value::Int64ListOp(sdf::ListOp::explicit([])))
+            Some(sdf::Value::Int64ListOp(Box::new(sdf::ListOp::explicit([]))))
         );
     }
 
@@ -3017,12 +3029,15 @@ def \"Q\" (
 )
 ";
         let edited = sdf::Int64ListOp::deleted([4]).with(sdf::ListOpType::Appended, [7]);
-        assert_eq!(field(text, "/", "inactiveIds"), Some(sdf::Value::Int64ListOp(edited)));
+        assert_eq!(
+            field(text, "/", "inactiveIds"),
+            Some(sdf::Value::Int64ListOp(Box::new(edited)))
+        );
         assert_eq!(
             field(text, "/", "made_up"),
-            Some(sdf::Value::UnregisteredValueListOp(sdf::ListOp::prepended([
+            Some(sdf::Value::UnregisteredValueListOp(Box::new(sdf::ListOp::prepended([
                 "1, 2".to_owned()
-            ])))
+            ]))))
         );
 
         for rejected in ["append upAxis = \"Y\"", "delete \"a comment\"", "add subLayers = []"] {
@@ -3040,7 +3055,7 @@ def \"Q\" (
             sdf::ListOp::<String>::prepended(["1, 2".to_owned()]).with(sdf::ListOpType::Deleted, ["3".to_owned()]);
         assert_eq!(
             field(text, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(expected))
+            Some(sdf::Value::UnregisteredValueListOp(Box::new(expected)))
         );
     }
 
@@ -3052,7 +3067,7 @@ def \"Q\" (
         let expected = sdf::ListOp::<String>::prepended(vec!["2".to_owned()]);
         assert_eq!(
             field(text, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(expected))
+            Some(sdf::Value::UnregisteredValueListOp(Box::new(expected)))
         );
     }
 
@@ -3086,14 +3101,14 @@ def \"Q\" (
         let none = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = None\n)\n{\n}\n";
         assert_eq!(
             field(none, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(sdf::ListOp::default()))
+            Some(sdf::Value::UnregisteredValueListOp(Box::default()))
         );
 
         let empty = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = []\n)\n{\n}\n";
         let expected = sdf::ListOp::<String>::prepended(vec![String::new()]);
         assert_eq!(
             field(empty, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(expected))
+            Some(sdf::Value::UnregisteredValueListOp(Box::new(expected)))
         );
     }
 

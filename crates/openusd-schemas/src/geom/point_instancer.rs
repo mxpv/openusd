@@ -299,7 +299,9 @@ impl PointInstancer {
     /// (C++ `ActivateAllIds`).
     pub fn activate_all_ids(&self) -> Result<()> {
         let none = sdf::Int64ListOp::explicit([]);
-        self.prim().clone().set_inactive_ids(sdf::Value::Int64ListOp(none))?;
+        self.prim()
+            .clone()
+            .set_inactive_ids(sdf::Value::Int64ListOp(Box::new(none)))?;
         Ok(())
     }
 
@@ -769,7 +771,7 @@ impl PointInstancer {
     /// attribute where the edit target lacks it, as one edit.
     fn set_invisible_ids(&self, ids: Vec<i64>, time: Option<usd::TimeCode>) -> Result<()> {
         self.invisible_ids_attr_builder()
-            .set_at(sdf::Value::Int64Vec(ids), time)
+            .set_at(sdf::Value::Int64Vec(ids.into()), time)
             .build()?;
         Ok(())
     }
@@ -849,7 +851,9 @@ fn merge_inactive_ids(prim: &usd::Prim, proposed: sdf::Int64ListOp) -> Result<()
         let current = local
             .and_then(|value| value.try_as_int_64_list_op())
             .unwrap_or_default();
-        Some(sdf::Value::Int64ListOp(proposed.combined_with(&canonical(current))))
+        Some(sdf::Value::Int64ListOp(Box::new(
+            proposed.combined_with(&canonical(*current)),
+        )))
     })?;
     Ok(())
 }
@@ -1677,10 +1681,13 @@ def PointInstancer "TimeSampledAndDefaultIndices"
         assert_eq!(attr, instancer.orientations_attr());
 
         let orientationsf = instancer.create_orientationsf_attr()?;
-        let orientationsf = orientationsf.set(sdf::Value::QuatfVec(Vec::new()))?;
+        let orientationsf = orientationsf.set(sdf::Value::QuatfVec((Vec::new()).into()))?;
         assert!(!instancer.uses_orientationsf()?.0);
 
-        orientationsf.set_at(sdf::Value::QuatfVec(vec![gf::Quatf::IDENTITY]), TimeCode::new(5.0))?;
+        orientationsf.set_at(
+            sdf::Value::QuatfVec((vec![gf::Quatf::IDENTITY]).into()),
+            TimeCode::new(5.0),
+        )?;
         let (uses, attr) = instancer.uses_orientationsf()?;
         assert!(uses);
         assert_eq!(attr, instancer.orientationsf_attr());

@@ -1,0 +1,1317 @@
+{
+  "date": "2026-10-20",
+  "baseline_report": "moana-lookup-results.json",
+  "changes": [
+    "Property-name appends borrow string inputs. Common prim classification and root-name queries avoid component iteration; ASCII identifiers use byte checks with a Unicode fallback.",
+    "AbstractData::property_spec returns a stored property key and its spec type in one lookup. Data and CrateData support borrowed compound keys. Box and CowData forward the query, with overlay edits respected.",
+    "Property kinds are cached by composition revision and shared by canonical prototype queries. Authored-only enumeration reads the authored property set without a schema-definition query.",
+    "Property type-conflict detection retains the defining layer by reference and constructs the composed diagnostic path only for a conflict.",
+    "Internal numeric layer/stack dependency maps and owner sets use Fx hashing."
+  ],
+  "validation": {
+    "workspace_all_targets_all_features": {
+      "passed": 3991,
+      "ignored": 1
+    },
+    "strict_clippy": "passed",
+    "documentation": "passed",
+    "formatting": "passed",
+    "dependency_checks": "cargo deny --all-features --frozen check passed against a copied cached advisory database with the project policy unchanged except for the database directory.",
+    "secondary_checks": {
+      "nested_instancing": {
+        "root": "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda",
+        "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+        "cpu_count": 72,
+        "binaries": {
+          "rust": "/tmp/openusd-property-cache/after",
+          "cpp": "/tmp/openusd-reference/open_bench"
+        },
+        "binary_sha256": {
+          "rust": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+          "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+        },
+        "options": [
+          "--proxies",
+          "--authored",
+          "--no-heap"
+        ],
+        "commands": {
+          "rust": [
+            "/tmp/openusd-property-cache/after",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "--mmap",
+            "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+          ],
+          "cpp": [
+            "/tmp/openusd-reference/open_bench",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/github/doubleailes/openusd/crates/openusd/fixtures/instancing_nested_reference.usda"
+          ]
+        },
+        "warmups": 0,
+        "rust_cpu": null,
+        "rust_mmap": true,
+        "run_order": [
+          {
+            "round": 1,
+            "labels": [
+              "rust",
+              "cpp"
+            ]
+          }
+        ],
+        "results": {
+          "rust": [
+            {
+              "phases": {
+                "open": 0.0,
+                "metadata": 0.0,
+                "arrays": 0.0
+              },
+              "total": 0.0,
+              "process_seconds": 0.0036224600044079125,
+              "peak_rss_mib": 5.9,
+              "counts": {
+                "prims": 9,
+                "arrays": 0,
+                "elements": 0
+              }
+            }
+          ],
+          "cpp": [
+            {
+              "phases": {
+                "open": 0.021255,
+                "metadata": 3.1e-05,
+                "arrays": 0.009086
+              },
+              "total": 0.030372,
+              "process_seconds": 0.06207872500817757,
+              "peak_rss_mib": 43.3125,
+              "counts": {
+                "prims": 9,
+                "arrays": 0,
+                "elements": 0
+              }
+            }
+          ]
+        },
+        "status_records_matched": 9
+      },
+      "alab_book": {
+        "root": "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda",
+        "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+        "cpu_count": 72,
+        "binaries": {
+          "rust": "/tmp/openusd-property-cache/after",
+          "cpp": "/tmp/openusd-reference/open_bench"
+        },
+        "binary_sha256": {
+          "rust": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+          "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+        },
+        "options": [
+          "--proxies",
+          "--authored",
+          "--no-heap"
+        ],
+        "commands": {
+          "rust": [
+            "/tmp/openusd-property-cache/after",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "--mmap",
+            "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+          ],
+          "cpp": [
+            "/tmp/openusd-reference/open_bench",
+            "--proxies",
+            "--no-heap",
+            "--authored",
+            "/home/philippe.llerena/Workspace/samples/ALab/fragment/geo/modelling/book_encyclopedia01/geo_modelling_book_encyclopedia01.usda"
+          ]
+        },
+        "warmups": 0,
+        "rust_cpu": null,
+        "rust_mmap": true,
+        "run_order": [
+          {
+            "round": 1,
+            "labels": [
+              "rust",
+              "cpp"
+            ]
+          }
+        ],
+        "results": {
+          "rust": [
+            {
+              "phases": {
+                "open": 0.001,
+                "metadata": 0.001,
+                "arrays": 0.0
+              },
+              "total": 0.002,
+              "process_seconds": 0.004453061992535368,
+              "peak_rss_mib": 6.2,
+              "counts": {
+                "prims": 8,
+                "arrays": 50,
+                "elements": 16530
+              }
+            }
+          ],
+          "cpp": [
+            {
+              "phases": {
+                "open": 0.027709,
+                "metadata": 2.6e-05,
+                "arrays": 0.007023
+              },
+              "total": 0.034758000000000004,
+              "process_seconds": 0.06250197399640456,
+              "peak_rss_mib": 45.5625,
+              "counts": {
+                "prims": 8,
+                "arrays": 50,
+                "elements": 16530
+              }
+            }
+          ]
+        },
+        "status_records_matched": 8
+      }
+    }
+  },
+  "instruction_profiles": {
+    "tool": "Valgrind Callgrind 3.26.0",
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/elements/isBayCedarA1/element.usda",
+    "options": [
+      "--proxies",
+      "--authored",
+      "--no-heap",
+      "--until",
+      "metadata"
+    ],
+    "measurement": "Whole-process instructions through metadata traversal and stage destruction. No array phase. These profiles are separate from native timing series.",
+    "prims": 136458,
+    "graphs": 31258,
+    "shared_node_data": 75,
+    "graph_copies": 77,
+    "nodes_copied": 436,
+    "results": {
+      "before": {
+        "instructions": 8875967318,
+        "profile_sha256": "433641e7ec6a62b45ca42d29aed5d17f45a63391af47e3dd0f35e471d88b6819",
+        "binary_sha256": "8db547cb8f3e395d0e7a437d4a2beb283896542863da8259a3ad9d911b0d7c63"
+      },
+      "first_candidate": {
+        "instructions": 8504540419,
+        "profile_sha256": "448eb1fbf208e5947708f3e821d81ea73c56dc1ed7b9c938fa783bb2e1e467b8",
+        "binary_sha256": "526369b7308633276154d887ec73d6704de35c39c3ee4b09da3850160bcdc363"
+      },
+      "rust": {
+        "instructions": 8210606686,
+        "profile_sha256": "a2f8e0fafaf1cd46bd9255d999faf2ac05d9a5ad0c0e6709162d48113e5df98c",
+        "binary_sha256": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b"
+      }
+    }
+  },
+  "discarded_experiment": {
+    "description": "An intermediate candidate reused canonical paths for individual field reads and exposed property paths without returning their spec type. CowData initially used the allocating default lookup. Final code forwards property queries through CowData, returns path and type together, and keeps individual field reads on their original single-lookup path.",
+    "mapped_reads": {
+      "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+      "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+      "cpu_count": 72,
+      "binaries": {
+        "before": "/tmp/openusd-path-build/before",
+        "rust": "/tmp/openusd-spec-path/after",
+        "cpp": "/tmp/openusd-reference/open_bench"
+      },
+      "binary_sha256": {
+        "before": "8db547cb8f3e395d0e7a437d4a2beb283896542863da8259a3ad9d911b0d7c63",
+        "rust": "3e2d37e73f0dbfe9be73f2b60c08a16b5db705a1f591a15caa2455521f1602eb",
+        "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "options": [
+        "--proxies",
+        "--authored",
+        "--no-heap"
+      ],
+      "commands": {
+        "before": [
+          "/tmp/openusd-path-build/before",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "--mmap",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ],
+        "rust": [
+          "/tmp/openusd-spec-path/after",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "--mmap",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ],
+        "cpp": [
+          "/tmp/openusd-reference/open_bench",
+          "--proxies",
+          "--no-heap",
+          "--authored",
+          "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+        ]
+      },
+      "warmups": 1,
+      "rust_cpu": null,
+      "rust_mmap": true,
+      "run_order": [
+        {
+          "round": 0,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        },
+        {
+          "round": 1,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        },
+        {
+          "round": 2,
+          "labels": [
+            "cpp",
+            "rust",
+            "before"
+          ]
+        },
+        {
+          "round": 3,
+          "labels": [
+            "before",
+            "rust",
+            "cpp"
+          ]
+        }
+      ],
+      "results": {
+        "before": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 16.41,
+              "arrays": 16.667
+            },
+            "total": 33.078,
+            "process_seconds": 39.641731441006414,
+            "peak_rss_mib": 6017.8,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 15.942,
+              "arrays": 17.024
+            },
+            "total": 32.967,
+            "process_seconds": 39.87509638100164,
+            "peak_rss_mib": 6019.5,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 15.561,
+              "arrays": 16.641
+            },
+            "total": 32.202999999999996,
+            "process_seconds": 39.46432612200442,
+            "peak_rss_mib": 6018.7,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          }
+        ],
+        "rust": [
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 16.552,
+              "arrays": 18.96
+            },
+            "total": 35.513000000000005,
+            "process_seconds": 42.54271908898954,
+            "peak_rss_mib": 6001.9,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 14.787,
+              "arrays": 18.321
+            },
+            "total": 33.109,
+            "process_seconds": 39.991577478998806,
+            "peak_rss_mib": 6002.4,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          },
+          {
+            "phases": {
+              "open": 0.001,
+              "metadata": 14.906,
+              "arrays": 18.492
+            },
+            "total": 33.399,
+            "process_seconds": 40.508559548004996,
+            "peak_rss_mib": 6003.6,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          }
+        ],
+        "cpp": [
+          {
+            "phases": {
+              "open": 4.078705,
+              "metadata": 1.086705,
+              "arrays": 10.654531
+            },
+            "total": 15.819941,
+            "process_seconds": 16.258763036006712,
+            "peak_rss_mib": 1789.64453125,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          },
+          {
+            "phases": {
+              "open": 4.064676,
+              "metadata": 1.083968,
+              "arrays": 9.252984
+            },
+            "total": 14.401628,
+            "process_seconds": 14.798541416006628,
+            "peak_rss_mib": 1796.05859375,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          },
+          {
+            "phases": {
+              "open": 4.270678,
+              "metadata": 1.036066,
+              "arrays": 9.522301
+            },
+            "total": 14.829045,
+            "process_seconds": 15.323990665012388,
+            "peak_rss_mib": 1772.7734375,
+            "counts": {
+              "prims": 416549,
+              "arrays": 1425154,
+              "elements": 627170615
+            }
+          }
+        ]
+      },
+      "status_records_matched": 416549
+    },
+    "provenance": {
+      "source_sha256": {
+        "benchmarks/compare.py": "414fc039d1944ed341605d11be6459124fce1433afea38a4c1ffa53a6d3971ef",
+        "crates/openusd-build/src/emit/value.rs": "a41cd3895c345a4ee362a5bb999465d40cbebcb0b05cea1e70f5e31735c00199",
+        "crates/openusd-build/src/load.rs": "34100e2870174077d0e0216bdd1a2233db3e5e872575ac2ecc42b88505fc8b51",
+        "crates/openusd-build/src/plug_info.rs": "005c4ed4ee9c8a6f4796afa68838486261ba308fb0fd0d8dfd81dd96e77b5f2c",
+        "crates/openusd-build/tests/values/generated.rs": "beac86cca02322ee376f2e70868d01171d437e8e890220d4bfd4d7de7694c10a",
+        "crates/openusd-schemas/src/geom/imageable.rs": "722d99be482cfc50072d448b3fc6146613097efa939cd616a3d123b6bcbd4fde",
+        "crates/openusd-schemas/src/geom/point_instancer.rs": "488b7d16693b429675d4e9ef918ee6c9c00bf7f1d43a88509d97c640bca4c98c",
+        "crates/openusd-schemas/src/geom/xform_op.rs": "465b6f3055e752b8435eef63916d38e542abe8da5951c099810c862fec1ca8f8",
+        "crates/openusd-schemas/src/media/previews.rs": "930d8ca77c0ec5ef3096675a66c886b697004d4f21253dc66240e2e9af7afc81",
+        "crates/openusd-schemas/src/shade/interface.rs": "d8f3ac3ac33a1b80c27558a79cb3994afcfb0a0c36bc24002ecb63f08e851b0c",
+        "crates/openusd-schemas/src/shade/node_def.rs": "841b7047a7ca16c2d297f88b5ad77407297e69c95631bb1a0e9ee5043830021f",
+        "crates/openusd-schemas/src/shade/preview.rs": "40e55196cda5f9bfc709ffa72e1fc478bd8c24e68223bd6fb8553064c29b70de",
+        "crates/openusd-schemas/src/skel/bake.rs": "c9c491759ccd93ea15f01c11d26138bb7dd0590ff26b7f076bb3c00b4fe6fd01",
+        "crates/openusd-schemas/tests/lux.rs": "0cd917b41b307af03431016d4c9167d45219ac29f1d624b42d4e94e973c37394",
+        "crates/openusd-schemas/tests/media.rs": "03bbc719a4fb4d9b37bc009cec8275adb449647b9816f7bb165a92f1b5ac231b",
+        "crates/openusd-schemas/tests/render.rs": "3216b84ad61f9a2ea512f3826393ca076ccf745ab4ccfd8336a27fe54b7ad6ba",
+        "crates/openusd-schemas/tests/shade.rs": "342519fc0c3fa7578f74da7b616e29acc6ef01852243989831f63c6580fdceb7",
+        "crates/openusd-schemas/tests/skel_bake.rs": "fdc6a88ff4b7b2876b61ef8cdc0e3a939f4ffa3eb1b8d1ac7b24370a115a8615",
+        "crates/openusd-schemas/tests/ui.rs": "e88deaef1a51a34150446193503fd07772c9fdb324f3a03c7769e3a342161275",
+        "crates/openusd-schemas/tests/vol.rs": "60e14fd0b79e0ddb56efd9460d9d59502328449b9a87072f76d623ffbb0f9197",
+        "crates/openusd/Cargo.toml": "a37b96ea2b5e989d23b07220b6a3ecb98d3058fcddcf9d4f893fa43c78608311",
+        "crates/openusd/examples/author_variant_and_reference.rs": "84ae5031b890f0c4a6fd461adbd5134bef1e63e74cfa3f493f2addccb876e9b1",
+        "crates/openusd/src/pcp/asset_resolve.rs": "2d588001f47577a8ed3965ca8a8cf38b387d294fad5a98e1118f1e15142caaa6",
+        "crates/openusd/src/pcp/clip.rs": "5f610fb94a983498c25db9da50f295717777a177f9d3de9f2b1d6b8896e15260",
+        "crates/openusd/src/pcp/compose_site.rs": "74b3662626fb15d528599e0fdd8a5eb33d93268aa92943a84f4104566a1afb55",
+        "crates/openusd/src/pcp/dependencies.rs": "8312ba71d670983d88d72d0a8f1b460b097e7b40108d8070b1b5b01f7fe7d724",
+        "crates/openusd/src/pcp/index_cache.rs": "046d9a1e24dd339737e6624e6e2fbde05a0845671f0e8d87ee71bffbac0c6c86",
+        "crates/openusd/src/pcp/index_store.rs": "4dcb743a82cbdfcb6a95d52f515cc6094471dcff46912b38cc7d7d19a2502b3e",
+        "crates/openusd/src/pcp/instancing.rs": "bed2904b9c88a9c856f8e89b2f986e756d6610cd2c7d28f10d796989a7b4abc6",
+        "crates/openusd/src/pcp/layer_graph.rs": "091b754e7081951fca8317a74a98719ae314807f676e261fcb8f1a2ad0b1731b",
+        "crates/openusd/src/pcp/load_rules.rs": "3f5cab7f5d427980f24f2761ea8576ea9df3f51fb7906a949b37a60d1af1fbec",
+        "crates/openusd/src/pcp/prim_graph.rs": "8ffbbd973b77a6e908d5c8a81a55a15de3eb708c977268b313aa5f5e8faea2d5",
+        "crates/openusd/src/pcp/prim_index.rs": "04186f93a4567242d531f181bb4f4c799352f84eca030210a745a6a597b17eee",
+        "crates/openusd/src/pcp/prim_indexer.rs": "0b5cdfdbfdb881890e12eb685af1d2e64a658c204750210761a3ff7a70dec30e",
+        "crates/openusd/src/pcp/prim_resolve.rs": "de36cf89499020143487bb1b890f029abff1efad2f84986f7fdb2a2a1b1e73ad",
+        "crates/openusd/src/sdf/asset_path.rs": "9243273f313ae7541edf952cad3e587b313cc961a287bd01ceba11ed9968e89a",
+        "crates/openusd/src/sdf/change.rs": "cc208c0d4126195e02412195cecbd260a70b3aa403ec2a462d1c14504893335b",
+        "crates/openusd/src/sdf/coerce.rs": "dc4d3f06e0baa19fe756e1e2fe1281f6b6ce3da3865f62f92b622a275ac5d8ac",
+        "crates/openusd/src/sdf/copy.rs": "082ed024d8b8c5121fb2b61cc2f4fe84a90083822c834172fcb40b0ce88cb216",
+        "crates/openusd/src/sdf/data.rs": "9f076a94430b9740bcc4b8160b5342899080d08056c33806c4ab7d91de95f689",
+        "crates/openusd/src/sdf/expr.rs": "0f144db3571f039f2803de15d380671ec8599090bddd4ddb6f2c6afcf2255b8f",
+        "crates/openusd/src/sdf/layer_registry.rs": "94d9552de8963ab8d9de4d54d3220fda704b8b3a4a8788bbc90e67d5560ea227",
+        "crates/openusd/src/sdf/mod.rs": "5f3f7cda860fafb709c14295f83a433022047c12cf427b029b1173b918c08275",
+        "crates/openusd/src/sdf/path.rs": "9f2dad3203953a201df496e43e439b4c092bf118159cb792a187b9214162e31c",
+        "crates/openusd/src/sdf/path_table.rs": "e70c0498b3f3f839ea8a9a69dbe0ca963cbbf22d25a69a1de7ad09a235aef5a1",
+        "crates/openusd/src/sdf/spec.rs": "a33a8d4345073ad9eff5174805f907edff139a211ed4dd679b613a0d9ca65242",
+        "crates/openusd/src/sdf/value.rs": "565bcd000d9bde0c5b9dd90d4afdfc4e7005360c7878b8de71a58af0d4ff9eb7",
+        "crates/openusd/src/sdf/value_type.rs": "5c6475021ded0bff5a3f5a4bdfee79596c0da5e8bb6414fb6af0b77dd36aba5b",
+        "crates/openusd/src/usd/attribute.rs": "0958dba64e5eac898107a618f7c0d12258c8de8a593f2fcbefdec8e1ef19ff2d",
+        "crates/openusd/src/usd/clips.rs": "089defe6ff10f8d57884ca9657e1f3f353a66cda4b0552e53ba6794009a06b71",
+        "crates/openusd/src/usd/diff.rs": "ffc3cbd973c163775a169898420c7048ce616ee35654c6b4ea1f9b857fc2e448",
+        "crates/openusd/src/usd/editor.rs": "464536fc6008895e184320dca578b72577ff3004bcfd116b0c941035c5d8930f",
+        "crates/openusd/src/usd/flatten.rs": "7d63417f013b71c17c251dfd4bde7dd4fa3dce8a40faa3ecff7f8aa5ea6a797c",
+        "crates/openusd/src/usd/interp.rs": "b18248b39944b00a0482c3111098195c86bd8480e74190b78166727addd080ca",
+        "crates/openusd/src/usd/prim.rs": "ee4834e651cf4b5820c9fc8ef553c979ab313f03f53fa16fa950eb91dcf2486b",
+        "crates/openusd/src/usd/prim_definition.rs": "0ca859c46bcc7975863aa92512f885f38d54a5628ab887769779c6c0cfd87903",
+        "crates/openusd/src/usd/schema_registry.rs": "a4e037421cf877e7f454a5b120529ceda0a2b884a05f0a1d18191dd130d00050",
+        "crates/openusd/src/usd/stage.rs": "d5dbd25e944981ced7c13bf1ab69685092b58ccaa3df3c20cf1b4149b5e9d2e0",
+        "crates/openusd/src/usd_utils/walk.rs": "dfa4c21ed78472a072e076ebd9d9e780f7ad075298b09b77ff77ca71f3cd6155",
+        "crates/openusd/src/usda/parser.rs": "3610d2d8bee19aefcebf7b19d53c709fc5f7295b800e1bcf030541a680c316bb",
+        "crates/openusd/src/usda/types.rs": "5ee3ff99ccb13e3f5a7c9b20dc9bf74b8aca330447dc2d756a088d5726e87c3a",
+        "crates/openusd/src/usda/writer.rs": "1dcfbd7efb69fd5e70e9d86ed3a896d3ede261c7caf34b9d7418d7f59ea26422",
+        "crates/openusd/src/usdc/mod.rs": "2ce5989881995b18b384b9e824ec1fbf4ebeb58a8579f938721df450de48690d",
+        "crates/openusd/src/usdc/reader.rs": "cbd616d62631e444bb5277c8791c6b5cf03204b3c8fea629b8dec89c67954de6",
+        "crates/openusd/src/usdc/writer.rs": "cf93badb125eb55521d5e046e1d84ab27a90c42a499bb491225a427862b7421d",
+        "crates/openusd/tests/binary_format.rs": "d8f4817e4f0489574c1bfbc6ac95f222d9f52ac6e92e9cad3666dbb65061f26d",
+        "crates/openusd/tests/binary_writer_roundtrip.rs": "9de1a4e82df39f4a5abec50f8470ea2277aaed3ad3f4ddeb1e5262b4112b9c89",
+        "crates/openusd/tests/changes.rs": "513afd24a931a8ae6df88fba3999146428806dc72a99222e81db6ae4fdcd7423",
+        "crates/openusd/tests/stage.rs": "375b71159f09324d6c3261af484bdbdad106cea4a49b7335c11a9f5ec2124220",
+        "Cargo.toml": "869c6cb7e66a93df33dbae7038babc5cecd84546e227fe2c83f20ad75c39ef8a",
+        "Cargo.lock": "e60c88386e735600ba7af544edc068dc49114e57add3a70788eac661dda76fca",
+        "benchmarks/open_bench.cpp": "54f6344073bc105a4ed6e04af08c18ea2baef07457112a63298ec2a84770e093"
+      },
+      "binary_sha256": {
+        "/tmp/openusd-path-build/before": "8db547cb8f3e395d0e7a437d4a2beb283896542863da8259a3ad9d911b0d7c63",
+        "/tmp/openusd-spec-path/first-candidate": "526369b7308633276154d887ec73d6704de35c39c3ee4b09da3850160bcdc363",
+        "/tmp/openusd-spec-path/after": "3e2d37e73f0dbfe9be73f2b60c08a16b5db705a1f591a15caa2455521f1602eb",
+        "/tmp/openusd-reference/open_bench": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+      },
+      "branch": "perf/moana-read-followup",
+      "head": "4ce5df786f0a48be7b26f088a24f4fd960a7dcc0"
+    },
+    "native_sampling": {
+      "tool": "GDB timer-driven stack sampling",
+      "binary_sha256": "3e2d37e73f0dbfe9be73f2b60c08a16b5db705a1f591a15caa2455521f1602eb",
+      "samples_sha256": "8afb82d8ecbe961478790f9d2ef9780d5741ad44342cded5cbd4f97d083ec6ba",
+      "script_sha256": "2704e526357564d1b430a80605f747510fda99c94fd92afaf9d1118bbb89781c",
+      "measurement": "Starts at the first Stage::resolve_at call in the array phase and stops at the following Phase::end. Open, metadata traversal, and teardown are excluded. Sampling overhead is included in its elapsed time; it is not a timing benchmark.",
+      "interval_seconds": 0.01,
+      "stacks": 2078,
+      "inclusive_named_frame_counts": {
+        "std::rt::lang_start::{{closure}}": 2078,
+        "std::sys::backtrace::__rust_begin_short_backtrace": 2078,
+        "std::rt::lang_start_internal": 2078,
+        "open_bench::main": 2078,
+        "main": 2078,
+        "openusd::usd::composition::StageComposition::query": 1792,
+        "openusd::usd::stage::Stage::resolve_at": 1128,
+        "openusd::pcp::index_cache::IndexCache::value_at": 1078,
+        "openusd::usd::prim::Prim::authored_attributes": 853,
+        "openusd::usd::prim::Prim::properties_of_type": 852,
+        "core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &mut F>::call_once": 686,
+        "openusd::sdf::data::AbstractData::property_spec_path": 622,
+        "openusd::usd::stage::Stage::masked_opinions": 563,
+        "openusd::pcp::index_cache::IndexCache::prim_property_kinds": 530,
+        "<openusd::sdf::data::CowData<T> as openusd::sdf::data::AbstractData>::try_field": 488,
+        "openusd::sdf::path::Path::append_property": 433,
+        "<openusd::usdc::CrateData as openusd::sdf::data::AbstractData>::try_field": 394,
+        "<alloc::vec::Vec<T> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<T,I>>::from_iter": 374,
+        "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::fold": 372,
+        "openusd::usdc::reader::CrateFile::value": 357,
+        "openusd::usdc::reader::Decoder::decode": 356,
+        "openusd::pcp::prim_resolve::<impl openusd::pcp::prim_index::PrimIndex>::query_path_in": 329,
+        "<openusd::sdf::data::Data as openusd::sdf::data::AbstractData>::has_spec": 203,
+        "openusd::sdf::path::Path::check_property": 197,
+        "openusd::usdc::reader::Stream::read_encoded_ints": 197,
+        "openusd::usd::stage::Stage::prim_type_info_composed": 177,
+        "openusd::usdc::coding::decode_ints": 160,
+        "__memmove_avx_unaligned_erms_rtm": 156,
+        "<alloc::vec::into_iter::IntoIter<T,A> as core::iter::traits::iterator::Iterator>::try_fold": 137,
+        "openusd::usdc::reader::Decoder::read_array": 137,
+        "__memcmp_avx2_movbe_rtm": 133,
+        "alloc::vec::in_place_collect::from_iter_in_place": 132,
+        "openusd::usd::prim::Prim::property_path": 123,
+        "openusd::usd::stage::Stage::field": 123,
+        "openusd::pcp::asset_resolve::resolve_values": 120,
+        "openusd::sdf::asset_path::resolve_asset_paths": 119,
+        "openusd::pcp::index_cache::IndexCache::resolve_asset_at": 117,
+        "openusd::sdf::asset_path::resolve_path": 116,
+        "openusd::pcp::index_cache::IndexCache::resolve_field": 113,
+        "realpath_stk": 104,
+        "std::sys::fs::canonicalize": 104,
+        "std::sys::fs::unix::canonicalize": 104,
+        "realpath@@GLIBC_2.3": 104,
+        "alloc::str::join_generic_copy": 103,
+        "__rustc::__rust_alloc": 102
+      }
+    }
+  },
+  "ordinary_reads": {
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+    "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+    "cpu_count": 72,
+    "binaries": {
+      "before": "/tmp/openusd-path-build/before",
+      "rust": "/tmp/openusd-property-cache/after",
+      "cpp": "/tmp/openusd-reference/open_bench"
+    },
+    "binary_sha256": {
+      "before": "8db547cb8f3e395d0e7a437d4a2beb283896542863da8259a3ad9d911b0d7c63",
+      "rust": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+      "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+    },
+    "options": [
+      "--proxies",
+      "--authored",
+      "--no-heap"
+    ],
+    "commands": {
+      "before": [
+        "/tmp/openusd-path-build/before",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "rust": [
+        "/tmp/openusd-property-cache/after",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp": [
+        "/tmp/openusd-reference/open_bench",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ]
+    },
+    "warmups": 1,
+    "rust_cpu": null,
+    "rust_mmap": false,
+    "run_order": [
+      {
+        "round": 0,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 1,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 2,
+        "labels": [
+          "cpp",
+          "rust",
+          "before"
+        ]
+      },
+      {
+        "round": 3,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      }
+    ],
+    "results": {
+      "before": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 19.434,
+            "arrays": 16.691
+          },
+          "total": 36.126000000000005,
+          "process_seconds": 42.84466140999575,
+          "peak_rss_mib": 6113.9,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 18.25,
+            "arrays": 17.33
+          },
+          "total": 35.581,
+          "process_seconds": 42.85617324299528,
+          "peak_rss_mib": 6113.4,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 18.436,
+            "arrays": 16.944
+          },
+          "total": 35.381,
+          "process_seconds": 42.35168034701201,
+          "peak_rss_mib": 6113.3,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "rust": [
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 16.76,
+            "arrays": 14.586
+          },
+          "total": 31.348,
+          "process_seconds": 38.30339451400505,
+          "peak_rss_mib": 6232.7,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 18.074,
+            "arrays": 15.545
+          },
+          "total": 33.620000000000005,
+          "process_seconds": 40.52879658500024,
+          "peak_rss_mib": 6233.8,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 17.22,
+            "arrays": 16.05
+          },
+          "total": 33.271,
+          "process_seconds": 40.29226131399628,
+          "peak_rss_mib": 6233.0,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "cpp": [
+        {
+          "phases": {
+            "open": 4.032645,
+            "metadata": 1.005707,
+            "arrays": 10.015604
+          },
+          "total": 15.053956,
+          "process_seconds": 15.43770905600104,
+          "peak_rss_mib": 1797.88671875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.268829,
+            "metadata": 1.103571,
+            "arrays": 9.359441
+          },
+          "total": 14.731841000000001,
+          "process_seconds": 16.086023513998953,
+          "peak_rss_mib": 1804.87109375,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.561782,
+            "metadata": 1.05252,
+            "arrays": 10.171202
+          },
+          "total": 15.785504,
+          "process_seconds": 16.19719373600674,
+          "peak_rss_mib": 1814.2578125,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ]
+    },
+    "status_records_matched": 416549
+  },
+  "mapped_reads": {
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+    "platform": "Linux-5.14.0-687.15.1.el9_8.x86_64-x86_64-with-glibc2.34",
+    "cpu_count": 72,
+    "binaries": {
+      "before": "/tmp/openusd-path-build/before",
+      "rust": "/tmp/openusd-property-cache/after",
+      "cpp": "/tmp/openusd-reference/open_bench"
+    },
+    "binary_sha256": {
+      "before": "8db547cb8f3e395d0e7a437d4a2beb283896542863da8259a3ad9d911b0d7c63",
+      "rust": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+      "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+    },
+    "options": [
+      "--proxies",
+      "--authored",
+      "--no-heap"
+    ],
+    "commands": {
+      "before": [
+        "/tmp/openusd-path-build/before",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "--mmap",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "rust": [
+        "/tmp/openusd-property-cache/after",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "--mmap",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp": [
+        "/tmp/openusd-reference/open_bench",
+        "--proxies",
+        "--no-heap",
+        "--authored",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ]
+    },
+    "warmups": 1,
+    "rust_cpu": null,
+    "rust_mmap": true,
+    "run_order": [
+      {
+        "round": 0,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 1,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      },
+      {
+        "round": 2,
+        "labels": [
+          "cpp",
+          "rust",
+          "before"
+        ]
+      },
+      {
+        "round": 3,
+        "labels": [
+          "before",
+          "rust",
+          "cpp"
+        ]
+      }
+    ],
+    "results": {
+      "before": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 16.417,
+            "arrays": 17.234
+          },
+          "total": 33.652,
+          "process_seconds": 40.89991945899965,
+          "peak_rss_mib": 6018.2,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 16.612,
+            "arrays": 17.631
+          },
+          "total": 34.244,
+          "process_seconds": 41.24685499200132,
+          "peak_rss_mib": 6017.3,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 16.193,
+            "arrays": 17.259
+          },
+          "total": 33.453,
+          "process_seconds": 40.61627995800518,
+          "peak_rss_mib": 6019.1,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "rust": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.996,
+            "arrays": 15.785
+          },
+          "total": 30.782,
+          "process_seconds": 38.08325056100148,
+          "peak_rss_mib": 6138.1,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.852,
+            "arrays": 15.817
+          },
+          "total": 30.67,
+          "process_seconds": 37.93610039300984,
+          "peak_rss_mib": 6138.0,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 0.002,
+            "metadata": 15.195,
+            "arrays": 15.943
+          },
+          "total": 31.14,
+          "process_seconds": 38.70958050400077,
+          "peak_rss_mib": 6137.9,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ],
+      "cpp": [
+        {
+          "phases": {
+            "open": 4.628344,
+            "metadata": 1.136152,
+            "arrays": 10.660576
+          },
+          "total": 16.425072,
+          "process_seconds": 16.842681563008227,
+          "peak_rss_mib": 1763.17578125,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 4.40046,
+            "metadata": 1.155857,
+            "arrays": 9.899715
+          },
+          "total": 15.456032,
+          "process_seconds": 15.87298634799663,
+          "peak_rss_mib": 1778.39453125,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        },
+        {
+          "phases": {
+            "open": 3.954788,
+            "metadata": 1.144936,
+            "arrays": 10.077088
+          },
+          "total": 15.176812,
+          "process_seconds": 15.56041216700396,
+          "peak_rss_mib": 1770.8046875,
+          "counts": {
+            "prims": 416549,
+            "arrays": 1425154,
+            "elements": 627170615
+          }
+        }
+      ]
+    },
+    "status_records_matched": 416549
+  },
+  "source_sha256": {
+    "benchmarks/compare.py": "414fc039d1944ed341605d11be6459124fce1433afea38a4c1ffa53a6d3971ef",
+    "crates/openusd-build/src/emit/value.rs": "a41cd3895c345a4ee362a5bb999465d40cbebcb0b05cea1e70f5e31735c00199",
+    "crates/openusd-build/src/load.rs": "34100e2870174077d0e0216bdd1a2233db3e5e872575ac2ecc42b88505fc8b51",
+    "crates/openusd-build/src/plug_info.rs": "005c4ed4ee9c8a6f4796afa68838486261ba308fb0fd0d8dfd81dd96e77b5f2c",
+    "crates/openusd-build/tests/values/generated.rs": "beac86cca02322ee376f2e70868d01171d437e8e890220d4bfd4d7de7694c10a",
+    "crates/openusd-schemas/src/geom/imageable.rs": "722d99be482cfc50072d448b3fc6146613097efa939cd616a3d123b6bcbd4fde",
+    "crates/openusd-schemas/src/geom/point_instancer.rs": "488b7d16693b429675d4e9ef918ee6c9c00bf7f1d43a88509d97c640bca4c98c",
+    "crates/openusd-schemas/src/geom/xform_op.rs": "465b6f3055e752b8435eef63916d38e542abe8da5951c099810c862fec1ca8f8",
+    "crates/openusd-schemas/src/media/previews.rs": "930d8ca77c0ec5ef3096675a66c886b697004d4f21253dc66240e2e9af7afc81",
+    "crates/openusd-schemas/src/shade/interface.rs": "d8f3ac3ac33a1b80c27558a79cb3994afcfb0a0c36bc24002ecb63f08e851b0c",
+    "crates/openusd-schemas/src/shade/node_def.rs": "841b7047a7ca16c2d297f88b5ad77407297e69c95631bb1a0e9ee5043830021f",
+    "crates/openusd-schemas/src/shade/preview.rs": "40e55196cda5f9bfc709ffa72e1fc478bd8c24e68223bd6fb8553064c29b70de",
+    "crates/openusd-schemas/src/skel/bake.rs": "c9c491759ccd93ea15f01c11d26138bb7dd0590ff26b7f076bb3c00b4fe6fd01",
+    "crates/openusd-schemas/tests/lux.rs": "0cd917b41b307af03431016d4c9167d45219ac29f1d624b42d4e94e973c37394",
+    "crates/openusd-schemas/tests/media.rs": "03bbc719a4fb4d9b37bc009cec8275adb449647b9816f7bb165a92f1b5ac231b",
+    "crates/openusd-schemas/tests/render.rs": "3216b84ad61f9a2ea512f3826393ca076ccf745ab4ccfd8336a27fe54b7ad6ba",
+    "crates/openusd-schemas/tests/shade.rs": "342519fc0c3fa7578f74da7b616e29acc6ef01852243989831f63c6580fdceb7",
+    "crates/openusd-schemas/tests/skel_bake.rs": "fdc6a88ff4b7b2876b61ef8cdc0e3a939f4ffa3eb1b8d1ac7b24370a115a8615",
+    "crates/openusd-schemas/tests/ui.rs": "e88deaef1a51a34150446193503fd07772c9fdb324f3a03c7769e3a342161275",
+    "crates/openusd-schemas/tests/vol.rs": "60e14fd0b79e0ddb56efd9460d9d59502328449b9a87072f76d623ffbb0f9197",
+    "crates/openusd/Cargo.toml": "a37b96ea2b5e989d23b07220b6a3ecb98d3058fcddcf9d4f893fa43c78608311",
+    "crates/openusd/examples/author_variant_and_reference.rs": "84ae5031b890f0c4a6fd461adbd5134bef1e63e74cfa3f493f2addccb876e9b1",
+    "crates/openusd/src/pcp/asset_resolve.rs": "2d588001f47577a8ed3965ca8a8cf38b387d294fad5a98e1118f1e15142caaa6",
+    "crates/openusd/src/pcp/clip.rs": "5f610fb94a983498c25db9da50f295717777a177f9d3de9f2b1d6b8896e15260",
+    "crates/openusd/src/pcp/compose_site.rs": "74b3662626fb15d528599e0fdd8a5eb33d93268aa92943a84f4104566a1afb55",
+    "crates/openusd/src/pcp/dependencies.rs": "8312ba71d670983d88d72d0a8f1b460b097e7b40108d8070b1b5b01f7fe7d724",
+    "crates/openusd/src/pcp/index_cache.rs": "43adcf185fdd7adb70951b951a725ec679dd990c075c02ffafea207364573492",
+    "crates/openusd/src/pcp/index_store.rs": "5c05727daf32c2875f19d359507b2bc6e73993a1b7f763f967294fdfae3d3318",
+    "crates/openusd/src/pcp/instancing.rs": "bed2904b9c88a9c856f8e89b2f986e756d6610cd2c7d28f10d796989a7b4abc6",
+    "crates/openusd/src/pcp/layer_graph.rs": "091b754e7081951fca8317a74a98719ae314807f676e261fcb8f1a2ad0b1731b",
+    "crates/openusd/src/pcp/load_rules.rs": "3f5cab7f5d427980f24f2761ea8576ea9df3f51fb7906a949b37a60d1af1fbec",
+    "crates/openusd/src/pcp/prim_graph.rs": "8ffbbd973b77a6e908d5c8a81a55a15de3eb708c977268b313aa5f5e8faea2d5",
+    "crates/openusd/src/pcp/prim_index.rs": "dbb8f9af004e7c0b0cdb24ca8ebaea34eb0573b679ce25d0e83d58ee03acef10",
+    "crates/openusd/src/pcp/prim_indexer.rs": "17cfd52bc214a403b2042acbefcb457149bf22c5d15a90a3452be436e33302d9",
+    "crates/openusd/src/pcp/prim_resolve.rs": "5f58180541d96d96848e4ccd48e4c4591f7ff38265777dd77d51e15d59f737e6",
+    "crates/openusd/src/sdf/asset_path.rs": "9243273f313ae7541edf952cad3e587b313cc961a287bd01ceba11ed9968e89a",
+    "crates/openusd/src/sdf/change.rs": "cc208c0d4126195e02412195cecbd260a70b3aa403ec2a462d1c14504893335b",
+    "crates/openusd/src/sdf/coerce.rs": "dc4d3f06e0baa19fe756e1e2fe1281f6b6ce3da3865f62f92b622a275ac5d8ac",
+    "crates/openusd/src/sdf/copy.rs": "082ed024d8b8c5121fb2b61cc2f4fe84a90083822c834172fcb40b0ce88cb216",
+    "crates/openusd/src/sdf/data.rs": "46153c8ff3c2fbcc754996f4a1d1974b4ced7609b18ac36ce7fa8e8e3b146594",
+    "crates/openusd/src/sdf/expr.rs": "0f144db3571f039f2803de15d380671ec8599090bddd4ddb6f2c6afcf2255b8f",
+    "crates/openusd/src/sdf/layer_registry.rs": "94d9552de8963ab8d9de4d54d3220fda704b8b3a4a8788bbc90e67d5560ea227",
+    "crates/openusd/src/sdf/mod.rs": "5f3f7cda860fafb709c14295f83a433022047c12cf427b029b1173b918c08275",
+    "crates/openusd/src/sdf/path.rs": "3967a8fb8c33e809c872f8d9fdefd702be807c9f05586839c17714506f277958",
+    "crates/openusd/src/sdf/path_table.rs": "e70c0498b3f3f839ea8a9a69dbe0ca963cbbf22d25a69a1de7ad09a235aef5a1",
+    "crates/openusd/src/sdf/spec.rs": "a33a8d4345073ad9eff5174805f907edff139a211ed4dd679b613a0d9ca65242",
+    "crates/openusd/src/sdf/value.rs": "565bcd000d9bde0c5b9dd90d4afdfc4e7005360c7878b8de71a58af0d4ff9eb7",
+    "crates/openusd/src/sdf/value_type.rs": "5c6475021ded0bff5a3f5a4bdfee79596c0da5e8bb6414fb6af0b77dd36aba5b",
+    "crates/openusd/src/usd/attribute.rs": "0958dba64e5eac898107a618f7c0d12258c8de8a593f2fcbefdec8e1ef19ff2d",
+    "crates/openusd/src/usd/clips.rs": "089defe6ff10f8d57884ca9657e1f3f353a66cda4b0552e53ba6794009a06b71",
+    "crates/openusd/src/usd/diff.rs": "ffc3cbd973c163775a169898420c7048ce616ee35654c6b4ea1f9b857fc2e448",
+    "crates/openusd/src/usd/editor.rs": "464536fc6008895e184320dca578b72577ff3004bcfd116b0c941035c5d8930f",
+    "crates/openusd/src/usd/flatten.rs": "7d63417f013b71c17c251dfd4bde7dd4fa3dce8a40faa3ecff7f8aa5ea6a797c",
+    "crates/openusd/src/usd/interp.rs": "b18248b39944b00a0482c3111098195c86bd8480e74190b78166727addd080ca",
+    "crates/openusd/src/usd/prim.rs": "abcd561d4ce63545db33a9cd0d7bd7162db56a895ada7dd0a8e14bfbc8c1d9a7",
+    "crates/openusd/src/usd/prim_definition.rs": "0ca859c46bcc7975863aa92512f885f38d54a5628ab887769779c6c0cfd87903",
+    "crates/openusd/src/usd/schema_registry.rs": "a4e037421cf877e7f454a5b120529ceda0a2b884a05f0a1d18191dd130d00050",
+    "crates/openusd/src/usd/stage.rs": "d5dbd25e944981ced7c13bf1ab69685092b58ccaa3df3c20cf1b4149b5e9d2e0",
+    "crates/openusd/src/usd_utils/walk.rs": "dfa4c21ed78472a072e076ebd9d9e780f7ad075298b09b77ff77ca71f3cd6155",
+    "crates/openusd/src/usda/parser.rs": "3610d2d8bee19aefcebf7b19d53c709fc5f7295b800e1bcf030541a680c316bb",
+    "crates/openusd/src/usda/types.rs": "5ee3ff99ccb13e3f5a7c9b20dc9bf74b8aca330447dc2d756a088d5726e87c3a",
+    "crates/openusd/src/usda/writer.rs": "1dcfbd7efb69fd5e70e9d86ed3a896d3ede261c7caf34b9d7418d7f59ea26422",
+    "crates/openusd/src/usdc/mod.rs": "29061fd9f7b6b30f5a8ccea3498bc04f0c43e016ec2f01b582bb6aac1a25074c",
+    "crates/openusd/src/usdc/reader.rs": "cbd616d62631e444bb5277c8791c6b5cf03204b3c8fea629b8dec89c67954de6",
+    "crates/openusd/src/usdc/writer.rs": "cf93badb125eb55521d5e046e1d84ab27a90c42a499bb491225a427862b7421d",
+    "crates/openusd/tests/binary_format.rs": "d8f4817e4f0489574c1bfbc6ac95f222d9f52ac6e92e9cad3666dbb65061f26d",
+    "crates/openusd/tests/binary_writer_roundtrip.rs": "9de1a4e82df39f4a5abec50f8470ea2277aaed3ad3f4ddeb1e5262b4112b9c89",
+    "crates/openusd/tests/changes.rs": "513afd24a931a8ae6df88fba3999146428806dc72a99222e81db6ae4fdcd7423",
+    "crates/openusd/tests/stage.rs": "02e26d9bdf36eb7336a0fdcea72ed22e7da953506aa9fa2c6562bc030f3fb44a",
+    "Cargo.toml": "869c6cb7e66a93df33dbae7038babc5cecd84546e227fe2c83f20ad75c39ef8a",
+    "Cargo.lock": "e60c88386e735600ba7af544edc068dc49114e57add3a70788eac661dda76fca",
+    "benchmarks/open_bench.cpp": "54f6344073bc105a4ed6e04af08c18ea2baef07457112a63298ec2a84770e093"
+  },
+  "binary_sha256": {
+    "/tmp/openusd-path-build/before": "8db547cb8f3e395d0e7a437d4a2beb283896542863da8259a3ad9d911b0d7c63",
+    "/tmp/openusd-property-cache/after": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+    "/tmp/openusd-reference/open_bench": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+  },
+  "branch": "perf/moana-read-followup",
+  "head": "4ce5df786f0a48be7b26f088a24f4fd960a7dcc0",
+  "reference_environment": {
+    "USDC_USE_PREAD": null,
+    "USDC_ENABLE_ZERO_COPY_ARRAYS": null,
+    "PXR_WORK_THREAD_LIMIT": null
+  },
+  "composition_worker_diagnostic": {
+    "root": "/home/philippe.llerena/Workspace/samples/island/usd/island.usda",
+    "measurement": "Open plus first traversal and type-name queries. Arrays and teardown are excluded from workload totals. Separate diagnostic comparing Rust, default C++ workers, and one C++ worker; full-workload comparisons remain the primary results.",
+    "environment_overrides": {
+      "cpp_one": {
+        "PXR_WORK_THREAD_LIMIT": "1"
+      }
+    },
+    "warmups": 1,
+    "run_order": [
+      {
+        "round": 0,
+        "labels": [
+          "rust",
+          "cpp",
+          "cpp_one"
+        ]
+      },
+      {
+        "round": 1,
+        "labels": [
+          "rust",
+          "cpp",
+          "cpp_one"
+        ]
+      },
+      {
+        "round": 2,
+        "labels": [
+          "cpp_one",
+          "cpp",
+          "rust"
+        ]
+      },
+      {
+        "round": 3,
+        "labels": [
+          "rust",
+          "cpp",
+          "cpp_one"
+        ]
+      }
+    ],
+    "binary_sha256": {
+      "rust": "8c522811fa196ac8a9fb19e40001267a36a0ea9d7145bd8d360003ced4f64f3b",
+      "cpp": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c",
+      "cpp_one": "09b2699a088492ce7b0602d9a703233f7b6ca60ab30d825c5be9c3bbab11433c"
+    },
+    "commands": {
+      "rust": [
+        "/tmp/openusd-property-cache/after",
+        "--no-heap",
+        "--proxies",
+        "--authored",
+        "--until",
+        "metadata",
+        "--mmap",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp": [
+        "/tmp/openusd-reference/open_bench",
+        "--no-heap",
+        "--proxies",
+        "--authored",
+        "--until",
+        "metadata",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ],
+      "cpp_one": [
+        "/tmp/openusd-reference/open_bench",
+        "--no-heap",
+        "--proxies",
+        "--authored",
+        "--until",
+        "metadata",
+        "/home/philippe.llerena/Workspace/samples/island/usd/island.usda"
+      ]
+    },
+    "results": {
+      "rust": [
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.525
+          },
+          "total": 14.526,
+          "process_seconds": 20.931448709001415,
+          "counts": {
+            "prims": 416549
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.839
+          },
+          "total": 14.84,
+          "process_seconds": 21.370882571995026,
+          "counts": {
+            "prims": 416549
+          }
+        },
+        {
+          "phases": {
+            "open": 0.001,
+            "metadata": 14.799
+          },
+          "total": 14.799999999999999,
+          "process_seconds": 21.33115880600235,
+          "counts": {
+            "prims": 416549
+          }
+        }
+      ],
+      "cpp": [
+        {
+          "phases": {
+            "open": 4.426686,
+            "metadata": 1.075644
+          },
+          "total": 5.502330000000001,
+          "process_seconds": 5.868331217003288,
+          "counts": {
+            "prims": 416549
+          }
+        },
+        {
+          "phases": {
+            "open": 3.948189,
+            "metadata": 1.072245
+          },
+          "total": 5.020434,
+          "process_seconds": 5.410347857003217,
+          "counts": {
+            "prims": 416549
+          }
+        },
+        {
+          "phases": {
+            "open": 4.022419,
+            "metadata": 1.174575
+          },
+          "total": 5.196994,
+          "process_seconds": 5.55214803700801,
+          "counts": {
+            "prims": 416549
+          }
+        }
+      ],
+      "cpp_one": [
+        {
+          "phases": {
+            "open": 11.300902,
+            "metadata": 0.910072
+          },
+          "total": 12.210974,
+          "process_seconds": 15.116536835004808,
+          "counts": {
+            "prims": 416549
+          }
+        },
+        {
+          "phases": {
+            "open": 12.722904,
+            "metadata": 0.97934
+          },
+          "total": 13.702244,
+          "process_seconds": 16.84860618300445,
+          "counts": {
+            "prims": 416549
+          }
+        },
+        {
+          "phases": {
+            "open": 11.526388,
+            "metadata": 0.958077
+          },
+          "total": 12.484465,
+          "process_seconds": 15.610512629995355,
+          "counts": {
+            "prims": 416549
+          }
+        }
+      ]
+    },
+    "runner_sha256": "cdea5e62598bee1f7efdf266f46c9cdfbbdd3121fe6ee3566589f9338a3ee1a8"
+  }
+}

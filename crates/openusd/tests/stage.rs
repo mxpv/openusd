@@ -3805,6 +3805,9 @@ fn instance_descendant_load_rule_splits_prototype() -> Result<()> {
         proto_a, proto_b,
         "identical composition and load state share a prototype"
     );
+    for instance in ["InstA", "InstB", "InstA"] {
+        assert!(stage.prim(format!("/World/{instance}/Heavy"))?.is_loaded()?);
+    }
 
     stage.unload("/World/InstA/Heavy").unwrap();
 
@@ -3814,6 +3817,54 @@ fn instance_descendant_load_rule_splits_prototype() -> Result<()> {
         proto_a, proto_b,
         "differing load rules on a descendant split the prototype"
     );
+    assert!(!stage.prim("/World/InstA/Heavy")?.is_loaded()?);
+    assert!(stage.prim("/World/InstB/Heavy")?.is_loaded()?);
+    assert_eq!(
+        stage.prim("/World/InstB/Heavy")?.attribute("x").get::<f64>()?,
+        Some(1.0)
+    );
+    assert_eq!(stage.prim("/World/InstA/Heavy")?.attribute("x").get::<f64>()?, None);
+    Ok(())
+}
+
+#[test]
+fn instance_child_order_after_edit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Source" {
+    def "First" {}
+    def "Second" {}
+}
+def "A" (
+    instanceable = true
+    references = </Source>
+) {}
+def "B" (
+    instanceable = true
+    references = </Source>
+) {}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    for path in ["/A", "/B", "/A"] {
+        assert_eq!(
+            stage.prim(path)?.child_names()?,
+            vec![tf::Token::from("First"), tf::Token::from("Second")]
+        );
+    }
+    stage.prim("/Source")?.set_metadata(
+        sdf::FieldKey::PrimOrder.as_str(),
+        sdf::Value::TokenVec(vec!["Second".into(), "First".into()]),
+    )?;
+    for path in ["/B", "/A", "/B"] {
+        assert_eq!(
+            stage.prim(path)?.child_names()?,
+            vec![tf::Token::from("Second"), tf::Token::from("First")]
+        );
+    }
     Ok(())
 }
 
@@ -4305,10 +4356,10 @@ fn rediscovery_on_known_root() -> Result<()> {
     let instance = |path: &str| -> Result<()> {
         stage.define_prim(path)?.set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Proto")?,
                 ..Default::default()
-            }])),
+            }]))),
         )?;
         stage
             .prim(path)?
@@ -6738,7 +6789,7 @@ fn inherit_stage() -> Result<Stage> {
     stage.define_prim("/_Class")?;
     stage.define_prim("/Prim")?.set_metadata(
         sdf::FieldKey::InheritPaths.as_str(),
-        sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/_Class")?])),
+        sdf::Value::PathListOp(Box::new(sdf::PathListOp::prepended([sdf::path("/_Class")?]))),
     )?;
     Ok(stage)
 }
@@ -6921,11 +6972,11 @@ fn variant_ref_path_error() -> Result<()> {
     stage.define_prim("/Target")?;
     stage.define_prim("/P")?.set_metadata(
         sdf::FieldKey::References.as_str(),
-        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+        sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
             asset_path: String::new(),
             prim_path: sdf::path("/Target{v=a}")?,
             ..Default::default()
-        }])),
+        }]))),
     )?;
     assert!(stage.prim("/P")?.is_valid()?);
     assert!(
@@ -7125,11 +7176,11 @@ fn layer_stack_id_same_inputs() -> Result<()> {
 fn reference_with_offset(stage: &Stage, offset: sdf::LayerOffset) -> Result<()> {
     stage.define_prim("/Prim")?.set_metadata(
         sdf::FieldKey::References.as_str(),
-        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+        sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
             prim_path: sdf::path("/Source")?,
             layer_offset: offset,
             ..Default::default()
-        }])),
+        }]))),
     )?;
     Ok(())
 }
@@ -7344,7 +7395,7 @@ fn default_hides_inherited_samples() -> Result<()> {
         .define_prim("/A")?
         .set_metadata(
             sdf::FieldKey::InheritPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/C")?])),
+            sdf::Value::PathListOp(Box::new(sdf::PathListOp::prepended([sdf::path("/C")?]))),
         )?
         .create_attribute("x", "double")?
         .set(sdf::Value::Double(1.0))?;
@@ -10790,15 +10841,18 @@ fn clip_metadata(prim_path: &str) -> sdf::Value {
         ),
         (
             "manifestAssetPath".to_string(),
-            sdf::Value::AssetPath("./manifest.usda".into()),
+            sdf::Value::AssetPath(Box::new("./manifest.usda".into())),
         ),
         ("primPath".to_string(), sdf::Value::String(prim_path.to_string())),
         (
             "active".to_string(),
-            sdf::Value::Vec2dVec(vec![openusd::gf::vec2d(0.0, 0.0)]),
+            sdf::Value::Vec2dVec((vec![openusd::gf::vec2d(0.0, 0.0)]).into()),
         ),
     ]);
-    sdf::Value::Dictionary(HashMap::from([("default".to_string(), sdf::Value::Dictionary(set))]))
+    sdf::Value::Dictionary(Box::new(HashMap::from([(
+        "default".to_string(),
+        sdf::Value::Dictionary(Box::new(set)),
+    )])))
 }
 
 /// The manifest and clip [`clip_metadata`] points at, declaring `Child.size`
@@ -11314,7 +11368,7 @@ fn target_edit_fans_out_to_dependent() -> Result<()> {
         .set_targets(["/Class/Local"])?;
     stage.define_prim("/Inst")?.set_metadata(
         sdf::FieldKey::InheritPaths.as_str(),
-        sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/Class")?])),
+        sdf::Value::PathListOp(Box::new(sdf::PathListOp::prepended([sdf::path("/Class")?]))),
     )?;
     stage.define_prim("/Inst/Local")?;
     stage.define_prim("/Inst/Other")?;
@@ -11361,10 +11415,10 @@ def "Inst" (
     assert!(!stage.is_indexed(&sdf::path("/_Class")?), "nothing asked for the class");
 
     let root = stage.root_layer().identifier().to_owned();
-    let reference = sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+    let reference = sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
         prim_path: sdf::path("/Lib")?,
         ..Default::default()
-    }]));
+    }])));
     stage.layer_mut(&root).expect("the root layer is live").edit(|e| {
         e.data_mut()
             .set_field(&sdf::path("/_Class")?, sdf::FieldKey::References.as_str(), reference);
@@ -11511,7 +11565,7 @@ fn instance_target_memo_not_stale() -> Result<()> {
     )?;
     let attr = "/Owner.x";
     let target = sdf::path("/Target")?;
-    let drop_inherit = || sdf::Value::PathListOp(sdf::PathListOp::explicit(Vec::<sdf::Path>::new()));
+    let drop_inherit = || sdf::Value::PathListOp(Box::new(sdf::PathListOp::explicit(Vec::<sdf::Path>::new())));
 
     // Stage A: query first (populating any memo). `Target` is an instance of
     // `Class`, so the class connection to it is dropped. Then drop `Target`'s
@@ -11604,7 +11658,7 @@ fn sublayer_stronger_opinion_wins() -> Result<()> {
     // The composed value must come from the stronger layer (blue),
     // not the weaker layer (red). Verify by checking it's not the base red.
     let value = value.unwrap();
-    let base_red = sdf::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0)]);
+    let base_red = sdf::Value::Vec3fVec((vec![gf::vec3f(1.0, 0.0, 0.0)]).into());
     assert_ne!(value, base_red, "stronger layer opinion should win over weaker");
 
     Ok(())
@@ -11661,7 +11715,7 @@ fn inherit_local_opinion_wins() -> Result<()> {
     assert!(value.is_some());
 
     // Verify it's the local red, not the inherited green.
-    let green = sdf::Value::Vec3fVec(vec![gf::vec3f(0.0, 0.8, 0.0)]);
+    let green = sdf::Value::Vec3fVec((vec![gf::vec3f(0.0, 0.8, 0.0)]).into());
     assert_ne!(value.unwrap(), green, "local opinion should win over inherited");
 
     Ok(())
@@ -11700,7 +11754,7 @@ fn specialize_local_opinion_wins() -> Result<()> {
     assert!(value.is_some());
 
     // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
-    let red = sdf::Value::Vec3fVec(vec![gf::vec3f(0.8, 0.0, 0.0)]);
+    let red = sdf::Value::Vec3fVec((vec![gf::vec3f(0.8, 0.0, 0.0)]).into());
     assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
 
     Ok(())
@@ -11961,7 +12015,7 @@ fn custom_layer_data() -> Result<()> {
     let stage = in_memory_stage()?;
     assert!(stage.custom_layer_data()?.is_none());
 
-    let dict = sdf::Value::Dictionary([("tool".to_string(), sdf::Value::String("rs".into()))].into());
+    let dict = sdf::Value::Dictionary(Box::new([("tool".to_string(), sdf::Value::String("rs".into()))].into()));
     stage.set_custom_layer_data(dict)?;
 
     let Some(sdf::Value::Dictionary(read)) = stage.custom_layer_data()? else {
@@ -12219,11 +12273,11 @@ fn listener_info_under_variant_target() -> Result<()> {
         let mut prim = e.prim_mut("/Prim")?.expect("the prim spec is on the root layer");
         prim.set(
             sdf::FieldKey::VariantSetNames.as_str(),
-            sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
+            sdf::Value::StringListOp(Box::new(sdf::StringListOp::prepended(["set".to_owned()]))),
         );
         prim.set(
             sdf::FieldKey::VariantSelection.as_str(),
-            sdf::Value::VariantSelectionMap(HashMap::from([("set".to_string(), "sel".to_string())])),
+            sdf::Value::VariantSelectionMap(Box::new(HashMap::from([("set".to_string(), "sel".to_string())]))),
         );
         Ok(())
     })?;
@@ -12993,6 +13047,31 @@ fn remove_property_drops_spec() -> Result<()> {
     assert!(!stage.prim("/A")?.property_names()?.iter().any(|t| t == "size"));
     assert!(stage.prim("/A")?.is_valid()?);
     assert!(!stage.remove_property("/A.size")?);
+    Ok(())
+}
+
+#[test]
+fn property_kinds_follow_replacement() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let prim = stage.define_prim("/A")?;
+    stage.create_attribute("/A.p", "float")?;
+    for _ in 0..2 {
+        assert_eq!(prim.authored_attributes()?.len(), 1);
+        assert!(prim.authored_relationships()?.is_empty());
+    }
+    stage.remove_property("/A.p")?;
+    stage.create_relationship("/A.p")?;
+    for _ in 0..2 {
+        assert!(prim.authored_attributes()?.is_empty());
+        assert_eq!(prim.authored_relationships()?.len(), 1);
+    }
+    stage.remove_property("/A.p")?;
+    stage.create_attribute("/A.p", "double")?;
+    stage.create_attribute("/A.q", "int")?;
+    for _ in 0..2 {
+        assert_eq!(prim.authored_attributes()?.len(), 2);
+        assert!(prim.authored_relationships()?.is_empty());
+    }
     Ok(())
 }
 

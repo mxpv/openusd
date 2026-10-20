@@ -1077,15 +1077,18 @@ fn clip_metadata(active_index: f64) -> sdf::Value {
         ),
         (
             "manifestAssetPath".to_string(),
-            sdf::Value::AssetPath("./manifest.usda".into()),
+            sdf::Value::AssetPath(Box::new("./manifest.usda".into())),
         ),
         ("primPath".to_string(), sdf::Value::String("/Model".to_string())),
         (
             "active".to_string(),
-            sdf::Value::Vec2dVec(vec![gf::vec2d(0.0, active_index)]),
+            sdf::Value::Vec2dVec((vec![gf::vec2d(0.0, active_index)]).into()),
         ),
     ]);
-    sdf::Value::Dictionary(HashMap::from([("default".to_string(), sdf::Value::Dictionary(set))]))
+    sdf::Value::Dictionary(Box::new(HashMap::from([(
+        "default".to_string(),
+        sdf::Value::Dictionary(Box::new(set)),
+    )])))
 }
 
 /// A stage whose `/Model` carries a two-clip set selecting the first, with the
@@ -1183,10 +1186,10 @@ fn info_change_names_referrer() {
         .unwrap()
         .set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            sdf::Value::ReferenceListOp(Box::new(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Source").unwrap(),
                 ..Default::default()
-            }])),
+            }]))),
         )
         .unwrap();
     // Compose the referrer so the dependency map records what it reads.

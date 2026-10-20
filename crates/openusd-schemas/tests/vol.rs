@@ -31,7 +31,7 @@ fn volume_and_fields_from_fixture() -> Result<()> {
     let vdb = vol::OpenVDBAsset::get(&stage, sdf::path("/Smoke/density")?)?.expect("OpenVDBAsset");
     assert_eq!(
         vdb.file_path_attr().get::<sdf::Value>()?,
-        Some(sdf::Value::AssetPath("./smoke.vdb".into()))
+        Some(sdf::Value::AssetPath(Box::new("./smoke.vdb".into())))
     );
     assert_eq!(vdb.field_data_type_attr().get::<Token>()?.as_deref(), Some("float"));
     assert_eq!(vdb.field_class_attr().get::<Token>()?.as_deref(), Some("fogVolume"));
@@ -75,7 +75,7 @@ fn openvdb_asset_roundtrip() -> Result<()> {
     let stage = memory()?;
     let a = OpenVDBAsset::define(&stage, "/V/density")?;
     a.create_file_path_attr()?
-        .set(sdf::Value::AssetPath("./smoke.vdb".into()))?;
+        .set(sdf::Value::AssetPath(Box::new("./smoke.vdb".into())))?;
     a.create_field_name_attr()?.set(sdf::Value::token("density"))?;
     a.create_field_index_attr()?.set(0)?;
     a.create_field_data_type_attr()?.set(sdf::Value::token("float"))?;

@@ -25,9 +25,9 @@ use strum::{Display, IntoStaticStr};
 use crate::gf::{self, f16};
 use crate::tf;
 
+use super::TimeCode;
 use super::unit::Unit;
 use super::value::{CastError, Value, ValueKind};
-use super::{AssetPath, PathExpression, TimeCode};
 
 /// The name of an attribute value type (C++ `SdfValueTypeName`), such as
 /// `float3`, `color3f[]` or `token`.
@@ -482,7 +482,7 @@ macro_rules! array_pairs {
             /// The empty array of an array kind.
             fn empty_array(self) -> Option<Value> {
                 match self {
-                    $(ValueKind::$array => Some(Value::$array(Vec::new())),)*
+                    $(ValueKind::$array => Some(Value::$array(Default::default())),)*
                     _ => None,
                 }
             }
@@ -514,7 +514,7 @@ macro_rules! array_pairs {
                     $(Value::$array(items) => positions
                         .into_iter()
                         .map(|at| items.get(at).cloned())
-                        .collect::<Option<Vec<_>>>()
+                        .collect::<Option<_>>()
                         .map(Value::$array),)*
                     _ => None,
                 }
@@ -602,8 +602,8 @@ impl ValueKind {
             ValueKind::TimeCode => Value::TimeCode(TimeCode(0.0)),
             ValueKind::String => Value::String(String::new()),
             ValueKind::Token => Value::Token(tf::Token::default()),
-            ValueKind::AssetPath => Value::AssetPath(AssetPath::default()),
-            ValueKind::PathExpression => Value::PathExpression(PathExpression::default()),
+            ValueKind::AssetPath => Value::AssetPath(Box::default()),
+            ValueKind::PathExpression => Value::PathExpression(Box::default()),
             ValueKind::Opaque => Value::Opaque,
             ValueKind::Vec2i => Value::Vec2i(gf::Vec2i::default()),
             ValueKind::Vec2h => Value::Vec2h(gf::Vec2h::default()),
@@ -621,8 +621,8 @@ impl ValueKind {
             ValueKind::Quatf => Value::Quatf(gf::Quatf::IDENTITY),
             ValueKind::Quatd => Value::Quatd(gf::Quatd::IDENTITY),
             ValueKind::Matrix2d => Value::Matrix2d(gf::Mat2d::IDENTITY),
-            ValueKind::Matrix3d => Value::Matrix3d(gf::Mat3d::IDENTITY),
-            ValueKind::Matrix4d => Value::Matrix4d(gf::Mat4d::IDENTITY),
+            ValueKind::Matrix3d => Value::Matrix3d(Box::new(gf::Mat3d::IDENTITY)),
+            ValueKind::Matrix4d => Value::Matrix4d(Box::new(gf::Mat4d::IDENTITY)),
             array => return array.empty_array(),
         })
     }
@@ -936,17 +936,20 @@ mod tests {
     /// twice.
     #[test]
     fn gather_repeats_elements() {
-        let values = Value::IntVec(vec![10, 20, 30]);
-        assert_eq!(values.gather([2, 0, 0, 1]), Some(Value::IntVec(vec![30, 10, 10, 20])));
-        assert_eq!(values.gather([]), Some(Value::IntVec(Vec::new())));
+        let values = Value::IntVec((vec![10, 20, 30]).into());
+        assert_eq!(
+            values.gather([2, 0, 0, 1]),
+            Some(Value::IntVec((vec![30, 10, 10, 20]).into()))
+        );
+        assert_eq!(values.gather([]), Some(Value::IntVec((Vec::new()).into())));
     }
 
     /// One position past the end fails the whole gather.
     #[test]
     fn gather_out_of_range() {
-        let values = Value::FloatVec(vec![1.0, 2.0]);
+        let values = Value::FloatVec((vec![1.0, 2.0]).into());
         assert_eq!(values.gather([0, 2]), None);
-        assert_eq!(Value::FloatVec(Vec::new()).gather([0]), None);
+        assert_eq!(Value::FloatVec((Vec::new()).into()).gather([0]), None);
     }
 
     /// A scalar holds no elements to gather, and neither does an array no
@@ -1217,16 +1220,16 @@ mod tests {
         );
         assert_eq!(
             ValueTypeName::MATRIX4D.default_value(),
-            Some(Value::Matrix4d(gf::Mat4d::IDENTITY))
+            Some(Value::Matrix4d(Box::new(gf::Mat4d::IDENTITY)))
         );
         assert_eq!(
             ValueTypeName::FRAME4D.default_value(),
-            Some(Value::Matrix4d(gf::Mat4d::IDENTITY))
+            Some(Value::Matrix4d(Box::new(gf::Mat4d::IDENTITY)))
         );
         assert_eq!(ValueTypeName::FLOAT3.default_value(), Some(Value::vec3f(0.0, 0.0, 0.0)));
         assert_eq!(
             ValueTypeName::FLOAT3_ARRAY.default_value(),
-            Some(Value::Vec3fVec(Vec::new()))
+            Some(Value::Vec3fVec((Vec::new()).into()))
         );
         assert_eq!(
             ValueTypeName::TOKEN.default_value(),

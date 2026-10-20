@@ -118,7 +118,7 @@ fn author_then_read_back_roundtrip() -> Result<(), SchemaError> {
     let tex = Shader::define(&stage, "/World/Looks/M/Albedo")?;
     tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
     tex.create_input("file", "asset")?
-        .set(sdf::Value::AssetPath("./wood.png".into()))?;
+        .set(sdf::Value::AssetPath(Box::new("./wood.png".into())))?;
     tex.create_output("rgb", "float3")?;
 
     let surface = Shader::define(&stage, "/World/Looks/M/Surface")?;
@@ -274,7 +274,7 @@ fn shader_source_asset() -> Result<()> {
         .set(ImplementationSource::SourceAsset)?;
     shader
         .create_source_asset_attr()?
-        .set(sdf::Value::AssetPath("./OmniPBR.mdl".into()))?;
+        .set(sdf::Value::AssetPath(Box::new("./OmniPBR.mdl".into())))?;
     shader
         .create_source_asset_subidentifier_attr()?
         .set(sdf::Value::token("OmniPBR"))?;

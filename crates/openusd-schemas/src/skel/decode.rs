@@ -198,7 +198,7 @@ impl BindingAPI {
                 sdf::ValueTypeName::INT_ARRAY,
             );
             influences(indices, true, Some(1))
-                .set(sdf::Value::IntVec(vec![index]))
+                .set(sdf::Value::IntVec((vec![index]).into()))
                 .build()?;
             let weights = PrimvarBuilder::in_edit(
                 &prim,
@@ -206,7 +206,7 @@ impl BindingAPI {
                 sdf::ValueTypeName::FLOAT_ARRAY,
             );
             influences(weights, true, Some(1))
-                .set(sdf::Value::FloatVec(vec![weight]))
+                .set(sdf::Value::FloatVec((vec![weight]).into()))
                 .build()?;
             Ok::<_, SchemaError>(())
         })
@@ -249,9 +249,9 @@ impl Animation {
         self.stage().edit(|edit| -> Result<(), SchemaError> {
             let components = [
                 self.translations_attr_builder()
-                    .set_at(sdf::Value::Vec3fVec(translations), time),
+                    .set_at(sdf::Value::Vec3fVec(translations.into()), time),
                 self.rotations_attr_builder()
-                    .set_at(sdf::Value::QuatfVec(rotations), time),
+                    .set_at(sdf::Value::QuatfVec(rotations.into()), time),
                 self.scales_attr_builder().set_at(sdf::Value::Vec3hVec(scales), time),
             ];
             for component in components {
@@ -331,8 +331,10 @@ mod tests {
         root.create_skeleton_rel()?.add_target("/Char/Rig")?;
 
         let body = BindingAPI::apply(&stage.prim("/Char/Body")?)?;
-        body.create_joint_indices_attr()?.set(Value::IntVec(vec![0, 1]))?;
-        body.create_joint_weights_attr()?.set(Value::FloatVec(vec![1.0, 1.0]))?;
+        body.create_joint_indices_attr()?
+            .set(Value::IntVec((vec![0, 1]).into()))?;
+        body.create_joint_weights_attr()?
+            .set(Value::FloatVec((vec![1.0, 1.0]).into()))?;
         body.create_skinning_method_attr()?.set(SkinningMethod::ClassicLinear)?;
 
         let body = BindingAPI::get(&stage, "/Char/Body")?.expect("BindingAPI");

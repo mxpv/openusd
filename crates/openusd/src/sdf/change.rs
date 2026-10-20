@@ -480,7 +480,7 @@ fn flag_for_field(field: &str) -> ChangeFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdf::{AttributeSpec, ChildrenKey, Data, PathListOp, PrimSpec, ReferenceListOp, Variability};
+    use crate::sdf::{AttributeSpec, ChildrenKey, Data, PrimSpec, Variability};
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")
@@ -635,7 +635,7 @@ mod tests {
         cow.set_field(
             path,
             FieldKey::References.as_str(),
-            Value::ReferenceListOp(ReferenceListOp::default()),
+            Value::ReferenceListOp(Box::default()),
         );
     }
 
@@ -719,7 +719,7 @@ mod tests {
         base.set_field(
             &p("/X"),
             FieldKey::References.as_str(),
-            Value::ReferenceListOp(ReferenceListOp::default()),
+            Value::ReferenceListOp(Box::default()),
         );
 
         let cl = derive(base, |c| c.erase_spec(&p("/X")));
@@ -739,7 +739,7 @@ mod tests {
         base.set_field(
             &p("/P.rel"),
             FieldKey::TargetPaths.as_str(),
-            Value::PathListOp(PathListOp::default()),
+            Value::PathListOp(Box::default()),
         );
 
         let cl = derive(base, |c| c.erase_spec(&p("/P.rel")));
@@ -765,7 +765,7 @@ mod tests {
         base.set_field(
             &p("/X"),
             FieldKey::References.as_str(),
-            Value::ReferenceListOp(ReferenceListOp::default()),
+            Value::ReferenceListOp(Box::default()),
         );
 
         // Re-create /X as a plain `over` with no references, in one window.
@@ -825,12 +825,12 @@ mod tests {
             c.set_field(
                 &p("/P.rel"),
                 FieldKey::TargetPaths.as_str(),
-                Value::PathListOp(PathListOp::default()),
+                Value::PathListOp(Box::default()),
             );
             c.set_field(
                 &p("/P.attr"),
                 FieldKey::ConnectionPaths.as_str(),
-                Value::PathListOp(PathListOp::default()),
+                Value::PathListOp(Box::default()),
             );
         });
         let rel = cl.iter().find(|(path, _)| path == &p("/P.rel")).expect("rel entry");

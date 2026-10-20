@@ -4091,6 +4091,8 @@ mod tests {
                 property_errors: Diagnostics::default(),
                 resolved_targets: Default::default(),
                 instanceable: None,
+                child_names: None,
+                property_kinds: None,
                 revision: PrimRevision::placeholder(),
             },
         );

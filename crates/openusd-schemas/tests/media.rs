@@ -18,7 +18,7 @@ fn spatial_audio_from_fixture() -> Result<()> {
 
     assert_eq!(
         a.file_path_attr().get::<sdf::Value>()?,
-        Some(sdf::Value::AssetPath("./ambient.wav".into()))
+        Some(sdf::Value::AssetPath(Box::new("./ambient.wav".into())))
     );
     assert_eq!(
         a.aural_mode_attr()

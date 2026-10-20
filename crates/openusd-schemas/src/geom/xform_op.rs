@@ -185,7 +185,7 @@ impl XformOpKind {
         let matrix = match self {
             Self::Transform => match value {
                 sdf::Value::Matrix4d(m) if inverse => return m.inverse(),
-                sdf::Value::Matrix4d(m) => Some(m),
+                sdf::Value::Matrix4d(m) => Some(*m),
                 _ => None,
             },
             Self::TranslateX | Self::TranslateY | Self::TranslateZ => value.cast::<f64>().ok().map(|v| {
@@ -421,9 +421,9 @@ mod tests {
     #[test]
     fn inverse_undoes_kind() {
         let value = |kind: XformOpKind| match kind {
-            XformOpKind::Transform => {
-                sdf::Value::Matrix4d(gf::Mat4d::translation([1.0, 2.0, 3.0]) * gf::Mat4d::scale([2.0, 3.0, 4.0]))
-            }
+            XformOpKind::Transform => sdf::Value::Matrix4d(Box::new(
+                gf::Mat4d::translation([1.0, 2.0, 3.0]) * gf::Mat4d::scale([2.0, 3.0, 4.0]),
+            )),
             XformOpKind::Orient => sdf::Value::Quatd(gf::quatd(0.5, 0.5, 0.5, 0.5)),
             k if k.value_type(XformOpPrecision::Double) == sdf::ValueTypeName::DOUBLE => sdf::Value::Double(30.0),
             _ => sdf::Value::Vec3d(gf::vec3d(10.0, 20.0, 30.0)),

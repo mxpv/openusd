@@ -28,7 +28,7 @@ fn assert_text_format(name: &str) {
     // Build actual output as a sorted map of path → fields.
     let mut actual: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
-        let fields: BTreeMap<&str, &sdf::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let fields: BTreeMap<&str, &sdf::Value> = spec.fields.iter().map(|(k, v)| (k.as_ref(), v)).collect();
         actual.insert(path.to_string(), fields);
     }
 

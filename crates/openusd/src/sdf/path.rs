@@ -1,12 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
-use std::{cmp, convert::Infallible, fmt, str::FromStr};
+use std::{cmp, convert::Infallible, fmt, mem, str::FromStr};
 
 use rustc_hash::{FxBuildHasher, FxHasher};
-
-use crate::tf;
 
 /// Parses `str` into a validated [`Path`] — the terse form of [`Path::new`].
 #[inline]
@@ -65,6 +64,108 @@ pub type PathMap<V> = HashMap<Path, V, FxBuildHasher>;
 /// A set of [`Path`]s, hashed as a [`PathMap`] is.
 pub type PathSet = HashSet<Path, FxBuildHasher>;
 
+/// A borrowed lookup key with the same hash and equality as an owned path.
+pub(super) struct PathRef<'a>(pub(super) &'a str);
+
+impl Hash for PathRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(text_hash(self.0));
+    }
+}
+
+impl hashbrown::Equivalent<Path> for PathRef<'_> {
+    fn equivalent(&self, key: &Path) -> bool {
+        self.0 == key.as_str()
+    }
+}
+
+/// A borrowed path lookup with a precomputed hash.
+///
+/// Compound queries retain their parent and suffix separately. Constructing an
+/// owned path is deferred until [`to_path`](Self::to_path) is called.
+#[derive(Debug, Clone, Copy)]
+pub struct PathQuery<'a> {
+    prefix: &'a Path,
+    separator: &'static str,
+    suffix: &'a str,
+    hash: u64,
+}
+
+impl<'a> PathQuery<'a> {
+    /// Borrows an existing path, including its cached hash.
+    pub fn new(path: &'a Path) -> Self {
+        Self {
+            prefix: path,
+            separator: "",
+            suffix: "",
+            hash: path.path.hash,
+        }
+    }
+
+    /// Borrows the property `prim.name`, returning `None` for invalid names.
+    pub fn property(prim: &'a Path, name: &'a str) -> Option<Self> {
+        prim.check_property(name).ok()?;
+        Some(Self::from_parts(prim, ".", name))
+    }
+
+    /// Appends a suffix split from a validated property path to a node path.
+    pub(crate) fn from_suffix(prim: &'a Path, suffix: &'a str) -> Self {
+        Self::from_parts(prim, "", suffix)
+    }
+
+    /// Returns the full path, borrowing it when this query has no suffix.
+    pub fn to_path(&self) -> Cow<'a, Path> {
+        if self.separator.is_empty() && self.suffix.is_empty() {
+            Cow::Borrowed(self.prefix)
+        } else {
+            Cow::Owned(Path::from_string_unchecked(
+                [self.prefix.as_str(), self.separator, self.suffix].concat(),
+            ))
+        }
+    }
+
+    /// Hashes the contiguous bytes of the compound key.
+    fn from_parts(prefix: &'a Path, separator: &'static str, suffix: &'a str) -> Self {
+        let mut buffer = [0u8; 256];
+        let parts = [prefix.as_str(), separator, suffix];
+        let len = parts.iter().map(|part| part.len()).sum::<usize>();
+        let hash = if len <= buffer.len() {
+            let mut end = 0;
+            for part in parts {
+                buffer[end..end + part.len()].copy_from_slice(part.as_bytes());
+                end += part.len();
+            }
+            text_bytes_hash(&buffer[..len])
+        } else {
+            text_hash(&parts.concat())
+        };
+        Self {
+            prefix,
+            separator,
+            suffix,
+            hash,
+        }
+    }
+}
+
+impl Hash for PathQuery<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl hashbrown::Equivalent<Path> for PathQuery<'_> {
+    #[inline]
+    fn equivalent(&self, key: &Path) -> bool {
+        let text = key.as_str().as_bytes();
+        let prefix = self.prefix.as_str().as_bytes();
+        text.len() == prefix.len() + self.separator.len() + self.suffix.len()
+            && text.starts_with(prefix)
+            && text[prefix.len()..].starts_with(self.separator.as_bytes())
+            && text.ends_with(self.suffix.as_bytes())
+    }
+}
+
 /// The text of the empty path, shared by every [`Path::default`].
 static EMPTY: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::new())));
 
@@ -81,6 +182,15 @@ struct Text {
     /// The text's hash under a fixed-key hasher. Equal texts in separate
     /// allocations hash alike.
     hash: u64,
+    /// The structural origin retained by component-wise construction.
+    origin: Origin,
+}
+
+/// A derived path's final component and the path it extends.
+enum Origin {
+    Text,
+    Prim { parent: Path, depth: usize },
+    Property(Path),
 }
 
 impl Default for Path {
@@ -221,31 +331,78 @@ impl Path {
         self.path.is_empty()
     }
 
-    pub fn append_property(&self, property: impl Into<tf::Token>) -> Result<Path, PathParseError> {
-        let property = property.into();
-        let property = property.as_str();
-        let fail = |offset, reason| PathParseError {
-            input: format!("{}.{property}", self.path),
-            offset,
-            reason,
-        };
+    pub fn append_property(&self, property: impl AsRef<str>) -> Result<Path, PathParseError> {
+        let property = property.as_ref();
+        self.check_property(property)
+            .map_err(|(offset, reason)| PathParseError {
+                input: format!("{}.{property}", self.path),
+                offset,
+                reason,
+            })?;
+        let mut text = Text::new([self.as_str(), ".", property].concat());
+        if !self.path.contains('[') {
+            text.origin = Origin::Property(self.clone());
+        }
+        Ok(Path { path: Arc::new(text) })
+    }
+
+    /// Checks the owning path and the property-name grammar.
+    fn check_property(&self, property: &str) -> Result<(), (usize, &'static str)> {
         if self.is_property() {
-            return Err(fail(0, "cannot append a property to a property path"));
+            return Err((0, "cannot append a property to a property path"));
         }
         // The pseudo-root, the empty path, and the `.`/`..` relative anchors
         // cannot own properties; appending to them would build an unparseable
         // path like `/.foo`.
         if self.is_empty() || self.is_abs_root() || self.as_str() == "." || self.path.ends_with("..") {
-            return Err(fail(0, "path cannot own properties"));
+            return Err((0, "path cannot own properties"));
         }
         if !Path::is_valid_namespace_identifier(property) {
-            return Err(fail(
+            return Err((
                 self.path.len() + 1,
                 "property name is not a valid namespaced identifier",
             ));
         }
+        Ok(())
+    }
 
-        Ok(Path::from_text([self.as_str(), ".", property].concat()))
+    /// Appends one prim identifier, retaining its namespace parent
+    /// (C++ `SdfPath::AppendChild`).
+    pub fn append_child(&self, name: impl AsRef<str>) -> Result<Path, PathParseError> {
+        let name = name.as_ref();
+        if !Self::is_valid_identifier(name) {
+            return Err(PathParseError {
+                input: name.to_owned(),
+                offset: 0,
+                reason: "child name is not a valid identifier",
+            });
+        }
+        if !(self.is_abs_root() || self.is_prim() || self.is_variant_selection()) {
+            return Err(PathParseError {
+                input: self.to_string(),
+                offset: 0,
+                reason: "path cannot own prim children",
+            });
+        }
+        if self.as_str() == "." {
+            return Ok(Path::from_text(name.to_owned()));
+        }
+        let separator = if self.is_abs_root() || self.is_variant_selection() {
+            ""
+        } else {
+            "/"
+        };
+        let mut text = Text::new([self.as_str(), separator, name].concat());
+        let depth = if self.path.starts_with('.') {
+            0
+        } else {
+            self.prim_element_count() + 1
+        };
+        text.origin = Origin::Prim {
+            parent: self.clone(),
+            depth,
+        };
+        Ok(Path { path: Arc::new(text) })
     }
 
     /// Appends `path` (parsed if given as a string) under this path with a `/`
@@ -308,6 +465,11 @@ impl Path {
     }
 
     pub fn is_property(&self) -> bool {
+        match self.path.origin {
+            Origin::Prim { .. } => return false,
+            Origin::Property(_) => return true,
+            Origin::Text => {}
+        }
         let pos = match self.path.rfind('.') {
             Some(index) => index,
             // No dot, not a property path
@@ -346,6 +508,16 @@ impl Path {
     /// remainder the prim-chain grammar cannot consume, and so is not a prim
     /// path.
     pub fn is_prim(&self) -> bool {
+        match self.path.origin {
+            Origin::Prim { .. } => return true,
+            Origin::Property(_) => return false,
+            Origin::Text => {}
+        }
+        // A validated path without variants or property syntax is a prim
+        // chain, except for the empty path and absolute root.
+        if !self.path.contains(['{', '.', '[']) {
+            return !self.is_empty() && !self.is_abs_root();
+        }
         // The relative anchors: `.`, and a `..(/..)*` run with nothing after it.
         if self.as_str() == "." || (!self.path.is_empty() && self.path.split('/').all(|seg| seg == "..")) {
             return true;
@@ -416,12 +588,22 @@ impl Path {
         if len == self.path.len() {
             return self.clone();
         }
+        if let Origin::Property(prim) = &self.path.origin
+            && len == prim.path.len()
+        {
+            return prim.clone();
+        }
         Path::from_str_unchecked(&self.path[..len])
     }
 
     /// The byte length of this path's [`prim_path`](Self::prim_path) prefix,
     /// found without building it.
     fn prim_len(&self) -> usize {
+        match &self.path.origin {
+            Origin::Prim { .. } => return self.path.len(),
+            Origin::Property(prim) => return prim.path.len(),
+            Origin::Text => {}
+        }
         // Split at the last slash outside a `[..]` target, which may itself be
         // an absolute path: "/A/B/C.foo[/T].bar:baz" becomes "/A/B" and
         // "C.foo[/T].bar:baz".
@@ -609,6 +791,9 @@ impl Path {
     /// ""            -> None
     /// ```
     pub fn parent(&self) -> Option<Path> {
+        if let Origin::Prim { parent, .. } | Origin::Property(parent) = &self.path.origin {
+            return Some(parent.clone());
+        }
         if self.path.is_empty() || self.as_str() == "/" {
             return None;
         }
@@ -699,10 +884,9 @@ impl Path {
     /// "/"      -> None
     /// ```
     pub fn root_prim_name(&self) -> Option<&str> {
-        match self.components().next() {
-            Some(PathComponent::Prim(name)) => Some(name),
-            _ => None,
-        }
+        let text = self.as_str().strip_prefix('/').unwrap_or(self.as_str());
+        let end = text.find(['/', '{', '.']).unwrap_or(text.len());
+        (end != 0).then_some(&text[..end])
     }
 
     /// Returns the final component name, or `None` for the pseudo-root and empty paths.
@@ -714,6 +898,10 @@ impl Path {
     /// ""       -> None
     /// ```
     pub fn name(&self) -> Option<&str> {
+        if let Origin::Prim { parent, .. } = &self.path.origin {
+            let separator = usize::from(!parent.is_abs_root() && !parent.is_variant_selection());
+            return Some(&self.path[parent.path.len() + separator..]);
+        }
         if self.path.is_empty() || self.as_str() == "/" {
             return None;
         }
@@ -765,6 +953,11 @@ impl Path {
     /// "/"        -> 0
     /// ```
     pub fn prim_element_count(&self) -> usize {
+        match &self.path.origin {
+            Origin::Prim { depth, .. } => return *depth,
+            Origin::Property(parent) => return parent.prim_element_count(),
+            Origin::Text => {}
+        }
         self.components()
             .filter(|c| matches!(c, PathComponent::Prim(_)))
             .count()
@@ -1065,8 +1258,25 @@ impl Path {
     /// whenever they are neither whitespace nor control characters, a
     /// superset of the UTF-8 identifiers C++ OpenUSD allows.
     pub fn is_valid_identifier(name: &str) -> bool {
-        let mut chars = name.chars();
-        chars.next().is_some_and(is_identifier_start) && chars.all(is_identifier_cont)
+        let Some((&first, rest)) = name.as_bytes().split_first() else {
+            return false;
+        };
+        if !first.is_ascii() {
+            let mut chars = name.chars();
+            return chars.next().is_some_and(is_identifier_start) && chars.all(is_identifier_cont);
+        }
+        if !(first.is_ascii_alphabetic() || first == b'_') {
+            return false;
+        }
+        for (index, &byte) in rest.iter().enumerate() {
+            if !byte.is_ascii() {
+                return name[index + 1..].chars().all(is_identifier_cont);
+            }
+            if !(byte.is_ascii_alphanumeric() || byte == b'_') {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether every `:`- or `.`-separated segment of `name` is a valid
@@ -1468,11 +1678,10 @@ impl TryFrom<&String> for Path {
 
 impl Text {
     fn new(text: String) -> Self {
-        let mut hasher = FxHasher::default();
-        text.hash(&mut hasher);
         Self {
-            hash: hasher.finish(),
+            hash: text_hash(&text),
             text,
+            origin: Origin::Text,
         }
     }
 }
@@ -1482,6 +1691,20 @@ impl Deref for Text {
 
     fn deref(&self) -> &str {
         &self.text
+    }
+}
+
+impl Drop for Text {
+    fn drop(&mut self) {
+        // Release exclusively owned ancestor chains iteratively. A namespace
+        // can be much deeper than the thread's call stack.
+        let mut origin = mem::replace(&mut self.origin, Origin::Text);
+        while let Origin::Prim { parent, .. } | Origin::Property(parent) = origin {
+            match Arc::into_inner(parent.path) {
+                Some(mut text) => origin = mem::replace(&mut text.origin, Origin::Text),
+                None => break,
+            }
+        }
     }
 }
 
@@ -1523,9 +1746,22 @@ impl fmt::Display for Text {
     }
 }
 
+/// The fixed-key text hash carried by owned paths and borrowed lookup keys.
+fn text_hash(text: &str) -> u64 {
+    text_bytes_hash(text.as_bytes())
+}
+
+/// Hashes the complete text of a path lookup key.
+fn text_bytes_hash(text: &[u8]) -> u64 {
+    let mut hasher = FxHasher::default();
+    hasher.write(text);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::thread;
 
     use crate::Result;
 
@@ -1546,6 +1782,83 @@ mod tests {
         );
         assert_eq!(map.get(&Path::new("/World/Geo.points").unwrap()), Some(&2));
         assert_eq!(map.get(&Path::new("/World").unwrap()), None);
+    }
+
+    /// Borrowed text and owned paths hash identically under each map hasher.
+    #[test]
+    fn borrowed_key_hashes() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        let random = RandomState::new();
+        for text in ["", "/", "/A/B.attr", "/A{v=s}B", "/A.rel[/B]", "../Relative", "/日本語"] {
+            let owned = if text.is_empty() {
+                Path::default()
+            } else {
+                Path::new(text).unwrap()
+            };
+            let borrowed = PathRef(text);
+            assert_eq!(random.hash_one(&owned), random.hash_one(&borrowed));
+            assert_eq!(FxBuildHasher.hash_one(&owned), FxBuildHasher.hash_one(&borrowed));
+        }
+    }
+
+    #[test]
+    fn property_key_boundaries() {
+        use hashbrown::Equivalent;
+        use std::hash::BuildHasher;
+
+        for prim in [
+            "/A".to_owned(),
+            "/日本語".to_owned(),
+            format!("/{}", "Long".repeat(100)),
+        ] {
+            let prim = Path::new(&prim).unwrap();
+            for name in ["attr", "primvars:色", "namespace.attr"] {
+                let key = PathQuery::property(&prim, name).unwrap();
+                let owned = prim.append_property(name).unwrap();
+                assert!(key.equivalent(&owned));
+                assert_eq!(FxBuildHasher.hash_one(key), FxBuildHasher.hash_one(&owned));
+                assert!(!key.equivalent(&prim));
+                assert!(!key.equivalent(&prim.append_property(format!("{name}Other")).unwrap()));
+            }
+        }
+        assert!(PathQuery::property(&Path::abs_root(), "attr").is_none());
+        assert!(PathQuery::property(&Path::new("/A").unwrap(), "attr[/B]").is_none());
+    }
+
+    #[test]
+    fn query_suffix_boundaries() {
+        use hashbrown::Equivalent;
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        let random = RandomState::new();
+        for text in [
+            "",
+            "/",
+            "/日本語.rel[/Other.attr].target",
+            "/A{v=s}B.x",
+            "../A.x",
+            "/A.rel[/B.rel[/C]]",
+        ] {
+            let path = if text.is_empty() {
+                Path::default()
+            } else {
+                Path::new(text).unwrap()
+            };
+            let query = PathQuery::new(&path);
+            assert!(matches!(query.to_path(), Cow::Borrowed(_)));
+            assert!(query.equivalent(&path));
+            assert_eq!(random.hash_one(query), random.hash_one(&path));
+            if path.is_property() {
+                let (prim, suffix) = path.split_prim();
+                let compound = PathQuery::from_suffix(&prim, suffix);
+                assert!(compound.equivalent(&path));
+                assert_eq!(compound.to_path().as_ref(), &path);
+                assert_eq!(random.hash_one(compound), random.hash_one(&path));
+            }
+        }
     }
 
     #[test]
@@ -1576,6 +1889,80 @@ mod tests {
         let mut paths = HashSet::new();
         paths.insert(path);
         assert!(paths.contains(&independent));
+    }
+
+    #[test]
+    fn property_shares_prim() {
+        for source in ["/Root/Mesh", "/Root{lod=1.5}", "../Mesh"] {
+            let prim = Path::new(source).unwrap();
+            let property = prim.append_property("primvars:st").unwrap();
+            assert!(Arc::ptr_eq(&prim.path, &property.prim_path().path));
+            let (owner, suffix) = property.split_prim();
+            assert!(Arc::ptr_eq(&prim.path, &owner.path));
+            assert_eq!(suffix, ".primvars:st");
+            assert_eq!(property, Path::new(property.as_str()).unwrap());
+        }
+    }
+
+    #[test]
+    fn appended_prim_boundaries() {
+        for source in [
+            "/Root{lod=1.5}",
+            "../Mesh",
+            "/A.rel[/Target]",
+            "A.rel[/Target]",
+            ".rel[/Target]",
+            "/A.rel[/T.rel2[/Q]]",
+        ] {
+            let property = Path::new(source).unwrap().append_property("weight").unwrap();
+            let parsed = Path::new(property.as_str()).unwrap();
+            assert_eq!(property.prim_path(), parsed.prim_path(), "{source}");
+            assert_eq!(property.split_prim(), parsed.split_prim(), "{source}");
+            assert_eq!(property.parent(), parsed.parent(), "{source}");
+        }
+    }
+
+    #[test]
+    fn child_structure() {
+        for source in ["/", "/Root", "/Root{lod=1.5}", "Root", "../Root", "..", ".", "/日本語"] {
+            let parent = Path::new(source).unwrap();
+            let child = parent.append_child("Mesh").unwrap();
+            let parsed = Path::new(child.as_str()).unwrap();
+            assert_eq!(child, parent.append_path("Mesh").unwrap());
+            assert_eq!(child.parent(), parsed.parent(), "{source}");
+            assert_eq!(child.prim_path(), parsed.prim_path(), "{source}");
+            assert_eq!(child.prim_element_count(), parsed.prim_element_count(), "{source}");
+            assert_eq!(child.is_property(), parsed.is_property(), "{source}");
+            assert_eq!(child.is_prim(), parsed.is_prim(), "{source}");
+            assert_eq!(child.name(), parsed.name(), "{source}");
+            if source != "." {
+                assert!(Arc::ptr_eq(&parent.path, &child.parent().unwrap().path));
+            }
+        }
+        let root = Path::abs_root();
+        for invalid in ["", ".", "..", "A/B", "A.b", "A{v=x}", "1A", "A:B"] {
+            assert!(root.append_child(invalid).is_err(), "{invalid}");
+        }
+        for invalid in ["", "/A.attr", "/A.rel[/B]"] {
+            assert!(Path::from_str_unchecked(invalid).append_child("Mesh").is_err());
+        }
+    }
+
+    #[test]
+    fn deep_child_drop() {
+        thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let mut path = Path::abs_root();
+                for _ in 0..4096 {
+                    path = path.append_child("A").unwrap();
+                }
+                assert_eq!(path.prim_element_count(), 4096);
+                drop(path);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[cfg(feature = "serde")]
@@ -2419,6 +2806,29 @@ mod tests {
         assert_eq!(p.parent().unwrap().as_str(), "/A");
         let stripped = Path::new("/A{v=x}\u{2206}B").unwrap().strip_variant_selections();
         assert_eq!(stripped.as_str(), "/A/\u{2206}B");
+    }
+
+    #[test]
+    fn mixed_identifier_boundaries() {
+        for name in ["A", "_9", "é", "Aé9", "éA9", "A日本語", "日本語_9", "A\u{a0}B"] {
+            let expected = name != "A\u{a0}B";
+            assert_eq!(Path::is_valid_identifier(name), expected, "{name:?}");
+        }
+        for name in ["9é", "Aé!", "Aé B", "Aé\n", "Aé\u{85}", "A\u{2003}B", "Aé:B"] {
+            assert!(!Path::is_valid_identifier(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn root_names_across_path_forms() {
+        for text in ["/A", "/A/B", "/A{v=s}B", "/A.attr", "/A.rel[/B]", "A/B", "A.attr"] {
+            assert_eq!(Path::new(text).unwrap().root_prim_name(), Some("A"), "{text}");
+        }
+        assert_eq!(Path::new("/日本語/子").unwrap().root_prim_name(), Some("日本語"));
+        for text in ["/", ".", "..", "../A", ".attr"] {
+            assert_eq!(Path::new(text).unwrap().root_prim_name(), None, "{text}");
+        }
+        assert_eq!(Path::default().root_prim_name(), None);
     }
 
     /// Every derivation of a parsed path must itself re-validate — the

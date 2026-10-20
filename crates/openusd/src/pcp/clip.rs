@@ -1811,8 +1811,8 @@ pub(crate) fn effective_set_names<'a, T>(sets: &'a HashMap<String, T>, order: Op
 /// [`HashPattern::parse`](HashPattern::parse) unevaluated.
 pub(crate) fn as_asset_field(value: Value) -> Value {
     match value {
-        Value::String(path) => Value::AssetPath(AssetPath::new(path)),
-        Value::Token(path) => Value::AssetPath(AssetPath::new(path.as_str())),
+        Value::String(path) => Value::AssetPath(Box::new(AssetPath::new(path))),
+        Value::Token(path) => Value::AssetPath(Box::new(AssetPath::new(path.as_str()))),
         other => other,
     }
 }
@@ -2090,7 +2090,7 @@ mod tests {
         let mut set = HashMap::new();
         set.insert(
             keys::TEMPLATE_ASSET_PATH.to_string(),
-            Value::AssetPath("clip.##.usd".into()),
+            Value::AssetPath(Box::new("clip.##.usd".into())),
         );
         set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(101.0));
         set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(103.0));
@@ -2115,7 +2115,7 @@ mod tests {
         let mut set = HashMap::new();
         set.insert(
             keys::TEMPLATE_ASSET_PATH.to_string(),
-            Value::AssetPath("c.#.usd".into()),
+            Value::AssetPath(Box::new("c.#.usd".into())),
         );
         set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(0.0));
         set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));
@@ -2139,7 +2139,7 @@ mod tests {
             let mut set = HashMap::new();
             set.insert(
                 keys::TEMPLATE_ASSET_PATH.to_string(),
-                Value::AssetPath("c.#.usd".into()),
+                Value::AssetPath(Box::new("c.#.usd".into())),
             );
             set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(0.0));
             set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));
@@ -2166,7 +2166,7 @@ mod tests {
                 keys::ASSET_PATHS.to_string(),
                 Value::AssetPathVec(vec!["a.usd".into(), "b.usd".into()]),
             );
-            set.insert(keys::ACTIVE.to_string(), Value::Vec2dVec(active));
+            set.insert(keys::ACTIVE.to_string(), Value::Vec2dVec(active.into()));
             ClipSet::parse_set("default", &set)
         };
 
@@ -2192,7 +2192,7 @@ mod tests {
         );
         set.insert(
             keys::TEMPLATE_ASSET_PATH.to_string(),
-            Value::AssetPath("c.#.usd".into()),
+            Value::AssetPath(Box::new("c.#.usd".into())),
         );
         set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(0.0));
         set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));

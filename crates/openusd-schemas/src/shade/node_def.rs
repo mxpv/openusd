@@ -104,7 +104,7 @@ impl Shader {
             self,
             &SOURCE_ASSET,
             source_type.as_ref(),
-            sdf::Value::AssetPath(asset.into()),
+            sdf::Value::AssetPath(Box::new(asset.into())),
         )
     }
 
@@ -367,11 +367,11 @@ pub(super) fn merge_metadata(
     entries: impl IntoIterator<Item = (String, String)>,
 ) -> Option<sdf::Value> {
     let mut dictionary = match current {
-        Some(sdf::Value::Dictionary(dictionary)) => dictionary,
+        Some(sdf::Value::Dictionary(dictionary)) => *dictionary,
         _ => HashMap::new(),
     };
     dictionary.extend(entries.into_iter().map(|(key, value)| (key, sdf::Value::String(value))));
-    (!dictionary.is_empty()).then_some(sdf::Value::Dictionary(dictionary))
+    (!dictionary.is_empty()).then_some(sdf::Value::Dictionary(Box::new(dictionary)))
 }
 
 /// Merges a whole [`SdrMetadata`] map into a metadata dictionary authored on the
@@ -479,12 +479,12 @@ mod tests {
     }
 
     fn dictionary(entries: &[(&str, &str)]) -> sdf::Value {
-        sdf::Value::Dictionary(
+        sdf::Value::Dictionary(Box::new(
             entries
                 .iter()
                 .map(|&(key, value)| (key.to_string(), sdf::Value::String(value.to_string())))
                 .collect(),
-        )
+        ))
     }
 
     #[test]
@@ -518,10 +518,10 @@ mod tests {
             .set(ImplementationSource::SourceAsset)?;
         shader
             .create_source_asset_attr()?
-            .set(sdf::Value::AssetPath("./universal.osl".into()))?;
+            .set(sdf::Value::AssetPath(Box::new("./universal.osl".into())))?;
         shader
             .create_attribute("info:osl:sourceAsset", "asset")?
-            .set(sdf::Value::AssetPath("./specific.osl".into()))?;
+            .set(sdf::Value::AssetPath(Box::new("./specific.osl".into())))?;
         shader.create_attribute("info:mdl:sourceAsset", "asset")?;
         shader
             .create_attribute("info:osl:sourceAsset:subIdentifier", "token")?
@@ -576,7 +576,7 @@ mod tests {
         shader.create_attribute("info:ri:sourceCode", "string")?;
         shader
             .create_attribute("info:mdl:sourceAsset", "asset")?
-            .set(sdf::Value::AssetPath("./inactive.mdl".into()))?;
+            .set(sdf::Value::AssetPath(Box::new("./inactive.mdl".into())))?;
 
         assert_eq!(shader.source_code("osl")?.as_deref(), Some("specific"));
         assert_eq!(shader.source_code("ri")?, None);

@@ -1295,7 +1295,7 @@ mod tests {
             .field(&Path::new("/World.size")?, "default")
             .expect("decoded on demand")
             .into_owned();
-        assert_eq!(size, Value::FloatVec(vec![1.0; 64]));
+        assert_eq!(size, Value::FloatVec((vec![1.0; 64]).into()));
         assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
         assert_eq!(fs::read_dir(dir.path())?.count(), 1, "no temporary file remains");
         Ok(())
@@ -1441,7 +1441,7 @@ mod tests {
             .field(&Path::new("/World.size")?, "default")
             .expect("still decodes from its view")
             .into_owned();
-        assert_eq!(size, Value::FloatVec(vec![1.0; 64]));
+        assert_eq!(size, Value::FloatVec((vec![1.0; 64]).into()));
         assert_eq!(world_kind(&Layer::open(path.to_string_lossy())?), component);
         Ok(())
     }

@@ -375,15 +375,13 @@ impl IndexCache {
         &self.load_rules
     }
 
-    /// `true` if `path`'s own payload is included — resolved through
-    /// [`scoped_load_rules`](Self::scoped_load_rules), so a path inside a
-    /// `/__Prototype_N` namespace is decided against that prototype's stored
-    /// relative rules (translated onto the synthetic path), not the global
-    /// table, which never carries prototype-rooted entries. Used both by
-    /// composition (`IndexCache::build_index`, deciding whether to expand
-    /// the site currently being composed) and by external queries
-    /// (`Prim::is_loaded`, which may address a prototype's own namespace
-    /// directly, e.g. through `Prim::prototype`).
+    /// Whether `path`'s own payload is included. Namespace-dependent rules
+    /// inside a prototype use its stored instance-relative table through
+    /// [`scoped_load_rules`](Self::scoped_load_rules). An empty rule table
+    /// includes every payload.
+    ///
+    /// Used by composition to decide whether to expand a site and by queries
+    /// such as `Prim::is_loaded`, which can address a prototype directly.
     pub(crate) fn is_loaded(&self, path: &Path) -> bool {
         let (rules, relative) = self.scoped_load_rules(path);
         rules.is_loaded(&relative)
@@ -475,9 +473,13 @@ impl IndexCache {
         victims
     }
 
-    /// The load rules governing `path`, in `path`'s scope — see
-    /// [`IndexCache::scoped`](Self::scoped).
+    /// The governing load rules and query path in a common namespace.
+    /// With no authored rules, all payloads are included and the path stays
+    /// in its original namespace.
     pub(super) fn scoped_load_rules<'a>(&'a self, path: &'a Path) -> (&'a LoadRules, Cow<'a, Path>) {
+        if self.load_rules.is_empty() {
+            return (&self.load_rules, Cow::Borrowed(path));
+        }
         self.scoped(path, &self.load_rules, |p| &p.relative_load_rules)
     }
 }

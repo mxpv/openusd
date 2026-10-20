@@ -791,7 +791,7 @@ impl<'a> PrimAdapter<'a> {
         if self.flags.intersects(Deform::MODIFIES_POINTS) {
             let points = points
                 .into_iter()
-                .map(|(time, points)| (time, sdf::Value::Vec3fVec(points)));
+                .map(|(time, points)| (time, sdf::Value::Vec3fVec(points.into())));
             outputs.push((
                 tf::Token::new(geom::tokens::POINTS),
                 sdf::ValueTypeName::POINT3F_ARRAY,
@@ -802,7 +802,7 @@ impl<'a> PrimAdapter<'a> {
         if self.flags.intersects(Deform::MODIFIES_NORMALS) {
             let normals = normals
                 .into_iter()
-                .map(|(time, normals)| (time, sdf::Value::Vec3fVec(normals)));
+                .map(|(time, normals)| (time, sdf::Value::Vec3fVec(normals.into())));
             outputs.push((
                 tf::Token::new(geom::tokens::NORMALS),
                 sdf::ValueTypeName::NORMAL3F_ARRAY,
@@ -813,7 +813,7 @@ impl<'a> PrimAdapter<'a> {
         if self.extent {
             let extents = extents
                 .into_iter()
-                .map(|(time, extent)| (time, sdf::Value::Vec3fVec(extent.to_vec())));
+                .map(|(time, extent)| (time, sdf::Value::Vec3fVec((extent.to_vec()).into())));
             outputs.push((
                 tf::Token::new(geom::tokens::EXTENT),
                 sdf::ValueTypeName::FLOAT3_ARRAY,
@@ -829,7 +829,7 @@ impl<'a> PrimAdapter<'a> {
             };
             let xforms = xforms
                 .into_iter()
-                .map(|(time, xform)| (time, sdf::Value::Matrix4d(xform)));
+                .map(|(time, xform)| (time, sdf::Value::Matrix4d(Box::new(xform))));
             outputs.push((op, sdf::ValueTypeName::MATRIX4D, varying, xforms.collect()));
             outputs.push((
                 tf::Token::new(geom::tokens::XFORM_OP_ORDER),
@@ -931,7 +931,7 @@ fn bake_extents(stage: &usd::Stage, layers: &[EditTarget], followups: &[Followup
         let mut values = Vec::new();
         for &time in &followup.extent_times {
             if let Some(extent) = extents.shape_extent(&followup.prim, time, None)? {
-                values.push((time, sdf::Value::Vec3fVec(extent.to_vec())));
+                values.push((time, sdf::Value::Vec3fVec((extent.to_vec()).into())));
             }
         }
         if !values.is_empty() {

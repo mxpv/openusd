@@ -27,6 +27,7 @@ bitflags.workspace = true
 bytemuck.workspace = true
 derive_more.workspace = true
 half.workspace = true
+hashbrown = { version = "0.17.1", default-features = false }
 logos = "0.16.0"
 lz4_flex = "0.14.0"
 memmap2 = { version = "0.9", optional = true }

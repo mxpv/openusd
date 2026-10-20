@@ -1289,7 +1289,7 @@ class "MissingSuffix" (
                 .collect()
         });
         assert!(
-            fallbacks.contains(&Some(sdf::Value::DoubleVec(vec![0.0, 1.0]))),
+            fallbacks.contains(&Some(sdf::Value::DoubleVec((vec![0.0, 1.0]).into()))),
             "{fallbacks:?}"
         );
         assert!(output.rust.contains(".fallback(||"), "{}", output.rust);

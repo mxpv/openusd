@@ -12,6 +12,7 @@ use strum::FromRepr;
 
 use crate::tf::Token;
 
+mod array;
 mod asset_path;
 mod change;
 mod coerce;
@@ -35,6 +36,7 @@ mod value_type;
 
 #[doc(inline)]
 pub use crate::impl_token_value;
+pub use array::Array;
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
     AssetExpressionFailure, AssetOutcome, evaluate_asset_paths, holds_asset_expression, resolve_asset_paths,
@@ -58,7 +60,8 @@ pub use layer_registry::LayerRegistry;
 pub(crate) use layer_registry::PreparedLayer;
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{
-    IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,
+    IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathQuery, PathSet, path,
+    try_into_path,
 };
 pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
@@ -483,8 +486,8 @@ pub type Relocate = (Path, Path);
 /// metadata. Mirrors C++ `SdfRelocates`, a `std::vector<SdfRelocate>`.
 pub type RelocateList = Vec<Relocate>;
 
-/// A boxed layer data source, used throughout the layer stack.
-pub type LayerData = Box<dyn AbstractData>;
+/// A layer backend supporting concurrent immutable reads.
+pub type LayerData = Box<dyn AbstractData + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
@@ -593,10 +596,10 @@ mod tests {
 
         // A dictionary carries timecodes at any depth.
         let inner = HashMap::from([("deep".to_string(), Value::TimeCode(TimeCode(5.0)))]);
-        let mut dict = Value::Dictionary(HashMap::from([
-            ("nested".to_string(), Value::Dictionary(inner)),
+        let mut dict = Value::Dictionary(Box::new(HashMap::from([
+            ("nested".to_string(), Value::Dictionary(Box::new(inner))),
             ("kept".to_string(), Value::Double(5.0)),
-        ]));
+        ])));
         assert!(dict.holds_time_codes());
         offset.apply_to_value(&mut dict);
         let entries = dict.try_as_dictionary_ref().expect("dictionary");

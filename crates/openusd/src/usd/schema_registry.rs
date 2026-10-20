@@ -1352,7 +1352,7 @@ impl SchemaFamily<'_> {
             data.set_field(
                 &sdf::Path::abs_root(),
                 sdf::FieldKey::FallbackPrimTypes.as_str(),
-                sdf::Value::Dictionary(fallbacks),
+                sdf::Value::Dictionary(Box::new(fallbacks)),
             );
         }
 
@@ -2144,6 +2144,7 @@ fn manifest_instance_restrictions(manifest: &sdf::Data, prim: &sdf::Path) -> Has
         .and_then(sdf::Value::try_as_dictionary_ref)
         .and_then(|custom| custom.get("apiSchemaInstances"))
         .and_then(sdf::Value::try_as_dictionary_ref)
+        .map(Box::as_ref)
         .into_iter()
         .flatten()
         .filter_map(|(instance, entry)| {

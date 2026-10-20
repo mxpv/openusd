@@ -44,6 +44,10 @@ pub fn read_file(path: impl AsRef<Path>) -> crate::Result<sdf::Data> {
 pub struct UsdaFileFormat;
 
 impl sdf::FileFormat for UsdaFileFormat {
+    fn reads_only_bytes(&self) -> bool {
+        true
+    }
+
     fn format_id(&self) -> tf::Token {
         tf::Token::new("usda")
     }

@@ -85,13 +85,13 @@ fn compressed_int_array_roundtrips() {
     let short_prop = prim.append_property("short").unwrap();
     let short_spec = data.create_spec(short_prop.clone(), SpecType::Attribute);
     short_spec.add(FieldKey::TypeName, Value::Token("int[]".into()));
-    short_spec.add(FieldKey::Default, Value::IntVec(vec![1, 2, 3]));
+    short_spec.add(FieldKey::Default, Value::IntVec((vec![1, 2, 3]).into()));
 
     let long: Vec<i32> = (0..1000).collect();
     let long_prop = prim.append_property("long").unwrap();
     let long_spec = data.create_spec(long_prop.clone(), SpecType::Attribute);
     long_spec.add(FieldKey::TypeName, Value::Token("int[]".into()));
-    long_spec.add(FieldKey::Default, Value::IntVec(long.clone()));
+    long_spec.add(FieldKey::Default, Value::IntVec((long.clone()).into()));
 
     let mut buf = Vec::new();
     CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
@@ -116,8 +116,8 @@ fn compressed_int_array_roundtrips() {
         .field(&long_prop, "default")
         .unwrap()
         .into_owned();
-    assert_eq!(round_short, Value::IntVec(vec![1, 2, 3]));
-    assert_eq!(round_long, Value::IntVec(long));
+    assert_eq!(round_short, Value::IntVec((vec![1, 2, 3]).into()));
+    assert_eq!(round_long, Value::IntVec(long.into()));
 }
 
 /// An unregistered value decodes out of a crate file upstream wrote.
@@ -176,8 +176,8 @@ fn unregistered_values_roundtrip() {
     let dictionary = sdf::Dictionary::from([("myKey".to_owned(), Value::Int(8))]);
     let fields = [
         ("madeUpField", Value::UnregisteredValue("1.50".to_owned())),
-        ("madeUpList", Value::UnregisteredValueListOp(list_op)),
-        ("madeUpDict", Value::UnregisteredDictionary(dictionary)),
+        ("madeUpList", Value::UnregisteredValueListOp(Box::new(list_op))),
+        ("madeUpDict", Value::UnregisteredDictionary(Box::new(dictionary))),
     ];
     for (name, value) in &fields {
         prim_spec.add(*name, value.clone());
@@ -372,26 +372,29 @@ fn quat_write_read_preserves_wxyz_convention() {
         .into_owned();
     assert_eq!(
         arr,
-        Value::QuatfVec(vec![
-            openusd::gf::Quatf {
-                w: 4.2,
-                x: 3.5,
-                y: 2.6,
-                z: 3.6
-            },
-            openusd::gf::Quatf {
-                w: 2.4,
-                x: 5.3,
-                y: 6.3,
-                z: 5.2
-            },
-            openusd::gf::Quatf {
-                w: 7.1,
-                x: 4.3,
-                y: 2.4,
-                z: 6.4
-            },
-        ])
+        Value::QuatfVec(
+            (vec![
+                openusd::gf::Quatf {
+                    w: 4.2,
+                    x: 3.5,
+                    y: 2.6,
+                    z: 3.6
+                },
+                openusd::gf::Quatf {
+                    w: 2.4,
+                    x: 5.3,
+                    y: 6.3,
+                    z: 5.2
+                },
+                openusd::gf::Quatf {
+                    w: 7.1,
+                    x: 4.3,
+                    y: 2.4,
+                    z: 6.4
+                },
+            ])
+            .into()
+        )
     );
 
     // fields.usda: quatd quatdSingle = (2.4, 5.3, 6.3, 5.2)
@@ -416,20 +419,23 @@ fn quat_write_read_preserves_wxyz_convention() {
         .into_owned();
     assert_eq!(
         arr,
-        Value::QuatdVec(vec![
-            openusd::gf::Quatd {
-                w: 4.2,
-                x: 3.5,
-                y: 2.6,
-                z: 3.6
-            },
-            openusd::gf::Quatd {
-                w: 7.1,
-                x: 4.3,
-                y: 2.4,
-                z: 6.4
-            },
-        ])
+        Value::QuatdVec(
+            (vec![
+                openusd::gf::Quatd {
+                    w: 4.2,
+                    x: 3.5,
+                    y: 2.6,
+                    z: 3.6
+                },
+                openusd::gf::Quatd {
+                    w: 7.1,
+                    x: 4.3,
+                    y: 2.4,
+                    z: 6.4
+                },
+            ])
+            .into()
+        )
     );
 }
 

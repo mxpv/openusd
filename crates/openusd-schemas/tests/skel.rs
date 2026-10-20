@@ -62,7 +62,10 @@ fn reads_skel_root_extent() -> Result<()> {
     let stage = open()?;
     let root = Root::get(&stage, "/World/Character")?.expect("Root");
     assert_eq!(
-        root.extent_attr().get::<Value>()?.and_then(|v| v.try_as_vec_3f_vec()),
+        root.extent_attr()
+            .get::<Value>()?
+            .and_then(|v| v.try_as_vec_3f_vec())
+            .map(Vec::from),
         Some(vec![
             openusd::gf::Vec3f {
                 x: -1.0,
@@ -487,13 +490,15 @@ fn memory() -> Result<Stage> {
 fn skel_root_is_boundable() -> Result<()> {
     let stage = memory()?;
     let root = Root::define(&stage, "/Char")?;
-    root.create_extent_attr()?.set(Value::Vec3fVec(vec![
-        [-1.0_f32, 0.0, -1.0].into(),
-        [1.0, 2.0, 1.0].into(),
-    ]))?;
+    root.create_extent_attr()?.set(Value::Vec3fVec(
+        (vec![[-1.0_f32, 0.0, -1.0].into(), [1.0, 2.0, 1.0].into()]).into(),
+    ))?;
     let root = Root::get(&stage, "/Char")?.expect("Root");
     assert_eq!(
-        root.extent_attr().get::<Value>()?.and_then(|v| v.try_as_vec_3f_vec()),
+        root.extent_attr()
+            .get::<Value>()?
+            .and_then(|v| v.try_as_vec_3f_vec())
+            .map(Vec::from),
         Some(vec![gf::vec3f(-1.0, 0.0, -1.0), gf::vec3f(1.0, 2.0, 1.0)])
     );
     Ok(())
@@ -1001,9 +1006,10 @@ fn skeleton_query_poses() -> Result<(), SchemaError> {
     let rest: Vec<Mat4d> = joints.iter().map(|_| random.transform().2).collect();
     let topology = Topology::from_joint_paths(&joints.map(String::from));
     let bind = skinning::joint_local_to_skel_space(&rest, &topology, None).expect("ordered joints");
-    skel.create_bind_transforms_attr()?.set(Value::Matrix4dVec(bind))?;
+    skel.create_bind_transforms_attr()?
+        .set(Value::Matrix4dVec(bind.into()))?;
     skel.create_rest_transforms_attr()?
-        .set(Value::Matrix4dVec(rest.clone()))?;
+        .set(Value::Matrix4dVec((rest.clone()).into()))?;
 
     let root_op = root.make_matrix_xform()?;
     let mut root_xforms = Vec::new();
@@ -1020,7 +1026,9 @@ fn skeleton_query_poses() -> Result<(), SchemaError> {
         anim.create_rotations_attr()?,
         anim.create_scales_attr()?,
     );
-    scales.set(Value::Vec3hVec(vec![gf::Vec3h::from([gf::f16::from_f32(1.0); 3]); 4]))?;
+    scales.set(Value::Vec3hVec(
+        (vec![gf::Vec3h::from([gf::f16::from_f32(1.0); 3]); 4]).into(),
+    ))?;
     let mut anim_xforms = Vec::new();
     for frame in 0..frames {
         let (t, r): (Vec<Vec3f>, Vec<Quatf>) = (0..4)
@@ -1030,8 +1038,8 @@ fn skeleton_query_poses() -> Result<(), SchemaError> {
             })
             .unzip();
         let time = TimeCode::new(f64::from(frame));
-        translations.clone().set_at(Value::Vec3fVec(t.clone()), time)?;
-        rotations.clone().set_at(Value::QuatfVec(r.clone()), time)?;
+        translations.clone().set_at(Value::Vec3fVec((t.clone()).into()), time)?;
+        rotations.clone().set_at(Value::QuatfVec((r.clone()).into()), time)?;
         anim_xforms.push(skinning::make_transforms(&t, &r, &[gf::vec3f(1.0, 1.0, 1.0); 4]).expect("one of each"));
     }
 

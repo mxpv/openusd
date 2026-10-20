@@ -89,8 +89,8 @@ macro_rules! impl_spec_debug {
 pub struct SpecData {
     /// The type of this spec (prim, attribute, relationship, etc.).
     pub ty: sdf::SpecType,
-    /// The fields stored on this spec, in authored order.
-    pub fields: Vec<(String, sdf::Value)>,
+    /// The fields in authored order. Built-in names borrow static storage.
+    pub fields: Vec<(Cow<'static, str>, sdf::Value)>,
 }
 
 /// Errors raised by typed spec-level authoring helpers.
@@ -121,7 +121,11 @@ impl SpecData {
         if let Some(slot) = self.fields.iter_mut().find(|(k, _)| k == key) {
             slot.1 = value;
         } else {
-            self.fields.push((key.to_owned(), value));
+            let key = sdf::FieldKey::from_name(key)
+                .map(|field| field.as_str())
+                .or_else(|| sdf::ChildrenKey::from_name(key).map(|field| field.as_str()))
+                .map_or_else(|| Cow::Owned(key.to_owned()), Cow::Borrowed);
+            self.fields.push((key, value));
         }
     }
 
@@ -144,16 +148,16 @@ impl SpecData {
             UInt64ListOp, UIntListOp, UnregisteredValueListOp,
         };
         match (slot, value) {
-            (TokenListOp(existing), TokenListOp(incoming)) => existing.merge_op(incoming),
-            (StringListOp(existing), StringListOp(incoming)) => existing.merge_op(incoming),
-            (PathListOp(existing), PathListOp(incoming)) => existing.merge_op(incoming),
-            (ReferenceListOp(existing), ReferenceListOp(incoming)) => existing.merge_op(incoming),
-            (PayloadListOp(existing), PayloadListOp(incoming)) => existing.merge_op(incoming),
-            (IntListOp(existing), IntListOp(incoming)) => existing.merge_op(incoming),
-            (Int64ListOp(existing), Int64ListOp(incoming)) => existing.merge_op(incoming),
-            (UIntListOp(existing), UIntListOp(incoming)) => existing.merge_op(incoming),
-            (UInt64ListOp(existing), UInt64ListOp(incoming)) => existing.merge_op(incoming),
-            (UnregisteredValueListOp(existing), UnregisteredValueListOp(incoming)) => existing.merge_op(incoming),
+            (TokenListOp(existing), TokenListOp(incoming)) => existing.merge_op(*incoming),
+            (StringListOp(existing), StringListOp(incoming)) => existing.merge_op(*incoming),
+            (PathListOp(existing), PathListOp(incoming)) => existing.merge_op(*incoming),
+            (ReferenceListOp(existing), ReferenceListOp(incoming)) => existing.merge_op(*incoming),
+            (PayloadListOp(existing), PayloadListOp(incoming)) => existing.merge_op(*incoming),
+            (IntListOp(existing), IntListOp(incoming)) => existing.merge_op(*incoming),
+            (Int64ListOp(existing), Int64ListOp(incoming)) => existing.merge_op(*incoming),
+            (UIntListOp(existing), UIntListOp(incoming)) => existing.merge_op(*incoming),
+            (UInt64ListOp(existing), UInt64ListOp(incoming)) => existing.merge_op(*incoming),
+            (UnregisteredValueListOp(existing), UnregisteredValueListOp(incoming)) => existing.merge_op(*incoming),
             (slot, value) => *slot = value,
         }
     }
@@ -499,7 +503,7 @@ where
             None => {
                 self.set(
                     sdf::FieldKey::ApiSchemas.as_str(),
-                    sdf::Value::TokenListOp(sdf::TokenListOp::prepended([name])),
+                    sdf::Value::TokenListOp(Box::new(sdf::TokenListOp::prepended([name]))),
                 );
                 Ok(true)
             }
@@ -656,7 +660,7 @@ where
     pub fn set_expression_variables(&mut self, vars: HashMap<String, sdf::Value>) {
         self.set(
             sdf::FieldKey::ExpressionVariables.as_str(),
-            sdf::Value::Dictionary(vars),
+            sdf::Value::Dictionary(Box::new(vars)),
         );
     }
 
@@ -1132,7 +1136,7 @@ where
         let paths: Vec<sdf::Path> = paths.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
         self.set(
             sdf::FieldKey::ConnectionPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
+            sdf::Value::PathListOp(Box::new(sdf::PathListOp::explicit(paths))),
         );
         Ok(())
     }
@@ -1186,7 +1190,7 @@ where
                 } else {
                     sdf::PathListOp::appended([path])
                 };
-                self.set(key, sdf::Value::PathListOp(op));
+                self.set(key, sdf::Value::PathListOp(Box::new(op)));
                 true
             }
             None => {
@@ -1197,7 +1201,7 @@ where
                 } else {
                     sdf::PathListOp::appended([path])
                 };
-                self.set(key, sdf::Value::PathListOp(op));
+                self.set(key, sdf::Value::PathListOp(Box::new(op)));
                 true
             }
         })
@@ -1210,7 +1214,7 @@ where
             return false;
         };
         let removed = op.discard(path);
-        self.set(key, sdf::Value::PathListOp(op));
+        self.set(key, sdf::Value::PathListOp(Box::new(op)));
         removed
     }
 
@@ -1233,11 +1237,17 @@ where
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
+                self.set(
+                    key,
+                    sdf::Value::PathListOp(Box::new(sdf::PathListOp::deleted([path.clone()]))),
+                );
                 true
             }
             None => {
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
+                self.set(
+                    key,
+                    sdf::Value::PathListOp(Box::new(sdf::PathListOp::deleted([path.clone()]))),
+                );
                 true
             }
         })
@@ -1332,7 +1342,7 @@ where
         let paths: Vec<sdf::Path> = paths.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
         self.set(
             sdf::FieldKey::TargetPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
+            sdf::Value::PathListOp(Box::new(sdf::PathListOp::explicit(paths))),
         );
         Ok(())
     }
@@ -1359,10 +1369,10 @@ where
             }
             Some(other) => {
                 debug_assert!(false, "targetPaths field is not a sdf::PathListOp (got {other:?})");
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::explicit([path])));
+                self.set(key, sdf::Value::PathListOp(Box::new(sdf::PathListOp::explicit([path]))));
             }
             None => {
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::explicit([path])));
+                self.set(key, sdf::Value::PathListOp(Box::new(sdf::PathListOp::explicit([path]))));
             }
         }
         Ok(())
@@ -1392,7 +1402,10 @@ where
             None => {
                 // No authored targets here yet: record a deletion so the same
                 // target from a weaker layer is suppressed through composition.
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
+                self.set(
+                    key,
+                    sdf::Value::PathListOp(Box::new(sdf::PathListOp::deleted([path.clone()]))),
+                );
                 true
             }
         }
@@ -1872,6 +1885,29 @@ fn split_property_path(path: &sdf::Path) -> Result<(sdf::Path, String), sdf::Aut
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn field_names_survive_source() {
+        let mut spec = SpecData::new(sdf::SpecType::Prim);
+        {
+            let builtin = String::from("typeName");
+            let custom = String::from("pluginField");
+            spec.add(&builtin, sdf::Value::token("Scope"));
+            spec.add(&custom, 42);
+            spec.add(
+                sdf::ChildrenKey::RelationshipTargetChildren,
+                sdf::Value::token_vec(["target"]),
+            );
+        }
+        assert!(matches!(&spec.fields[0].0, Cow::Borrowed("typeName")));
+        assert!(matches!(&spec.fields[1].0, Cow::Owned(name) if name == "pluginField"));
+        assert!(matches!(&spec.fields[2].0, Cow::Borrowed("targetChildren")));
+        let mut copy = spec.clone();
+        copy.add("pluginField", 43);
+        assert_eq!(spec.get("pluginField"), Some(&sdf::Value::Int(42)));
+        assert_eq!(copy.get("pluginField"), Some(&sdf::Value::Int(43)));
+        assert_eq!(copy.fields[1].0, "pluginField");
+    }
+
     use std::borrow::Cow;
 
     use super::*;
@@ -1979,7 +2015,7 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp::explicit([tf::Token::from("ExistingAPI")])),
+            sdf::Value::TokenListOp(Box::new(sdf::TokenListOp::explicit([tf::Token::from("ExistingAPI")]))),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
@@ -2000,7 +2036,7 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp::added(vec![tf::Token::from("ExistingAPI")])),
+            sdf::Value::TokenListOp(Box::new(sdf::TokenListOp::added(vec![tf::Token::from("ExistingAPI")]))),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
@@ -2018,7 +2054,7 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(sdf::TokenListOp::deleted(vec![tf::Token::from("RemovedAPI")])),
+            sdf::Value::TokenListOp(Box::new(sdf::TokenListOp::deleted(vec![tf::Token::from("RemovedAPI")]))),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
@@ -2038,9 +2074,9 @@ mod tests {
         data.set_field(
             &path,
             sdf::FieldKey::ApiSchemas.as_str(),
-            sdf::Value::TokenListOp(
+            sdf::Value::TokenListOp(Box::new(
                 sdf::TokenListOp::explicit([]).with(sdf::ListOpType::Added, [tf::Token::from("StaleAPI")]),
-            ),
+            )),
         );
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
@@ -2143,7 +2179,11 @@ mod tests {
         let x = sdf::Path::new("/X").unwrap();
         let op = sdf::PathListOp::added([x.clone()]).with(sdf::ListOpType::Deleted, [x.clone()]);
         let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
-        data.set_field(&path, sdf::FieldKey::TargetPaths.as_str(), sdf::Value::PathListOp(op));
+        data.set_field(
+            &path,
+            sdf::FieldKey::TargetPaths.as_str(),
+            sdf::Value::PathListOp(Box::new(op)),
+        );
 
         let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         assert!(rel.remove_target(&x));
@@ -2305,8 +2345,10 @@ mod tests {
     fn path_expression_anchored() {
         let (mut data, path) = typed_attr("pathExpression");
         let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
-        attr.set_default(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))
-            .expect("a path expression fits");
+        attr.set_default(sdf::Value::PathExpression(Box::new(sdf::PathExpression::parse(
+            "Child",
+        ))))
+        .expect("a path expression fits");
         let default = field_of(&data, &path, sdf::FieldKey::Default).expect("default authored");
         let expr = default.try_as_path_expression().expect("a path expression");
         assert_eq!(expr.to_string(), "/A/Child");

@@ -86,8 +86,8 @@ pub(super) fn collect_payloads_in(
         FieldKey::Payload.as_str(),
         graph,
         |v| match v {
-            Value::Payload(p) => Some(PayloadListOp::explicit([p])),
-            Value::PayloadListOp(op) => Some(op),
+            Value::Payload(p) => Some(PayloadListOp::explicit([*p])),
+            Value::PayloadListOp(op) => Some(*op),
             _ => None,
         },
         |p: &mut Payload, sub, scale| {
