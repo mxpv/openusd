@@ -651,6 +651,19 @@ impl Mat4d {
         converged
     }
 
+    /// The matrix with its scale and shear removed (C++ `RemoveScaleShear`):
+    /// the rotation [`factor`](Self::factor) finds, orthonormalized, with the
+    /// translation. A singular matrix comes back as it is.
+    pub fn remove_scale_shear(self) -> Mat4d {
+        let factors = self.factor(Self::FACTOR_EPSILON);
+        if factors.singular {
+            return self;
+        }
+        let mut rotation = factors.rotation;
+        rotation.orthonormalize();
+        rotation * Mat4d::translation(factors.translation)
+    }
+
     /// Factor the matrix into scale, rotation and translation (C++
     /// `Factor`), reading `self` as `r · s · rᵀ · u · t`.
     ///
@@ -1359,5 +1372,26 @@ pub(crate) mod tests {
 
         let flat = Mat4d::scale([1.0, 0.0, 1.0]).factor(1e-10);
         assert!(flat.singular);
+    }
+
+    /// Removing scale and shear recovers the rotation and translation of a
+    /// scaled matrix, leaves a sheared one orthonormal with its translation,
+    /// and leaves a singular one alone.
+    #[test]
+    fn remove_scale_shear() {
+        let rotation = Mat4d::rotation_x(0.4) * Mat4d::rotation_y(-1.2) * Mat4d::rotation_z(2.0);
+        let rigid = rotation * translation(10.0, 20.0, 30.0);
+        let scaled = Mat4d::scale([1.0, 2.0, 3.0]) * rigid;
+        assert_close(scaled.remove_scale_shear(), rigid);
+
+        let mut shear = Mat4d::IDENTITY;
+        shear[(0, 1)] = 0.5;
+        let unsheared = (shear * scaled).remove_scale_shear();
+        let upper = unsheared.extract_rotation_matrix();
+        assert!((upper * upper.transpose()).is_close(Mat3d::IDENTITY, 1e-9));
+        assert_eq!(unsheared.extract_translation(), rigid.extract_translation());
+
+        let flat = Mat4d::scale([1.0, 0.0, 1.0]);
+        assert_eq!(flat.remove_scale_shear(), flat);
     }
 }
