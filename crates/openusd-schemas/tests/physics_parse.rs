@@ -20,7 +20,7 @@ use openusd_schemas::physics::{
     PrismaticJointSchema, RevoluteJoint, RevoluteJointSchema, RigidBodyAPI, Scene, SphericalJoint,
     SphericalJointSchema, desc, tokens,
 };
-use openusd_schemas::shade::{BindingStrength, Material, MaterialBindingAPI};
+use openusd_schemas::shade::{Material, MaterialBindingAPI};
 
 type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -119,11 +119,7 @@ fn physics_material(stage: &Stage, path: &str) -> Result<Material> {
 
 /// `material` bound to `prim` for the physics purpose.
 fn bind(prim: &usd::Prim, material: &Material) -> Result {
-    MaterialBindingAPI::apply(prim)?.bind_for_purpose(
-        MATERIAL_PURPOSE,
-        material.path().clone(),
-        BindingStrength::WeakerThanDescendants,
-    )?;
+    MaterialBindingAPI::apply(prim)?.bind_for_purpose(MATERIAL_PURPOSE, material.path().clone(), None)?;
     Ok(())
 }
 
@@ -1412,7 +1408,7 @@ fn binding_without_api() -> Result {
     MaterialBindingAPI::from_prim_unchecked(cube.prim().clone()).bind_for_purpose(
         MATERIAL_PURPOSE,
         material.path().clone(),
-        BindingStrength::WeakerThanDescendants,
+        None,
     )?;
     let parsed = parse(&stage)?;
     assert!(only_shape(&parsed).materials.is_empty());

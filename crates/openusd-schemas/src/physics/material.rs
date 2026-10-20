@@ -28,7 +28,7 @@ mod tests {
 
     use super::{MATERIAL_PURPOSE, MaterialAPI, MaterialBindingAPI};
     use crate::SchemaError;
-    use crate::shade::{BindingStrength, Material};
+    use crate::shade::Material;
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
 
@@ -41,20 +41,12 @@ mod tests {
         assert!(MaterialAPI::bound(&binding)?.is_none());
 
         let plain = Material::define(&stage, "/plain")?;
-        binding.bind_for_purpose(
-            MATERIAL_PURPOSE,
-            plain.path().clone(),
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        binding.bind_for_purpose(MATERIAL_PURPOSE, plain.path().clone(), None)?;
         assert!(MaterialAPI::bound(&binding)?.is_none());
 
         let physics = Material::define(&stage, "/physics")?;
         MaterialAPI::apply(physics.prim())?;
-        binding.bind_for_purpose(
-            MATERIAL_PURPOSE,
-            physics.path().clone(),
-            BindingStrength::WeakerThanDescendants,
-        )?;
+        binding.bind_for_purpose(MATERIAL_PURPOSE, physics.path().clone(), None)?;
         let bound = MaterialAPI::bound(&binding)?.expect("the physics material is bound");
         assert_eq!(bound.path(), physics.path());
         Ok(())

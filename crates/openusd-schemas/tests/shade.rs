@@ -98,10 +98,21 @@ fn reads_material_bindings_from_fixture() -> Result<()> {
 
     // Direct all-purpose binding.
     let bound = binding.direct_binding("")?.expect("all-purpose binding");
-    assert_eq!(bound.as_str(), "/World/Looks/BrickMat");
+    assert_eq!(bound.material_path().as_str(), "/World/Looks/BrickMat");
     // Purpose-restricted preview binding.
     let preview = binding.direct_binding("preview")?.expect("preview binding");
-    assert_eq!(preview.as_str(), "/World/Looks/BrickMat");
+    assert_eq!(preview.material_path().as_str(), "/World/Looks/BrickMat");
+    assert_eq!(preview.rel().path().as_str(), "/World/Brick.material:binding:preview");
+
+    // Resolution reports the binding that won beside the material.
+    let resolved = binding
+        .resolve_binding("preview", &mut shade::BindingCache::default())?
+        .expect("resolved");
+    assert_eq!(resolved.rel().name(), "material:binding:preview");
+    assert_eq!(
+        resolved.material()?.expect("a Material").path().as_str(),
+        "/World/Looks/BrickMat"
+    );
     Ok(())
 }
 
@@ -145,7 +156,10 @@ fn author_then_read_back_roundtrip() -> Result<(), SchemaError> {
     assert_eq!(ps.roughness.value(), Some(&0.3));
 
     let binding = MaterialBindingAPI::get(&stage, "/World/Geo")?.expect("MaterialBindingAPI");
-    assert_eq!(binding.direct_binding("")?.expect("binding").as_str(), "/World/Looks/M");
+    assert_eq!(
+        binding.direct_binding("")?.expect("binding").material_path().as_str(),
+        "/World/Looks/M"
+    );
 
     // A stage traversal gated through the typed views sees the authored
     // material + its two shaders.

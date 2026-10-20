@@ -1215,18 +1215,34 @@ impl Prim {
     /// Returns handles to the composed relationships of this prim. Mirrors C++
     /// `UsdPrim::GetRelationships`.
     pub fn relationships(&self) -> Result<Vec<Relationship>> {
-        Ok(self
-            .properties_of_type(PropertySource::Composed, sdf::SpecType::Relationship, "")?
-            .into_iter()
-            .map(|path| Relationship::new(&self.stage, path))
-            .collect())
+        self.relationships_in_namespace("")
     }
 
     /// Returns handles to the relationships layers author on this prim. Mirrors
     /// C++ `UsdPrim::GetAuthoredRelationships`.
     pub fn authored_relationships(&self) -> Result<Vec<Relationship>> {
+        self.authored_relationships_in_namespace("")
+    }
+
+    /// Returns handles to the composed relationships of this prim whose names
+    /// sit under `namespace`, read as
+    /// [`attributes_in_namespace`](Self::attributes_in_namespace) reads it.
+    /// The relationship half of C++ `UsdPrim::GetPropertiesInNamespace`.
+    pub fn relationships_in_namespace(&self, namespace: &str) -> Result<Vec<Relationship>> {
         Ok(self
-            .properties_of_type(PropertySource::Authored, sdf::SpecType::Relationship, "")?
+            .properties_of_type(PropertySource::Composed, sdf::SpecType::Relationship, namespace)?
+            .into_iter()
+            .map(|path| Relationship::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns handles to the relationships layers author on this prim under
+    /// `namespace`, read as
+    /// [`attributes_in_namespace`](Self::attributes_in_namespace) reads it.
+    /// The relationship half of C++ `UsdPrim::GetAuthoredPropertiesInNamespace`.
+    pub fn authored_relationships_in_namespace(&self, namespace: &str) -> Result<Vec<Relationship>> {
+        Ok(self
+            .properties_of_type(PropertySource::Authored, sdf::SpecType::Relationship, namespace)?
             .into_iter()
             .map(|path| Relationship::new(&self.stage, path))
             .collect())

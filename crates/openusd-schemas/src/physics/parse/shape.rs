@@ -271,10 +271,11 @@ fn largest_scale(scale: gf::Vec3d) -> f32 {
 /// `MaterialBindingAPI` (C++ `_GetMaterialBinding`, whose binding view is
 /// valid only on such a prim, followed by `HasAPI<UsdPhysicsMaterialAPI>`).
 ///
-/// TODO(perf): each call resolves the binding from scratch; C++ shares a
-/// `UsdShadeMaterialBindingAPI::BindingsCache` and `CollectionQueryCache`
-/// across a parse, which a cache on the parser would mirror once
-/// `bound_material` takes one.
+/// TODO(perf): each call resolves the binding from scratch. A
+/// `shade::BindingCache` held by the parser and handed to `resolve_binding`
+/// would share the ancestors' bindings and collection queries across a parse,
+/// as C++ shares its `BindingsCache` and `CollectionQueryCache`;
+/// `MaterialAPI::bound` would need to take one.
 fn bound_material(prim: &usd::Prim) -> Result<Option<Path>, SchemaError> {
     let Some(binding) = MaterialBindingAPI::from_prim(prim.clone())? else {
         return Ok(None);
