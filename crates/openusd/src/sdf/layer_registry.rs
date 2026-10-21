@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use crate::ar;
 use crate::sdf::{self, expr};
@@ -139,10 +140,12 @@ impl From<LoadError> for crate::Error {
 /// layers, the built-in format set, and whether payload arcs are expanded.
 ///
 /// The `pcp::LayerGraph` holds one and opens reference and payload targets on
-/// demand through it. The resolver is private — every path that resolves and
-/// reads a layer is a method here, so no caller juggles the resolver itself. This is the Rust analog of C++ `Sdf_LayerRegistry`; it will
-/// grow a ref-counted loaded-layer cache (`find_or_open` dedup) and custom
-/// format registration.
+/// demand through it. The resolver is private: every path that resolves and
+/// reads a layer is a method here, and the registry stands in as the
+/// [`ar::Resolver`] it fronts where one is asked for, with the identifier
+/// rules below applied. This is the Rust analog of C++ `Sdf_LayerRegistry`;
+/// it will grow a ref-counted loaded-layer cache (`find_or_open` dedup) and
+/// custom format registration.
 pub struct LayerRegistry {
     resolver: Rc<dyn ar::Resolver>,
 }
@@ -157,6 +160,54 @@ pub(crate) struct PreparedLayer {
     pub resolved: ar::ResolvedPath,
     /// The layer's data.
     pub data: sdf::LayerData,
+}
+
+/// The registry as the resolver it fronts: each path passes the registry's
+/// own identifier rules on its way to the resolver.
+impl ar::Resolver for LayerRegistry {
+    fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+        LayerRegistry::create_identifier(self, asset_path, anchor)
+    }
+
+    fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        LayerRegistry::resolve(self, asset_path)
+    }
+
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        self.resolver.resolve_for_new_asset(asset_path)
+    }
+
+    fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+        LayerRegistry::open_asset(self, resolved_path)
+    }
+
+    fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
+        self.resolver.extension(asset_path)
+    }
+
+    fn is_context_dependent_path(&self, asset_path: &str) -> bool {
+        LayerRegistry::is_context_dependent_path(self, asset_path)
+    }
+
+    fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+        LayerRegistry::in_memory_identifier(self, asset_path)
+    }
+
+    fn asset_info(&self, asset_path: &str, resolved_path: &ar::ResolvedPath) -> ar::AssetInfo {
+        self.resolver.asset_info(asset_path, resolved_path)
+    }
+
+    fn modification_timestamp(&self, asset_path: &str, resolved_path: &ar::ResolvedPath) -> Option<SystemTime> {
+        self.resolver.modification_timestamp(asset_path, resolved_path)
+    }
+
+    fn identity(&self) -> String {
+        LayerRegistry::identity(self)
+    }
+
+    fn cache_id(&self) -> Option<u64> {
+        self.resolver.cache_id()
+    }
 }
 
 impl Default for LayerRegistry {

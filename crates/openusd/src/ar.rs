@@ -35,7 +35,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
-use std::ops::{Deref, Range};
+use std::ops::{Deref, Range, RangeInclusive};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -1113,6 +1113,127 @@ fn normalize_search_path(path: PathBuf) -> PathBuf {
     lexically_normalize(&path)
 }
 
+/// The tile numbers a UDIM path stands for.
+const UDIM_TILES: RangeInclusive<u16> = 1001..=1100;
+
+/// What a UDIM path carries in place of a tile number.
+const UDIM_PATTERN: &str = "<UDIM>";
+
+/// The digits of a tile number.
+const UDIM_TILE_DIGITS: usize = 4;
+
+/// A texture path naming a set of UDIM tiles, `<prefix><UDIM><suffix>`,
+/// which stands for the tiles `1001` to `1100` (C++ `UsdShadeUdimUtils`). A
+/// tile's own path has its number where the pattern is: `tex.<UDIM>.exr`
+/// stands for `tex.1001.exr`, `tex.1002.exr` and so on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UdimPath {
+    prefix: String,
+    suffix: String,
+}
+
+/// A tile of a [`UdimPath`] a resolver found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UdimTile {
+    /// The tile's number, `1001` to `1100`.
+    pub number: u16,
+    /// Where the tile resolved.
+    pub path: ResolvedPath,
+}
+
+impl UdimPath {
+    /// Split `path` at its `<UDIM>` pattern, `None` where it carries none
+    /// (C++ `IsUdimIdentifier`). A path that is only the pattern names
+    /// nothing and is `None` too.
+    pub fn parse(path: &str) -> Option<Self> {
+        let (prefix, suffix) = path.split_once(UDIM_PATTERN)?;
+        if prefix.is_empty() && suffix.is_empty() {
+            return None;
+        }
+        Some(Self {
+            prefix: prefix.to_owned(),
+            suffix: suffix.to_owned(),
+        })
+    }
+
+    /// The path of tile `number`: the pattern replaced by it (C++
+    /// `ReplaceUdimPattern`).
+    pub fn tile(&self, number: u16) -> String {
+        format!("{}{number}{}", self.prefix, self.suffix)
+    }
+
+    /// The path up to the pattern.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Every tile `resolver` finds, in tile order, each probed as the path of
+    /// its number, anchored at `anchor` where one is given the way a layer
+    /// there anchors the relative asset paths it authors (C++
+    /// `ResolveUdimTilePaths`). The probes share one cache scope. A packaged
+    /// set opens its package once.
+    ///
+    /// TODO(perf): a hundred probes, each a resolution and, anchored, an
+    /// identifier. A `Resolver` method listing the names under a prefix,
+    /// defaulted to this loop and answered by `DefaultResolver` with one
+    /// directory read, would find the tiles in one call.
+    pub fn resolve_tiles(&self, resolver: &dyn Resolver, anchor: Option<&ResolvedPath>) -> Vec<UdimTile> {
+        let _scope = CacheScope::begin();
+        self.tiles(resolver, anchor).collect()
+    }
+
+    /// The path in resolved form: the first tile's resolved path with the
+    /// pattern put back where its number is, inside the packaged part where
+    /// a plain path resolved into a package (C++ `ResolveUdimPath`). `None`
+    /// where no tile resolves, or where the first tile's resolved path does
+    /// not end with the suffix.
+    pub fn resolve(&self, resolver: &dyn Resolver, anchor: Option<&ResolvedPath>) -> Option<String> {
+        let _scope = CacheScope::begin();
+        let first = self.tiles(resolver, anchor).next()?;
+        let resolved = first.path.to_str()?;
+        self.pattern_of(resolved).or_else(|| {
+            let (package, inner) = split_package_relative_path_inner(resolved)?;
+            Some(nest_packaged_path(&package, &self.pattern_of(&inner)?))
+        })
+    }
+
+    /// `tile_path`, the path of one tile, with the pattern put back where
+    /// its number is; `None` where the path does not end with the suffix
+    /// preceded by a tile number. The suffix matches across separators, and
+    /// the path keeps its own.
+    fn pattern_of(&self, tile_path: &str) -> Option<String> {
+        let (numbered, suffix) = tile_path.split_at_checked(tile_path.len().checked_sub(self.suffix.len())?)?;
+        let same_but_separators = suffix.chars().zip(self.suffix.chars()).all(|(found, expected)| {
+            found == expected || (SEPARATORS.contains(&found) && SEPARATORS.contains(&expected))
+        });
+        if suffix.chars().count() != self.suffix.chars().count() || !same_but_separators {
+            return None;
+        }
+        let (prefix, number) = numbered.split_at_checked(numbered.len().checked_sub(UDIM_TILE_DIGITS)?)?;
+        number
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| format!("{prefix}{UDIM_PATTERN}{suffix}"))
+    }
+
+    /// The tiles `resolver` finds, probed in tile order.
+    fn tiles<'a>(
+        &'a self,
+        resolver: &'a dyn Resolver,
+        anchor: Option<&'a ResolvedPath>,
+    ) -> impl Iterator<Item = UdimTile> + 'a {
+        UDIM_TILES.filter_map(move |number| {
+            let tile = self.tile(number);
+            let asset_path = match anchor {
+                Some(_) => resolver.create_identifier(&tile, anchor),
+                None => tile,
+            };
+            let path = resolver.resolve(&asset_path)?;
+            Some(UdimTile { number, path })
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Package-relative path utilities
 // ---------------------------------------------------------------------------
@@ -2172,5 +2293,174 @@ pub(crate) mod tests {
         buffer.advise(0..3, Advice::Random);
         assert!(!buffer.is_mapping());
         assert_eq!(&*buffer, [1, 2, 3]);
+    }
+
+    /// The fixture of the C++ `testUsdShadeUdimUtils` test: tiles in two
+    /// spellings, a packaged set, and tiles past `1100` for the bound to
+    /// leave out, resolved as a layer beside them would resolve them.
+    struct UdimFixture {
+        _dir: tempfile::TempDir,
+        resolver: DefaultResolver,
+        anchor: ResolvedPath,
+    }
+
+    impl UdimFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            for name in [
+                "style_a.1001.exr",
+                "style_a.1011.exr",
+                "style_a.1101.exr",
+                "style_b_1002.exr",
+                "style_b_1021.exr",
+                "style_b_1201.exr",
+            ] {
+                fs::write(dir.path().join(name), b"tile").unwrap();
+            }
+            let mut package = usdz::ArchiveWriter::create(dir.path().join("udims.usdz")).unwrap();
+            package.add_layer("udims.usda", b"#usda 1.0\n").unwrap();
+            for number in 1001..=1003 {
+                package
+                    .add_layer(&format!("udim_tex_{number}_.foo.bar.baz"), b"tile")
+                    .unwrap();
+            }
+            package.finish().unwrap();
+            let anchor = ResolvedPath::new(dir.path().join("layer.usda"));
+            Self {
+                _dir: dir,
+                resolver: DefaultResolver::new(),
+                anchor,
+            }
+        }
+
+        /// Where `path`, anchored beside the tiles, resolves.
+        fn at(&self, path: &str) -> ResolvedPath {
+            self.resolver
+                .resolve(&self.resolver.create_identifier(path, Some(&self.anchor)))
+                .expect(path)
+        }
+
+        /// The tiles of the UDIM path `path`.
+        fn tiles(&self, path: &str) -> Vec<UdimTile> {
+            UdimPath::parse(path)
+                .expect("a UDIM path")
+                .resolve_tiles(&self.resolver, Some(&self.anchor))
+        }
+
+        /// The UDIM path `path` in resolved form.
+        fn resolved(&self, path: &str) -> Option<String> {
+            UdimPath::parse(path)
+                .expect("a UDIM path")
+                .resolve(&self.resolver, Some(&self.anchor))
+        }
+
+        /// Where the tile `tile` resolves, with its last `number` replaced by
+        /// the pattern.
+        fn pattern_at(&self, tile: &str, number: &str) -> String {
+            let path = self.at(tile);
+            let (prefix, suffix) = path.to_str().unwrap().rsplit_once(number).unwrap();
+            format!("{prefix}<UDIM>{suffix}")
+        }
+    }
+
+    #[test]
+    fn udim_parse_and_tile() {
+        let udim = UdimPath::parse("style_a.<UDIM>.exr").expect("a UDIM path");
+        assert_eq!(udim.tile(1011), "style_a.1011.exr");
+        assert_eq!(UdimPath::parse("style_z.exr"), None);
+        assert_eq!(UdimPath::parse("<UDIM>"), None);
+        assert_eq!(
+            udim.pattern_of("/x/style_a.1001.exr").as_deref(),
+            Some("/x/style_a.<UDIM>.exr")
+        );
+        assert_eq!(udim.pattern_of("/x/style_a.exr"), None);
+        assert_eq!(udim.pattern_of("/x/style_a.abcd.exr"), None);
+
+        // A pattern in a directory matches a tile path spelled either way.
+        let directory = UdimPath::parse("../textures/<UDIM>/diffuse.png").expect("a UDIM path");
+        assert_eq!(
+            directory.pattern_of(r"C:\x\textures\1001\diffuse.png").as_deref(),
+            Some(r"C:\x\textures\<UDIM>\diffuse.png")
+        );
+        assert_eq!(
+            directory.pattern_of("/x/textures/1001/diffuse.png").as_deref(),
+            Some("/x/textures/<UDIM>/diffuse.png")
+        );
+    }
+
+    #[test]
+    fn udim_tiles_resolve() {
+        let fixture = UdimFixture::new();
+        let tile = |number, path| UdimTile {
+            number,
+            path: fixture.at(path),
+        };
+        assert_eq!(
+            fixture.tiles("./style_a.<UDIM>.exr"),
+            [tile(1001, "./style_a.1001.exr"), tile(1011, "./style_a.1011.exr")]
+        );
+        assert_eq!(
+            fixture.tiles("./style_b_<UDIM>.exr"),
+            [tile(1002, "./style_b_1002.exr"), tile(1021, "./style_b_1021.exr")]
+        );
+        assert_eq!(
+            fixture.tiles("udims.usdz[udim_tex_<UDIM>_.foo.bar.baz]"),
+            [
+                tile(1001, "udims.usdz[udim_tex_1001_.foo.bar.baz]"),
+                tile(1002, "udims.usdz[udim_tex_1002_.foo.bar.baz]"),
+                tile(1003, "udims.usdz[udim_tex_1003_.foo.bar.baz]"),
+            ]
+        );
+        assert!(fixture.tiles("./missing.<UDIM>.exr").is_empty());
+    }
+
+    #[test]
+    fn udim_path_resolves() {
+        let fixture = UdimFixture::new();
+        assert_eq!(
+            fixture.resolved("./style_a.<UDIM>.exr"),
+            Some(fixture.pattern_at("./style_a.1001.exr", "1001"))
+        );
+        assert_eq!(
+            fixture.resolved("./style_b_<UDIM>.exr"),
+            Some(fixture.pattern_at("./style_b_1002.exr", "1002"))
+        );
+        assert_eq!(
+            fixture.resolved("udims.usdz[udim_tex_<UDIM>_.foo.bar.baz]"),
+            Some(fixture.pattern_at("udims.usdz[udim_tex_1001_.foo.bar.baz]", "1001"))
+        );
+        assert_eq!(fixture.resolved("./missing.<UDIM>.exr"), None);
+    }
+    /// A plain path whose tiles resolve into a nested package keeps the
+    /// pattern inside the innermost one.
+    #[test]
+    fn udim_resolves_into_nested_package() {
+        struct Nested;
+
+        impl Resolver for Nested {
+            fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
+                asset_path.to_string()
+            }
+
+            fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+                asset_path
+                    .starts_with("t.100")
+                    .then(|| ResolvedPath::new(format!("outer.usdz[inner.usdz[{asset_path}]]")))
+            }
+
+            fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+                self.resolve(asset_path)
+            }
+
+            fn open_asset(&self, _resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+                Err(io::Error::other("nothing to open"))
+            }
+        }
+
+        let udim = UdimPath::parse("t.<UDIM>.exr").expect("a UDIM path");
+        assert_eq!(
+            udim.resolve(&Nested, None).as_deref(),
+            Some("outer.usdz[inner.usdz[t.<UDIM>.exr]]")
+        );
     }
 }

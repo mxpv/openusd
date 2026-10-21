@@ -92,59 +92,144 @@ pub fn create_usdz_package(
     Ok(skipped)
 }
 
+/// Where a scope's sources are stored: one entry per source, and the entries
+/// a tile shared between sets takes again under each later set's name.
+struct Entries {
+    /// By source index.
+    by_source: Vec<String>,
+    /// A tile stored again, by source index, under another set's name.
+    again: Vec<(usize, String)>,
+}
+
 /// The entry each source of a scope is stored at, by source index: the root
 /// at `first_name`, an existing entry of a package at its own name. A named
 /// source keeps the place the layer that first named it reaches by a `./` or
 /// `../` path, when that entry is still free; any other moves into the
-/// numbered directory of its source directory. `reserved` holds the entry
-/// names already in use, every entry of a package being rebuilt.
-fn assign_entries(discovery: &Discovery<'_>, first_name: &str, reserved: HashSet<String>) -> Vec<String> {
+/// numbered directory of its source directory. A set of tiles is free only
+/// where every tile's name under it is, and moves as a whole; it places every
+/// tile of its own, a tile placed before it on its own moved under it, and a
+/// tile found through it takes the name the set's entry gives its number. A
+/// tile a set has placed stays there; a later set sharing it stores it again
+/// under its own name. `reserved` holds the entry names already in use, every
+/// entry of a package being rebuilt.
+fn assign_entries(discovery: &Discovery<'_>, first_name: &str, reserved: HashSet<String>) -> Entries {
     let mut entries: Vec<String> = Vec::with_capacity(discovery.sources.len());
+    let mut again = Vec::new();
     let mut taken = reserved;
     let mut directories = HashMap::new();
+    // The tiles a set has placed, by source index.
+    let mut pinned = HashSet::new();
     for source in &discovery.sources {
+        let free = |entry: &str| free(source, entry, &entries, &taken);
         let entry = match &source.placement {
             Placement::Root => first_name.to_owned(),
             Placement::Entry(name) => name.clone(),
             Placement::Named { by, path } => kept_entry(&entries[*by], path)
-                .filter(|entry| !taken.contains(entry))
-                .unwrap_or_else(|| moved_entry(&mut directories, &taken, &source.identifier)),
+                .filter(|entry| free(entry))
+                .unwrap_or_else(|| moved_entry(&mut directories, moved_name(source), free)),
+            Placement::Tile { of, number } => ar::UdimPath::parse(&entries[*of])
+                .expect("a set's entry keeps its pattern")
+                .tile(*number),
         };
+        if let Content::Tiles(tiles) = &source.content
+            && let Some(set) = ar::UdimPath::parse(&entry)
+        {
+            for (number, tile) in tiles {
+                let name = set.tile(*number);
+                match entries.get_mut(*tile) {
+                    Some(assigned) if *assigned == name => {}
+                    Some(_)
+                        if pinned.contains(tile)
+                            || matches!(discovery.sources[*tile].placement, Placement::Entry(_)) =>
+                    {
+                        again.push((*tile, name.clone()));
+                    }
+                    Some(assigned) => *assigned = name.clone(),
+                    None => {}
+                }
+                pinned.insert(*tile);
+                taken.insert(name);
+            }
+        }
         taken.insert(entry.clone());
         entries.push(entry);
     }
-    entries
+    Entries {
+        by_source: entries,
+        again,
+    }
 }
 
-/// The entry a moved source takes: its file name in the numbered directory
-/// of its source directory, `directories` numbering them in the order they
-/// first move and `taken` holding the entry names in use.
-fn moved_entry(directories: &mut HashMap<String, usize>, taken: &HashSet<String>, source: &str) -> String {
-    let (directory, name) = ar::split_file_name(source);
+/// Whether `entry` is free for `source`, given the `entries` assigned so far
+/// and the names `taken`: for a set of tiles, each tile's name under the
+/// entry is unused, or is the entry its tile already has.
+fn free(source: &Source<'_>, entry: &str, entries: &[String], taken: &HashSet<String>) -> bool {
+    match &source.content {
+        Content::Tiles(tiles) => ar::UdimPath::parse(entry).is_some_and(|set| {
+            tiles.iter().all(|(number, tile)| {
+                let name = set.tile(*number);
+                entries.get(*tile).is_some_and(|assigned| *assigned == name) || !taken.contains(&name)
+            })
+        }),
+        _ => !taken.contains(entry),
+    }
+}
+
+/// The directory a moved source is numbered by and the name it keeps,
+/// spelled with `/` as every entry is: the split before its file name, or
+/// for a set of tiles before the pattern's directory, which keeps a pattern
+/// in a directory with the name.
+fn moved_name<'s>(source: &'s Source<'_>) -> (&'s str, String) {
+    let identifier = source.identifier.as_str();
+    let before = match &source.content {
+        Content::Tiles(_) => ar::UdimPath::parse(identifier).map_or(identifier.len(), |set| set.prefix().len()),
+        _ => identifier.len(),
+    };
+    let (directory, _) = ar::split_file_name(&identifier[..before]);
+    (directory, identifier[directory.len()..].replace('\\', "/"))
+}
+
+/// The entry a moved source takes: its `name` in the numbered directory of
+/// its source `directory`, `directories` numbering them in the order they
+/// first move, bumped past any `free` refuses.
+fn moved_entry(
+    directories: &mut HashMap<String, usize>,
+    (directory, name): (&str, String),
+    free: impl Fn(&str) -> bool,
+) -> String {
     let next = directories.len();
     let mut number = *directories.entry(directory.to_owned()).or_insert(next);
     let mut entry = format!("{number}/{name}");
-    while taken.contains(&entry) {
+    while !free(&entry) {
         number += 1;
         entry = format!("{number}/{name}");
     }
     entry
 }
 
-/// Writes every source of the root scope to `archive` at its entry, in
-/// source order.
+/// Writes every stored source of the root scope to `archive` at its entry,
+/// in source order.
 ///
 /// TODO(rayon): each entry's bytes are produced independently of the others;
 /// only the writes are in order.
 fn write_entries<W: Write + Seek>(
     graph: &pcp::LayerGraph,
     discovery: &Discovery<'_>,
-    entries: &[String],
+    entries: &Entries,
     archive: &mut usdz::ArchiveWriter<W>,
 ) -> Result<()> {
-    for (index, source) in discovery.sources.iter().enumerate() {
-        let bytes = source_bytes(graph, source, &entries[index], entries, None)?;
-        archive.add_layer(&entries[index], &bytes)?;
+    for (index, source) in discovery
+        .sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| source.stored())
+    {
+        let bytes = source_bytes(graph, source, &entries.by_source[index], &entries.by_source, None)?;
+        archive.add_layer(&entries.by_source[index], &bytes)?;
+    }
+    for (index, entry) in &entries.again {
+        let bytes = source_bytes(graph, &discovery.sources[*index], entry, &entries.by_source, None)?;
+        archive.add_layer(entry, &bytes)?;
     }
     Ok(())
 }
@@ -185,6 +270,7 @@ fn source_bytes(
             Some(bytes) => Ok(bytes),
             None => read_asset(graph, resolved),
         },
+        Content::Tiles(_) => unreachable!("a set of tiles is stored as no entry"),
     }
 }
 
@@ -209,8 +295,8 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
         .iter()
         .enumerate()
         .filter_map(|(index, source)| match &source.placement {
-            Placement::Entry(name) => Some((name.as_str(), index)),
-            Placement::Root | Placement::Named { .. } => None,
+            Placement::Entry(name) if source.stored() => Some((name.as_str(), index)),
+            _ => None,
         })
         .collect();
     let mut rebuilt = usdz::ArchiveWriter::new(Cursor::new(Vec::new()));
@@ -220,16 +306,26 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
         let contents = match existing.get(name.as_str()) {
-            Some(&source) => source_bytes(graph, &inside.sources[source], &name, &entries, Some(contents))?,
+            Some(&source) => source_bytes(
+                graph,
+                &inside.sources[source],
+                &name,
+                &entries.by_source,
+                Some(contents),
+            )?,
             None => contents,
         };
         rebuilt.add_layer(&name, &contents)?;
     }
     for (index, source) in inside.sources.iter().enumerate() {
-        if matches!(source.placement, Placement::Named { .. }) {
-            let contents = source_bytes(graph, source, &entries[index], &entries, None)?;
-            rebuilt.add_layer(&entries[index], &contents)?;
+        if matches!(source.placement, Placement::Named { .. } | Placement::Tile { .. }) && source.stored() {
+            let contents = source_bytes(graph, source, &entries.by_source[index], &entries.by_source, None)?;
+            rebuilt.add_layer(&entries.by_source[index], &contents)?;
         }
+    }
+    for (index, entry) in &entries.again {
+        let contents = source_bytes(graph, &inside.sources[*index], entry, &entries.by_source, None)?;
+        rebuilt.add_layer(entry, &contents)?;
     }
     Ok(rebuilt.finish()?.into_inner())
 }
@@ -978,6 +1074,161 @@ def "T"
                 );
             }
         }
+        Ok(())
+    }
+
+    /// A UDIM path's tiles are packaged, kept beside the layer or moved with
+    /// their directory, and the path follows them with its pattern in place.
+    /// A tile the layer also names on its own has the one entry.
+    #[test]
+    fn udim_tiles_packaged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "scene/root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset t = @./tex.<UDIM>.png@\n    asset o = @../outside/o.<UDIM>.png@\n    asset first = @../outside/o.1001.png@\n}\n",
+        );
+        for name in [
+            "scene/tex.1001.png",
+            "scene/tex.1002.png",
+            "outside/o.1001.png",
+            "outside/o.1003.png",
+        ] {
+            write(dir.path(), name, "PNG");
+        }
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(
+            names,
+            [
+                "root.usda",
+                "0/o.1001.png",
+                "0/o.1003.png",
+                "tex.1001.png",
+                "tex.1002.png"
+            ]
+        );
+        for expected in ["@./tex.<UDIM>.png@", "@0/o.<UDIM>.png@", "@0/o.1001.png@"] {
+            assert!(texts["root.usda"].contains(expected), "{}", texts["root.usda"]);
+        }
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        assert_eq!(dependencies.assets.len(), 4);
+        Ok(())
+    }
+    /// A tile the layer names on its own before its set, placed elsewhere by
+    /// then, moves under the set.
+    #[test]
+    fn udim_tile_named_first_follows_set() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let absolute = dir
+            .path()
+            .join("scene/tex.1001.png")
+            .to_str()
+            .unwrap()
+            .replace('\\', "/");
+        write(
+            dir.path(),
+            "scene/root.usda",
+            &format!("#usda 1.0\ndef \"A\" {{\n    asset first = @{absolute}@\n    asset t = @./tex.<UDIM>.png@\n}}\n"),
+        );
+        for name in ["scene/tex.1001.png", "scene/tex.1002.png"] {
+            write(dir.path(), name, "PNG");
+        }
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "tex.1001.png", "tex.1002.png"]);
+        for expected in ["@tex.1001.png@", "@./tex.<UDIM>.png@"] {
+            assert!(texts["root.usda"].contains(expected), "{}", texts["root.usda"]);
+        }
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        Ok(())
+    }
+
+    /// A pattern in a directory keeps its place in the name a moved set takes.
+    #[test]
+    fn udim_directory_pattern_packaged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "scene/root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset d = @../textures/<UDIM>/diffuse.png@\n}\n",
+        );
+        for name in ["textures/1001/diffuse.png", "textures/1002/diffuse.png"] {
+            write(dir.path(), name, "PNG");
+        }
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "0/1001/diffuse.png", "0/1002/diffuse.png"]);
+        assert!(
+            texts["root.usda"].contains("@0/<UDIM>/diffuse.png@"),
+            "{}",
+            texts["root.usda"]
+        );
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        Ok(())
+    }
+    /// Two sets sharing a tile: the set placed first keeps it, and the other
+    /// stores it again under its own name.
+    #[test]
+    fn udim_sets_share_tile() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let absolute = dir
+            .path()
+            .join("scene/tex.1001.<UDIM>.png")
+            .to_str()
+            .unwrap()
+            .replace('\\', "/");
+        write(
+            dir.path(),
+            "scene/root.usda",
+            &format!(
+                "#usda 1.0\ndef \"A\" {{\n    asset a = @./tex.<UDIM>.1001.png@\n    asset b = @{absolute}@\n}}\n"
+            ),
+        );
+        for name in [
+            "scene/tex.1001.1001.png",
+            "scene/tex.1002.1001.png",
+            "scene/tex.1001.1002.png",
+        ] {
+            write(dir.path(), name, "PNG");
+        }
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(
+            names,
+            [
+                "root.usda",
+                "tex.1001.1001.png",
+                "tex.1002.1001.png",
+                "0/tex.1001.1002.png",
+                "0/tex.1001.1001.png",
+            ]
+        );
+        for expected in ["@./tex.<UDIM>.1001.png@", "@0/tex.1001.<UDIM>.png@"] {
+            assert!(texts["root.usda"].contains(expected), "{}", texts["root.usda"]);
+        }
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        assert_eq!(dependencies.assets.len(), 4);
         Ok(())
     }
 }

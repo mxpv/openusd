@@ -63,6 +63,8 @@ source of truth for specifics.
   asset paths to physical locations; `DefaultResolver` searches the filesystem.
   `CacheScope` (C++ `ArResolverScopedCache`) is the span, on one thread, over
   which opened packages are kept.
+  `UdimPath` (C++ `UsdShadeUdimUtils`) is a texture path standing for a set of
+  tiles, with the tiles a resolver finds for it.
 
 - **`pcp/`** - Prim Cache Population, the composition engine (C++ `Pcp`):
   LIVERPS strength ordering across layers, kept a pure function of `(graph,

@@ -75,6 +75,10 @@ pub(super) enum AssetKind {
     Package,
     /// Any other file, such as a texture.
     Asset,
+    /// The set of UDIM tiles a path with a `<UDIM>` pattern names, which
+    /// discovery decides by the pattern once the tiles are found; each tile
+    /// is an asset of its own.
+    Tiles,
 }
 
 impl AssetKind {
@@ -95,9 +99,8 @@ impl AssetKind {
 #[derive(Clone, Copy)]
 pub(super) struct Visit {
     /// Refuse an applied path that needs expanding or evaluating before it
-    /// can be followed: a UDIM pattern, a clip template, a variable
-    /// expression. A deleted or reordered item is visited as authored, since
-    /// it adds no dependency.
+    /// can be followed: a clip template or a variable expression. A deleted
+    /// or reordered item is visited as authored, since it adds no dependency.
     pub refuse_expansions: bool,
     /// Skip a prim's `assetInfo:identifier`, which names the asset itself, as
     /// C++ does with metadata filtering enabled.
@@ -233,13 +236,8 @@ impl Walk<'_> {
         if path.is_empty() {
             return Ok(false);
         }
-        if self.mode.refuse_expansions && self.applied {
-            if sdf::expr::is_expression(path) {
-                return Err(self.unsupported("variable expression", path));
-            }
-            if path.contains("<UDIM>") {
-                return Err(self.unsupported("UDIM pattern", path));
-            }
+        if self.mode.refuse_expansions && self.applied && sdf::expr::is_expression(path) {
+            return Err(self.unsupported("variable expression", path));
         }
         let asset = AssetRef {
             path,

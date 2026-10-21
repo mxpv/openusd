@@ -19,8 +19,8 @@ pub use walk::modify_asset_paths;
 #[non_exhaustive]
 pub enum DependencyError {
     /// An asset path that needs expanding or evaluating before it can be
-    /// followed: a UDIM pattern or clip template, which C++ expands by listing
-    /// the filesystem, or a variable expression.
+    /// followed: a clip template, which C++ expands by listing the
+    /// filesystem, or a variable expression.
     #[error("{kind} {path:?} in {layer} is not supported yet")]
     Unsupported {
         /// What the path needs expanded.

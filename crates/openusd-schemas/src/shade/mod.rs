@@ -35,7 +35,9 @@
 //! [`DirectBinding`]s and [`CollectionBinding`]s they carry.
 //! [`CoordSysAPI::resolve_bindings`] answers the coordinate systems in force
 //! at a prim, the nearest binding of each name among the prim and its
-//! ancestors, as [`CoordSysBinding`]s over a [`CoordSysCache`].
+//! ancestors, as [`CoordSysBinding`]s over a [`CoordSysCache`]. [`UdimPath`]
+//! reads a texture path standing for a set of UDIM tiles and finds them (C++
+//! `UsdShadeUdimUtils`).
 //! [`Shader::implementation_source`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
 //! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
@@ -106,6 +108,10 @@ pub use output::Output;
 pub use preview::{Channel, ReadPreviewSurface, read_preview_surface};
 pub use traits::Connectable;
 pub use utils::ProducerFilter;
+
+/// The UDIM path utilities (C++ `UsdShadeUdimUtils`), which the core carries
+/// for its dependency walk.
+pub use openusd::ar::{UdimPath, UdimTile};
 
 use tokens::*;
 

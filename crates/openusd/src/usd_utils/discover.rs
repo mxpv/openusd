@@ -37,9 +37,11 @@ pub struct Dependencies {
 /// layer. The layers and assets inside it are reported by their
 /// package-relative path.
 ///
-/// UDIM patterns and clip templates, which C++ expands by listing the
-/// filesystem, and variable expressions, which C++ anchors unevaluated and
-/// reports unresolved, return [`DependencyError`](super::DependencyError).
+/// A UDIM path names the tiles the resolver finds, each an asset, and is
+/// unresolved where it finds none. Clip templates, which C++ expands by
+/// listing the filesystem, and variable expressions, which C++ anchors
+/// unevaluated and reports unresolved, return
+/// [`DependencyError`](super::DependencyError).
 pub fn all_dependencies(stage: &Stage, asset_path: &str) -> Result<Dependencies> {
     let graph = stage.layers();
     let policy = Discover {
@@ -52,6 +54,7 @@ pub fn all_dependencies(stage: &Stage, asset_path: &str) -> Result<Dependencies>
         match &source.content {
             Content::Layer { .. } | Content::Package { .. } => dependencies.layers.push(source.identifier.clone()),
             Content::Asset(resolved) => dependencies.assets.push(resolved.to_string()),
+            Content::Tiles(_) => {}
         }
     }
     dependencies.unresolved = discovery
@@ -108,6 +111,9 @@ pub(super) enum Placement {
     /// for a path into a package), placed where that path leads when it can
     /// be.
     Named { by: usize, path: String },
+    /// A UDIM tile found through its set, the source `of`, at the name its
+    /// set's entry gives tile `number`.
+    Tile { of: usize, number: u16 },
 }
 
 /// What a [`Source`] holds.
@@ -127,6 +133,9 @@ pub(super) enum Content<'a> {
     },
     /// Any other file, at its location.
     Asset(ar::ResolvedPath),
+    /// A set of UDIM tiles, each by number with the source it is, placed by
+    /// this one where it was found through it; stored as no entry itself.
+    Tiles(Vec<(u16, usize)>),
 }
 
 /// What a path a layer authors names, as its [`Content::Layer`] records it.
@@ -146,6 +155,7 @@ impl Content<'_> {
         match self {
             Self::Layer { layer, .. } => layer.resolved_path(),
             Self::Package { resolved, .. } | Self::Asset(resolved) => resolved.to_str(),
+            Self::Tiles(_) => None,
         }
     }
 
@@ -153,7 +163,7 @@ impl Content<'_> {
     fn anchor(&self) -> Option<ar::ResolvedPath> {
         match self {
             Self::Layer { layer, .. } => layer.anchor_location(),
-            Self::Package { .. } | Self::Asset(_) => None,
+            Self::Package { .. } | Self::Asset(_) | Self::Tiles(_) => None,
         }
     }
 }
@@ -214,22 +224,15 @@ fn discover_scope<'a>(
             .enumerate()
             .map(|(index, root)| (root.identifier.clone(), index))
             .collect(),
+        queue: (0..roots.len()).filter(|&index| roots[index].is_layer()).collect(),
         sources: roots,
         unresolved,
     };
-    let mut queue: VecDeque<usize> = (0..discoverer.sources.len())
-        .filter(|&index| discoverer.sources[index].is_layer())
-        .collect();
     // TODO(rayon): the layers queued at one level open independently of each
     // other; open them in parallel and visit them in queue order.
-    while let Some(current) = queue.pop_front() {
+    while let Some(current) = discoverer.queue.pop_front() {
         for (path, kind) in discoverer.authored_in(current)? {
-            if let Some(found) = discoverer.find_or_add(current, &path, kind)? {
-                if found.source == discoverer.sources.len() - 1 && discoverer.sources[found.source].is_layer() {
-                    queue.push_back(found.source);
-                }
-                discoverer.uses_of(current).insert(path, found);
-            }
+            discoverer.follow(current, path, kind)?;
         }
     }
     Ok(Discovery {
@@ -298,11 +301,105 @@ struct Discoverer<'a> {
     package: Option<(String, String)>,
     /// The source index of each identifier found.
     index: HashMap<String, usize>,
+    /// The layer sources still to walk.
+    queue: VecDeque<usize>,
     sources: Vec<Source<'a>>,
     unresolved: Vec<(String, AssetKind)>,
 }
 
 impl<'a> Discoverer<'a> {
+    /// Follows `path`, authored in the layer source `current` as `kind`:
+    /// records what it names and queues a layer found through it. A UDIM
+    /// path names the set of its tiles, a source of its own placed by the
+    /// ordinary rule; each tile newly found through it is placed by the set,
+    /// so a rewrite of the path reaches its tiles where they went.
+    fn follow(&mut self, current: usize, path: String, kind: AssetKind) -> Result<()> {
+        let tiles = self.udim_tiles(current, &path, kind);
+        if tiles.is_empty() {
+            if let Some((found, _)) = self.add(current, &path, kind)? {
+                self.uses_of(current).insert(path, found);
+            }
+            return Ok(());
+        }
+        let Some((set, new_set)) = self.add(current, &path, AssetKind::Tiles)? else {
+            return Ok(());
+        };
+        let mut found_tiles = Vec::with_capacity(tiles.len());
+        for (number, tile) in tiles {
+            let Some((found, added)) = self.add(current, &tile, AssetKind::Asset)? else {
+                continue;
+            };
+            if added
+                && matches!(self.sources[found.source].content, Content::Asset(_))
+                && matches!(self.sources[found.source].placement, Placement::Named { .. })
+            {
+                self.sources[found.source].placement = Placement::Tile { of: set.source, number };
+            }
+            found_tiles.push((number, found.source));
+        }
+        if new_set && let Content::Tiles(tiles) = &mut self.sources[set.source].content {
+            *tiles = found_tiles;
+        }
+        self.uses_of(current).insert(path, set);
+        Ok(())
+    }
+
+    /// [`find_or_add`](Self::find_or_add), with whether it added the source,
+    /// queueing a layer it adds.
+    fn add(&mut self, current: usize, path: &str, kind: AssetKind) -> Result<Option<(Use, bool)>> {
+        let before = self.sources.len();
+        let Some(found) = self.find_or_add(current, path, kind)? else {
+            return Ok(None);
+        };
+        let added = self.sources.len() > before;
+        if added && self.sources[found.source].is_layer() {
+            self.queue.push_back(found.source);
+        }
+        Ok(Some((found, added)))
+    }
+
+    /// The tiles `path`, authored in the layer source `referrer` as `kind`,
+    /// names: for an asset path with a UDIM pattern, the number and authored
+    /// path of each tile found where the first one resolves (C++
+    /// `_GetUdimTiles`); empty for any other path, and where none resolves.
+    /// A set found before, through another layer, keeps its tiles. Only a
+    /// path of asset kind is expanded; C++ expands any asset value's path, a
+    /// layer-named one included, and neither expands an arc's.
+    ///
+    /// TODO(perf): `find_or_add` resolves each tile again; carrying the
+    /// tile's resolved path into its asset branch would spare that, the
+    /// identifier still being made as the key.
+    fn udim_tiles(&self, referrer: usize, path: &str, kind: AssetKind) -> Vec<(u16, String)> {
+        if kind != AssetKind::Asset {
+            return Vec::new();
+        }
+        let Some(udim) = ar::UdimPath::parse(path) else {
+            return Vec::new();
+        };
+        let registry = self.graph.layer_registry();
+        let anchor = self.sources[referrer].content.anchor();
+        let numbers: Vec<u16> = if let Some(&set) = self.index.get(&registry.create_identifier(path, anchor.as_ref())) {
+            let Content::Tiles(tiles) = &self.sources[set].content else {
+                return Vec::new();
+            };
+            tiles.iter().map(|(number, _)| *number).collect()
+        } else {
+            let resolver: &dyn ar::Resolver = registry;
+            let Some(resolved) = udim
+                .resolve(resolver, anchor.as_ref())
+                .and_then(|resolved| ar::UdimPath::parse(&resolved))
+            else {
+                return Vec::new();
+            };
+            resolved
+                .resolve_tiles(resolver, None)
+                .into_iter()
+                .map(|tile| tile.number)
+                .collect()
+        };
+        numbers.into_iter().map(|number| (number, udim.tile(number))).collect()
+    }
+
     /// The paths the layer source `current` authors, each once, with what it
     /// names: every path, or only the ones that add an opinion.
     fn authored_in(&self, current: usize) -> Result<Vec<(String, AssetKind)>> {
@@ -326,7 +423,7 @@ impl<'a> Discoverer<'a> {
     fn uses_of(&mut self, current: usize) -> &mut HashMap<String, Use> {
         match &mut self.sources[current].content {
             Content::Layer { uses, .. } => uses,
-            Content::Package { .. } | Content::Asset(_) => unreachable!("only a layer is walked"),
+            Content::Package { .. } | Content::Asset(_) | Content::Tiles(_) => unreachable!("only a layer is walked"),
         }
     }
 
@@ -357,12 +454,18 @@ impl<'a> Discoverer<'a> {
                     packaged,
                 }));
             }
-            let Some(resolved) = registry.resolve(&target) else {
+            // A set of tiles resolves through its tiles, not itself.
+            let resolved = if kind == AssetKind::Tiles {
+                None
+            } else if let Some(resolved) = registry.resolve(&target) {
+                Some(resolved)
+            } else {
                 self.record_unresolved(target, kind);
                 return Ok(None);
             };
             // An entry the stage holds no layer in, copied as it is; a package
-            // nested there has nothing live inside it.
+            // nested there has nothing live inside it, a set of tiles in it
+            // included.
             let content = if packaged.is_some() || AssetKind::of(name, false) == AssetKind::Package {
                 Content::Package {
                     resolved: ar::ResolvedPath::new(&identifier),
@@ -371,8 +474,10 @@ impl<'a> Discoverer<'a> {
                         unresolved: Vec::new(),
                     },
                 }
-            } else {
+            } else if let Some(resolved) = resolved {
                 Content::Asset(resolved)
+            } else {
+                Content::Tiles(Vec::new())
             };
             let index = self.sources.len();
             self.index.insert(identifier.clone(), index);
@@ -388,7 +493,8 @@ impl<'a> Discoverer<'a> {
         }
         let (identifier, to_source, kind, packaged) = match ar::split_package_relative_path_outer(path) {
             Some((package, inner)) if !self.policy.open_packages => {
-                if registry.resolve(&target).is_none() {
+                // A set of tiles resolves through its tiles, not itself.
+                if kind != AssetKind::Tiles && registry.resolve(&target).is_none() {
                     self.record_unresolved(target, kind);
                     return Ok(None);
                 }
@@ -410,6 +516,7 @@ impl<'a> Discoverer<'a> {
             }));
         }
         let content = match kind {
+            AssetKind::Tiles => Content::Tiles(Vec::new()),
             AssetKind::Layer => {
                 let Some(layer) = SourceLayer::open(self.graph, &identifier)? else {
                     self.record_unresolved(identifier, kind);
@@ -462,6 +569,12 @@ impl<'a> Discoverer<'a> {
 impl Source<'_> {
     fn is_layer(&self) -> bool {
         matches!(self.content, Content::Layer { .. })
+    }
+
+    /// Whether the source is stored as an entry of its own: a set of tiles is
+    /// not, its tiles are.
+    pub(super) fn stored(&self) -> bool {
+        !matches!(self.content, Content::Tiles(_))
     }
 }
 
@@ -772,27 +885,47 @@ def "N" (
         Ok(())
     }
 
-    /// Paths that need expanding or evaluating before they can be followed
-    /// are refused, naming the path.
+    /// A variable expression is refused, naming the path.
     #[test]
-    fn expansions_are_unsupported() -> Result<()> {
+    fn expressions_are_unsupported() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        for (body, kind) in [
-            ("asset t = @./tex.<UDIM>.png@", "UDIM pattern"),
-            ("asset t = @`\"./${NAME}.png\"`@", "variable expression"),
-        ] {
-            write(
-                dir.path(),
-                "root.usda",
-                &format!("#usda 1.0\ndef \"A\" {{\n    {body}\n}}\n"),
-            );
-            let (root, stage) = open(dir.path(), "root.usda")?;
-            let error = all_dependencies(&stage, &root).unwrap_err();
-            assert!(
-                matches!(&error, Error::Dependency(DependencyError::Unsupported { kind: k, .. }) if *k == kind),
-                "{error}"
-            );
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset t = @`\"./${NAME}.png\"`@\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        let error = all_dependencies(&stage, &root).unwrap_err();
+        assert!(
+            matches!(&error, Error::Dependency(DependencyError::Unsupported { kind, .. }) if *kind == "variable expression"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    /// A UDIM path names the tiles found beside it, within the tile range;
+    /// one with no tiles is unresolved as authored.
+    #[test]
+    fn udim_tiles_are_dependencies() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "scene/root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset t = @./tex.<UDIM>.png@\n    asset m = @./missing.<UDIM>.png@\n}\n",
+        );
+        for name in ["tex.1001.png", "tex.1002.png", "tex.1101.png"] {
+            write(dir.path(), &format!("scene/{name}"), "PNG");
         }
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let dependencies = all_dependencies(&stage, &root)?;
+        assert_eq!(
+            relative(dir.path(), &dependencies.assets),
+            ["scene/tex.1001.png", "scene/tex.1002.png"]
+        );
+        assert_eq!(
+            relative(dir.path(), &dependencies.unresolved),
+            ["scene/missing.<UDIM>.png"]
+        );
         Ok(())
     }
 }
