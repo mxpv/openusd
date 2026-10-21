@@ -709,9 +709,10 @@ fn constructors(class: &RustClass) -> TokenStream {
     }
 }
 
-/// Reading an instance back out of one of its property paths, which only a
-/// multiple-apply schema's properties carry (C++ `IsSchemaPropertyBaseName`
-/// and `Is<Name>Path`).
+/// The name tests of a multiple-apply view: whether a property name is its
+/// own, and reading an instance back out of one of its property paths, which
+/// only a multiple-apply schema's properties carry (C++
+/// `CanContainPropertyName`, `IsSchemaPropertyBaseName` and `Is<Name>Path`).
 ///
 /// A property of an instance is `<prefix>:<instance name>:<base name>`, so
 /// what remains between the prefix and a name the schema declares is the
@@ -720,6 +721,15 @@ fn constructors(class: &RustClass) -> TokenStream {
 fn decoding(instancing: &Instancing) -> TokenStream {
     let Instancing { prefix, base_names } = instancing;
     quote! {
+        /// Whether this schema owns the property named `name`: its namespace
+        /// prefix, or a name under it. A C++ `CanContainPropertyName`, where
+        /// a schema declares one, accepts any name starting with the prefix,
+        /// a longer identifier included.
+        pub fn owns_property(name: &str) -> bool {
+            name.strip_prefix(#prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        }
+
         /// Whether `base_name` is one of the property names this schema
         /// declares, which an instance name may therefore not end with.
         pub fn is_property_base_name(base_name: &str) -> bool {

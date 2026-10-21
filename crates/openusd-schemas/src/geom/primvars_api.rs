@@ -106,7 +106,7 @@ impl PrimvarsAPI {
     /// Whether a property named `name` belongs to this schema: one in the
     /// `primvars:` namespace, a primvar's indices included (C++
     /// `CanContainPropertyName`).
-    pub fn can_contain_property_name(name: &str) -> bool {
+    pub fn owns_property(name: &str) -> bool {
         name.starts_with(PRIMVARS_NAMESPACE)
     }
 
@@ -531,7 +531,7 @@ impl<'a> PrimvarBuilder<'a> {
 /// already in the `primvars:` namespace, else the name put in it (C++
 /// `UsdGeomPrimvar::_MakeNamespaced`).
 fn attribute_name(name: &str) -> Result<Cow<'_, str>, SchemaError> {
-    let namespaced = match PrimvarsAPI::can_contain_property_name(name) {
+    let namespaced = match PrimvarsAPI::owns_property(name) {
         true => Cow::Borrowed(name),
         false => Cow::Owned(format!("{PRIMVARS_NAMESPACE}{name}")),
     };

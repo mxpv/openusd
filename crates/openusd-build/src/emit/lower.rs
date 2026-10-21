@@ -1399,6 +1399,7 @@ const VIEW_METHODS: &[&str] = &[
     "can_apply",
     "name",
     "all",
+    "owns_property",
     "instance_at_path",
     "is_property_base_name",
 ];

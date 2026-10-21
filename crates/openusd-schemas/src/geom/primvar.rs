@@ -636,8 +636,8 @@ mod tests {
             "skel:jointWeights"
         );
         assert_eq!(Primvar::strip_primvars_name("points"), "points");
-        assert!(PrimvarsAPI::can_contain_property_name("primvars:st:indices"));
-        assert!(!PrimvarsAPI::can_contain_property_name("st"));
+        assert!(PrimvarsAPI::owns_property("primvars:st:indices"));
+        assert!(!PrimvarsAPI::owns_property("st"));
 
         let weights = mesh()?.create_primvar("skel:jointWeights", "float[]")?;
         assert_eq!(weights.attribute().name(), "primvars:skel:jointWeights");

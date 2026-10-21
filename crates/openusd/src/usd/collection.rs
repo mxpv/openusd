@@ -718,6 +718,14 @@ mod tests {
     }
 
     #[test]
+    fn property_ownership() {
+        assert!(CollectionAPI::owns_property("collection:render:includes"));
+        assert!(CollectionAPI::owns_property("collection"));
+        assert!(!CollectionAPI::owns_property("collectionX"));
+        assert!(!CollectionAPI::owns_property("xformOp:translate"));
+    }
+
+    #[test]
     fn decodes_collection_paths() -> Result<()> {
         let decode = |path: &str| -> Result<Option<(Path, String)>> {
             Ok(CollectionAPI::instance_at_path(&sdf::path(path)?).map(|(prim, name)| (prim, name.to_string())))

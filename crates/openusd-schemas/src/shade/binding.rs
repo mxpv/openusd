@@ -42,7 +42,7 @@ impl MaterialBindingAPI {
     /// Whether `name` is a property this schema owns: `material:binding` or a
     /// name namespaced under it. C++ `CanContainPropertyName` accepts any
     /// name starting with `material:binding`, `material:bindingX` included.
-    pub fn can_contain_property_name(name: &str) -> bool {
+    pub fn owns_property(name: &str) -> bool {
         name.strip_prefix(MATERIAL_BINDING)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
     }
@@ -166,7 +166,7 @@ impl MaterialBindingAPI {
     /// (C++ `UnbindAllBindings`).
     pub fn unbind_all(&self) -> Result<&Self> {
         for rel in self.relationships()? {
-            if Self::can_contain_property_name(rel.name()) {
+            if Self::owns_property(rel.name()) {
                 rel.set_targets([] as [Path; 0])?;
             }
         }
@@ -781,17 +781,11 @@ mod tests {
 
     #[test]
     fn property_name_ownership() {
-        assert!(MaterialBindingAPI::can_contain_property_name("material:binding"));
-        assert!(MaterialBindingAPI::can_contain_property_name(
-            "material:binding:preview"
-        ));
-        assert!(MaterialBindingAPI::can_contain_property_name(
-            "material:binding:collection:full:x"
-        ));
-        assert!(!MaterialBindingAPI::can_contain_property_name(
-            "material:bindingStrength"
-        ));
-        assert!(!MaterialBindingAPI::can_contain_property_name("material"));
+        assert!(MaterialBindingAPI::owns_property("material:binding"));
+        assert!(MaterialBindingAPI::owns_property("material:binding:preview"));
+        assert!(MaterialBindingAPI::owns_property("material:binding:collection:full:x"));
+        assert!(!MaterialBindingAPI::owns_property("material:bindingStrength"));
+        assert!(!MaterialBindingAPI::owns_property("material"));
         assert_eq!(MATERIAL_PURPOSES, ["", "preview", "full"]);
 
         assert_eq!(binding_purpose("material:binding"), "");

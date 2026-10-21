@@ -730,6 +730,14 @@ impl ColorSpaceDefinitionAPI {
                     .collect()
             })
     }
+    /// Whether this schema owns the property named `name`: its namespace
+    /// prefix, or a name under it. A C++ `CanContainPropertyName`, where
+    /// a schema declares one, accepts any name starting with the prefix,
+    /// a longer identifier included.
+    pub fn owns_property(name: &str) -> bool {
+        name.strip_prefix("colorSpaceDefinition")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+    }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.
     pub fn is_property_base_name(base_name: &str) -> bool {
@@ -1308,6 +1316,14 @@ impl CollectionAPI {
                     .map(|name| Self::from_prim_unchecked(prim.clone(), name))
                     .collect()
             })
+    }
+    /// Whether this schema owns the property named `name`: its namespace
+    /// prefix, or a name under it. A C++ `CanContainPropertyName`, where
+    /// a schema declares one, accepts any name starting with the prefix,
+    /// a longer identifier included.
+    pub fn owns_property(name: &str) -> bool {
+        name.strip_prefix("collection")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
     }
     /// Whether `base_name` is one of the property names this schema
     /// declares, which an instance name may therefore not end with.
