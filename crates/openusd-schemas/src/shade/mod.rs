@@ -14,7 +14,8 @@
 //!  │  └ NodeGraphInterface (interface-input consumer maps)
 //!  │     ├ NodeGraph       (typed; a shading-network container)
 //!  │     └ Material        (typed; surface / displacement / volume terminals)
-//!  └ MaterialBindingAPI (single-apply; direct + collection bindings)
+//!  ├ MaterialBindingAPI (single-apply; direct + collection bindings)
+//!  └ CoordSysAPI        (multiple-apply; named coordinate systems)
 //! ```
 //!
 //! [`Connectable`] is the shared `inputs:` / `outputs:` surface (C++
@@ -32,6 +33,9 @@
 //! [`MaterialBindingAPI::resolve_binding`] is material resolution over a prim
 //! and its ancestors, answering the [`ResolvedBinding`] that wins among the
 //! [`DirectBinding`]s and [`CollectionBinding`]s they carry.
+//! [`CoordSysAPI::resolve_bindings`] answers the coordinate systems in force
+//! at a prim, the nearest binding of each name among the prim and its
+//! ancestors, as [`CoordSysBinding`]s over a [`CoordSysCache`].
 //! [`Shader::implementation_source`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
 //! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
@@ -72,6 +76,7 @@ pub mod nodes;
 
 mod binding;
 mod connectable;
+mod coord_sys;
 mod input;
 mod interface;
 mod material;
@@ -89,6 +94,7 @@ pub use connectable::{
     AttributeType, ConnectedSources, ConnectionSource, ConnectionTarget, ShadingAttribute, base_name,
     base_name_and_type,
 };
+pub use coord_sys::{CoordSysBinding, CoordSysCache};
 pub use input::Input;
 pub use interface::{InterfaceInputConsumersMap, NodeGraphInterface};
 pub use material::{ResolvedTerminal, TerminalKind, TerminalSource};
