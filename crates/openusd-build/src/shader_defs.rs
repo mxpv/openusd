@@ -103,7 +103,7 @@ pub fn read(builder: &Builder, name: &str, path: &Path) -> Result<NodeLibrary, E
                 base_name: base_name.to_owned(),
                 type_name,
                 fallback: stage.field::<sdf::Value>(attr.path(), sdf::FieldKey::Default)?,
-                documentation: attr.metadata::<String>(sdf::FieldKey::Documentation.as_str())?,
+                documentation: attr.doc()?,
                 allowed_tokens: model::allowed_tokens(
                     attr.metadata::<sdf::Value>(sdf::FieldKey::AllowedTokens.as_str())?
                         .as_ref(),
@@ -113,7 +113,7 @@ pub fn read(builder: &Builder, name: &str, path: &Path) -> Result<NodeLibrary, E
         }
 
         nodes.push(Node {
-            documentation: prim.metadata::<String>(sdf::FieldKey::Documentation.as_str())?,
+            documentation: prim.doc()?,
             prim_name,
             id,
             inputs,

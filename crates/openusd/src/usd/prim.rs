@@ -297,6 +297,26 @@ impl Prim {
         self.update_metadata(key, |_| None)
     }
 
+    /// The composed `doc` field of this prim, `None` where neither a layer
+    /// nor its schema declaration carries one (C++
+    /// `UsdObject::GetDocumentation`). A registry `openusd-build` builds
+    /// drops declaration docs, which its generated views carry.
+    pub fn doc(&self) -> Result<Option<String>> {
+        self.metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
+    /// Author this prim's `doc` field on the edit target (C++
+    /// `UsdObject::SetDocumentation`).
+    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()))
+    }
+
+    /// Drop the local `doc` opinion (C++
+    /// `UsdObject::ClearDocumentation`).
+    pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
     /// Read-modify-write a prim-level metadata field on the edit-target layer.
     /// `f` receives the field's current opinion on that layer (`None` when it
     /// is unauthored locally) and returns the value to author, or `None` to
@@ -2814,6 +2834,18 @@ mod tests {
             .prim("/")?
             .set_metadata("documentation", sdf::Value::String("x".into()));
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn doc_round_trip() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?;
+        assert_eq!(prim.doc()?, None);
+        let prim = prim.set_doc("The world.")?;
+        assert_eq!(prim.doc()?.as_deref(), Some("The world."));
+        let prim = prim.clear_doc()?;
+        assert_eq!(prim.doc()?, None);
         Ok(())
     }
 }

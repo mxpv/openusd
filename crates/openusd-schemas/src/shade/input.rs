@@ -5,7 +5,7 @@ use openusd::Result;
 use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
-use super::tokens::INPUTS;
+use super::tokens::{CONNECTABILITY, INPUTS};
 use super::{Connectability, ConnectionTarget, ShadingAttribute};
 
 /// A UsdShade input backed by an `inputs:<base>` USD attribute
@@ -28,18 +28,34 @@ impl Input {
     pub fn connectability(&self) -> Result<Connectability> {
         Ok(self
             .attribute
-            .metadata::<Connectability>(super::tokens::CONNECTABILITY)?
+            .metadata::<Connectability>(CONNECTABILITY)?
             .unwrap_or_default())
     }
 
     /// Author this input's `connectability` metadata
     /// (C++ `UsdShadeInput::SetConnectability`).
     pub fn set_connectability(self, connectability: Connectability) -> Result<Self, usd::StageAuthoringError> {
-        Ok(Self {
-            attribute: self
-                .attribute
-                .set_metadata(super::tokens::CONNECTABILITY, connectability)?,
-        })
+        self.attribute
+            .set_metadata(CONNECTABILITY, connectability)
+            .map(Self::new)
+    }
+
+    /// Drop this input's local `connectability` opinion
+    /// (C++ `UsdShadeInput::ClearConnectability`).
+    pub fn clear_connectability(self) -> Result<Self, usd::StageAuthoringError> {
+        self.attribute.clear_metadata(CONNECTABILITY).map(Self::new)
+    }
+
+    /// Author this input's `doc` field (C++
+    /// `UsdShadeInput::SetDocumentation`).
+    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, usd::StageAuthoringError> {
+        self.attribute.set_doc(doc).map(Self::new)
+    }
+
+    /// Author this input's `displayGroup` (C++
+    /// `UsdShadeInput::SetDisplayGroup`).
+    pub fn set_display_group(self, display_group: impl Into<String>) -> Result<Self, usd::StageAuthoringError> {
+        self.attribute.set_display_group(display_group).map(Self::new)
     }
 }
 
@@ -59,7 +75,7 @@ impl ConnectionTarget for Input {
 mod tests {
     use openusd::Result;
 
-    use crate::shade::{Connectable, Shader};
+    use crate::shade::{Connectability, Connectable, NodeGraph, Shader};
 
     #[test]
     fn invalid_base_name_reads_empty() -> Result<()> {
@@ -73,6 +89,91 @@ mod tests {
         assert_eq!(input.base_name(), "");
         assert_eq!(input.get::<f32>()?, None);
         assert!(input.connected_sources()?.sources().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn single_source_queries() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let tex = NodeGraph::define(&stage, "/Mat/Tex")?;
+        let rgb = tex.create_output("rgb", "float3")?;
+        let surface = Shader::define(&stage, "/Mat/Surface")?;
+        let color = surface.create_input("diffuseColor", "color3f")?;
+        assert!(!color.has_connected_source()?);
+        assert!(color.connected_source()?.is_none());
+
+        let color = color.connect_to(&rgb)?;
+        assert!(color.has_connected_source()?);
+        let source = color.connected_source()?.expect("connected");
+        assert_eq!(source.path().as_str(), "/Mat/Tex.outputs:rgb");
+
+        assert!(color.disconnect_source(&rgb)?);
+        assert!(!color.disconnect_source(&rgb)?, "already removed");
+        assert!(!color.has_connected_source()?);
+        Ok(())
+    }
+
+    /// Disconnecting blocks a weaker layer's connection; clearing the sources
+    /// lets it compose again.
+    #[test]
+    fn disconnect_and_clear_sources() -> Result<()> {
+        let (_dir, stage) = crate::tests::layered(&[(
+            "weak.usda",
+            r#"
+def Material "Mat" {
+    def Shader "Tex" { float3 outputs:rgb }
+    def Shader "Surface" {
+        color3f inputs:diffuseColor.connect = </Mat/Tex.outputs:rgb>
+    }
+}
+"#,
+        )])?;
+        let surface = Shader::get(&stage, "/Mat/Surface")?.expect("a Shader");
+        let color = surface.input("diffuseColor");
+        assert!(color.has_connected_source()?);
+
+        let color = color.disconnect()?;
+        assert!(color.connections()?.is_empty());
+
+        let color = color.clear_sources()?;
+        assert_eq!(
+            color.connected_source()?.expect("the weaker layer's").path().as_str(),
+            "/Mat/Tex.outputs:rgb"
+        );
+
+        // Removing the one source deletes it on the edit target, which the
+        // weaker layer's opinion does not survive.
+        let rgb = Shader::get(&stage, "/Mat/Tex")?.expect("a Shader").output("rgb");
+        assert!(color.disconnect_source(&rgb)?);
+        assert!(!color.has_connected_source()?);
+        Ok(())
+    }
+
+    #[test]
+    fn connectability_cleared() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let shader = Shader::define(&stage, "/Surface")?;
+        let input = shader
+            .create_input("scale", "float")?
+            .set_connectability(Connectability::InterfaceOnly)?;
+        assert_eq!(input.connectability()?, Connectability::InterfaceOnly);
+        let input = input.clear_connectability()?;
+        assert_eq!(input.connectability()?, Connectability::Full);
+        Ok(())
+    }
+
+    /// The setters keep the input view; the reads come through the attribute.
+    #[test]
+    fn doc_and_display_group() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let shader = Shader::define(&stage, "/Surface")?;
+        let input = shader
+            .create_input("scale", "float")?
+            .set_doc("Scales the result.")?
+            .set_display_group("Basic")?;
+        assert_eq!(input.doc()?.as_deref(), Some("Scales the result."));
+        assert_eq!(input.display_group()?.as_deref(), Some("Basic"));
+        assert_eq!(input.base_name(), "scale");
         Ok(())
     }
 }

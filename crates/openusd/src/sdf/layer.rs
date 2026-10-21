@@ -2339,7 +2339,7 @@ mod tests {
         edit_layer(&mut layer, |e| {
             let mut root = e.pseudo_root_mut().expect("writable");
             root.set_default_prim("World");
-            root.set_documentation("auto-generated");
+            root.set_doc("auto-generated");
             root.set_start_time_code(1.0);
             root.set_end_time_code(24.0);
             root.add_sublayer("./over.usda");
@@ -2347,7 +2347,7 @@ mod tests {
         });
         let root = layer.pseudo_root().expect("present");
         assert_eq!(root.default_prim().as_deref(), Some("World"));
-        assert_eq!(root.documentation().as_deref(), Some("auto-generated"));
+        assert_eq!(root.doc().as_deref(), Some("auto-generated"));
         assert_eq!(root.start_time_code(), Some(1.0));
         assert_eq!(root.end_time_code(), Some(24.0));
         assert_eq!(

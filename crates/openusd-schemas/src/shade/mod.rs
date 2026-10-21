@@ -148,9 +148,7 @@ macro_rules! impl_shading_attribute {
                 self,
                 value: impl Into<$crate::openusd::sdf::Value>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: self.attribute.set(value)?,
-                })
+                self.attribute.set(value).map(Self::new)
             }
 
             /// Author this attribute's value at a numeric time code.
@@ -159,9 +157,7 @@ macro_rules! impl_shading_attribute {
                 value: impl Into<$crate::openusd::sdf::Value>,
                 time: impl Into<Option<$crate::openusd::usd::TimeCode>>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: self.attribute.set_at(value, time)?,
-                })
+                self.attribute.set_at(value, time).map(Self::new)
             }
 
             /// Replace this attribute's composed connection source paths.
@@ -169,9 +165,7 @@ macro_rules! impl_shading_attribute {
                 self,
                 targets: impl IntoIterator<Item: $crate::openusd::sdf::IntoPath>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: self.attribute.set_connections(targets)?,
-                })
+                self.attribute.set_connections(targets).map(Self::new)
             }
 
             /// Connect this attribute to `source`, replacing existing
@@ -190,6 +184,49 @@ macro_rules! impl_shading_attribute {
                 self.set_connections([source.target_path().clone()])
             }
 
+            /// The first valid connection source, the one a single-connection
+            /// attribute has (C++ `GetConnectedSource`). Any further source is
+            /// dropped without diagnostic; a multi-connection reads through
+            /// [`connected_sources`](Self::connected_sources).
+            ///
+            /// TODO(perf): this and
+            /// [`has_connected_source`](Self::has_connected_source) resolve
+            /// every connection; stopping at the first valid source would
+            /// answer both sooner.
+            pub fn connected_source(&self) -> $crate::openusd::Result<Option<$crate::shade::ConnectionSource>> {
+                Ok(self.connected_sources()?.into_sources().into_iter().next())
+            }
+
+            /// Whether a valid connection source is composed (C++
+            /// `HasConnectedSource`).
+            pub fn has_connected_source(&self) -> $crate::openusd::Result<bool> {
+                Ok(!self.connected_sources()?.sources().is_empty())
+            }
+
+            /// Block every connection with an explicit empty connection list
+            /// on the edit target, which hides the sources weaker layers
+            /// author (C++ `DisconnectSource` given no source).
+            pub fn disconnect(self) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
+                self.set_connections([] as [$crate::openusd::sdf::Path; 0])
+            }
+
+            /// Remove the connection to `source` (C++ `DisconnectSource` given
+            /// a source): `true` where the composed list held it. The edit
+            /// target records a delete of the path. That delete also removes a
+            /// connection a weaker layer authors.
+            pub fn disconnect_source(
+                &self,
+                source: &impl $crate::shade::ConnectionTarget,
+            ) -> Result<bool, $crate::openusd::usd::StageAuthoringError> {
+                self.attribute.remove_connection(source.target_path())
+            }
+
+            /// Drop the edit target's connection opinion (C++ `ClearSources`).
+            /// The sources weaker layers author compose again.
+            pub fn clear_sources(self) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
+                self.attribute.clear_connections().map(Self::new)
+            }
+
             /// The renderer-specific `renderType` hint, when authored.
             pub fn render_type(&self) -> $crate::openusd::Result<Option<$crate::openusd::tf::Token>> {
                 $crate::shade::AttributeMetadata::render_type(&self.attribute)
@@ -200,9 +237,7 @@ macro_rules! impl_shading_attribute {
                 self,
                 render_type: impl Into<$crate::openusd::tf::Token>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: $crate::shade::AttributeMetadata::set_render_type(self.attribute, render_type.into())?,
-                })
+                $crate::shade::AttributeMetadata::set_render_type(self.attribute, render_type.into()).map(Self::new)
             }
 
             /// The composed `sdrMetadata` dictionary on this shading attribute.
@@ -243,9 +278,7 @@ macro_rules! impl_shading_attribute {
                 self,
                 metadata: &$crate::shade::SdrMetadata,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: $crate::shade::node_def::set_attribute_sdr_metadata(self.attribute, metadata)?,
-                })
+                $crate::shade::node_def::set_attribute_sdr_metadata(self.attribute, metadata).map(Self::new)
             }
 
             /// Author one `sdrMetadata` entry on this shading attribute
@@ -255,23 +288,16 @@ macro_rules! impl_shading_attribute {
                 key: impl Into<String>,
                 value: impl Into<String>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: $crate::shade::node_def::set_attribute_sdr_metadata_by_key(
-                        self.attribute,
-                        key.into(),
-                        value.into(),
-                    )?,
-                })
+                $crate::shade::node_def::set_attribute_sdr_metadata_by_key(self.attribute, key.into(), value.into())
+                    .map(Self::new)
             }
 
             /// Drop this shading attribute's whole `sdrMetadata` opinion on the
             /// edit-target layer (C++ `ClearSdrMetadata`).
             pub fn clear_sdr_metadata(self) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: self
-                        .attribute
-                        .clear_metadata($crate::shade::tokens::SDR_METADATA)?,
-                })
+                self.attribute
+                    .clear_metadata($crate::shade::tokens::SDR_METADATA)
+                    .map(Self::new)
             }
 
             /// Drop one `sdrMetadata` entry from this shading attribute's
@@ -280,12 +306,8 @@ macro_rules! impl_shading_attribute {
                 self,
                 key: impl AsRef<str>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                Ok(Self {
-                    attribute: $crate::shade::node_def::clear_attribute_sdr_metadata_by_key(
-                        self.attribute,
-                        key.as_ref(),
-                    )?,
-                })
+                $crate::shade::node_def::clear_attribute_sdr_metadata_by_key(self.attribute, key.as_ref())
+                    .map(Self::new)
             }
 
             /// Valid and invalid upstream connection sources, in composed order
@@ -311,7 +333,8 @@ macro_rules! impl_shading_attribute {
             }
 
             /// Wrap `attribute` without checking its namespace, for the
-            /// accessors that build the name themselves.
+            /// accessors that build the name themselves and the setters that
+            /// hand the same attribute back.
             pub(super) fn new(attribute: $crate::openusd::usd::Attribute) -> Self {
                 Self { attribute }
             }

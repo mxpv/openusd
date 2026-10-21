@@ -580,8 +580,8 @@ where
         self.get(sdf::FieldKey::LayerRelocates)
     }
 
-    /// Layer documentation string.
-    pub fn documentation(&self) -> Option<String> {
+    /// The layer's `doc` field.
+    pub fn doc(&self) -> Option<String> {
         self.get(sdf::FieldKey::Documentation)
     }
 
@@ -729,8 +729,8 @@ where
         offsets
     }
 
-    /// Set the layer documentation string.
-    pub fn set_documentation(&mut self, doc: impl Into<String>) {
+    /// Set the layer's `doc` field.
+    pub fn set_doc(&mut self, doc: impl Into<String>) {
         self.set(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()));
     }
 

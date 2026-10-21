@@ -272,8 +272,9 @@ pub(super) fn is_container(prim: &usd::Prim) -> Result<bool> {
 }
 
 /// The authored `inputs:` attributes of `prim` in composed property order —
-/// the collection behind [`Connectable::inputs`](super::Connectable::inputs)
-/// and the interface-consumer walk.
+/// the collection behind
+/// [`Connectable::authored_inputs`](super::Connectable::authored_inputs) and
+/// the interface-consumer walk.
 pub(super) fn authored_inputs(prim: &usd::Prim) -> Result<Vec<Input>> {
     Ok(prim
         .authored_attributes_in_namespace(INPUTS)?

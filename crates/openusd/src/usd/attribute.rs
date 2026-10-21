@@ -487,6 +487,48 @@ impl Attribute {
         })
     }
 
+    /// The composed `doc` field of this attribute, `None` where neither a
+    /// layer nor the prim's schema declaration carries one (C++
+    /// `UsdObject::GetDocumentation`). A registry `openusd-build` builds
+    /// drops declaration docs, which its generated views carry.
+    pub fn doc(&self) -> Result<Option<String>> {
+        self.metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
+    /// Author this attribute's `doc` field on the edit target (C++
+    /// `UsdObject::SetDocumentation`).
+    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()))
+    }
+
+    /// Drop the local `doc` opinion (C++
+    /// `UsdObject::ClearDocumentation`).
+    pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
+    /// The composed `displayGroup` of this attribute, `None` where none is
+    /// authored or declared (C++ `UsdProperty::GetDisplayGroup`). Nested
+    /// groups are `:`-joined.
+    pub fn display_group(&self) -> Result<Option<String>> {
+        self.metadata(sdf::FieldKey::DisplayGroup.as_str())
+    }
+
+    /// Author this attribute's `displayGroup` on the edit target (C++
+    /// `UsdProperty::SetDisplayGroup`).
+    pub fn set_display_group(self, display_group: impl Into<String>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata(
+            sdf::FieldKey::DisplayGroup.as_str(),
+            sdf::Value::String(display_group.into()),
+        )
+    }
+
+    /// Drop the local `displayGroup` opinion (C++
+    /// `UsdProperty::ClearDisplayGroup`).
+    pub fn clear_display_group(self) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata(sdf::FieldKey::DisplayGroup.as_str())
+    }
+
     /// Read-modify-write a metadata field on the attribute's spec at the edit
     /// target. `f` receives the field's current opinion on that layer (`None`
     /// when it is unauthored locally) and returns the value to author, or
@@ -4916,6 +4958,60 @@ def \"P\" (
             ),
             "{error:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn doc_and_display_group() -> Result<()> {
+        let stage = schema_stage()?;
+        let attr = stage.define_prim("/P")?.create_attribute("radius", "float")?;
+        assert_eq!(attr.doc()?, None);
+        assert_eq!(attr.display_group()?, None);
+
+        let attr = attr.set_doc("The radius.")?.set_display_group("Shape:Size")?;
+        assert_eq!(attr.doc()?.as_deref(), Some("The radius."));
+        assert_eq!(attr.display_group()?.as_deref(), Some("Shape:Size"));
+
+        let attr = attr.clear_doc()?.clear_display_group()?;
+        assert_eq!(attr.doc()?, None);
+        assert_eq!(attr.display_group()?, None);
+        Ok(())
+    }
+
+    /// A declaration's doc and display group read through a registry that
+    /// carries them, under any authored opinion.
+    #[test]
+    fn declared_doc_and_display_group() -> Result<()> {
+        const MANIFEST: &str = r#"#usda 1.0
+def "Thing"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        const SCHEMATICS: &str = r#"#usda 1.0
+class Thing "Thing" (
+    documentation = "a thing"
+)
+{
+    float radius = 1 (
+        documentation = "the radius"
+        displayGroup = "Shape"
+    )
+}
+"#;
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_family(MANIFEST, SCHEMATICS))
+            .in_memory("anon.usda")?;
+        let prim = stage.define_prim("/T")?.set_type_name("Thing")?;
+        assert_eq!(prim.doc()?.as_deref(), Some("a thing"));
+        let radius = prim.attribute("radius");
+        assert_eq!(radius.doc()?.as_deref(), Some("the radius"));
+        assert_eq!(radius.display_group()?.as_deref(), Some("Shape"));
+
+        let radius = radius.set_doc("mine")?;
+        assert_eq!(radius.doc()?.as_deref(), Some("mine"));
+        let radius = radius.clear_doc()?;
+        assert_eq!(radius.doc()?.as_deref(), Some("the radius"));
         Ok(())
     }
 }

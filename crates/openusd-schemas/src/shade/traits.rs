@@ -6,6 +6,7 @@ use openusd::sdf;
 use openusd::usd::SchemaBase;
 
 use super::connectable::{authored_inputs, input_name, output_name};
+use super::tokens::{INPUTS, OUTPUTS};
 use super::{Input, Output};
 
 /// The `inputs:` and `outputs:` surface shared by Shader, NodeGraph, and
@@ -30,8 +31,23 @@ pub trait Connectable: SchemaBase {
         ))
     }
 
-    /// The authored inputs in composed property order (C++ `GetInputs`).
+    /// The inputs this prim composes, authored or declared by its schema, in
+    /// the order
+    /// [`Prim::attributes_in_namespace`](openusd::usd::Prim::attributes_in_namespace)
+    /// lists them (C++ `GetInputs` with `onlyAuthored` off).
     fn inputs(&self) -> Result<Vec<Input>> {
+        Ok(self
+            .prim()
+            .attributes_in_namespace(INPUTS)?
+            .into_iter()
+            .map(Input::new)
+            .collect())
+    }
+
+    /// The inputs layers author on this prim, in the order
+    /// [`Prim::authored_attributes_in_namespace`](openusd::usd::Prim::authored_attributes_in_namespace)
+    /// lists them (C++ `GetInputs`).
+    fn authored_inputs(&self) -> Result<Vec<Input>> {
         authored_inputs(self.prim())
     }
 
@@ -51,11 +67,26 @@ pub trait Connectable: SchemaBase {
         ))
     }
 
-    /// The authored outputs in composed property order (C++ `GetOutputs`).
+    /// The outputs this prim composes, authored or declared by its schema, in
+    /// the order
+    /// [`Prim::attributes_in_namespace`](openusd::usd::Prim::attributes_in_namespace)
+    /// lists them (C++ `GetOutputs` with `onlyAuthored` off).
     fn outputs(&self) -> Result<Vec<Output>> {
         Ok(self
             .prim()
-            .authored_attributes_in_namespace(super::tokens::OUTPUTS)?
+            .attributes_in_namespace(OUTPUTS)?
+            .into_iter()
+            .map(Output::new)
+            .collect())
+    }
+
+    /// The outputs layers author on this prim, in the order
+    /// [`Prim::authored_attributes_in_namespace`](openusd::usd::Prim::authored_attributes_in_namespace)
+    /// lists them (C++ `GetOutputs`).
+    fn authored_outputs(&self) -> Result<Vec<Output>> {
+        Ok(self
+            .prim()
+            .authored_attributes_in_namespace(OUTPUTS)?
             .into_iter()
             .map(Output::new)
             .collect())
@@ -67,3 +98,53 @@ pub trait Connectable: SchemaBase {
 impl Connectable for super::Shader {}
 impl Connectable for super::NodeGraph {}
 impl Connectable for super::Material {}
+
+#[cfg(test)]
+mod tests {
+    use openusd::Result;
+
+    use super::Connectable;
+    use crate::shade::{Input, Material, Output, Shader};
+
+    /// The base names of `views`, sorted: the listings interleave authored and
+    /// declared properties in an order of their own.
+    fn names<T>(views: &[T], base_name: impl Fn(&T) -> &str) -> Vec<&str> {
+        let mut names: Vec<&str> = views.iter().map(base_name).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// A Material's schema declares its three terminals, which the composed
+    /// listing carries and the authored one does not until written.
+    #[test]
+    fn declared_outputs() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let material = Material::define(&stage, "/Mat")?;
+        assert_eq!(
+            names(&material.outputs()?, Output::base_name),
+            ["displacement", "surface", "volume"]
+        );
+        assert!(material.authored_outputs()?.is_empty());
+
+        material.create_surface_output()?;
+        assert_eq!(names(&material.authored_outputs()?, Output::base_name), ["surface"]);
+        assert_eq!(material.outputs()?.len(), 3, "an authored terminal is listed once");
+        Ok(())
+    }
+
+    /// A Shader's two listings agree: it declares no inputs.
+    #[test]
+    fn shader_inputs() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let shader = Shader::define(&stage, "/Surface")?;
+        assert!(shader.inputs()?.is_empty());
+        shader.create_input("roughness", "float")?;
+        shader.create_input("metallic", "float")?;
+        assert_eq!(names(&shader.inputs()?, Input::base_name), ["metallic", "roughness"]);
+        assert_eq!(
+            names(&shader.authored_inputs()?, Input::base_name),
+            ["metallic", "roughness"]
+        );
+        Ok(())
+    }
+}

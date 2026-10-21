@@ -365,6 +365,11 @@ fn material_render_context_terminal() -> Result<()> {
 fn terminal_output_enumeration() -> Result<(), SchemaError> {
     let stage = memory()?;
     let material = Material::define(&stage, "/Mat")?;
+    // The schema declares the universal terminals. Each is listed before
+    // anything is authored.
+    assert_eq!(material.surface_outputs()?.len(), 1);
+    assert_eq!(material.surface_outputs()?[0].base_name(), "surface");
+
     material.create_surface_output_for("ri")?;
     material.create_output("surface:preview", "token")?;
     material.create_surface_output_for("mtlx:standard")?;
@@ -378,8 +383,9 @@ fn terminal_output_enumeration() -> Result<(), SchemaError> {
     assert_eq!(names.len(), 3);
     assert!(names.contains(&"ri:surface"));
     assert!(names.contains(&"mtlx:standard:surface"));
-    assert_eq!(material.displacement_outputs()?.len(), 1);
-    assert_eq!(material.volume_outputs()?.len(), 1);
+    // Each lists the declared universal terminal and the one `ri` terminal.
+    assert_eq!(material.displacement_outputs()?.len(), 2);
+    assert_eq!(material.volume_outputs()?.len(), 2);
     assert_eq!(material.surface_output_for("ri")?.full_name(), "outputs:ri:surface");
     assert_eq!(
         material.displacement_output_for("ri")?.full_name(),

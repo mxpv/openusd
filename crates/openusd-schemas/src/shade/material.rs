@@ -234,7 +234,10 @@ impl Material {
         Ok(self.terminal_output(render_context, TerminalKind::Surface))
     }
 
-    /// Every authored surface terminal, with the universal terminal first.
+    /// The surface terminals: the universal one where it is defined, then
+    /// every authored render-context one. Never empty on a typed Material,
+    /// whose schema declares the universal terminal; whether one is wired
+    /// reads through its connections.
     pub fn surface_outputs(&self) -> Result<Vec<Output>> {
         self.terminal_outputs(TerminalKind::Surface)
     }
@@ -268,8 +271,9 @@ impl Material {
         Ok(self.terminal_output(render_context, TerminalKind::Displacement))
     }
 
-    /// Every authored displacement terminal, with the universal terminal
-    /// first.
+    /// The displacement terminals: the universal one where it is defined, then
+    /// every authored render-context one. Never empty on a typed Material,
+    /// whose schema declares the universal terminal.
     pub fn displacement_outputs(&self) -> Result<Vec<Output>> {
         self.terminal_outputs(TerminalKind::Displacement)
     }
@@ -303,7 +307,9 @@ impl Material {
         Ok(self.terminal_output(render_context, TerminalKind::Volume))
     }
 
-    /// Every authored volume terminal, with the universal terminal first.
+    /// The volume terminals: the universal one where it is defined, then every
+    /// authored render-context one. Never empty on a typed Material, whose
+    /// schema declares the universal terminal.
     pub fn volume_outputs(&self) -> Result<Vec<Output>> {
         self.terminal_outputs(TerminalKind::Volume)
     }
@@ -396,21 +402,25 @@ impl Material {
         Output::new(self.attribute(terminal_output_name(render_context, kind).as_ref()))
     }
 
+    /// The universal terminal where it is defined, which a Material's schema
+    /// declares, then the authored render-context terminals in property order
+    /// (C++ `_GetOutputsForTerminalName`).
     fn terminal_outputs(&self, kind: TerminalKind) -> Result<Vec<Output>> {
-        let mut universal = None;
-        let mut contextual = Vec::new();
-        for output in self.outputs()? {
-            let base_name = output.base_name();
-            if base_name == kind.as_str() {
-                universal = Some(output);
-            } else if base_name
+        let universal = self.terminal_output(tokens::UNIVERSAL_RENDER_CONTEXT, kind);
+        let mut outputs = Vec::new();
+        if universal.is_defined()? {
+            outputs.push(universal);
+        }
+        for output in self.authored_outputs()? {
+            if output
+                .base_name()
                 .strip_suffix(kind.as_str())
                 .is_some_and(|context| context.ends_with(':') && context.len() > 1)
             {
-                contextual.push(output);
+                outputs.push(output);
             }
         }
-        Ok(universal.into_iter().chain(contextual).collect())
+        Ok(outputs)
     }
 
     fn create_terminal_output(&self, render_context: &str, kind: TerminalKind) -> Result<Output> {

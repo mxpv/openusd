@@ -283,17 +283,70 @@ impl Relationship {
         })
     }
 
+    /// Remove a metadata field's opinion from the relationship's spec on the
+    /// edit-target layer (C++ `UsdObject::ClearMetadata`). Only the local
+    /// opinion goes away; one on a weaker layer still composes. A spec the
+    /// layer does not hold is left alone.
+    pub fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
+        authoring::check_reserved(sdf::SpecType::Relationship, key)?;
+        self.edit_existing(|spec| {
+            spec.erase(key);
+            Ok(())
+        })
+    }
+
+    /// The composed `doc` field of this relationship, `None` where neither a
+    /// layer nor the prim's schema declaration carries one (C++
+    /// `UsdObject::GetDocumentation`). A registry `openusd-build` builds
+    /// drops declaration docs, which its generated views carry.
+    pub fn doc(&self) -> Result<Option<String>> {
+        self.metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
+    /// Author this relationship's `doc` field on the edit target (C++
+    /// `UsdObject::SetDocumentation`).
+    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()))
+    }
+
+    /// Drop the local `doc` opinion (C++
+    /// `UsdObject::ClearDocumentation`).
+    pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
+    /// The composed `displayGroup` of this relationship, `None` where none
+    /// is authored or declared (C++ `UsdProperty::GetDisplayGroup`). Nested
+    /// groups are `:`-joined.
+    pub fn display_group(&self) -> Result<Option<String>> {
+        self.metadata(sdf::FieldKey::DisplayGroup.as_str())
+    }
+
+    /// Author this relationship's `displayGroup` on the edit target (C++
+    /// `UsdProperty::SetDisplayGroup`).
+    pub fn set_display_group(self, display_group: impl Into<String>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata(
+            sdf::FieldKey::DisplayGroup.as_str(),
+            sdf::Value::String(display_group.into()),
+        )
+    }
+
+    /// Drop the local `displayGroup` opinion (C++
+    /// `UsdProperty::ClearDisplayGroup`).
+    pub fn clear_display_group(self) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata(sdf::FieldKey::DisplayGroup.as_str())
+    }
+
     /// Erase the local `targetPaths` opinion on the edit target (C++
     /// `UsdRelationship::ClearTargets` without removing the spec): the targets
     /// weaker layers author compose again, unlike after `set_targets([])`,
     /// which authors an explicit empty list that blocks them. A target
     /// holding no spec is left alone; an attribute at the path is an error.
     pub fn clear_targets(self) -> Result<Self, StageAuthoringError> {
-        authoring::edit_existing::<Self>(&self.stage, &self.path, |spec| {
+        self.edit_existing(|spec| {
             spec.erase(sdf::FieldKey::TargetPaths.as_str());
             Ok(())
-        })?;
-        Ok(self)
+        })
     }
 
     /// Remove a target path. Returns `Ok(true)` if it was present. Takes
@@ -382,6 +435,17 @@ impl Relationship {
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
         authoring::author::<Self>(&self.stage, &self.path, f)?;
+        Ok(self)
+    }
+
+    /// Edit the relationship's spec on the edit target where the layer holds
+    /// one, leaving a layer that says nothing about it untouched (the
+    /// relationship half of `Attribute::edit_existing`).
+    fn edit_existing<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::RelationshipSpecMut<'_>) -> Result<(), StageAuthoringError>,
+    {
+        authoring::edit_existing::<Self>(&self.stage, &self.path, f)?;
         Ok(self)
     }
 }
@@ -604,6 +668,25 @@ mod tests {
         p.create_relationship("b")?.set_targets(["/P.a"])?;
 
         assert!(a.forwarded_targets()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn doc_and_display_group() -> Result<()> {
+        let stage = stage()?;
+        let rel = stage.define_prim("/P")?.create_relationship("look")?;
+        assert_eq!(rel.doc()?, None);
+        assert_eq!(rel.display_group()?, None);
+
+        let rel = rel.set_doc("The look.")?.set_display_group("Shading")?;
+        assert_eq!(rel.doc()?.as_deref(), Some("The look."));
+        assert_eq!(rel.display_group()?.as_deref(), Some("Shading"));
+
+        let rel = rel.clear_doc()?.clear_display_group()?;
+        assert_eq!(rel.doc()?, None);
+        assert_eq!(rel.display_group()?, None);
+        // A reserved field stays with its own setter.
+        assert!(rel.clone().clear_metadata("targetPaths").is_err());
         Ok(())
     }
 }
