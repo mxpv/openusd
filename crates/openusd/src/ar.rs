@@ -1190,17 +1190,23 @@ impl UdimPath {
     pub fn resolve(&self, resolver: &dyn Resolver, anchor: Option<&ResolvedPath>) -> Option<String> {
         let _scope = CacheScope::begin();
         let first = self.tiles(resolver, anchor).next()?;
-        let resolved = first.path.to_str()?;
-        self.pattern_of(resolved).or_else(|| {
-            let (package, inner) = split_package_relative_path_inner(resolved)?;
+        self.with_pattern(first.path.to_str()?)
+    }
+
+    /// `tile_path`, the path of one tile, with the pattern put back where
+    /// its number is, inside the packaged part where the path leads into a
+    /// package; `None` where the path does not end with the suffix preceded
+    /// by a tile number. The suffix matches across separators, and the path
+    /// keeps its own.
+    pub fn with_pattern(&self, tile_path: &str) -> Option<String> {
+        self.pattern_of(tile_path).or_else(|| {
+            let (package, inner) = split_package_relative_path_inner(tile_path)?;
             Some(nest_packaged_path(&package, &self.pattern_of(&inner)?))
         })
     }
 
-    /// `tile_path`, the path of one tile, with the pattern put back where
-    /// its number is; `None` where the path does not end with the suffix
-    /// preceded by a tile number. The suffix matches across separators, and
-    /// the path keeps its own.
+    /// [`with_pattern`](Self::with_pattern) for a path leading into no
+    /// package.
     fn pattern_of(&self, tile_path: &str) -> Option<String> {
         let (numbered, suffix) = tile_path.split_at_checked(tile_path.len().checked_sub(self.suffix.len())?)?;
         let same_but_separators = suffix.chars().zip(self.suffix.chars()).all(|(found, expected)| {
@@ -1216,8 +1222,10 @@ impl UdimPath {
             .then(|| format!("{prefix}{UDIM_PATTERN}{suffix}"))
     }
 
-    /// The tiles `resolver` finds, probed in tile order.
-    fn tiles<'a>(
+    /// The tiles `resolver` finds, probed in tile order as the iterator is
+    /// driven, each as [`resolve_tiles`](Self::resolve_tiles) finds it, under
+    /// the caller's cache scope.
+    pub fn tiles<'a>(
         &'a self,
         resolver: &'a dyn Resolver,
         anchor: Option<&'a ResolvedPath>,

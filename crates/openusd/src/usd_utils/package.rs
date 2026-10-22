@@ -1120,6 +1120,32 @@ def "T"
         assert_eq!(dependencies.assets.len(), 4);
         Ok(())
     }
+    /// A set spelled through `..` and a plain asset beside its tiles are
+    /// numbered into one directory.
+    #[test]
+    fn udim_set_shares_directory() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "scene/root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset other = @../outside/other.png@\n    asset o = @../outside/o.<UDIM>.png@\n}\n",
+        );
+        for name in ["outside/other.png", "outside/o.1001.png", "outside/o.1003.png"] {
+            write(dir.path(), name, "PNG");
+        }
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "0/o.1001.png", "0/o.1003.png", "0/other.png"]);
+        assert!(
+            texts["root.usda"].contains("@0/o.<UDIM>.png@"),
+            "{}",
+            texts["root.usda"]
+        );
+        Ok(())
+    }
+
     /// A tile the layer names on its own before its set, placed elsewhere by
     /// then, moves under the set.
     #[test]

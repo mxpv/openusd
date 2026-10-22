@@ -302,14 +302,23 @@ struct Discoverer<'a> {
     package: Option<(String, String)>,
     /// The source index of each identifier found.
     index: HashMap<String, usize>,
-    /// The numbers of the tiles each UDIM set resolved to, by the set's
-    /// anchored identifier: a set authored by several layers is probed once,
+    /// Each UDIM set probed, by its anchored identifier, or `None` where no
+    /// tile of it resolves. A set authored by several layers is probed once,
     /// however it is interned.
-    udim_sets: HashMap<String, Vec<u16>>,
+    udim_sets: HashMap<String, Option<UdimSet>>,
     /// The layer sources still to walk.
     queue: VecDeque<usize>,
     sources: Vec<Source<'a>>,
     unresolved: Vec<(String, AssetKind)>,
+}
+
+/// What discovery found for a UDIM set.
+struct UdimSet {
+    /// The set's identifier: the first tile's with the pattern put back,
+    /// which names the tiles' directory as their own identifiers do.
+    identifier: String,
+    /// The numbers of the tiles found.
+    numbers: Vec<u16>,
 }
 
 impl<'a> Discoverer<'a> {
@@ -351,7 +360,7 @@ impl<'a> Discoverer<'a> {
 
     /// The tiles `path`, authored in the layer source `referrer` as `kind`,
     /// names: for an asset path with a UDIM pattern, the number and authored
-    /// path of each tile found where the first one resolves (C++
+    /// path of each tile found beside the first one the layer reaches (C++
     /// `_GetUdimTiles`); empty for any other path, and where none resolves.
     /// A set is probed once, however many layers author it; each tile is
     /// resolved again by [`find_or_add`](Self::find_or_add), as C++ resolves
@@ -368,23 +377,26 @@ impl<'a> Discoverer<'a> {
         let registry = self.graph.layer_registry();
         let anchor = self.sources[referrer].content.anchor();
         let set = registry.create_identifier(path, anchor.as_ref());
-        let numbers = self.udim_sets.entry(set).or_insert_with(|| {
-            let resolver: &dyn ar::Resolver = registry;
-            // One scope over the probe for the first tile and the walk of
-            // the rest: a packaged set opens its package once.
-            let _scope = ar::CacheScope::begin();
-            udim.resolve(resolver, anchor.as_ref())
-                .and_then(|resolved| ar::UdimPath::parse(&resolved))
-                .map(|resolved| {
-                    resolved
-                        .resolve_tiles(resolver, None)
-                        .iter()
-                        .map(|tile| tile.number)
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
-        numbers.iter().map(|&number| (number, udim.tile(number))).collect()
+        self.udim_sets
+            .entry(set)
+            .or_insert_with(|| {
+                // One scope over the probe for the first tile and the walk of
+                // the rest: a packaged set opens its package once.
+                let _scope = ar::CacheScope::begin();
+                let first = udim.tiles(registry, anchor.as_ref()).next()?;
+                let identifier =
+                    udim.with_pattern(&registry.create_identifier(&udim.tile(first.number), anchor.as_ref()))?;
+                let resolved = udim.with_pattern(first.path.to_str()?)?;
+                let numbers = ar::UdimPath::parse(&resolved)?
+                    .resolve_tiles(registry, None)
+                    .iter()
+                    .map(|tile| tile.number)
+                    .collect();
+                Some(UdimSet { identifier, numbers })
+            })
+            .iter()
+            .flat_map(|set| set.numbers.iter().map(|&number| (number, udim.tile(number))))
+            .collect()
     }
 
     /// [`find_or_add`](Self::find_or_add), with whether it added the source,
@@ -507,6 +519,17 @@ impl<'a> Discoverer<'a> {
             }
             _ if self.policy.open_packages && kind == AssetKind::Package => {
                 (target, path.to_owned(), AssetKind::Layer, None)
+            }
+            // A set is identified as its tiles are, by the first tile's
+            // identifier with the pattern put back, canonical as the
+            // identifier of a file that exists is; `udim_tiles` probed it. A
+            // set no tile resolves for is unresolved.
+            _ if kind == AssetKind::Tiles => {
+                let Some(set) = self.udim_sets.get(&target).and_then(Option::as_ref) else {
+                    self.record_unresolved(target, kind);
+                    return Ok(None);
+                };
+                (set.identifier.clone(), path.to_owned(), kind, None)
             }
             _ => (target, path.to_owned(), kind, None),
         };
