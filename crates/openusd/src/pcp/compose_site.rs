@@ -160,7 +160,7 @@ where
     R: FnMut(&mut T, LayerOffset, f64),
     A: FnMut(&mut T, LayerId) -> f64,
 {
-    let mut combined: Option<ListOp<T>> = None;
+    let mut ops = Vec::new();
     // The sublayer offset and time-codes scale to fold into each item, keyed by
     // the item as authored (after anchoring). Recorded strongest-first and applied
     // only after the list-op is composed: an offset-bearing item (reference/
@@ -204,14 +204,11 @@ where
                     folds.push((item.clone(), sub, scale));
                 }
             });
-            combined = Some(match combined {
-                Some(stronger) => stronger.combined_with(&list_op),
-                None => list_op,
-            });
+            ops.push(list_op);
         }
     }
 
-    let mut result = combined.map(|op| op.reduced().flatten()).unwrap_or_default();
+    let mut result = ListOp::compose_all(&ops);
     for item in &mut result {
         if let Some((_, sub, scale)) = folds.iter().find(|(i, _, _)| i == item) {
             retime(item, *sub, *scale);

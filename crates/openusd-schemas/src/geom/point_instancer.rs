@@ -843,13 +843,17 @@ where
 /// `UsdGeomPointInstancerSetOrMergeOverOp`, as it runs with
 /// `USDGEOM_POINTINSTANCER_NEW_APPLYOPS` at its default). The two compose
 /// into one list op, the held opinion in its [`canonical`] form (C++
-/// `SdfListOp::ApplyOperations`).
+/// `SdfListOp::ApplyOperations`): neither adds, and one op states a fold of
+/// such ops.
 fn merge_inactive_ids(prim: &usd::Prim, proposed: sdf::Int64ListOp) -> Result<()> {
     prim.clone().update_metadata(tokens::INACTIVE_IDS, |local| {
         let current = local
             .and_then(|value| value.try_as_int_64_list_op())
             .unwrap_or_default();
-        Some(sdf::Value::Int64ListOp(proposed.combined_with(&canonical(current))))
+        let merged = proposed
+            .combined_with(&canonical(current))
+            .expect("one op states a fold of ops that add nothing");
+        Some(sdf::Value::Int64ListOp(merged))
     })?;
     Ok(())
 }
@@ -1514,8 +1518,9 @@ def PointInstancer "TimeSampledAndDefaultIndices"
     fn merged_list_ops() {
         let deactivate = |ids: &[i64]| sdf::Int64ListOp::appended(ids.to_vec());
         let activate = |ids: &[i64]| sdf::Int64ListOp::deleted(ids.to_vec());
-        let merged =
-            |proposed: &sdf::Int64ListOp, current: sdf::Int64ListOp| proposed.combined_with(&canonical(current));
+        let merged = |proposed: &sdf::Int64ListOp, current: sdf::Int64ListOp| {
+            proposed.combined_with(&canonical(current)).expect("composable")
+        };
 
         // Over nothing, the edit is the opinion.
         assert_eq!(

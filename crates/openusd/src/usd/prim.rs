@@ -285,8 +285,12 @@ impl Prim {
     /// `value` is in stage time, so any `timecode` it holds is mapped into the
     /// edit target's own time frame (C++ `_StageValueToFieldXf`).
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+        super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
         let value = self.stage.map_to_spec_value(&self.path, value);
-        self.update_metadata(key, |_| Some(value))
+        self.edit(|spec| {
+            spec.set(key, value);
+            Ok(())
+        })
     }
 
     /// Remove a prim-level metadata field's opinion from the edit-target layer.
@@ -294,7 +298,8 @@ impl Prim {
     ///
     /// Only the local opinion goes away; one on a weaker layer still composes.
     pub fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
-        self.update_metadata(key, |_| None)
+        super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
+        self.erase_local(key)
     }
 
     /// The composed `doc` field of this prim, `None` where neither a layer
@@ -315,6 +320,30 @@ impl Prim {
     /// `UsdObject::ClearDocumentation`).
     pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
         self.clear_metadata(sdf::FieldKey::Documentation.as_str())
+    }
+
+    /// The `inherits` arcs of this prim as an editor over the edit target
+    /// (C++ `UsdPrim::GetInherits`).
+    pub fn inherits(&self) -> super::ListEdit<sdf::Path> {
+        super::ListEdit::new(self.clone(), sdf::FieldKey::InheritPaths)
+    }
+
+    /// The `specializes` arcs of this prim as an editor over the edit target
+    /// (C++ `UsdPrim::GetSpecializes`).
+    pub fn specializes(&self) -> super::ListEdit<sdf::Path> {
+        super::ListEdit::new(self.clone(), sdf::FieldKey::Specializes)
+    }
+
+    /// The `references` of this prim as an editor over the edit target (C++
+    /// `UsdPrim::GetReferences`).
+    pub fn references(&self) -> super::ListEdit<sdf::Reference> {
+        super::ListEdit::new(self.clone(), sdf::FieldKey::References)
+    }
+
+    /// The `payload` arcs of this prim as an editor over the edit target
+    /// (C++ `UsdPrim::GetPayloads`).
+    pub fn payloads(&self) -> super::ListEdit<sdf::Payload> {
+        super::ListEdit::new(self.clone(), sdf::FieldKey::Payload)
     }
 
     /// Read-modify-write a prim-level metadata field on the edit-target layer.
@@ -344,23 +373,27 @@ impl Prim {
         // composes to find one.
         let local = self.stage.local_field(&self.path, key)?;
         let Some(value) = f(local) else {
-            // Erasing reaches only a prim spec this layer already holds, so a
-            // prim it says nothing about stays absent from it — and the
-            // pseudo-root, whose fields are the layer's own metadata rather
-            // than any prim's, is no more clearable here than it is
-            // authorable.
-            self.stage.with_target_layer_at(&self.path, |layer, path| {
-                if let Some(mut spec) = sdf::PrimSpecMut::get(layer.data_mut(), path) {
-                    spec.erase(key);
-                }
-                Ok(())
-            })?;
-            return Ok(self);
+            return self.erase_local(key);
         };
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())
         })
+    }
+
+    /// Drops the edit-target layer's own opinion for `key`. Erasing reaches
+    /// only a prim spec this layer already holds: a prim it says nothing
+    /// about stays absent from it, and the pseudo-root, whose fields are the
+    /// layer's own metadata, is no more clearable here than it is
+    /// authorable.
+    fn erase_local(self, key: &str) -> Result<Self, StageAuthoringError> {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            if let Some(mut spec) = sdf::PrimSpecMut::get(layer.data_mut(), path) {
+                spec.erase(key);
+            }
+            Ok(())
+        })?;
+        Ok(self)
     }
 
     /// Author an attribute spec named `name` under this prim (C++
@@ -1355,7 +1388,7 @@ impl Prim {
     // TODO: a variant-selection leaf (`/Prim{set=sel}`, the spec path under a
     // variant edit target) is rejected by `PrimSpec::over`, where C++
     // `SdfCreatePrimInLayer` authors inside the variant.
-    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    pub(super) fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>) -> Result<(), StageAuthoringError>,
     {
@@ -1472,7 +1505,29 @@ impl PrimIndexRef {
     /// (e.g. [`Stage::node_layer_stack`](super::Stage::node_layer_stack))
     /// reports `None`.
     pub fn graph(&self) -> Result<pcp::PrimIndex> {
-        Ok(self.graph_composed()?)
+        self.with(|index| pcp::PrimIndex::clone(index))
+    }
+
+    /// Runs `f` over this prim's composition graph where the cache holds it,
+    /// with the layer graph it composes over; [`graph`](Self::graph) copies
+    /// the same index out. The index is built if needed, and `f` runs again
+    /// whenever building it demanded a layer the stage then loaded. `f`
+    /// holds the cache and cannot reach back into the stage: it collects
+    /// what a stage query after it needs. A prototype root, whose opinions
+    /// are read through an empty index, hands `f` one.
+    pub fn with<R>(&self, mut f: impl FnMut(&pcp::PrimIndexView<'_>) -> R) -> Result<R> {
+        let answered = self.stage.opinions(&self.path, |graph, cache| {
+            Ok(Some(f(&pcp::PrimIndexView::new(
+                cache.index(graph, &self.path)?,
+                graph,
+            ))))
+        })?;
+        Ok(answered.unwrap_or_else(|| {
+            f(&pcp::PrimIndexView::new(
+                &pcp::PrimIndex::default(),
+                &self.stage.layers(),
+            ))
+        }))
     }
 
     /// [`graph`](Self::graph) at the composition tier, for the namespace
@@ -1673,13 +1728,10 @@ mod tests {
 
     use crate::sdf;
     use crate::tf::Token;
+    use crate::usd::stage::tests::stage;
     use crate::usd::{
         ApplyApiError, PrimPredicate, PrimRange, PrimStatus, SchemaRegistry, Stage, StageAuthoringError, VersionFilter,
     };
-
-    fn stage() -> Result<Stage> {
-        Stage::builder().in_memory("anon.usda")
-    }
 
     /// A stage over the shared test schema family, so prim definitions have
     /// something to resolve against.
@@ -2846,6 +2898,21 @@ mod tests {
         assert_eq!(prim.doc()?.as_deref(), Some("The world."));
         let prim = prim.clear_doc()?;
         assert_eq!(prim.doc()?, None);
+        Ok(())
+    }
+
+    /// `with` sees the index `graph` copies out.
+    #[test]
+    fn prim_index_with() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Base")?;
+        let child = stage.define_prim("/Child")?;
+        child.inherits().add("/Base")?;
+        let index = child.prim_index();
+        let copied: Vec<String> = index.graph()?.nodes().map(|node| node.path().to_string()).collect();
+        let borrowed = index.with(|index| index.nodes().map(|node| node.path().to_string()).collect::<Vec<_>>())?;
+        assert_eq!(borrowed, copied);
+        assert_eq!(borrowed, ["/Child", "/Base"]);
         Ok(())
     }
 }

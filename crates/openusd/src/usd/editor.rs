@@ -1638,7 +1638,7 @@ fn remap_embedded_path(
         Some(projected) => target
             .map_to_spec_target_path(&projected)
             .map(Some)
-            .ok_or_else(|| NamespaceEditError::Stage(StageAuthoringError::OutsideEditTarget { path: projected })),
+            .map_err(NamespaceEditError::Stage),
     }
 }
 

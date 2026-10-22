@@ -6,7 +6,7 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
-use super::{Prim, SpecSite, Stage, StageAuthoringError, StageEdit, authoring};
+use super::{ListPosition, Prim, SpecSite, Stage, StageAuthoringError, StageEdit, authoring, list_edit};
 use crate::Result;
 use crate::{pcp, sdf};
 
@@ -107,6 +107,10 @@ impl<'a> RelationshipBuilder<'a> {
     /// the transaction has left to do is stamp the spec and write.
     fn plan(self) -> Result<authoring::PlannedProperty, StageAuthoringError> {
         let (stage, path) = self.site?;
+        let targets = self
+            .targets
+            .map(|targets| authoring::targets_for_authoring(&stage, &path, targets))
+            .transpose()?;
         let declaration = authoring::PropertyDeclaration::Relationship {
             variability: sdf::Variability::Uniform,
             custom: self.custom,
@@ -115,10 +119,7 @@ impl<'a> RelationshipBuilder<'a> {
         Ok(authoring::PlannedProperty::new(
             stage,
             path,
-            authoring::PropertyWrite::Relationship {
-                ensure,
-                targets: self.targets,
-            },
+            authoring::PropertyWrite::Relationship { ensure, targets },
         ))
     }
 }
@@ -231,15 +232,36 @@ impl Relationship {
             .is_some_and(|property| property.spec_type() == sdf::SpecType::Relationship))
     }
 
-    /// Append a target path. No-op if already present.
+    /// Put `target` at the back of the edit target's prepended list, where
+    /// C++ `UsdRelationship::AddTarget` puts one unless told otherwise; see
+    /// [`add_target_at`](Self::add_target_at).
     pub fn add_target(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
-        let target = sdf::try_into_path(target)?;
-        self.edit(|spec| Ok(spec.add_target(target)?))
+        self.add_target_at(target, ListPosition::default())
     }
 
-    /// Replace the entire target list.
+    /// Put `target` at `position` in the edit target's `targetPaths` (C++
+    /// `UsdRelationship::AddTarget`); see [`ListPosition`]. The target is
+    /// mapped as [`set_targets`](Self::set_targets) maps one.
+    pub fn add_target_at(
+        self,
+        target: impl sdf::IntoPath,
+        position: ListPosition,
+    ) -> Result<Self, StageAuthoringError> {
+        let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
+        self.edit(move |spec| {
+            Ok(list_edit::edit_list(spec, sdf::FieldKey::TargetPaths, |op| {
+                list_edit::insert(op, target, position);
+            })?)
+        })
+    }
+
+    /// Author the targets as the explicit list `targets`, strongest first
+    /// (C++ `UsdRelationship::SetTargets`), each an absolute prim or property
+    /// path, or one relative to this prim, mapped into the edit target's
+    /// layer namespace; one the mapping does not reach is
+    /// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget).
     pub fn set_targets(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
-        let targets: Vec<sdf::Path> = targets.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
+        let targets = authoring::targets_for_authoring(&self.stage, &self.path, targets)?;
         self.edit(|spec| Ok(spec.set_targets(targets)?))
     }
 
@@ -349,12 +371,14 @@ impl Relationship {
         })
     }
 
-    /// Remove a target path. Returns `Ok(true)` if it was present. Takes
+    /// Remove a target path, mapped as [`set_targets`](Self::set_targets)
+    /// maps one (C++ `UsdRelationship::RemoveTarget`). Returns `Ok(true)` if
+    /// it was present. Takes
     /// `&self` rather than consuming — `remove_target` returns a `bool` (not
     /// `Self`), so it doesn't fit the chain pattern. Skips cache invalidation
     /// when the target wasn't authored (no mutation occurred).
     pub fn remove_target(&self, target: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
-        let target = sdf::try_into_path(target)?;
+        let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
         let mut removed = false;
         authoring::author::<Self>(&self.stage, &self.path, |spec| {
             removed = spec.remove_target(&target);
@@ -454,11 +478,9 @@ impl Relationship {
 mod tests {
     use crate::Result;
     use crate::sdf;
-    use crate::usd::Stage;
-
-    fn stage() -> Result<Stage> {
-        Stage::builder().in_memory("anon.usda")
-    }
+    use crate::sdf::path::tests::strings;
+    use crate::usd::stage::tests::{authored, reference_scene, stage};
+    use crate::usd::{ListPosition, Stage, StageAuthoringError};
 
     #[test]
     fn relationship_chain() -> Result<()> {
@@ -687,6 +709,59 @@ mod tests {
         assert_eq!(rel.display_group()?, None);
         // A reserved field stays with its own setter.
         assert!(rel.clone().clear_metadata("targetPaths").is_err());
+        Ok(())
+    }
+    /// A target authored through a reference arc's edit target lands in the
+    /// referenced namespace, and one the mapping does not reach is refused.
+    #[test]
+    fn targets_through_reference() -> Result<()> {
+        let (_dir, stage, child, target) = reference_scene("", "    def \"Sibling\"\n    {\n    }\n    rel r\n")?;
+        let rel = child.relationship("r");
+        rel.clone()
+            .set_targets(["/Child/Sibling"])?
+            .add_target("/Child/Sibling.attr")?;
+        assert!(rel.remove_target("/Child/Sibling.attr")?);
+        let layer = stage.layer(target.layer_identifier()).expect("the referenced layer");
+        let op: sdf::PathListOp = authored(&layer, "/R.r", sdf::FieldKey::TargetPaths).expect("authored");
+        assert_eq!(strings(op.explicit_items()), ["/R/Sibling"]);
+        let refused = rel.add_target("/Elsewhere");
+        assert!(
+            matches!(refused, Err(StageAuthoringError::OutsideEditTarget { .. })),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
+    /// A target joins the list its position names, and one held already
+    /// moves; a relative target is anchored at the prim, and a variant
+    /// selection is stripped.
+    #[test]
+    fn add_target_positions() -> Result<()> {
+        let stage = stage()?;
+        let rel = stage.define_prim("/A")?.create_relationship("r")?;
+        rel.clone()
+            .add_target("/B")?
+            .add_target("/C")?
+            .add_target_at("/B", ListPosition::BackOfPrepend)?
+            .add_target_at("/D", ListPosition::BackOfAppend)?
+            .add_target("E")?
+            .add_target("/F{v=x}G")?;
+        let op: sdf::PathListOp = authored(&stage.root_layer(), "/A.r", sdf::FieldKey::TargetPaths).expect("targets");
+        assert_eq!(strings(op.prepended_items()), ["/C", "/B", "/A/E", "/F/G"]);
+        assert_eq!(strings(op.appended_items()), ["/D"]);
+        Ok(())
+    }
+
+    /// A target inside a prototype is refused.
+    #[test]
+    fn target_in_prototype() -> Result<()> {
+        let stage = stage()?;
+        let rel = stage.define_prim("/A")?.create_relationship("r")?;
+        let refused = rel.add_target("/__Prototype_1/Geom");
+        assert!(
+            matches!(refused, Err(StageAuthoringError::PrototypeTarget { .. })),
+            "{refused:?}"
+        );
         Ok(())
     }
 }

@@ -1519,12 +1519,17 @@ impl fmt::Display for Text {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashSet;
 
     use crate::Result;
 
     use super::*;
+
+    /// `paths` spelled out, for an assertion over a list of them.
+    pub(crate) fn strings(paths: &[Path]) -> Vec<String> {
+        paths.iter().map(ToString::to_string).collect()
+    }
 
     /// The empty and absolute root paths share one text each, from every
     /// constructor and derivation that reaches them.

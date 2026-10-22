@@ -5,6 +5,7 @@
 //! that drives it.
 
 use openusd::Result;
+use openusd::pcp;
 use openusd::sdf;
 use openusd::tf;
 use openusd::usd;
@@ -402,6 +403,64 @@ impl Material {
         Output::new(self.attribute(terminal_output_name(render_context, kind).as_ref()))
     }
 
+    /// The base material: the one a specializes arc of this prim's own names,
+    /// where the stage holds a `Material` (C++ `GetBaseMaterial`). An arc
+    /// authored under a reference implies one here and counts; one whose
+    /// target the stage holds no material at does not. An instance proxy's
+    /// base is the material in its prototype.
+    pub fn base_material(&self) -> Result<Option<Material>> {
+        let Some(base) = self.arc_base()? else {
+            return Ok(None);
+        };
+        Ok(match base.prim_in_prototype()? {
+            Some(prototype) => Material::from_prim(prototype)?,
+            None => Some(base),
+        })
+    }
+
+    /// The material the first qualifying specializes arc names, an instance
+    /// proxy not yet redirected to its prototype.
+    fn arc_base(&self) -> Result<Option<Material>> {
+        let candidates = self.prim_index().with(|index| base_candidates(index))?;
+        for path in candidates {
+            if let Some(material) = Material::get(self.stage(), &path)? {
+                return Ok(Some(material));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The path of the base material (C++ `GetBaseMaterialPath`), the
+    /// prototype's for an instance proxy.
+    pub fn base_material_path(&self) -> Result<Option<sdf::Path>> {
+        Ok(self.base_material()?.map(|base| base.path().clone()))
+    }
+
+    /// Whether this material specializes a material (C++ `HasBaseMaterial`).
+    pub fn has_base_material(&self) -> Result<bool> {
+        Ok(self.arc_base()?.is_some())
+    }
+
+    /// Author `base` as the one prim this material specializes (C++
+    /// `SetBaseMaterial`).
+    pub fn set_base_material(&self, base: &Material) -> Result<&Self> {
+        self.set_base_material_path(base.path())
+    }
+
+    /// Author the prim at `path` as the one this material specializes (C++
+    /// `SetBaseMaterialPath`).
+    pub fn set_base_material_path(&self, path: impl sdf::IntoPath) -> Result<&Self> {
+        self.specializes().set([path])?;
+        Ok(self)
+    }
+
+    /// Drop the edit target's specializes arcs (C++ `ClearBaseMaterial`, and
+    /// `SetBaseMaterialPath` given the empty path).
+    pub fn clear_base_material(&self) -> Result<&Self> {
+        self.specializes().clear()?;
+        Ok(self)
+    }
+
     /// The universal terminal where it is defined, which a Material's schema
     /// declares, then the authored render-context terminals in property order
     /// (C++ `_GetOutputsForTerminalName`).
@@ -450,6 +509,29 @@ fn checked_context(render_context: &str) -> Result<(), SchemaError> {
         });
     }
     Ok(())
+}
+
+/// The prims the specializes arcs at the root of `index` name, strongest
+/// first, one of which may be its base material (the walk of C++
+/// `FindBaseMaterialPathInPrimIndex`, whose predicate [`Material::get`]
+/// answers once the index is released). An arc authored under a reference
+/// reaches the prim's root twice: as the implied arc, whose mapping carries
+/// root identity and names a prim of this stage, and as the propagated copy
+/// of the arc itself, whose mapping composes through the reference and
+/// names a prim of the referenced layer stack. The copy is left out.
+fn base_candidates(index: &pcp::PrimIndex) -> Vec<sdf::Path> {
+    let Some(root) = index.local_root() else {
+        return Vec::new();
+    };
+    index
+        .node(root)
+        .children()
+        .map(|id| index.node(id))
+        .filter(|node| {
+            !node.is_culled() && node.arc() == pcp::ArcType::Specialize && node.map_to_parent().has_root_identity()
+        })
+        .map(|node| node.path().clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -644,6 +726,271 @@ mod tests {
 
         let mat = Material::get(&stage, "/Mat")?.expect("Material");
         assert!(mat.surface_source(&[])?.is_none());
+        Ok(())
+    }
+
+    /// The scenes of the C++ `testUsdShadeMaterialSpecializesBaseComposition`
+    /// test.
+    const LIBRARY: &str = r#"#usda 1.0
+
+def Material "BaseMaterial"
+{
+}
+
+def Material "ChildMaterial" (
+    specializes = </BaseMaterial>
+)
+{
+}
+"#;
+
+    const ASSET: &str = r#"#usda 1.0
+
+def "Asset"
+{
+    def "Looks"
+    {
+        def "NotAChildMaterial" (
+            references = @./library.usda@</ChildMaterial>
+        )
+        {
+        }
+    }
+}
+"#;
+
+    const SET_WITH_SPECIALIZED: &str = r#"#usda 1.0
+
+def "Asset"
+{
+    def "Looks"
+    {
+        def Material "BaseMaterial"
+        {
+        }
+
+        def Material "ChildMaterial" (
+            specializes = </Asset/Looks/BaseMaterial>
+        )
+        {
+        }
+    }
+}
+
+def "Set"
+{
+    def "SetChild"
+    {
+        def "ReferencedAsset" (
+            references = </Asset>
+        )
+        {
+        }
+    }
+}
+
+def "Shot"
+{
+    def "Set" (
+        references = </Set>
+    )
+    {
+    }
+}
+"#;
+
+    const MULTIPLE_REFERENCED_PARENTS: &str = r#"#usda 1.0
+
+def "Asset"
+{
+    def "Looks"
+    {
+        def Material "BaseMaterial"
+        {
+        }
+    }
+}
+
+def "Set"
+{
+    def "SetChild"
+    {
+        def "ReferencedAsset" (
+            references = </Asset>
+        )
+        {
+        }
+    }
+}
+
+def "Shot"
+{
+    def "Set" (
+        references = </Set>
+    )
+    {
+        over "SetChild"
+        {
+            over "ReferencedAsset"
+            {
+                over "Looks"
+                {
+                    def Material "ChildMaterial" (
+                        specializes = </Shot/Set/SetChild/ReferencedAsset/Looks/BaseMaterial>
+                    )
+                    {
+                    }
+                }
+            }
+        }
+    }
+}
+"#;
+
+    const CONCEALED_PARENT: &str = r#"#usda 1.0
+
+def "Shot"
+{
+    def "SomethingInteresting"
+    {
+        def "ThingOne"
+        {
+        }
+
+        def "ThingTwo"
+        {
+        }
+    }
+
+    def "Looks"
+    {
+        def Material "Base"
+        {
+        }
+
+        def Material "InterestingChild" (
+            specializes = [</Shot/SomethingInteresting/ThingOne>, </Shot/Looks/Base>, </Shot/SomethingInteresting/ThingTwo>]
+        )
+        {
+        }
+    }
+}
+"#;
+
+    /// A child's base in each scene, and the base's own lack of one: in the
+    /// root layer, across one reference and two, and among specializes arcs
+    /// that name no material.
+    #[test]
+    fn base_material_scenes() -> Result<()> {
+        for (scene, child, base) in [
+            (LIBRARY, "/ChildMaterial", "/BaseMaterial"),
+            (
+                SET_WITH_SPECIALIZED,
+                "/Shot/Set/SetChild/ReferencedAsset/Looks/ChildMaterial",
+                "/Shot/Set/SetChild/ReferencedAsset/Looks/BaseMaterial",
+            ),
+            (
+                MULTIPLE_REFERENCED_PARENTS,
+                "/Shot/Set/SetChild/ReferencedAsset/Looks/ChildMaterial",
+                "/Shot/Set/SetChild/ReferencedAsset/Looks/BaseMaterial",
+            ),
+            (CONCEALED_PARENT, "/Shot/Looks/InterestingChild", "/Shot/Looks/Base"),
+        ] {
+            let (_dir, stage) = crate::tests::from_usda(scene)?;
+            let child = Material::get(&stage, child)?.expect("a Material");
+            assert!(child.has_base_material()?, "{}", child.path());
+            assert_eq!(
+                child.base_material()?.expect("a base").path().as_str(),
+                base,
+                "{}",
+                child.path()
+            );
+            let base = Material::get(&stage, base)?.expect("a Material");
+            assert!(!base.has_base_material()?, "{}", base.path());
+        }
+        Ok(())
+    }
+
+    /// A referenced material's base, which the referencing stage holds no
+    /// material for, names none.
+    #[test]
+    fn base_material_absent() -> Result<()> {
+        let (_dir, stage) =
+            crate::tests::from_files(&[("library.usda", LIBRARY), ("asset.usda", ASSET)], "asset.usda")?;
+        let material = Material::get(&stage, "/Asset/Looks/NotAChildMaterial")?.expect("a Material");
+        assert!(material.base_material()?.is_none());
+        Ok(())
+    }
+
+    /// The authoring of the C++ `testUsdShadeMaterialBaseMaterial` test: a
+    /// child material composes the base's shaders, whose connections come
+    /// from the base.
+    #[test]
+    fn set_clear_base_material() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let parent = Material::define(&stage, "/Materials/Parent")?;
+        parent.create_input("floatVal", "float")?;
+        let input = Shader::define(&stage, "/Materials/Parent/Shader_1")?
+            .create_input("floatInput", "float")?
+            .set(1.0_f32)?;
+        let output = Shader::define(&stage, "/Materials/Parent/Shader_2")?.create_output("floatOutput", "float")?;
+        let input = input.connect_to(&output)?;
+        assert!(input.has_connected_source()?);
+        assert!(!input.source_from_base_material()?);
+        assert!(!parent.has_base_material()?);
+
+        let child_1 = Material::define(&stage, "/Materials/Child_1")?;
+        child_1.set_base_material(&parent)?;
+        let child_2 = Material::define(&stage, "/Materials/Child_2")?;
+        child_2.set_base_material_path("/Materials/Parent")?;
+        for child in [&child_1, &child_2] {
+            assert!(child.has_base_material()?);
+            assert_eq!(
+                child.base_material_path()?.expect("a base").as_str(),
+                "/Materials/Parent"
+            );
+            let shader = Shader::get(&stage, child.path().append_path("Shader_1")?)?.expect("composed through the arc");
+            let input = shader.input("floatInput");
+            assert_eq!(input.get::<f32>()?, Some(1.0));
+            assert!(input.source_from_base_material()?);
+        }
+
+        child_1.clear_base_material()?;
+        assert!(!child_1.has_base_material()?);
+        Ok(())
+    }
+
+    /// A base that is an instance proxy is answered by its prototype.
+    #[test]
+    fn base_material_in_prototype() -> Result<()> {
+        let (_dir, stage) = crate::tests::from_usda(
+            r#"#usda 1.0
+
+def "Asset"
+{
+    def Material "Base"
+    {
+    }
+}
+
+def "Instance" (
+    instanceable = true
+    references = </Asset>
+)
+{
+}
+
+def Material "Child" (
+    specializes = </Instance/Base>
+)
+{
+}
+"#,
+        )?;
+        let child = Material::get(&stage, "/Child")?.expect("a Material");
+        let base = child.base_material()?.expect("a base");
+        assert!(base.is_in_prototype()?, "{}", base.path());
+        assert_eq!(child.base_material_path()?.as_ref(), Some(base.path()));
         Ok(())
     }
 }

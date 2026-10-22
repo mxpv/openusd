@@ -469,7 +469,7 @@ impl IndexStore {
             let Some(entry) = self.entries.get(&prim) else {
                 continue;
             };
-            if !entry.index.contributes_at(layer, path, graph) {
+            if entry.index.node_providing_spec(graph, layer, path).is_none() {
                 refreshed.remove(&prim);
                 rebuild.insert(prim);
             }

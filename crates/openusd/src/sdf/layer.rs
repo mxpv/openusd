@@ -2525,7 +2525,7 @@ mod tests {
                 false,
             )
             .unwrap();
-            binding.add_target(material.clone()).unwrap();
+            binding.set_targets([material.clone()]).unwrap();
             let mut surface = sdf::AttributeSpec::new(
                 e.data_mut(),
                 "/World/Sphere.inputs:surface",

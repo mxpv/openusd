@@ -681,6 +681,58 @@ pub(super) fn check_reserved(kind: sdf::SpecType, key: &'static str) -> Result<(
     Ok(())
 }
 
+/// `target` as the edit target of `stage` authors a target of the property
+/// at `owner`, a relationship target or an attribute connection (C++
+/// `UsdRelationship::_GetTargetForAuthoring`,
+/// `UsdAttribute::_GetPathForAuthoring`): a relative path is anchored at the
+/// owning prim, and the absolute prim or property path, as Sdf admits for
+/// the field, is mapped into the target's layer namespace less its variant
+/// selections. A target naming a prototype, or an object within one, is
+/// [`PrototypeTarget`](StageAuthoringError::PrototypeTarget), and one the
+/// mapping does not reach
+/// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget).
+pub(super) fn target_for_authoring(
+    stage: &Stage,
+    owner: &sdf::Path,
+    target: impl sdf::IntoPath,
+) -> Result<sdf::Path, StageAuthoringError> {
+    let target = sdf::try_into_path(target)?;
+    let invalid = |path: sdf::Path| {
+        StageAuthoringError::from(sdf::AuthoringError::InvalidPath {
+            path,
+            reason: "a target names an absolute prim or property path",
+        })
+    };
+    if target.is_empty() {
+        return Err(invalid(target));
+    }
+    let target = if target.is_abs() {
+        target
+    } else {
+        owner.prim_path().make_absolute(&target)
+    };
+    let target = target.strip_variant_selections();
+    if pcp::is_prototype_namespace(&target) {
+        return Err(StageAuthoringError::PrototypeTarget { path: target });
+    }
+    if !(target.is_prim() || target.is_property()) {
+        return Err(invalid(target));
+    }
+    stage.map_to_spec_target_path(&target)
+}
+
+/// [`target_for_authoring`] over each of `targets`, in order.
+pub(super) fn targets_for_authoring(
+    stage: &Stage,
+    owner: &sdf::Path,
+    targets: impl IntoIterator<Item: sdf::IntoPath>,
+) -> Result<Vec<sdf::Path>, StageAuthoringError> {
+    targets
+        .into_iter()
+        .map(|target| target_for_authoring(stage, owner, target))
+        .collect()
+}
+
 /// The declaration the spec at `site` carries, read from that layer with the
 /// fallible readers; `wanted` names the kind being authored for the error
 /// when the site holds none.
@@ -779,11 +831,8 @@ pub(super) fn missing_spec(path: &sdf::Path, kind: sdf::SpecType) -> StageAuthor
 mod tests {
     use crate::Result;
     use crate::sdf;
+    use crate::usd::stage::tests::stage;
     use crate::usd::{EditTarget, Stage, StageAuthoringError, TimeCode};
-
-    fn stage() -> Result<Stage> {
-        Stage::builder().in_memory("anon.usda")
-    }
 
     /// An edit target on the same layer that maps `/World` into a variant, so
     /// a property planned against the stage's own target would land elsewhere

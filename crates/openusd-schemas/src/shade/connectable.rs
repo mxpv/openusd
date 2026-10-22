@@ -1,8 +1,10 @@
 //! UsdShade connection source queries and attribute namespacing.
 
+use std::iter;
+
 use openusd::Result;
 
-use openusd::{sdf, tf, usd};
+use openusd::{pcp, sdf, tf, usd};
 
 use super::tokens::{INPUTS, NODE_GRAPH, OUTPUTS};
 use super::{Input, Output};
@@ -281,6 +283,38 @@ pub(super) fn authored_inputs(prim: &usd::Prim) -> Result<Vec<Input>> {
         .into_iter()
         .map(Input::new)
         .collect())
+}
+
+/// Whether the strongest connection opinion on `attribute` is authored across
+/// a specializes arc, as a base material's is (C++
+/// `IsSourceConnectionFromBaseMaterial`): the node that introduced the spec
+/// holding it came through one, or was implied from one.
+pub(super) fn source_from_base_material(attribute: &usd::Attribute) -> Result<bool> {
+    let stage = attribute.stage();
+    let Some(site) = attribute.property_stack()?.into_iter().find(|site| {
+        stage.layer(&site.layer).is_some_and(|layer| {
+            layer
+                .attribute(&site.path)
+                .ok()
+                .flatten()
+                .is_some_and(|spec| spec.has_connection_paths())
+        })
+    }) else {
+        return Ok(false);
+    };
+    attribute.prim().prim_index().with(|index| {
+        index
+            .node_providing_spec(&site.layer, &site.path.prim_path())
+            .is_some_and(|node| within_base_material(index, node.id()))
+    })
+}
+
+/// Whether `node` lies within a base material: it, or a node it was
+/// introduced from, came through a specializes arc (C++
+/// `_NodeRepresentsLiveBaseMaterial`).
+fn within_base_material(index: &pcp::PrimIndex, node: pcp::NodeId) -> bool {
+    iter::successors(Some(node), |id| index.node(*id).origin())
+        .any(|id| index.node(id).arc() == pcp::ArcType::Specialize)
 }
 
 #[cfg(test)]

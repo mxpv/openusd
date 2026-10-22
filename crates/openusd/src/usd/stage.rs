@@ -394,7 +394,7 @@ impl EditTarget {
         match scene_path.embedded_target() {
             None => Some(mapped),
             Some(target) => {
-                let mapped_target = self.map_to_spec_target_path(&target)?;
+                let mapped_target = self.map_to_spec_target_path(&target).ok()?;
                 mapped.replace_embedded_target(&mapped_target)
             }
         }
@@ -404,14 +404,15 @@ impl EditTarget {
     /// connection, inherit, or specialize — from scene namespace into this
     /// target's layer namespace. Target paths never carry variant selections,
     /// so the mapped result is stripped of them; under a variant target this
-    /// maps a path to itself. `None` when the path falls outside the mapping's
-    /// co-domain.
-    pub(super) fn map_to_spec_target_path(&self, scene_path: &sdf::Path) -> Option<sdf::Path> {
-        Some(
-            self.mapping
-                .map_target_to_source(scene_path)?
-                .strip_variant_selections(),
-        )
+    /// maps a path to itself. A path outside the mapping's co-domain is
+    /// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget).
+    pub(super) fn map_to_spec_target_path(&self, scene_path: &sdf::Path) -> Result<sdf::Path, StageAuthoringError> {
+        self.mapping
+            .map_target_to_source(scene_path)
+            .map(|mapped| mapped.strip_variant_selections())
+            .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
+                path: scene_path.clone(),
+            })
     }
 
     /// Maps a stage (scene) time to the source (layer) time a time sample
@@ -585,6 +586,15 @@ pub enum StageAuthoringError {
     #[error("authoring to an instance proxy is not allowed: {path}")]
     InstanceProxyEdit {
         /// The instance-proxy path the edit named.
+        path: sdf::Path,
+    },
+    /// A relationship target or attribute connection names a prototype, or
+    /// an object within one, which no layer can name (C++
+    /// `UsdRelationship::_GetTargetForAuthoring`: "Cannot target a prototype
+    /// or an object within a prototype").
+    #[error("a target cannot name a prototype or an object within one: {path}")]
+    PrototypeTarget {
+        /// The target as given.
         path: sdf::Path,
     },
 
@@ -1191,6 +1201,13 @@ impl Stage {
     /// cloning it. See [`EditTarget::map_to_spec_value`].
     pub(super) fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<sdf::Value>) -> sdf::Value {
         self.edit_target.borrow().map_to_spec_value(object_path, value)
+    }
+
+    /// Maps a target-valued path into the layer namespace of the current edit
+    /// target, under a borrow of the target. See
+    /// `EditTarget::map_to_spec_target_path`.
+    pub(super) fn map_to_spec_target_path(&self, scene_path: &sdf::Path) -> Result<sdf::Path, StageAuthoringError> {
+        self.edit_target.borrow().map_to_spec_target_path(scene_path)
     }
 
     /// The current edit target's layer identifier and the spec path
@@ -4265,6 +4282,56 @@ pub(crate) mod tests {
     use super::*;
     use crate::usd;
 
+    /// A stage over `files`, each a path relative to a fresh directory and its
+    /// contents, opened at `root.usda` against the test schema family. A
+    /// `.usda` file's contents are written after the `#usda` header.
+    pub(crate) fn scene(files: &[(&str, &str)]) -> Result<(tempfile::TempDir, Stage)> {
+        let dir = tempfile::tempdir()?;
+        for (name, contents) in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            match path.extension().is_some_and(|ext| ext == "usda") {
+                true => fs::write(&path, format!("#usda 1.0\n{contents}\n"))?,
+                false => fs::write(&path, contents)?,
+            }
+        }
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        Ok((dir, stage))
+    }
+
+    pub(crate) fn stage() -> Result<Stage> {
+        Stage::builder().in_memory("anon.usda")
+    }
+
+    /// A stage whose `/Child` references `</R>` in `ref.usda`, with the edit
+    /// target set to that arc: `root` is authored before `/Child` in the root
+    /// layer, `referenced` inside `/R`. Hands back `/Child` and the target.
+    pub(crate) fn reference_scene(
+        root: &str,
+        referenced: &str,
+    ) -> Result<(tempfile::TempDir, Stage, usd::Prim, usd::EditTarget)> {
+        let root = format!("{root}def \"Child\" (\n    references = @ref.usda@</R>\n)\n{{\n}}");
+        let referenced = format!("def \"R\"\n{{\n{referenced}}}");
+        let (dir, stage) = scene(&[("root.usda", root.as_str()), ("ref.usda", referenced.as_str())])?;
+        let child = stage.prim("/Child")?;
+        let target = child.edit_target_for_arc(usd::EditTargetArc::Reference)?;
+        stage.set_edit_target(target.clone())?;
+        Ok((dir, stage, child, target))
+    }
+
+    /// The field `key` as `layer` authors it at `path`, read as `T`.
+    pub(crate) fn authored<T: TryFrom<sdf::Value>>(layer: &sdf::Layer, path: &str, key: sdf::FieldKey) -> Option<T> {
+        let value = layer
+            .data()
+            .try_field(&sdf::Path::new(path).ok()?, key.as_str())
+            .ok()??;
+        T::try_from(value.into_owned()).ok()
+    }
+
     /// Author through a layer's `edit` API and commit, for building test fixtures
     /// before they join a stage.
     fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
@@ -5008,8 +5075,10 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A target a weaker layer holds is prepended on the edit target as
+    /// well; composition lists it once.
     #[test]
-    fn add_connection_dedups_inherited() -> Result<()> {
+    fn add_connection_inherited() -> Result<()> {
         let target = sdf::Path::new("/Mat.outputs:out")?;
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
@@ -5046,20 +5115,20 @@ pub(crate) mod tests {
         let attr = attr.add_connection(target.clone())?;
 
         assert_eq!(attr.connections()?, vec![target.clone()]);
-        // The dedup leaves the root layer without any local connection
-        // opinion; the composed target keeps coming from the weak layer.
-        assert!(
-            stage
-                .root_layer()
-                .attribute(input.clone())?
-                .and_then(|attr| attr.connection_path_list())
-                .is_none()
-        );
+        let op = stage
+            .root_layer()
+            .attribute(input)?
+            .expect("authored on the root layer")
+            .connection_path_list()
+            .expect("connections");
+        assert_eq!(op.prepended_items(), vec![target]);
         Ok(())
     }
 
+    /// A target re-added on the layer that deletes it composes again, the
+    /// delete left as it is (C++ `Usd_InsertListItem`).
     #[test]
-    fn add_connection_clears_delete() -> Result<()> {
+    fn add_connection_after_delete() -> Result<()> {
         let target = sdf::Path::new("/Mat.outputs:out")?;
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
@@ -5105,7 +5174,7 @@ pub(crate) mod tests {
             .expect("authored on the root layer")
             .connection_path_list()
             .unwrap();
-        assert!(op.deleted_items().is_empty());
+        assert_eq!(op.deleted_items(), vec![target.clone()]);
         assert_eq!(op.prepended_items(), vec![target]);
         Ok(())
     }

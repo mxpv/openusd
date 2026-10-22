@@ -67,9 +67,9 @@ fn run_combine_chain(name: &str) {
     for case in &cases {
         let chain: Vec<ListOp<i32>> = case.chain.iter().map(ListOp::from).collect();
 
-        let combined = chain[1..]
-            .iter()
-            .fold(chain[0].clone(), |acc, weaker| acc.combined_with(weaker));
+        let combined = chain[1..].iter().fold(chain[0].clone(), |acc, weaker| {
+            acc.combined_with(weaker).expect("the spec's ops add nothing")
+        });
         let reduced = combined.reduced();
 
         assert!(

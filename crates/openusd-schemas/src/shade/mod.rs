@@ -37,7 +37,8 @@
 //! at a prim, the nearest binding of each name among the prim and its
 //! ancestors, as [`CoordSysBinding`]s over a [`CoordSysCache`]. [`UdimPath`]
 //! reads a texture path standing for a set of UDIM tiles and finds them (C++
-//! `UsdShadeUdimUtils`).
+//! `UsdShadeUdimUtils`). [`Material::base_material`] is the material a
+//! specializes arc of the prim's own names.
 //! [`Shader::implementation_source`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
 //! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
@@ -213,6 +214,13 @@ macro_rules! impl_shading_attribute {
             /// `HasConnectedSource`).
             pub fn has_connected_source(&self) -> $crate::openusd::Result<bool> {
                 Ok(!self.connected_sources()?.sources().is_empty())
+            }
+
+            /// Whether the strongest connection opinion on this attribute is
+            /// authored across a specializes arc, as a base material's is
+            /// (C++ `IsSourceConnectionFromBaseMaterial`).
+            pub fn source_from_base_material(&self) -> $crate::openusd::Result<bool> {
+                $crate::shade::connectable::source_from_base_material(&self.attribute)
             }
 
             /// Block every connection with an explicit empty connection list

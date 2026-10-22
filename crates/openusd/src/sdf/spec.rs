@@ -959,6 +959,13 @@ where
     pub fn connection_path_list(&self) -> Option<sdf::PathListOp> {
         self.get(sdf::FieldKey::ConnectionPaths)
     }
+
+    /// Whether `connectionPaths` is authored as a list op that says something:
+    /// an explicit list, empty or not, or one with items (C++
+    /// `SdfAttributeSpec::HasConnectionPaths`).
+    pub fn has_connection_paths(&self) -> bool {
+        self.connection_path_list().is_some_and(|op| !op.is_empty())
+    }
 }
 
 impl<'a, B> AttributeSpec<'a, B>
@@ -1137,72 +1144,6 @@ where
         Ok(())
     }
 
-    /// Append a single connection path. Returns `true` if the spec was
-    /// mutated, `false` when the path was already present.
-    ///
-    /// `prepend = true` joins the prepended-items list (the new path
-    /// composes stronger than weaker layers); `prepend = false` joins
-    /// the appended-items list (weaker than prepends, but still
-    /// composes with weaker-layer opinions). When the existing op is
-    /// `explicit`, the path is added to whichever side `prepend`
-    /// selects without flipping the op out of explicit mode. A
-    /// pre-existing non-`PathListOp` value is overwritten — debug
-    /// builds assert.
-    pub fn add_connection(&mut self, path: impl sdf::IntoPath, prepend: bool) -> Result<bool, sdf::PathParseError> {
-        let path = sdf::try_into_path(path)?;
-        let key = sdf::FieldKey::ConnectionPaths.as_str();
-        // An undecodable `connectionPaths` must not be silently overwritten.
-        let Ok(existing) = self.field(key) else {
-            return Ok(false);
-        };
-        Ok(match existing {
-            Some(sdf::Value::PathListOp(mut op)) => {
-                // Re-adding a previously deleted target must first clear the
-                // delete bucket; otherwise the newly authored connection can
-                // still be removed during list-op application.
-                let mut changed = op.remove_item(sdf::ListOpType::Deleted, &path);
-                if op.iter().any(|p| p == &path) {
-                    if changed {
-                        self.set(key, sdf::Value::PathListOp(op));
-                    }
-                    return Ok(changed);
-                }
-                // An explicit op stays explicit, and `prepend` says which
-                // end of its items the path goes to.
-                match (op.is_explicit(), prepend) {
-                    (true, true) => op.edit_items(sdf::ListOpType::Explicit, |items| items.insert(0, path)),
-                    (true, false) => drop(op.push(sdf::ListOpType::Explicit, path)),
-                    (false, true) => drop(op.push(sdf::ListOpType::Prepended, path)),
-                    (false, false) => drop(op.push(sdf::ListOpType::Appended, path)),
-                }
-                changed = true;
-                self.set(key, sdf::Value::PathListOp(op));
-                changed
-            }
-            Some(other) => {
-                debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
-                let op = if prepend {
-                    sdf::PathListOp::prepended([path])
-                } else {
-                    sdf::PathListOp::appended([path])
-                };
-                self.set(key, sdf::Value::PathListOp(op));
-                true
-            }
-            None => {
-                // Default to a non-explicit list op so the new path composes
-                // with weaker-layer opinions, matching C++ `UsdAttribute::AddConnection`.
-                let op = if prepend {
-                    sdf::PathListOp::prepended([path])
-                } else {
-                    sdf::PathListOp::appended([path])
-                };
-                self.set(key, sdf::Value::PathListOp(op));
-                true
-            }
-        })
-    }
-
     /// Remove a single connection path. Returns `true` if it was present.
     pub fn remove_connection(&mut self, path: &sdf::Path) -> bool {
         let key = sdf::FieldKey::ConnectionPaths.as_str();
@@ -1226,10 +1167,9 @@ where
         };
         Ok(match existing {
             Some(sdf::Value::PathListOp(mut op)) => {
-                let removed = op.discard(path);
-                let deleted = !op.is_explicit() && op.push(sdf::ListOpType::Deleted, path.clone());
+                let changed = op.remove(path);
                 self.set(key, sdf::Value::PathListOp(op));
-                removed || deleted
+                changed
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
@@ -1334,37 +1274,6 @@ where
             sdf::FieldKey::TargetPaths.as_str(),
             sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
         );
-        Ok(())
-    }
-
-    /// Append a single target path. No-op if already present. A pre-existing
-    /// value of a non-`sdf::PathListOp` variant is overwritten — debug builds assert.
-    pub fn add_target(&mut self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
-        let path = sdf::try_into_path(path)?;
-        let key = sdf::FieldKey::TargetPaths.as_str();
-        // An undecodable `targetPaths` must not be silently overwritten.
-        let Ok(existing) = self.field(key) else {
-            return Ok(());
-        };
-        match existing {
-            Some(sdf::Value::PathListOp(mut op)) => {
-                if !op.iter().any(|p| p == &path) {
-                    let ty = match op.is_explicit() {
-                        true => sdf::ListOpType::Explicit,
-                        false => sdf::ListOpType::Added,
-                    };
-                    op.push(ty, path);
-                }
-                self.set(key, sdf::Value::PathListOp(op));
-            }
-            Some(other) => {
-                debug_assert!(false, "targetPaths field is not a sdf::PathListOp (got {other:?})");
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::explicit([path])));
-            }
-            None => {
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::explicit([path])));
-            }
-        }
         Ok(())
     }
 
@@ -1949,17 +1858,6 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_path_dedups() {
-        let (mut data, path) = data_with_spec("/A.in", sdf::SpecType::Attribute);
-        let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
-        let target = sdf::Path::new("/A.out").expect("path");
-
-        assert!(attr.add_connection(target.clone(), false).unwrap());
-        // Duplicate — must not mutate, must not trip the change tracker.
-        assert!(!attr.add_connection(target, false).unwrap());
-    }
-
-    #[test]
     fn clear_connection_paths_noop() {
         let (mut data, path) = data_with_spec("/A.in", sdf::SpecType::Attribute);
         let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
@@ -1967,8 +1865,7 @@ mod tests {
         // Nothing authored — clear is a no-op.
         assert!(!attr.clear_connections());
 
-        attr.add_connection(sdf::Path::new("/A.out").expect("path"), false)
-            .unwrap();
+        attr.set_connections([sdf::Path::new("/A.out").expect("path")]).unwrap();
         assert!(attr.clear_connections());
         assert!(!attr.clear_connections());
     }
@@ -2090,7 +1987,7 @@ mod tests {
         let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         let target = sdf::Path::new("/Target").expect("valid path");
 
-        rel.add_target(target.clone()).unwrap();
+        rel.set_targets([target.clone()]).unwrap();
 
         assert_eq!(
             rel.target_path_list().and_then(|op| op.iter().next().cloned()),
@@ -2113,7 +2010,12 @@ mod tests {
 
         // A weaker layer adds /Target and /Keep; composition drops /Target.
         let weaker = sdf::PathListOp::explicit([target.clone(), sdf::Path::new("/Keep").unwrap()]);
-        let composed: Vec<_> = stronger.combined_with(&weaker).iter().cloned().collect();
+        let composed: Vec<_> = stronger
+            .combined_with(&weaker)
+            .expect("composable")
+            .iter()
+            .cloned()
+            .collect();
         assert_eq!(composed, vec![sdf::Path::new("/Keep").unwrap()]);
     }
 
@@ -2125,8 +2027,7 @@ mod tests {
         let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         let a = sdf::Path::new("/A").unwrap();
         let b = sdf::Path::new("/B").unwrap();
-        rel.add_target(a.clone()).unwrap();
-        rel.add_target(b.clone()).unwrap();
+        rel.set_targets([a.clone(), b.clone()]).unwrap();
         assert!(rel.remove_target(&a));
 
         let op = rel.target_path_list().expect("target list op");

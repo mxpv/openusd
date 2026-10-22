@@ -378,7 +378,7 @@ pub use mapping::MapFunction;
 pub use population_mask::{PopulationMask, PopulationMaskError};
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub(crate) use prim_index::Demand;
-pub use prim_index::PrimIndex;
+pub use prim_index::{PrimIndex, PrimIndexView};
 pub(crate) use prim_resolve::Composing;
 pub(crate) use relocates::{BatchRelocate, analyze_relocate_occurrences, first_unrepresentable_relocate};
 pub(crate) use value_resolve::{Resolution, ResolveMode, ResolveSourceKind, TimedValue, ValueState};

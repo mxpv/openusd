@@ -751,9 +751,33 @@ pub(crate) mod tests {
         usda: &str,
         configure: impl FnOnce(usd::StageBuilder) -> usd::StageBuilder,
     ) -> Result<(tempfile::TempDir, Stage)> {
+        from_files_with(&[("scene.usda", usda)], "scene.usda", configure)
+    }
+
+    /// A stage opened on `root` among `files`, each a file name and its usda
+    /// text written to a fresh directory, carrying every enabled family's
+    /// schema data. For a scene whose layers reach each other by relative
+    /// path.
+    #[allow(
+        dead_code,
+        reason = "which families' tests reach for it depends on the features enabled"
+    )]
+    pub(crate) fn from_files(files: &[(&str, &str)], root: &str) -> Result<(tempfile::TempDir, Stage)> {
+        from_files_with(files, root, |builder| builder)
+    }
+
+    /// [`from_files`], with the stage builder configured by `configure` before
+    /// it opens.
+    pub(crate) fn from_files_with(
+        files: &[(&str, &str)],
+        root: &str,
+        configure: impl FnOnce(usd::StageBuilder) -> usd::StageBuilder,
+    ) -> Result<(tempfile::TempDir, Stage)> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("scene.usda");
-        fs::write(&path, usda)?;
+        for (name, usda) in files {
+            fs::write(dir.path().join(name), usda)?;
+        }
+        let path = dir.path().join(root);
         let stage = configure(Stage::builder().schema_registry(schema_registry()))
             .open(path.to_str().expect("utf-8 temp path"))?;
         Ok((dir, stage))

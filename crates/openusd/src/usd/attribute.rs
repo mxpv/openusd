@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use super::authoring::PropertySpecKind;
 use super::{
-    Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, StageEdit, TimeCode,
-    TypeConflict, authoring, interp,
+    ListPosition, Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, StageEdit,
+    TimeCode, TypeConflict, authoring, interp, list_edit,
 };
 use crate::Result;
 use crate::gf;
@@ -583,10 +583,12 @@ impl Attribute {
     /// Each path is a full property path including its namespace, e.g.
     /// `</Mat/Tex.outputs:rgb>` or `</Mat.inputs:diffuseColor>`. Replaces
     /// any previously authored connections (the list op is written
-    /// `explicit`). This is the primitive every UsdShade input/output
-    /// connection is built on.
+    /// `explicit`), each mapped into the edit target's layer namespace, one
+    /// the mapping does not reach being
+    /// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget). This is
+    /// the primitive every UsdShade input/output connection is built on.
     pub fn set_connections(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
-        let targets: Vec<sdf::Path> = targets.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
+        let targets = authoring::targets_for_authoring(&self.stage, &self.path, targets)?;
         self.edit(|spec| Ok(spec.set_connections(targets)?))
     }
 
@@ -601,52 +603,37 @@ impl Attribute {
         self.set_connections([source.path().clone()])
     }
 
-    /// Add a single connection target at the default USD list position.
-    /// No-op if already present (skips cache invalidation in that case).
-    /// Joins the prepended-items list op, matching C++
-    /// `UsdAttribute::AddConnection`'s default back-of-prepend position.
+    /// Put `target` at the back of the edit target's prepended list, where
+    /// C++ `UsdAttribute::AddConnection` puts one unless told otherwise; see
+    /// [`add_connection_at`](Self::add_connection_at).
     pub fn add_connection(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(sdf::try_into_path(target)?, true)
+        self.add_connection_at(target, ListPosition::default())
     }
 
-    /// Add a single connection target to the prepended list op. No-op if
-    /// already present. This is the explicit spelling of the default USD
-    /// `AddConnection` position.
-    pub fn add_connection_prepended(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(sdf::try_into_path(target)?, true)
-    }
-
-    /// Add a single connection target to the appended list op. No-op if
-    /// already present. Use this when the new target should compose behind
-    /// prepended opinions from this layer.
-    pub fn add_connection_appended(self, target: impl sdf::IntoPath) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(sdf::try_into_path(target)?, false)
-    }
-
-    fn add_connection_at(self, target: sdf::Path, prepend: bool) -> Result<Self, StageAuthoringError> {
-        // Dedup against the composed result, not just the local edit-target
-        // op. Otherwise adding a weaker-layer target would author a stronger
-        // duplicate and could accidentally reorder it.
-        if self.connections_composed()?.iter().any(|p| p == &target) {
-            return Ok(self);
-        }
+    /// Put `target` at `position` in the edit target's `connectionPaths`
+    /// (C++ `UsdAttribute::AddConnection`); see [`ListPosition`]. The target
+    /// is mapped as [`set_connections`](Self::set_connections) maps one.
+    pub fn add_connection_at(
+        self,
+        target: impl sdf::IntoPath,
+        position: ListPosition,
+    ) -> Result<Self, StageAuthoringError> {
+        let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
         self.edit(move |spec| {
-            spec.add_connection(target, prepend)?;
-            Ok(())
+            Ok(list_edit::edit_list(spec, sdf::FieldKey::ConnectionPaths, |op| {
+                list_edit::insert(op, target, position);
+            })?)
         })
     }
 
-    /// Remove a single connection target. Returns `Ok(true)` if it was
-    /// present. Takes `&self` (returns `bool`, not `Self`, so it doesn't
-    /// chain). Mirrors C++ `UsdAttribute::RemoveConnection`.
+    /// Remove a single connection target, mapped as
+    /// [`set_connections`](Self::set_connections) maps one (C++
+    /// `UsdAttribute::RemoveConnection`): dropped from the lists the edit
+    /// target contributes it through and, unless its op is explicit,
+    /// recorded as deleted so a weaker layer's copy goes too. Returns
+    /// whether an opinion changed.
     pub fn remove_connection(&self, target: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
-        let target = sdf::try_into_path(target)?;
-        // The target may exist only through weaker layers. Check the composed
-        // list first so this call can author a delete opinion even when the
-        // edit-target layer has no local connection item to remove.
-        if !self.connections_composed()?.iter().any(|p| p == &target) {
-            return Ok(false);
-        }
+        let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
         // A delete list-op still needs a property spec to carry it, stamped
         // as any other write stamps it.
         let mut removed = false;
@@ -1669,7 +1656,9 @@ fn source_of(kind: pcp::ResolveSourceKind) -> ResolveInfoSource {
 #[cfg(test)]
 mod tests {
     use crate::Result;
+    use crate::sdf::path::tests::strings;
     use crate::usd::SchemaRegistry;
+    use crate::usd::stage::tests::{authored, reference_scene, scene, stage};
 
     /// A downstream value type with its own conversion error, standing in for
     /// an application extending the generic accessors.
@@ -1730,14 +1719,10 @@ mod tests {
     use std::rc::Rc;
 
     use crate::usd::{
-        Attribute, AttributeQuery, CommittedChange, EditTarget, EditTargetArc, ExpansionRule, ResolveInfoSource, Stage,
-        StageAuthoringError, TimeCode, TypeConflict,
+        Attribute, AttributeQuery, CommittedChange, EditTarget, EditTargetArc, ExpansionRule, ListPosition,
+        ResolveInfoSource, Stage, StageAuthoringError, TimeCode, TypeConflict,
     };
     use crate::{gf, sdf, tf};
-
-    fn stage() -> Result<Stage> {
-        Stage::builder().in_memory("anon.usda")
-    }
 
     /// An attribute's name is its property name, namespaces included, and
     /// two handles to one attribute are equal.
@@ -2509,9 +2494,10 @@ class Marker "Marker"
         let input = input.set_connections([iface.clone()])?;
         assert_eq!(input.connections()?, vec![iface.clone()]);
 
-        // add_connection prepends by default; dedups.
+        // On an explicit op, add_connection joins the explicit list at its
+        // back; one held already stays where it is.
         let input = input.add_connection(tex_out.path().clone())?;
-        assert_eq!(input.connections()?, vec![tex_out.path().clone(), iface.clone()]);
+        assert_eq!(input.connections()?, vec![iface.clone(), tex_out.path().clone()]);
         let input = input.add_connection(tex_out.path().clone())?;
         assert_eq!(input.connections()?.len(), 2);
 
@@ -2582,7 +2568,7 @@ class Marker "Marker"
             .define_prim("/Surface")?
             .set_type_name("Shader")?
             .create_attribute("inputs:diffuseColor", "color3f")?
-            .add_connection_appended(target.clone())?;
+            .add_connection_at(target.clone(), ListPosition::BackOfAppend)?;
 
         let op = stage
             .root_layer()
@@ -2598,10 +2584,8 @@ class Marker "Marker"
 
     #[test]
     fn add_connection_prepend_on_explicit() -> Result<()> {
-        // When the existing op is `explicit` (e.g. authored via
-        // `set_connections`), `add_connection_prepended` must honour the
-        // prepend position by inserting at the front of `explicit_items`
-        // rather than silently routing to the back.
+        // An explicit op takes the addition into its explicit list, at the
+        // front the position names.
         let stage = stage()?;
         let a = sdf::Path::new("/A.outputs:out")?;
         let b = sdf::Path::new("/B.outputs:out")?;
@@ -2610,7 +2594,7 @@ class Marker "Marker"
             .set_type_name("Shader")?
             .create_attribute("inputs:diffuseColor", "color3f")?
             .set_connections([a.clone()])?
-            .add_connection_prepended(b.clone())?;
+            .add_connection_at(b.clone(), ListPosition::FrontOfPrepend)?;
 
         let op = stage
             .root_layer()
@@ -4337,27 +4321,6 @@ class Marker "Marker"
         Ok(())
     }
 
-    /// A stage over `files`, each a path relative to a fresh directory and its
-    /// contents, opened at `root.usda` against the test schema family. A
-    /// `.usda` file's contents are written after the `#usda` header.
-    fn scene(files: &[(&str, &str)]) -> Result<(tempfile::TempDir, Stage)> {
-        let dir = tempfile::tempdir()?;
-        for (name, contents) in files {
-            let path = dir.path().join(name);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            match path.extension().is_some_and(|ext| ext == "usda") {
-                true => fs::write(&path, format!("#usda 1.0\n{contents}\n"))?,
-                false => fs::write(&path, contents)?,
-            }
-        }
-        let stage = Stage::builder()
-            .schema_registry(SchemaRegistry::test_registry())
-            .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
-        Ok((dir, stage))
-    }
-
     /// A [`scene`] whose root only sublayers `layers`, strongest first.
     fn layered(layers: &[(&str, &str)]) -> Result<(tempfile::TempDir, Stage)> {
         let subs: Vec<String> = layers.iter().map(|(name, _)| format!("@{name}@")).collect();
@@ -5012,6 +4975,25 @@ class Thing "Thing" (
         assert_eq!(radius.doc()?.as_deref(), Some("mine"));
         let radius = radius.clear_doc()?;
         assert_eq!(radius.doc()?.as_deref(), Some("the radius"));
+        Ok(())
+    }
+    /// A connection authored through a reference arc's edit target lands in
+    /// the referenced namespace, and one the mapping does not reach is
+    /// refused.
+    #[test]
+    fn connections_through_reference() -> Result<()> {
+        let (_dir, stage, child, target) = reference_scene("", "    float a\n    float b\n    float c\n")?;
+        let attr = child.attribute("a");
+        attr.clone().set_connections(["/Child.b"])?.add_connection("/Child.c")?;
+        assert!(attr.remove_connection("/Child.c")?);
+        let layer = stage.layer(target.layer_identifier()).expect("the referenced layer");
+        let op: sdf::PathListOp = authored(&layer, "/R.a", sdf::FieldKey::ConnectionPaths).expect("authored");
+        assert_eq!(strings(op.explicit_items()), ["/R.b"]);
+        let refused = attr.add_connection("/Elsewhere.x");
+        assert!(
+            matches!(refused, Err(StageAuthoringError::OutsideEditTarget { .. })),
+            "{refused:?}"
+        );
         Ok(())
     }
 }

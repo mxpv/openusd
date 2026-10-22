@@ -22,7 +22,7 @@ mod file_format;
 mod layer;
 pub(crate) mod layer_registry;
 mod ordering;
-mod path;
+pub(crate) mod path;
 pub mod path_expr;
 mod path_table;
 pub mod schema;

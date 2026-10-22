@@ -684,7 +684,7 @@ fn validate_value(diff: &Diff, target: &EditTarget, value: &sdf::Value) -> Resul
 // a check that tolerates edit-target mappings first — a pair plus root
 // identity shadows paths the bare map translates fine.
 fn translate_value_path(diff: &Diff, target: &EditTarget, path: &sdf::Path) -> Option<sdf::Path> {
-    lift_path(diff.mapping.as_ref(), path).and_then(|scene| target.map_to_spec_target_path(&scene))
+    lift_path(diff.mapping.as_ref(), path).and_then(|scene| target.map_to_spec_target_path(&scene).ok())
 }
 
 /// Translate one field value for the retargeting replay, or `None` when the

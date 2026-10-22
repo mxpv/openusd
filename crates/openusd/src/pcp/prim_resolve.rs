@@ -7,7 +7,6 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 
 use rustc_hash::FxHashSet;
 
@@ -650,7 +649,7 @@ impl PrimIndex {
                         _ => {}
                     }
                 }
-                Value::$variant(sdf::ListOp::explicit(compose_list_ops(&ops)))
+                Value::$variant(sdf::ListOp::explicit(sdf::ListOp::compose_all(&ops)))
             }};
         }
 
@@ -769,7 +768,7 @@ impl PrimIndex {
         // `_RemoveTargetPathErrorsForPath`); an external drop has no composed path
         // and is never matched.
         invalid.retain(|inv| inv.composed.as_ref().is_none_or(|c| !deleted_composed.contains(c)));
-        Ok((compose_list_ops(&ops), invalid))
+        Ok((sdf::ListOp::compose_all(&ops), invalid))
     }
 
     /// Collects the field's path-list-op opinions across the composition graph,
@@ -1104,20 +1103,30 @@ impl PrimIndex {
         if ops.is_empty() {
             return Ok(None);
         }
-        Ok(Some(compose_list_ops(&ops)))
+        Ok(Some(sdf::ListOp::compose_all(&ops)))
     }
 
-    /// Resolves the `clipSets` list-op composed across the stack (C++
-    /// `SdfStringListOp` folding), preserving the prepend/append/delete
-    /// structure rather than flattening to an applied order like
-    /// [`clip_sets_order`](Self::clip_sets_order). `None` when unauthored.
+    /// Resolves the `clipSets` list op composed across the stack, keeping its
+    /// prepend/append/delete structure where one op states the fold and
+    /// giving the composed list as an explicit op otherwise (C++
+    /// `SdfListOp::ApplyOperations` over the inner op);
+    /// [`clip_sets_order`](Self::clip_sets_order) is the applied order.
+    /// `None` when unauthored.
     pub(crate) fn clip_sets_list_op(&self, stack: &LayerGraph) -> Result<Option<sdf::StringListOp>, QueryError> {
         // `clip_sets_ops` yields strongest first; fold each weaker op under the
         // accumulated stronger one.
-        Ok(self
-            .clip_sets_ops(stack)?
-            .into_iter()
-            .reduce(|stronger, weaker| stronger.combined_with(&weaker)))
+        let ops = self.clip_sets_ops(stack)?;
+        let Some((strongest, weaker)) = ops.split_first() else {
+            return Ok(None);
+        };
+        let mut folded = strongest.clone();
+        for op in weaker {
+            let Some(next) = folded.combined_with(op) else {
+                return Ok(Some(sdf::ListOp::explicit(sdf::ListOp::compose_all(&ops))));
+            };
+            folded = next;
+        }
+        Ok(Some(folded))
     }
 
     /// Gathers the contributing `clipSets` list-op opinions, strongest first,
@@ -1489,18 +1498,6 @@ fn evaluate_clip_assets(
             sets.remove(&name);
         }
     }
-}
-
-/// Folds list-op opinions, collected strongest-to-weakest, into a single
-/// resolved list (spec 12.2.6): each weaker op is composed under the stronger
-/// ones. `compose_over` short-circuits on an explicit op, so a stronger
-/// explicit opinion replaces all weaker contributions.
-fn compose_list_ops<T: Clone + PartialEq + Hash>(ops: &[sdf::ListOp<T>]) -> Vec<T> {
-    let mut result = Vec::new();
-    for op in ops.iter().rev() {
-        result = op.compose_over(&result);
-    }
-    result
 }
 
 /// Maps the stage-time component of clip `active`/`times` pairs through the

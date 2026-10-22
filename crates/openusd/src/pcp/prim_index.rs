@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::{iter, mem};
 
 use crate::sdf::schema::FieldKey;
@@ -307,6 +308,15 @@ impl PrimIndex {
         self.all_nodes().filter(|node| !node.is_culled())
     }
 
+    /// The node providing the spec `layer` holds at `path`: the strongest,
+    /// among those that contribute opinions, at `path` whose layer stack
+    /// holds `layer` (C++ `PcpPrimIndex::GetNodeProvidingSpec`); `graph`
+    /// holds the stacks. `None` where no node does.
+    pub(crate) fn node_providing_spec(&self, graph: &LayerGraph, layer: LayerId, path: &Path) -> Option<Node<'_>> {
+        self.nodes()
+            .find(|node| node.path() == path && graph.stack_contains(node.layer_stack_id(), layer))
+    }
+
     /// Iterates every retained node in strength order, including the culled
     /// nodes the index keeps. Skips inert nodes — the
     /// synthetic root and the non-contributing class placeholders implied-class
@@ -568,6 +578,14 @@ impl PrimIndex {
         self.graph.root().is_valid().then_some(self.graph.root())
     }
 
+    /// The node of the prim's own site in the root layer stack, which its
+    /// direct arcs and the classes implied up to it hang off (C++
+    /// `GetRootNode`, the parentless root there); `None` for an empty index.
+    /// [`root`](Self::root) is the synthetic node above it.
+    pub fn local_root(&self) -> Option<NodeId> {
+        self.graph.local_root().valid()
+    }
+
     /// Recomputes `has_specs` from live layer data for every node sitting at
     /// site `(layer, path)`, reporting what the caller must do next and keeping
     /// each refreshed node's spec-stack run in `runs`.
@@ -657,15 +675,6 @@ impl PrimIndex {
                 && stack_has_spec(graph, culled.layer_stack, path)
         });
         refresh
-    }
-
-    /// Whether a node that can contribute specs sits at `path` in a stack
-    /// holding `layer` (C++ `PcpPrimIndex::GetNodeProvidingSpec`).
-    pub(crate) fn contributes_at(&self, layer: LayerId, path: &Path, graph: &LayerGraph) -> bool {
-        self.nodes_at(path).any(|id| {
-            let node = self.graph.node(id);
-            !node.is_inert() && !node.is_culled() && graph.stack_contains(node.layer_stack_id(), layer)
-        })
     }
 
     /// Arena handles of every node sitting at `path`, in arena order — the
@@ -1242,6 +1251,37 @@ impl CompositionContext {
 // ---------------------------------------------------------------------------
 // Shared helpers (used by the `Indexer` and Stage)
 // ---------------------------------------------------------------------------
+
+/// A prim index with the layer graph it composes over, as a borrow of the
+/// cache hands one out: the index through `Deref`, and the queries that read
+/// a node's layer stack as well, which a C++ `PcpNodeRef` reaches on its own.
+pub struct PrimIndexView<'a> {
+    index: &'a PrimIndex,
+    graph: &'a LayerGraph,
+}
+
+impl<'a> PrimIndexView<'a> {
+    pub(crate) fn new(index: &'a PrimIndex, graph: &'a LayerGraph) -> Self {
+        Self { index, graph }
+    }
+
+    /// The node providing the spec the layer `identifier` holds at `path`,
+    /// among those that contribute opinions (C++
+    /// `PcpPrimIndex::GetNodeProvidingSpec`). `None` where no node does, or
+    /// where the stage does not hold the layer.
+    pub fn node_providing_spec(&self, identifier: &str, path: &Path) -> Option<Node<'a>> {
+        let layer = self.graph.id_of(identifier)?;
+        self.index.node_providing_spec(self.graph, layer, path)
+    }
+}
+
+impl Deref for PrimIndexView<'_> {
+    type Target = PrimIndex;
+
+    fn deref(&self) -> &PrimIndex {
+        self.index
+    }
+}
 
 /// Appends the spec-stack entries `node` contributes: one per layer of its
 /// stack that authors a spec at the node's path, in the stack's order, each
