@@ -224,6 +224,7 @@ fn discover_scope<'a>(
             .enumerate()
             .map(|(index, root)| (root.identifier.clone(), index))
             .collect(),
+        udim_sets: HashMap::new(),
         queue: (0..roots.len()).filter(|&index| roots[index].is_layer()).collect(),
         sources: roots,
         unresolved,
@@ -301,6 +302,10 @@ struct Discoverer<'a> {
     package: Option<(String, String)>,
     /// The source index of each identifier found.
     index: HashMap<String, usize>,
+    /// The numbers of the tiles each UDIM set resolved to, by the set's
+    /// anchored identifier: a set authored by several layers is probed once,
+    /// however it is interned.
+    udim_sets: HashMap<String, Vec<u16>>,
     /// The layer sources still to walk.
     queue: VecDeque<usize>,
     sources: Vec<Source<'a>>,
@@ -344,6 +349,44 @@ impl<'a> Discoverer<'a> {
         Ok(())
     }
 
+    /// The tiles `path`, authored in the layer source `referrer` as `kind`,
+    /// names: for an asset path with a UDIM pattern, the number and authored
+    /// path of each tile found where the first one resolves (C++
+    /// `_GetUdimTiles`); empty for any other path, and where none resolves.
+    /// A set is probed once, however many layers author it; each tile is
+    /// resolved again by [`find_or_add`](Self::find_or_add), as C++ resolves
+    /// the authored tile paths it hands back. Only a path of asset kind is
+    /// expanded; C++ expands any asset value's path, a layer-named one
+    /// included, and neither expands an arc's.
+    fn udim_tiles(&mut self, referrer: usize, path: &str, kind: AssetKind) -> Vec<(u16, String)> {
+        if kind != AssetKind::Asset {
+            return Vec::new();
+        }
+        let Some(udim) = ar::UdimPath::parse(path) else {
+            return Vec::new();
+        };
+        let registry = self.graph.layer_registry();
+        let anchor = self.sources[referrer].content.anchor();
+        let set = registry.create_identifier(path, anchor.as_ref());
+        let numbers = self.udim_sets.entry(set).or_insert_with(|| {
+            let resolver: &dyn ar::Resolver = registry;
+            // One scope over the probe for the first tile and the walk of
+            // the rest: a packaged set opens its package once.
+            let _scope = ar::CacheScope::begin();
+            udim.resolve(resolver, anchor.as_ref())
+                .and_then(|resolved| ar::UdimPath::parse(&resolved))
+                .map(|resolved| {
+                    resolved
+                        .resolve_tiles(resolver, None)
+                        .iter()
+                        .map(|tile| tile.number)
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        numbers.iter().map(|&number| (number, udim.tile(number))).collect()
+    }
+
     /// [`find_or_add`](Self::find_or_add), with whether it added the source,
     /// queueing a layer it adds.
     fn add(&mut self, current: usize, path: &str, kind: AssetKind) -> Result<Option<(Use, bool)>> {
@@ -356,48 +399,6 @@ impl<'a> Discoverer<'a> {
             self.queue.push_back(found.source);
         }
         Ok(Some((found, added)))
-    }
-
-    /// The tiles `path`, authored in the layer source `referrer` as `kind`,
-    /// names: for an asset path with a UDIM pattern, the number and authored
-    /// path of each tile found where the first one resolves (C++
-    /// `_GetUdimTiles`); empty for any other path, and where none resolves.
-    /// A set found before, through another layer, keeps its tiles. Only a
-    /// path of asset kind is expanded; C++ expands any asset value's path, a
-    /// layer-named one included, and neither expands an arc's.
-    ///
-    /// TODO(perf): `find_or_add` resolves each tile again; carrying the
-    /// tile's resolved path into its asset branch would spare that, the
-    /// identifier still being made as the key.
-    fn udim_tiles(&self, referrer: usize, path: &str, kind: AssetKind) -> Vec<(u16, String)> {
-        if kind != AssetKind::Asset {
-            return Vec::new();
-        }
-        let Some(udim) = ar::UdimPath::parse(path) else {
-            return Vec::new();
-        };
-        let registry = self.graph.layer_registry();
-        let anchor = self.sources[referrer].content.anchor();
-        let numbers: Vec<u16> = if let Some(&set) = self.index.get(&registry.create_identifier(path, anchor.as_ref())) {
-            let Content::Tiles(tiles) = &self.sources[set].content else {
-                return Vec::new();
-            };
-            tiles.iter().map(|(number, _)| *number).collect()
-        } else {
-            let resolver: &dyn ar::Resolver = registry;
-            let Some(resolved) = udim
-                .resolve(resolver, anchor.as_ref())
-                .and_then(|resolved| ar::UdimPath::parse(&resolved))
-            else {
-                return Vec::new();
-            };
-            resolved
-                .resolve_tiles(resolver, None)
-                .into_iter()
-                .map(|tile| tile.number)
-                .collect()
-        };
-        numbers.into_iter().map(|number| (number, udim.tile(number))).collect()
     }
 
     /// The paths the layer source `current` authors, each once, with what it

@@ -2434,7 +2434,7 @@ pub(crate) mod tests {
     /// A plain path whose tiles resolve into a nested package keeps the
     /// pattern inside the innermost one.
     #[test]
-    fn udim_resolves_into_nested_package() {
+    fn udim_nested_package() {
         struct Nested;
 
         impl Resolver for Nested {

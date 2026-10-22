@@ -1123,7 +1123,7 @@ def "T"
     /// A tile the layer names on its own before its set, placed elsewhere by
     /// then, moves under the set.
     #[test]
-    fn udim_tile_named_first_follows_set() -> Result<()> {
+    fn udim_tile_follows_set() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let absolute = dir
             .path()

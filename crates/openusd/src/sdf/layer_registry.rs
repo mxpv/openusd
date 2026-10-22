@@ -162,8 +162,10 @@ pub(crate) struct PreparedLayer {
     pub data: sdf::LayerData,
 }
 
-/// The registry as the resolver it fronts: each path passes the registry's
-/// own identifier rules on its way to the resolver.
+/// The registry as the resolver it fronts. An identifier passes the
+/// registry's own rules (`create_identifier`, `in_memory_identifier`,
+/// `is_context_dependent_path`); every other call reaches the resolver as it
+/// is.
 impl ar::Resolver for LayerRegistry {
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
         LayerRegistry::create_identifier(self, asset_path, anchor)
