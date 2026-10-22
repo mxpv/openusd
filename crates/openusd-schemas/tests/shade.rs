@@ -7,11 +7,14 @@ use std::fs;
 use openusd::Result;
 use openusd::{sdf, tf, usd};
 use openusd_schemas::SchemaError;
+use openusd_schemas::geom::FamilyType;
 use openusd_schemas::shade::Connectable;
 use openusd_schemas::shade::{
     self, AttributeType, Channel, Connectability, ImplementationSource, Material, MaterialBindingAPI, NodeGraph,
     Output, Shader, TerminalKind, base_name,
 };
+
+mod common;
 
 const FIXTURE: &str = "fixtures/usdShade_scene.usda";
 
@@ -113,6 +116,21 @@ fn reads_material_bindings_from_fixture() -> Result<()> {
         resolved.material()?.expect("a Material").path().as_str(),
         "/World/Looks/BrickMat"
     );
+    Ok(())
+}
+
+/// The material-bind subsets a vendor asset authors are listed with the
+/// partition their mesh declares, each bound to a material of its own.
+#[test]
+fn vendor_material_bind_subsets() -> Result<()> {
+    let stage =
+        common::vendor("usd-wg-assets/full_assets/Vehicles/USD_Mini_Car_Kit/assets/vehicles/sedan/geo/sedanGeo.usda")?;
+    let binding = MaterialBindingAPI::from_prim_unchecked(stage.prim("/sedan")?);
+    assert_eq!(binding.subsets()?.len(), 5);
+    assert_eq!(binding.subset_family_type()?, FamilyType::Partition);
+    let first = MaterialBindingAPI::get(&stage, "/sedan/_4_frontLightMax")?.expect("applied");
+    let direct = first.direct_binding("")?.expect("bound");
+    assert_eq!(direct.material_path().as_str(), "/Materials/frontLightMax");
     Ok(())
 }
 

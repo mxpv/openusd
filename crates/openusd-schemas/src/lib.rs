@@ -26,7 +26,7 @@
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
 //! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim |
 //! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, and the labels it carries under one of them over time and down namespace |
-//! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, the `UsdPreviewSurface` reader |
+//! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, material bindings and their `materialBind` subsets, the `UsdPreviewSurface` reader; needs `geom` |
 //! | `skel`    | `skel`    | `UsdSkel`     | the skinning toolkit: topology, animation mapping, resolvers, pure-math LBS; needs `geom` |
 //! | `ui`      | `ui`      | `UsdUI`       | |
 //! | `vol`     | `vol`     | `UsdVol`      | a volume's field relationships, which no property declares; needs `geom` |
@@ -209,6 +209,14 @@ pub enum SchemaError {
     InvalidBindingName {
         /// The rejected name.
         name: String,
+    },
+
+    /// The `materialBind` family of subsets is given the unrestricted type,
+    /// under which one element could be bound to several materials.
+    #[error("the materialBind subsets of {prim} cannot be unrestricted")]
+    UnrestrictedBindFamily {
+        /// The prim whose subsets they are.
+        prim: sdf::Path,
     },
 
     /// A name that no primvar can have: one ending in `:indices`, which names

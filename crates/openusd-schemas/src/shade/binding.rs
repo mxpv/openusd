@@ -23,12 +23,13 @@ use std::iter;
 
 use openusd::Result;
 use openusd::sdf::{self, Path, PathMap};
-use openusd::usd::{CollectionAPI, MembershipQuery, Prim, Relationship, Stage};
+use openusd::usd::{CollectionAPI, MembershipQuery, Prim, Relationship, SchemaBase, Stage};
 
 use crate::SchemaError;
+use crate::geom::{ElementType, FamilyType, Imageable, Subset, subset};
 
 use super::tokens::{
-    ALL_PURPOSE, BIND_MATERIAL_AS, FULL, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION, PREVIEW,
+    ALL_PURPOSE, BIND_MATERIAL_AS, FULL, MATERIAL_BIND, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION, PREVIEW,
     WEAKER_THAN_DESCENDANTS,
 };
 use super::{BindingStrength, Material, MaterialBindingAPI, RelationshipMetadata};
@@ -300,6 +301,54 @@ impl MaterialBindingAPI {
             .collect()
     }
 
+    /// Define the subset named `name` under the prim, in the `materialBind`
+    /// family, indexing the `indices` of `element_type` (C++
+    /// `CreateMaterialBindSubset`); a subset of that name defined already is
+    /// the one authored on, as [`Subset::create`] authors it. The family's
+    /// type becomes [`FamilyType::NonOverlapping`] where none is authored or
+    /// it is unrestricted, under which one element could be bound to two
+    /// materials; any other authored token stays, one naming no type
+    /// included.
+    pub fn create_subset(&self, name: &str, element_type: ElementType, indices: &[i32]) -> Result<Subset> {
+        let authored = subset::family_type_token(self.prim(), MATERIAL_BIND)?;
+        let unrestricted = authored.is_none_or(|token| token.as_str() == FamilyType::Unrestricted.as_token());
+        let family_type = unrestricted.then_some(FamilyType::NonOverlapping);
+        Subset::create(
+            &self.imageable(),
+            name,
+            element_type,
+            indices,
+            MATERIAL_BIND,
+            family_type,
+        )
+    }
+
+    /// The subsets of the `materialBind` family under the prim, of every
+    /// element type (C++ `GetMaterialBindSubsets`).
+    pub fn subsets(&self) -> Result<Vec<Subset>> {
+        Subset::in_family(&self.imageable(), None, Some(MATERIAL_BIND))
+    }
+
+    /// The type of the `materialBind` family of subsets under the prim (C++
+    /// `GetMaterialBindSubsetsFamilyType`).
+    pub fn subset_family_type(&self) -> Result<FamilyType> {
+        Subset::family_type(&self.imageable(), MATERIAL_BIND)
+    }
+
+    /// Author the type of the `materialBind` family of subsets under the
+    /// prim (C++ `SetMaterialBindSubsetsFamilyType`).
+    /// [`FamilyType::Unrestricted`] is refused: one element in two subsets
+    /// would be bound to two materials.
+    pub fn set_subset_family_type(&self, family_type: FamilyType) -> Result<&Self, SchemaError> {
+        if family_type == FamilyType::Unrestricted {
+            return Err(SchemaError::UnrestrictedBindFamily {
+                prim: self.prim().path().clone(),
+            });
+        }
+        Subset::set_family_type(&self.imageable(), MATERIAL_BIND, family_type)?;
+        Ok(self)
+    }
+
     /// The applied collection the binding named `binding_name` for `purpose`
     /// targets.
     fn bound_collection(&self, binding_name: &str, purpose: &str) -> Result<Option<CollectionAPI>> {
@@ -307,6 +356,12 @@ impl MaterialBindingAPI {
             Some(binding) => binding.collection(),
             None => Ok(None),
         }
+    }
+
+    /// The prim as the imageable its subsets are defined under, viewed
+    /// without a check, as C++ `UsdGeomImageable geom(GetPrim())` views it.
+    fn imageable(&self) -> Imageable {
+        Imageable::from_prim_unchecked(self.prim().clone())
     }
 }
 
@@ -648,6 +703,41 @@ mod tests {
         assert_eq!(direct.material_path().as_str(), "/World/Mat");
         assert_eq!(direct.strength()?, BindingStrength::WeakerThanDescendants);
         assert_eq!(direct.material()?.expect("a Material").path().as_str(), "/World/Mat");
+        Ok(())
+    }
+
+    /// The sphere of the C++ test: material-bind subsets are defined with
+    /// their family typed `nonOverlapping`, a partition is kept once asked
+    /// for, each subset binds a material of its own, and `unrestricted` is
+    /// refused.
+    #[test]
+    fn material_bind_subsets() -> Result {
+        let (_dir, stage) = crate::tests::from_usda(
+            "#usda 1.0\ndef Mesh \"Mesh\"\n{\n    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]\n}\ndef Material \"Mat1\"\n{\n}\ndef Material \"Mat2\"\n{\n}\n",
+        )?;
+        let binding = MaterialBindingAPI::apply(&stage.prim("/Mesh")?)?;
+        let geom = binding.imageable();
+        assert!(binding.subsets()?.is_empty());
+
+        let first = binding.create_subset("subset1", ElementType::Face, &[0, 1, 2, 3])?;
+        binding.create_subset("subset2", ElementType::Face, &[4, 5, 6, 7, 8, 9, 10, 11])?;
+        assert_eq!(binding.subset_family_type()?, FamilyType::NonOverlapping);
+        assert!(Subset::validate_family(&geom, ElementType::Face, MATERIAL_BIND)?.is_empty());
+
+        binding.set_subset_family_type(FamilyType::Partition)?;
+        assert!(!Subset::validate_family(&geom, ElementType::Face, MATERIAL_BIND)?.is_empty());
+        let third = binding.create_subset("subset3", ElementType::Face, &[12, 13, 14, 15])?;
+        assert_eq!(binding.subset_family_type()?, FamilyType::Partition);
+        assert!(Subset::validate_family(&geom, ElementType::Face, MATERIAL_BIND)?.is_empty());
+        assert_eq!(binding.subsets()?.len(), 3);
+
+        MaterialBindingAPI::apply(first.prim())?.bind("/Mat1")?;
+        MaterialBindingAPI::apply(third.prim())?.bind("/Mat2")?;
+        let bound = MaterialBindingAPI::get(&stage, third.path().clone())?.expect("applied");
+        assert_eq!(bound.bound_material("")?.expect("bound").path().as_str(), "/Mat2");
+
+        let refused = binding.set_subset_family_type(FamilyType::Unrestricted);
+        assert!(matches!(refused, Err(SchemaError::UnrestrictedBindFamily { prim }) if prim.as_str() == "/Mesh"));
         Ok(())
     }
 

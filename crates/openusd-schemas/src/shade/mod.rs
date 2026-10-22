@@ -39,6 +39,9 @@
 //! reads a texture path standing for a set of UDIM tiles and finds them (C++
 //! `UsdShadeUdimUtils`). [`Material::base_material`] is the material a
 //! specializes arc of the prim's own names.
+//! [`MaterialBindingAPI::create_subset`] and [`MaterialBindingAPI::subsets`]
+//! are the `materialBind` family of [`Subset`](crate::geom::Subset)s a prim's
+//! geometry is bound by.
 //! [`Shader::implementation_source`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
 //! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries

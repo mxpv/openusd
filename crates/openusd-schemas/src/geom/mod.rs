@@ -189,7 +189,7 @@ mod points;
 mod primvar;
 mod primvars_api;
 mod sampling;
-mod subset;
+pub(crate) mod subset;
 mod tet_mesh;
 mod visibility_api;
 mod xform;

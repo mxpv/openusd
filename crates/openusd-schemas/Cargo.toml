@@ -31,7 +31,9 @@ physics = ["geom", "shade"]
 proc = ["geom"]
 render = []
 semantics = []
-shade = []
+# UsdShade binds materials to UsdGeomSubsets of a prim's geometry, so the
+# shade views build on the geom views.
+shade = ["geom"]
 # UsdSkelRoot and UsdSkelSkeleton are UsdGeomBoundable-derived prims, so the
 # skel views build on the geom schema traits.
 skel = ["geom", "dep:bitflags"]

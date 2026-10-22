@@ -716,7 +716,7 @@ fn named(family_name: &str) -> Option<&str> {
 
 /// The family-type token authored for the family `family_name` on `geom`,
 /// or `None` where the name is empty or no token is authored.
-fn family_type_token(geom: &usd::Prim, family_name: &str) -> Result<Option<tf::Token>> {
+pub(crate) fn family_type_token(geom: &usd::Prim, family_name: &str) -> Result<Option<tf::Token>> {
     if family_name.is_empty() {
         return Ok(None);
     }

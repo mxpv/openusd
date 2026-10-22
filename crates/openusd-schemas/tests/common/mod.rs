@@ -22,6 +22,10 @@ pub fn vendor(asset: &str) -> Result<Stage> {
 }
 
 /// A stage opened from `usda` source, for the scenes a fixture does not carry.
+#[allow(
+    dead_code,
+    reason = "only the families whose tests author scenes of their own call it"
+)]
 pub fn from_usda(usda: &str) -> Result<Stage> {
     // Persist the tempdir so it outlives the stage; the process exits at test
     // end, so the OS reclaims it.
