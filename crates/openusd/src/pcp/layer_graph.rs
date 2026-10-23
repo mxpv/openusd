@@ -1171,11 +1171,10 @@ impl LayerGraph {
     /// them into the sublayer subsystem
     /// ([`SublayerState::replace_stack`], which supersedes the stack's earlier
     /// demands and diagnostics). Each unresolved entry becomes one of three
-    /// things: nothing when its parent is anonymous (nothing anchors the
-    /// entry, so there is no asset to open) or its target muted (membership
-    /// pruning would drop the opened layer right back out — the sublayer
-    /// analog of the indexer's muted-arc-target check; an unmute rebuilds the
-    /// stack, which re-derives the entry), a regenerated per-referrer
+    /// things: nothing when its target is muted (membership pruning would
+    /// drop the opened layer right back out — the sublayer analog of the
+    /// indexer's muted-arc-target check; an unmute rebuilds the stack, which
+    /// re-derives the entry), a regenerated per-referrer
     /// diagnostic when its identifier already failed to open (the barrier
     /// would refuse it; an edit clears the failure and the next rebuild
     /// demands again), or a demand. A resolve failure holds only while the
@@ -1202,12 +1201,6 @@ impl LayerGraph {
         // collection.
         let mut seen: HashSet<(LayerId, String)> = HashSet::new();
         for demand in demands {
-            // An anonymous parent has no location to resolve the entry
-            // against; the entry stays a graph-only lookup, satisfied when a
-            // matching in-memory layer joins.
-            if self.nodes[&demand.parent].layer.is_anonymous() {
-                continue;
-            }
             if muted
                 && self
                     .muted_asset_id(&demand.evaluated, self.anchor_location(Some(demand.parent)).as_ref())
@@ -3310,16 +3303,19 @@ mod tests {
         assert!(graph.take_sublayer_demands().is_empty());
     }
 
-    /// An anonymous parent anchors nothing, so its unresolved entries are
-    /// graph-only lookups: no load demand is recorded for them.
+    /// An anonymous parent's unresolved entry records a load demand like any
+    /// other parent's: the entry resolves without an anchor, as C++
+    /// `SdfComputeAssetPathRelativeToLayer` does for an anonymous layer.
     #[test]
-    fn anon_parent_no_demand() {
+    fn anon_parent_demands() {
         let mut root = sdf::Layer::new_anonymous("root.usda");
         edit_layer(&mut root, |e| {
-            e.pseudo_root_mut().unwrap().set_sublayers(["ghost.usda"]);
+            e.pseudo_root_mut().unwrap().set_sublayers(["/abs/ghost.usda"]);
         });
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
-        assert!(graph.take_sublayer_demands().is_empty());
+        let demands = graph.take_sublayer_demands();
+        assert_eq!(demands.len(), 1);
+        assert_eq!(demands[0].evaluated, "/abs/ghost.usda");
     }
 
     /// Muting a session layer that supplies a root `${VAR}` sublayer's variable

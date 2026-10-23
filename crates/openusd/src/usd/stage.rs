@@ -6132,6 +6132,62 @@ def "T" {
         Ok(())
     }
 
+    /// An absolute `subLayers` entry on an anonymous layer names a file
+    /// without an anchor, so the load barrier opens it from disk (C++
+    /// `SdfComputeAssetPathRelativeToLayer` resolves it unanchored): through
+    /// `insert_layer`, and authored on the in-memory stage's anonymous root.
+    #[test]
+    fn anon_absolute_sublayer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let sub_path = dir.path().join("sub.usda");
+        fs::write(&sub_path, "#usda 1.0\ndef \"Sub\" {}\n")?;
+        let sub = sub_path.to_str().expect("utf-8 path");
+
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        let mut anon = sdf::Layer::new_anonymous("lop.usda");
+        edit_layer(&mut anon, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([sub]);
+        });
+        stage.insert_layer(&root_id, 0, anon, sdf::LayerOffset::IDENTITY)?;
+        assert!(stage.prim("/Sub")?.is_defined()?, "the inserted layer's sublayer loads");
+        assert!(stage.composition_errors().is_empty());
+
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        edit_layer(&mut stage.layer_mut(&root_id).expect("root layer"), |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([sub]);
+        });
+        assert!(stage.prim("/Sub")?.is_defined()?, "the root's authored sublayer loads");
+        assert!(stage.composition_errors().is_empty());
+        Ok(())
+    }
+
+    /// An anonymous layer's sublayer entry that names no asset reports an
+    /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer)
+    /// diagnostic rather than vanishing (C++ `PcpErrorInvalidSublayerPath`).
+    #[test]
+    fn anon_missing_sublayer_reports() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let missing = dir.path().join("missing.usda");
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        edit_layer(&mut stage.layer_mut(&root_id).expect("root layer"), |e| {
+            e.pseudo_root_mut()
+                .unwrap()
+                .set_sublayers([missing.to_str().expect("utf-8 path")]);
+        });
+        let _ = stage.prim("/Sub")?;
+        assert!(
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| matches!(error, pcp::CompositionDiagnostic::UnresolvedSublayer { .. })),
+            "the missing sublayer reports"
+        );
+        Ok(())
+    }
+
     /// Muting a layer that is a reference target skips the arc without panicking
     /// (its `sublayer_stack` is empty); unmuting restores the referenced opinion.
     #[test]
