@@ -5,7 +5,7 @@
 use openusd::Result;
 use openusd::gf;
 use openusd::sdf::{self, Value};
-use openusd::usd::{Attribute, StageAuthoringError};
+use openusd::usd::{Attribute, Object, StageAuthoringError};
 
 use super::{AttributeMetadata, BlendShape, tokens};
 

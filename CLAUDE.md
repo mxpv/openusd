@@ -93,7 +93,9 @@ source of truth for specifics.
   `ReplayStage`, recording wrappers over the change seam), `usd/editor.rs`
   (namespace editing), `usd/list_edit.rs` (`ListEdit`, C++ `UsdInherits` /
   `UsdSpecializes` / `UsdReferences` / `UsdPayloads`, a prim's arc lists
-  edited on the edit target), `usd/composition.rs` (private
+  edited on the edit target), `usd/object.rs` (`Object` and `Property`, C++
+  `UsdObject` and `UsdProperty`: the metadata a prim and its properties
+  share), `usd/composition.rs` (private
   `StageComposition`: owns
   the layer graph, index cache, and pending-edit queue, and the operations over
   them — reconciliation, the composed-query/load fixpoint, demand loading,

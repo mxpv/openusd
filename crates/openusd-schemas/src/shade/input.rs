@@ -2,6 +2,7 @@
 
 use openusd::Result;
 
+use openusd::usd::{Object, Property};
 use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
@@ -74,6 +75,7 @@ impl ConnectionTarget for Input {
 #[cfg(test)]
 mod tests {
     use openusd::Result;
+    use openusd::usd::{Object, Property};
 
     use crate::shade::{Connectability, Connectable, NodeGraph, Shader};
 

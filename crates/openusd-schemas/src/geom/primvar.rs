@@ -1,6 +1,7 @@
 //! A primvar: a `primvars:` attribute read together with the metadata and the
 //! indices that say how its values lie on the geometry (C++ `UsdGeomPrimvar`).
 
+use openusd::usd::Object;
 use openusd::{Error, Result};
 use openusd::{gf, sdf, tf, usd};
 

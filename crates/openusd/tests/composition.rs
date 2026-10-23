@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use openusd::usd::Object;
 use openusd::{pcp, usd};
 
 const ASSETS: &str = concat!(
@@ -1354,10 +1355,12 @@ mod value_resolution {
     #[test]
     fn dictionary_values_compose_recursively() {
         let stage = open_fixture();
-        let value = stage.prim("/DictTest").unwrap().custom_data().unwrap();
-        let Some(Value::Dictionary(dict)) = value else {
-            panic!("customData should resolve to a dictionary");
-        };
+        let dict = stage
+            .prim("/DictTest")
+            .unwrap()
+            .custom_data()
+            .unwrap()
+            .expect("customData should resolve to a dictionary");
 
         assert_eq!(string(&dict, "strongOnly"), "strong");
         assert_eq!(string(&dict, "weakOnly"), "weak");

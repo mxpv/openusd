@@ -487,48 +487,6 @@ impl Attribute {
         })
     }
 
-    /// The composed `doc` field of this attribute, `None` where neither a
-    /// layer nor the prim's schema declaration carries one (C++
-    /// `UsdObject::GetDocumentation`). A registry `openusd-build` builds
-    /// drops declaration docs, which its generated views carry.
-    pub fn doc(&self) -> Result<Option<String>> {
-        self.metadata(sdf::FieldKey::Documentation.as_str())
-    }
-
-    /// Author this attribute's `doc` field on the edit target (C++
-    /// `UsdObject::SetDocumentation`).
-    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_metadata(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()))
-    }
-
-    /// Drop the local `doc` opinion (C++
-    /// `UsdObject::ClearDocumentation`).
-    pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
-        self.clear_metadata(sdf::FieldKey::Documentation.as_str())
-    }
-
-    /// The composed `displayGroup` of this attribute, `None` where none is
-    /// authored or declared (C++ `UsdProperty::GetDisplayGroup`). Nested
-    /// groups are `:`-joined.
-    pub fn display_group(&self) -> Result<Option<String>> {
-        self.metadata(sdf::FieldKey::DisplayGroup.as_str())
-    }
-
-    /// Author this attribute's `displayGroup` on the edit target (C++
-    /// `UsdProperty::SetDisplayGroup`).
-    pub fn set_display_group(self, display_group: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_metadata(
-            sdf::FieldKey::DisplayGroup.as_str(),
-            sdf::Value::String(display_group.into()),
-        )
-    }
-
-    /// Drop the local `displayGroup` opinion (C++
-    /// `UsdProperty::ClearDisplayGroup`).
-    pub fn clear_display_group(self) -> Result<Self, StageAuthoringError> {
-        self.clear_metadata(sdf::FieldKey::DisplayGroup.as_str())
-    }
-
     /// Read-modify-write a metadata field on the attribute's spec at the edit
     /// target. `f` receives the field's current opinion on that layer (`None`
     /// when it is unauthored locally) and returns the value to author, or
@@ -1010,13 +968,6 @@ impl Attribute {
     /// attribute with no fallback leaves it with none.
     pub fn has_value(&self) -> Result<bool> {
         Ok(self.resolve_info()?.source() != ResolveInfoSource::None)
-    }
-
-    /// `true` when a layer authors the metadata field `key` on this attribute
-    /// (C++ `UsdObject::HasAuthoredMetadata`). What the attribute's schema
-    /// declares for the field is not an authored opinion.
-    pub fn has_authored_metadata(&self, key: &str) -> Result<bool> {
-        Ok(self.stage.field::<sdf::Value>(&self.path, key)?.is_some())
     }
 
     /// Where the value [`get`](Self::get) returns comes from, without producing
@@ -1665,6 +1616,7 @@ mod tests {
     use crate::sdf::path::tests::strings;
     use crate::usd::SchemaRegistry;
     use crate::usd::stage::tests::{authored, reference_scene, scene, stage};
+    use crate::usd::{Object, Property};
 
     /// A downstream value type with its own conversion error, standing in for
     /// an application extending the generic accessors.

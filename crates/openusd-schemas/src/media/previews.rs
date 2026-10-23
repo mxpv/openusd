@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use openusd::Result;
 use openusd::sdf::{FieldKey, Value};
-use openusd::usd::SchemaBase;
+use openusd::usd::{Object, SchemaBase};
 
 use super::AssetPreviewsAPI;
 use super::tokens;
@@ -19,9 +19,7 @@ impl AssetPreviewsAPI {
     /// `assetInfo.previews.thumbnails.default.defaultImage`, or `None` when no
     /// preview is authored. C++ `UsdMediaAssetPreviewsAPI::GetDefaultThumbnails`.
     pub fn default_thumbnail(&self) -> Result<Option<String>> {
-        let Some(Value::Dictionary(asset_info)) =
-            self.stage().field::<Value>(self.path().clone(), FieldKey::AssetInfo)?
-        else {
+        let Some(asset_info) = self.prim().asset_info()? else {
             return Ok(None);
         };
         let leaf = asset_info

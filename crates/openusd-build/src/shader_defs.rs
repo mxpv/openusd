@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use openusd::usd::Object;
 use openusd::{sdf, tf};
 
 use crate::Builder;

@@ -325,48 +325,6 @@ impl Relationship {
         })
     }
 
-    /// The composed `doc` field of this relationship, `None` where neither a
-    /// layer nor the prim's schema declaration carries one (C++
-    /// `UsdObject::GetDocumentation`). A registry `openusd-build` builds
-    /// drops declaration docs, which its generated views carry.
-    pub fn doc(&self) -> Result<Option<String>> {
-        self.metadata(sdf::FieldKey::Documentation.as_str())
-    }
-
-    /// Author this relationship's `doc` field on the edit target (C++
-    /// `UsdObject::SetDocumentation`).
-    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_metadata(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()))
-    }
-
-    /// Drop the local `doc` opinion (C++
-    /// `UsdObject::ClearDocumentation`).
-    pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
-        self.clear_metadata(sdf::FieldKey::Documentation.as_str())
-    }
-
-    /// The composed `displayGroup` of this relationship, `None` where none
-    /// is authored or declared (C++ `UsdProperty::GetDisplayGroup`). Nested
-    /// groups are `:`-joined.
-    pub fn display_group(&self) -> Result<Option<String>> {
-        self.metadata(sdf::FieldKey::DisplayGroup.as_str())
-    }
-
-    /// Author this relationship's `displayGroup` on the edit target (C++
-    /// `UsdProperty::SetDisplayGroup`).
-    pub fn set_display_group(self, display_group: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_metadata(
-            sdf::FieldKey::DisplayGroup.as_str(),
-            sdf::Value::String(display_group.into()),
-        )
-    }
-
-    /// Drop the local `displayGroup` opinion (C++
-    /// `UsdProperty::ClearDisplayGroup`).
-    pub fn clear_display_group(self) -> Result<Self, StageAuthoringError> {
-        self.clear_metadata(sdf::FieldKey::DisplayGroup.as_str())
-    }
-
     /// Erase the local `targetPaths` opinion on the edit target (C++
     /// `UsdRelationship::ClearTargets` without removing the spec): the targets
     /// weaker layers author compose again. A target holding no spec is left
@@ -484,7 +442,7 @@ mod tests {
     use crate::sdf;
     use crate::sdf::path::tests::strings;
     use crate::usd::stage::tests::{authored, reference_scene, stage};
-    use crate::usd::{ListPosition, Stage, StageAuthoringError};
+    use crate::usd::{ListPosition, Object, Property, Stage, StageAuthoringError};
 
     #[test]
     fn relationship_chain() -> Result<()> {

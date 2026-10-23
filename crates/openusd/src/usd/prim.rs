@@ -140,14 +140,6 @@ impl Prim {
         })
     }
 
-    /// Set the prim's `hidden` flag.
-    pub fn set_hidden(self, hidden: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| {
-            spec.set_hidden(hidden);
-            Ok(())
-        })
-    }
-
     /// Set the prim's `instanceable` flag.
     pub fn set_instanceable(self, instanceable: bool) -> Result<Self, StageAuthoringError> {
         self.edit(|spec| {
@@ -310,26 +302,6 @@ impl Prim {
     pub fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
         super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
         self.erase_local(key)
-    }
-
-    /// The composed `doc` field of this prim, `None` where neither a layer
-    /// nor its schema declaration carries one (C++
-    /// `UsdObject::GetDocumentation`). A registry `openusd-build` builds
-    /// drops declaration docs, which its generated views carry.
-    pub fn doc(&self) -> Result<Option<String>> {
-        self.metadata(sdf::FieldKey::Documentation.as_str())
-    }
-
-    /// Author this prim's `doc` field on the edit target (C++
-    /// `UsdObject::SetDocumentation`).
-    pub fn set_doc(self, doc: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_metadata(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()))
-    }
-
-    /// Drop the local `doc` opinion (C++
-    /// `UsdObject::ClearDocumentation`).
-    pub fn clear_doc(self) -> Result<Self, StageAuthoringError> {
-        self.clear_metadata(sdf::FieldKey::Documentation.as_str())
     }
 
     /// The `inherits` arcs of this prim as an editor over the edit target
@@ -527,12 +499,6 @@ impl Prim {
             .stage
             .field::<sdf::Value>(&self.path, sdf::FieldKey::Kind)?
             .and_then(|v| v.try_as_token()))
-    }
-
-    /// Returns this prim's composed `customData` dictionary, if authored.
-    /// Mirrors C++ `UsdObject::GetCustomData`.
-    pub fn custom_data(&self) -> Result<Option<sdf::Value>> {
-        Ok(self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::CustomData)?)
     }
 
     /// The API schemas that apply to this prim, strongest first. Mirrors C++
@@ -1740,7 +1706,8 @@ mod tests {
     use crate::tf::Token;
     use crate::usd::stage::tests::stage;
     use crate::usd::{
-        ApplyApiError, PrimPredicate, PrimRange, PrimStatus, SchemaRegistry, Stage, StageAuthoringError, VersionFilter,
+        ApplyApiError, Object, PrimPredicate, PrimRange, PrimStatus, SchemaRegistry, Stage, StageAuthoringError,
+        VersionFilter,
     };
 
     /// A stage over the shared test schema family, so prim definitions have
@@ -2633,23 +2600,6 @@ mod tests {
         stage.override_prim("/Over")?;
         assert_eq!(stage.prim("/Def")?.specifier()?, Some(sdf::Specifier::Def));
         assert_eq!(stage.prim("/Over")?.specifier()?, Some(sdf::Specifier::Over));
-        Ok(())
-    }
-
-    /// `Prim::custom_data` reads the composed `customData` dictionary
-    /// (C++ `UsdObject::GetCustomData`).
-    #[test]
-    fn prim_custom_data() -> Result<()> {
-        let stage = stage()?;
-        let dict = sdf::Value::Dictionary([("note".to_string(), sdf::Value::String("hi".into()))].into());
-        stage
-            .define_prim("/A")?
-            .set_metadata(sdf::FieldKey::CustomData.as_str(), dict)?;
-        let Some(sdf::Value::Dictionary(read)) = stage.prim("/A")?.custom_data()? else {
-            panic!("customData should resolve to a dictionary");
-        };
-        assert_eq!(read.get("note"), Some(&sdf::Value::String("hi".into())));
-        assert!(stage.prim("/B")?.custom_data()?.is_none());
         Ok(())
     }
 
