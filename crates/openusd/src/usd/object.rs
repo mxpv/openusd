@@ -126,6 +126,33 @@ pub trait Object: Sized {
 /// A composed property, an attribute or a relationship (C++
 /// `UsdProperty`): the group a user interface files it under.
 pub trait Property: Object {
+    /// The last part of the property's name, after its namespaces:
+    /// `indices` for `primvars:normals:indices` (C++
+    /// `UsdProperty::GetBaseName`).
+    fn base_name(&self) -> &str {
+        let name = property_name(self.path());
+        name.rsplit_once(':').map_or(name, |(_, base)| base)
+    }
+
+    /// The namespaces of the property's name, `:`-joined, or `""` for a
+    /// name with none: `primvars:normals` for `primvars:normals:indices`
+    /// (C++ `UsdProperty::GetNamespace`).
+    fn namespace(&self) -> &str {
+        property_name(self.path())
+            .rsplit_once(':')
+            .map_or("", |(namespace, _)| namespace)
+    }
+
+    /// The parts of the property's name, outermost first (C++
+    /// `UsdProperty::SplitName`).
+    fn split_name(&self) -> Vec<&str> {
+        let name = property_name(self.path());
+        if name.is_empty() {
+            return Vec::new();
+        }
+        name.split(':').collect()
+    }
+
     /// The composed `displayGroup`, `None` where none is authored or
     /// declared (C++ `UsdProperty::GetDisplayGroup`). Nested groups are
     /// `:`-joined.
@@ -211,6 +238,12 @@ impl Property for Attribute {}
 
 impl Property for Relationship {}
 
+/// The property name `path` ends with, namespaces included, or `""` where
+/// it names no property.
+fn property_name(path: &sdf::Path) -> &str {
+    path.split_property().map_or("", |(_, name)| name)
+}
+
 /// The composed field `key` of `object` as `decode` takes it out of the
 /// value held; `None` where the field is unauthored or holds another type.
 fn field<O: Object, T>(
@@ -266,6 +299,22 @@ mod tests {
             .set_metadata(sdf::FieldKey::CustomData.as_str(), sdf::Value::String("oops".into()))?;
         assert!(!prim.is_hidden()?);
         assert_eq!(prim.custom_data()?, None);
+        Ok(())
+    }
+
+    /// A property's name splits into its namespaces and its base name.
+    #[test]
+    fn property_name_splits() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/A")?;
+        let attr = prim.create_attribute("primvars:normals:indices", "int[]")?;
+        assert_eq!(attr.base_name(), "indices");
+        assert_eq!(attr.namespace(), "primvars:normals");
+        assert_eq!(attr.split_name(), ["primvars", "normals", "indices"]);
+        let rel = prim.create_relationship("proxyPrim")?;
+        assert_eq!(rel.base_name(), "proxyPrim");
+        assert_eq!(rel.namespace(), "");
+        assert_eq!(rel.split_name(), ["proxyPrim"]);
         Ok(())
     }
 
