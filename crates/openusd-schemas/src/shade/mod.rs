@@ -230,7 +230,7 @@ macro_rules! impl_shading_attribute {
             /// on the edit target, which hides the sources weaker layers
             /// author (C++ `DisconnectSource` given no source).
             pub fn disconnect(self) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                self.set_connections([] as [$crate::openusd::sdf::Path; 0])
+                self.attribute.block_connections().map(Self::new)
             }
 
             /// Remove the connection to `source` (C++ `DisconnectSource` given

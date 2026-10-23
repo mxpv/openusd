@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use openusd::Result;
-use openusd::sdf::{self, Path, PathMap};
+use openusd::sdf;
 use openusd::tf;
 use openusd::usd::{Prim, Relationship, SchemaBase, Stage};
 
@@ -105,7 +105,7 @@ impl CoordSysAPI {
     /// `BlockBinding`). A binding an ancestor makes of the name stays in
     /// force, since resolution skips an instance that targets nothing.
     pub fn block_binding(&self) -> Result<&Self> {
-        self.binding_rel_builder().set_targets([] as [Path; 0]).build()?;
+        self.binding_rel_builder().block_targets().build()?;
         Ok(self)
     }
 }
@@ -122,7 +122,7 @@ impl CoordSysAPI {
 pub struct CoordSysBinding {
     name: tf::Token,
     rel: Relationship,
-    coord_sys_path: Path,
+    coord_sys_path: sdf::Path,
 }
 
 impl CoordSysBinding {
@@ -150,7 +150,7 @@ impl CoordSysBinding {
     /// The path of the prim whose local space the name designates, which the
     /// stage may hold no prim at, or one of another type (C++
     /// `coordSysPrimPath`).
-    pub fn coord_sys_path(&self) -> &Path {
+    pub fn coord_sys_path(&self) -> &sdf::Path {
         &self.coord_sys_path
     }
 }
@@ -168,7 +168,7 @@ impl CoordSysBinding {
 #[derive(Default)]
 pub struct CoordSysCache {
     /// Entries are keyed by path, which stages share. Each stage has its own.
-    stages: HashMap<Stage, PathMap<Vec<CoordSysBinding>>>,
+    stages: HashMap<Stage, sdf::PathMap<Vec<CoordSysBinding>>>,
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::iter;
 
 use openusd::Result;
-use openusd::sdf::{self, Path, PathMap};
+use openusd::sdf;
 use openusd::usd::{CollectionAPI, MembershipQuery, Prim, Relationship, SchemaBase, Stage};
 
 use crate::SchemaError;
@@ -127,7 +127,7 @@ impl MaterialBindingAPI {
         purpose: &str,
         strength: Option<BindingStrength>,
     ) -> Result<&Self, SchemaError> {
-        if !binding_name.is_empty() && !Path::is_valid_identifier(binding_name) {
+        if !binding_name.is_empty() && !sdf::Path::is_valid_identifier(binding_name) {
             return Err(SchemaError::InvalidBindingName {
                 name: binding_name.to_string(),
             });
@@ -150,7 +150,10 @@ impl MaterialBindingAPI {
     /// list on the edit target, which hides any binding a weaker layer authors
     /// (C++ `UnbindDirectBinding`). The schema stays applied.
     pub fn unbind_direct(&self, purpose: &str) -> Result<&Self> {
-        self.author_relationship_targets(&direct_binding_rel_name(purpose), [] as [Path; 0])?;
+        self.relationship_builder(direct_binding_rel_name(purpose))
+            .custom(false)
+            .block_targets()
+            .build()?;
         Ok(self)
     }
 
@@ -159,7 +162,10 @@ impl MaterialBindingAPI {
     /// `UnbindCollectionBinding`). A binding authored without a name is named
     /// after its collection.
     pub fn unbind_collection(&self, binding_name: &str, purpose: &str) -> Result<&Self> {
-        self.author_relationship_targets(&collection_binding_rel_name(binding_name, purpose), [] as [Path; 0])?;
+        self.relationship_builder(collection_binding_rel_name(binding_name, purpose))
+            .custom(false)
+            .block_targets()
+            .build()?;
         Ok(self)
     }
 
@@ -168,7 +174,7 @@ impl MaterialBindingAPI {
     pub fn unbind_all(&self) -> Result<&Self> {
         for rel in self.relationships()? {
             if Self::owns_property(rel.name()) {
-                rel.set_targets([] as [Path; 0])?;
+                rel.block_targets()?;
             }
         }
         Ok(self)
@@ -369,7 +375,7 @@ impl MaterialBindingAPI {
 #[derive(Clone)]
 pub struct DirectBinding {
     rel: Relationship,
-    material_path: Path,
+    material_path: sdf::Path,
 }
 
 impl DirectBinding {
@@ -396,7 +402,7 @@ impl DirectBinding {
     }
 
     /// The bound material's prim path (C++ `GetMaterialPath`).
-    pub fn material_path(&self) -> &Path {
+    pub fn material_path(&self) -> &sdf::Path {
         &self.material_path
     }
 
@@ -419,8 +425,8 @@ impl DirectBinding {
 #[derive(Clone)]
 pub struct CollectionBinding {
     rel: Relationship,
-    collection_path: Path,
-    material_path: Path,
+    collection_path: sdf::Path,
+    material_path: sdf::Path,
 }
 
 impl CollectionBinding {
@@ -464,12 +470,12 @@ impl CollectionBinding {
 
     /// The bound collection's path, a `collection:<name>` property path (C++
     /// `GetCollectionPath`).
-    pub fn collection_path(&self) -> &Path {
+    pub fn collection_path(&self) -> &sdf::Path {
         &self.collection_path
     }
 
     /// The bound material's prim path (C++ `GetMaterialPath`).
-    pub fn material_path(&self) -> &Path {
+    pub fn material_path(&self) -> &sdf::Path {
         &self.material_path
     }
 
@@ -505,11 +511,11 @@ impl CollectionBinding {
 #[derive(Clone)]
 pub struct ResolvedBinding {
     rel: Relationship,
-    material_path: Path,
+    material_path: sdf::Path,
 }
 
 impl ResolvedBinding {
-    fn of(rel: &Relationship, material_path: &Path) -> Self {
+    fn of(rel: &Relationship, material_path: &sdf::Path) -> Self {
         Self {
             rel: rel.clone(),
             material_path: material_path.clone(),
@@ -522,7 +528,7 @@ impl ResolvedBinding {
     }
 
     /// The prim path the winning binding targets as its material.
-    pub fn material_path(&self) -> &Path {
+    pub fn material_path(&self) -> &sdf::Path {
         &self.material_path
     }
 
@@ -554,11 +560,11 @@ pub struct BindingCache {
 /// A [`BindingCache`]'s entries for one stage.
 #[derive(Default)]
 struct StageCache {
-    bindings: PathMap<BindingsAtPrim>,
+    bindings: sdf::PathMap<BindingsAtPrim>,
     /// By collection path; `None` where the collection is not applied.
-    queries: PathMap<Option<MembershipQuery>>,
+    queries: sdf::PathMap<Option<MembershipQuery>>,
     /// By binding relationship path.
-    strengths: PathMap<BindingStrength>,
+    strengths: sdf::PathMap<BindingStrength>,
 }
 
 /// The bindings authored on one prim, each kind in property order (C++
@@ -612,7 +618,7 @@ pub fn set_binding_strength(rel: Relationship, strength: Option<BindingStrength>
 }
 
 /// The entry of `map` at `key`, computed by `fill` on first request.
-fn cached<'m, V>(map: &'m mut PathMap<V>, key: &Path, fill: impl FnOnce() -> Result<V>) -> Result<&'m V> {
+fn cached<'m, V>(map: &'m mut sdf::PathMap<V>, key: &sdf::Path, fill: impl FnOnce() -> Result<V>) -> Result<&'m V> {
     if !map.contains_key(key) {
         map.insert(key.clone(), fill()?);
     }
@@ -682,7 +688,6 @@ fn purpose_passes(purpose: &str) -> impl Iterator<Item = &str> {
 mod tests {
     use super::*;
 
-    use openusd::sdf;
     use openusd::usd::{StagePopulationMask, apply_collection};
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;

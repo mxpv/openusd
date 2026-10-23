@@ -77,6 +77,12 @@ where
         self.spec.edit_list(self.key, |op| op.erase(&path))
     }
 
+    /// Author the list as an explicit empty list, which hides what weaker
+    /// layers list (C++ `ClearEditsAndMakeExplicit`).
+    pub fn block(self) -> Result<(), sdf::AuthoringError> {
+        self.spec.edit_list(self.key, |op| *op = sdf::PathListOp::explicit([]))
+    }
+
     /// Drop the field (C++ `ClearEdits`).
     pub fn clear(self) {
         self.spec.erase(self.key.as_str());
@@ -143,6 +149,9 @@ mod tests {
 
         assert!(attr.edit_connections().erase("/B.out")?);
         assert!(attr.connection_path_list().is_none());
+        attr.edit_connections().block()?;
+        assert!(attr.connection_path_list().is_some_and(|op| op.is_explicit()));
+        attr.edit_connections().clear();
         attr.edit_connections().set([] as [sdf::Path; 0])?;
         assert!(attr.connection_path_list().is_some_and(|op| op.is_explicit()));
         attr.edit_connections().clear();

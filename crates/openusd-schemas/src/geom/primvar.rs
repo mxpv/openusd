@@ -1201,7 +1201,7 @@ mod tests {
         id_relationship(&primvar).add_target("/Two")?;
         assert_eq!(primvar.get_at::<String>(None)?, None);
 
-        id_relationship(&primvar).set_targets(Vec::<sdf::Path>::new())?;
+        id_relationship(&primvar).block_targets()?;
         assert_eq!(primvar.get_at::<String>(None)?, None);
         Ok(())
     }

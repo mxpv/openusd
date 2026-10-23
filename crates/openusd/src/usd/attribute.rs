@@ -592,6 +592,12 @@ impl Attribute {
         self.edit(|spec| Ok(spec.edit_connections().set(targets)?))
     }
 
+    /// Author an explicit empty connection list on the edit target, which
+    /// hides the connections weaker layers author (C++ `SetConnections({})`).
+    pub fn block_connections(self) -> Result<Self, StageAuthoringError> {
+        self.edit(|spec| Ok(spec.edit_connections().block()?))
+    }
+
     /// Wire this attribute to a single `source` property, replacing any
     /// existing connections. The connectable shorthand for
     /// [`set_connections`](Attribute::set_connections) over one source; mirrors
@@ -2515,7 +2521,7 @@ class Marker "Marker"
 
     #[test]
     fn authored_connections_explicit_empty() -> Result<()> {
-        // `set_connections([])` authors an explicit-empty list op, the
+        // `block_connections` authors an explicit-empty list op, the
         // canonical way to block weaker-layer connection opinions.
         // `has_authored_connections` must see this as authored even though
         // the flattened list is empty.
@@ -2524,7 +2530,7 @@ class Marker "Marker"
             .define_prim("/Surface")?
             .set_type_name("Shader")?
             .create_attribute("inputs:diffuseColor", "color3f")?
-            .set_connections(Vec::<sdf::Path>::new())?;
+            .block_connections()?;
         assert!(attr.has_authored_connections()?);
         assert!(attr.connections()?.is_empty());
         Ok(())
@@ -4062,7 +4068,7 @@ class Marker "Marker"
             "the sublayer's targets compose again"
         );
         assert!(root_has_spec(&stage, "/A.r"));
-        let rel = rel.set_targets(Vec::<sdf::Path>::new())?;
+        let rel = rel.block_targets()?;
         assert_eq!(rel.targets()?, vec![], "an explicit empty list blocks again");
         Ok(())
     }

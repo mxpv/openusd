@@ -70,6 +70,12 @@ impl<'a> RelationshipBuilder<'a> {
         self
     }
 
+    /// [`Relationship::block_targets`] as part of the creating edit.
+    pub fn block_targets(mut self) -> Self {
+        self.targets = Some(Vec::new());
+        self
+    }
+
     /// The target list to author with it: [`Relationship::set_targets`] as
     /// part of the creating edit rather than an edit after it.
     pub fn set_targets(mut self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Self {
@@ -261,6 +267,12 @@ impl Relationship {
         self.edit(|spec| Ok(spec.edit_targets().set(targets)?))
     }
 
+    /// Author an explicit empty target list on the edit target, which hides
+    /// the targets weaker layers author (C++ `SetTargets({})`).
+    pub fn block_targets(self) -> Result<Self, StageAuthoringError> {
+        self.edit(|spec| Ok(spec.edit_targets().block()?))
+    }
+
     /// Composed value of a generic metadata field on the relationship decoded
     /// to `T`, falling back to what the relationship's schema declares.
     /// Mirrors C++ `UsdObject::GetMetadata(name, &value)`; the read
@@ -357,9 +369,8 @@ impl Relationship {
 
     /// Erase the local `targetPaths` opinion on the edit target (C++
     /// `UsdRelationship::ClearTargets` without removing the spec): the targets
-    /// weaker layers author compose again, unlike after `set_targets([])`,
-    /// which authors an explicit empty list that blocks them. A target
-    /// holding no spec is left alone; an attribute at the path is an error.
+    /// weaker layers author compose again. A target holding no spec is left
+    /// alone; an attribute at the path is an error.
     pub fn clear_targets(self) -> Result<Self, StageAuthoringError> {
         self.edit_existing(|spec| {
             spec.edit_targets().clear();
@@ -722,6 +733,23 @@ mod tests {
             matches!(refused, Err(StageAuthoringError::OutsideEditTarget { .. })),
             "{refused:?}"
         );
+        Ok(())
+    }
+
+    /// A block authors an explicit empty target list, on a relationship
+    /// held already and in the edit that creates one.
+    #[test]
+    fn block_targets_explicit() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/A")?;
+        let rel = prim.create_relationship("r")?.set_targets(["/B"])?.block_targets()?;
+        assert!(rel.targets()?.is_empty());
+        let built = prim.relationship_builder("s").block_targets().build()?;
+        assert!(built.targets()?.is_empty());
+        for path in ["/A.r", "/A.s"] {
+            let op: sdf::PathListOp = authored(&stage.root_layer(), path, sdf::FieldKey::TargetPaths).expect("targets");
+            assert!(op.is_explicit() && op.explicit_items().is_empty(), "{path}");
+        }
         Ok(())
     }
 
