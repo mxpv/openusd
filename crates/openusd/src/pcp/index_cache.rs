@@ -5516,7 +5516,8 @@ def "Anchor" (inherits = </Rig>) {}
             e.relationship_mut("/P.relA")
                 .unwrap()
                 .expect("relationship spec")
-                .set_targets([sdf::path("/Z").unwrap()])
+                .edit_targets()
+                .set([sdf::path("/Z").unwrap()])
                 .unwrap();
             Ok(())
         })?;

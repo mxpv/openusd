@@ -408,8 +408,10 @@ impl Hash for Reference {
     }
 }
 
+pub(crate) mod list_edit;
 mod list_op;
 
+pub use list_edit::PathListEdit;
 pub use list_op::{ListOp, ListOpType};
 
 /// A USD dictionary value (C++ `VtDictionary`): the payload of

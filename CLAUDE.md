@@ -45,8 +45,11 @@ source of truth for specifics.
   evaluates any expression in it (`sdf/asset_path.rs`, C++
   `SdfResolveAssetPaths`; `pcp` and `usd` each supply their own anchor and
   variable scope), the path-expression engine behind pattern-based collections
-  (`sdf/path_expr/`), and the namespace-aware spec-copy primitive
-  (`sdf/copy.rs`). Start at `sdf/mod.rs`.
+  (`sdf/path_expr/`), the namespace-aware spec-copy primitive
+  (`sdf/copy.rs`), and the list edits: `Spec::edit_list` rewrites a list-op
+  field, and `PathListEdit` (C++ `SdfPathEditorProxy`) edits a spec's path
+  lists anchored at its prim, a property's targets or connections and a
+  prim's inherits or specializes. Start at `sdf/mod.rs`.
 
 - **`usda/`** - Text format `.usda`: logos lexer + recursive-descent parser.
   `Parser` builds the scene hierarchy over a `Cursor` (one-token lookahead and

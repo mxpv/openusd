@@ -35,6 +35,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
@@ -308,6 +309,37 @@ where
     pub fn erase(&mut self, key: &str) {
         self.data.erase_field(&self.path, key);
     }
+
+    /// Rewrites with `f` the list op `key` holds, an op holding nothing
+    /// where the field is unauthored (C++ `SdfListEditorProxy` over the
+    /// field); a field holding anything else is
+    /// [`FieldType`](sdf::SpecError::FieldType), never overwritten. The op
+    /// is written back, or the field erased where the op is left neither
+    /// explicit nor holding an item.
+    pub fn edit_list<T, R>(
+        &mut self,
+        key: sdf::FieldKey,
+        f: impl FnOnce(&mut sdf::ListOp<T>) -> R,
+    ) -> Result<R, sdf::AuthoringError>
+    where
+        T: Clone + PartialEq + Hash,
+        sdf::ListOp<T>: Into<sdf::Value> + TryFrom<sdf::Value>,
+    {
+        let held = self.typed_field::<sdf::ListOp<T>>(key, "list op")?.unwrap_or_default();
+        // TODO(perf): the op is copied and compared whole on every edit; `f`
+        // reporting whether it changed anything would spare a long list both.
+        let mut op = held.clone();
+        let result = f(&mut op);
+        if op != held {
+            set_or_erase(
+                &mut *self.data,
+                &self.path,
+                key.as_str(),
+                (!op.is_empty()).then(|| op.into()),
+            );
+        }
+        Ok(result)
+    }
 }
 
 /// Typed view of a prim spec. Parallel to C++ `SdfPrimSpec`.
@@ -447,6 +479,22 @@ where
         self.set(sdf::FieldKey::Specifier.as_str(), sdf::Value::Specifier(specifier));
     }
 
+    /// The `inheritPaths` list as it is edited (C++
+    /// `SdfPrimSpec::GetInheritPathList`), anchored at the prim less its
+    /// variant selections.
+    pub fn edit_inherits(&mut self) -> sdf::PathListEdit<'_, 'a, B> {
+        let anchor = self.path().prim_path().strip_variant_selections();
+        sdf::PathListEdit::new(self, sdf::FieldKey::InheritPaths, anchor)
+    }
+
+    /// The `specializes` list as it is edited (C++
+    /// `SdfPrimSpec::GetSpecializesPathList`), anchored at the prim less its
+    /// variant selections.
+    pub fn edit_specializes(&mut self) -> sdf::PathListEdit<'_, 'a, B> {
+        let anchor = self.path().prim_path().strip_variant_selections();
+        sdf::PathListEdit::new(self, sdf::FieldKey::Specializes, anchor)
+    }
+
     /// Set the `kind` metadata.
     pub fn set_kind(&mut self, kind: impl Into<tf::Token>) {
         self.set(sdf::FieldKey::Kind.as_str(), sdf::Value::token(kind));
@@ -480,30 +528,9 @@ where
     /// Returns `Ok(true)` whenever the local list op changed (whether by
     /// adding the schema, by clearing a pending delete, or both); `Ok(false)`
     /// when the call was a no-op.
-    pub fn add_applied_schema(&mut self, name: impl Into<String>) -> Result<bool, SpecError> {
+    pub fn add_applied_schema(&mut self, name: impl Into<String>) -> Result<bool, sdf::AuthoringError> {
         let name: tf::Token = name.into().into();
-        // An undecodable `apiSchemas` must not be silently overwritten.
-        let Ok(existing) = self.field(sdf::FieldKey::ApiSchemas.as_str()) else {
-            return Ok(false);
-        };
-        match existing {
-            Some(sdf::Value::TokenListOp(mut op)) => {
-                let changed = add_applied_schema_to_list_op(&mut op, name);
-                self.set(sdf::FieldKey::ApiSchemas.as_str(), sdf::Value::TokenListOp(op));
-                Ok(changed)
-            }
-            Some(_) => Err(SpecError::FieldType {
-                field: sdf::FieldKey::ApiSchemas.as_str(),
-                expected: "sdf::TokenListOp",
-            }),
-            None => {
-                self.set(
-                    sdf::FieldKey::ApiSchemas.as_str(),
-                    sdf::Value::TokenListOp(sdf::TokenListOp::prepended([name])),
-                );
-                Ok(true)
-            }
-        }
+        self.edit_list(sdf::FieldKey::ApiSchemas, |op| add_applied_schema_to_list_op(op, name))
     }
 }
 
@@ -1130,68 +1157,11 @@ where
         self.set(sdf::FieldKey::AllowedTokens.as_str(), sdf::Value::TokenVec(tokens));
     }
 
-    /// Set the `connectionPaths` (explicit list op, replacing any prior).
-    /// Every path converts (and can fail) before anything is authored.
-    pub fn set_connections(
-        &mut self,
-        paths: impl IntoIterator<Item: sdf::IntoPath>,
-    ) -> Result<(), sdf::PathParseError> {
-        let paths: Vec<sdf::Path> = paths.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
-        self.set(
-            sdf::FieldKey::ConnectionPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
-        );
-        Ok(())
-    }
-
-    /// Remove a single connection path. Returns `true` if it was present.
-    pub fn remove_connection(&mut self, path: &sdf::Path) -> bool {
-        let key = sdf::FieldKey::ConnectionPaths.as_str();
-        let Some(mut op) = self.get::<sdf::PathListOp>(key) else {
-            return false;
-        };
-        let removed = op.discard(path);
-        self.set(key, sdf::Value::PathListOp(op));
-        removed
-    }
-
-    /// Author a removal for a connection path. Local contributions are
-    /// stripped first; non-explicit list ops also get a delete opinion so
-    /// weaker-layer contributions stay removed in the composed result.
-    pub fn delete_connection(&mut self, path: impl sdf::IntoPath) -> Result<bool, sdf::PathParseError> {
-        let path = &sdf::try_into_path(path)?;
-        let key = sdf::FieldKey::ConnectionPaths.as_str();
-        // An undecodable `connectionPaths` must not be silently overwritten.
-        let Ok(existing) = self.field(key) else {
-            return Ok(false);
-        };
-        Ok(match existing {
-            Some(sdf::Value::PathListOp(mut op)) => {
-                let changed = op.remove(path);
-                self.set(key, sdf::Value::PathListOp(op));
-                changed
-            }
-            Some(other) => {
-                debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
-                true
-            }
-            None => {
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
-                true
-            }
-        })
-    }
-
-    /// Clear all authored `connectionPaths`. Returns `true` if an
-    /// opinion was actually removed.
-    pub fn clear_connections(&mut self) -> bool {
-        let key = sdf::FieldKey::ConnectionPaths.as_str();
-        let present = self.has_field(key);
-        if present {
-            self.erase(key);
-        }
-        present
+    /// The `connectionPaths` list as it is edited (C++
+    /// `SdfAttributeSpec::GetConnectionPathList`).
+    pub fn edit_connections(&mut self) -> sdf::PathListEdit<'_, 'a, B> {
+        let anchor = self.path().prim_path();
+        sdf::PathListEdit::new(self, sdf::FieldKey::ConnectionPaths, anchor)
     }
 }
 
@@ -1266,45 +1236,11 @@ impl<'a, B> RelationshipSpec<'a, B>
 where
     B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
-    /// Replace `targetPaths` with the given list. Every path converts (and
-    /// can fail) before anything is authored.
-    pub fn set_targets(&mut self, paths: impl IntoIterator<Item: sdf::IntoPath>) -> Result<(), sdf::PathParseError> {
-        let paths: Vec<sdf::Path> = paths.into_iter().map(sdf::try_into_path).collect::<Result<_, _>>()?;
-        self.set(
-            sdf::FieldKey::TargetPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
-        );
-        Ok(())
-    }
-
-    /// Remove a single target path, ensuring it is absent from the composed
-    /// result rather than only from this layer's opinions (C++
-    /// `UsdRelationship::RemoveTarget`). Delegates to [`ListOp::remove`]; when
-    /// no targets are authored here yet it records a deletion so the same
-    /// target from a weaker layer is suppressed. Returns `true` when an
-    /// authored change was made.
-    ///
-    /// [`ListOp::remove`]: sdf::ListOp::remove
-    pub fn remove_target(&mut self, path: &sdf::Path) -> bool {
-        let key = sdf::FieldKey::TargetPaths.as_str();
-        // An undecodable `targetPaths` must not be silently overwritten.
-        let Ok(existing) = self.field(key) else {
-            return false;
-        };
-        match existing {
-            Some(sdf::Value::PathListOp(mut op)) => {
-                let changed = op.remove(path);
-                self.set(key, sdf::Value::PathListOp(op));
-                changed
-            }
-            Some(_) => false,
-            None => {
-                // No authored targets here yet: record a deletion so the same
-                // target from a weaker layer is suppressed through composition.
-                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
-                true
-            }
-        }
+    /// The `targetPaths` list as it is edited (C++
+    /// `SdfRelationshipSpec::GetTargetPathList`).
+    pub fn edit_targets(&mut self) -> sdf::PathListEdit<'_, 'a, B> {
+        let anchor = self.path().prim_path();
+        sdf::PathListEdit::new(self, sdf::FieldKey::TargetPaths, anchor)
     }
 }
 
@@ -1780,7 +1716,7 @@ fn split_property_path(path: &sdf::Path) -> Result<(sdf::Path, String), sdf::Aut
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::borrow::Cow;
 
     use super::*;
@@ -1788,7 +1724,7 @@ mod tests {
 
     /// Builds a [`Data`] with an empty spec of `ty` at `path` and returns both
     /// so tests can construct a typed view over the abstract data.
-    fn data_with_spec(path: &str, ty: sdf::SpecType) -> (Data, sdf::Path) {
+    pub(crate) fn data_with_spec(path: &str, ty: sdf::SpecType) -> (Data, sdf::Path) {
         let path = sdf::path(path).expect("valid path");
         let mut data = Data::new();
         data.create_spec(path.clone(), ty);
@@ -1840,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn add_api_schema_prepends() -> Result<(), SpecError> {
+    fn add_api_schema_prepends() -> Result<(), sdf::AuthoringError> {
         let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
         let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
@@ -1858,20 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_connection_paths_noop() {
-        let (mut data, path) = data_with_spec("/A.in", sdf::SpecType::Attribute);
-        let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
-
-        // Nothing authored — clear is a no-op.
-        assert!(!attr.clear_connections());
-
-        attr.set_connections([sdf::Path::new("/A.out").expect("path")]).unwrap();
-        assert!(attr.clear_connections());
-        assert!(!attr.clear_connections());
-    }
-
-    #[test]
-    fn add_api_schema_explicit() -> Result<(), SpecError> {
+    fn add_api_schema_explicit() -> Result<(), sdf::AuthoringError> {
         let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
         data.set_field(
             &path,
@@ -1892,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    fn add_api_schema_keeps_add() -> Result<(), SpecError> {
+    fn add_api_schema_keeps_add() -> Result<(), sdf::AuthoringError> {
         let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
         data.set_field(
             &path,
@@ -1910,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn add_api_schema_clears_delete() -> Result<(), SpecError> {
+    fn add_api_schema_clears_delete() -> Result<(), sdf::AuthoringError> {
         let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
         data.set_field(
             &path,
@@ -1930,7 +1853,7 @@ mod tests {
     /// Explicit op with the name lingering in (irrelevant) `added_items`:
     /// `already_applied` stays false, so the schema lands in `explicit_items`.
     #[test]
-    fn add_api_schema_stale_added() -> Result<(), SpecError> {
+    fn add_api_schema_stale_added() -> Result<(), sdf::AuthoringError> {
         let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
         data.set_field(
             &path,
@@ -1961,10 +1884,10 @@ mod tests {
 
         assert!(matches!(
             prim.add_applied_schema("NewAPI"),
-            Err(SpecError::FieldType {
+            Err(sdf::AuthoringError::Spec(SpecError::FieldType {
                 field: "apiSchemas",
-                expected: "sdf::TokenListOp"
-            })
+                expected: "list op"
+            }))
         ));
     }
 
@@ -1987,70 +1910,12 @@ mod tests {
         let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         let target = sdf::Path::new("/Target").expect("valid path");
 
-        rel.set_targets([target.clone()]).unwrap();
+        rel.edit_targets().set([target.clone()]).unwrap();
 
         assert_eq!(
             rel.target_path_list().and_then(|op| op.iter().next().cloned()),
             Some(target)
         );
-    }
-
-    #[test]
-    fn remove_target_suppresses_weaker() {
-        // Removing a target from a relationship with no local targets must
-        // author a deletion (not no-op), so a target authored in a weaker
-        // layer is suppressed through composition.
-        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
-        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
-        let target = sdf::Path::new("/Target").expect("valid path");
-        assert!(rel.remove_target(&target));
-
-        let stronger = rel.target_path_list().expect("target list op");
-        assert!(stronger.deleted_items().contains(&target));
-
-        // A weaker layer adds /Target and /Keep; composition drops /Target.
-        let weaker = sdf::PathListOp::explicit([target.clone(), sdf::Path::new("/Keep").unwrap()]);
-        let composed: Vec<_> = stronger
-            .combined_with(&weaker)
-            .expect("composable")
-            .iter()
-            .cloned()
-            .collect();
-        assert_eq!(composed, vec![sdf::Path::new("/Keep").unwrap()]);
-    }
-
-    #[test]
-    fn remove_target_explicit_drops_entry() {
-        // In explicit mode the explicit list is the whole value, so removal
-        // just drops the entry without authoring a deletion.
-        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
-        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
-        let a = sdf::Path::new("/A").unwrap();
-        let b = sdf::Path::new("/B").unwrap();
-        rel.set_targets([a.clone(), b.clone()]).unwrap();
-        assert!(rel.remove_target(&a));
-
-        let op = rel.target_path_list().expect("target list op");
-        assert!(op.is_explicit());
-        assert!(op.deleted_items().is_empty());
-        assert_eq!(op.iter().cloned().collect::<Vec<_>>(), vec![b]);
-    }
-
-    #[test]
-    fn remove_target_reports_change() {
-        // A non-explicit op that adds /X while /X is already deleted: removal
-        // still mutates added_items, so it must report a change so relationship
-        // change tracking emits an entry.
-        let x = sdf::Path::new("/X").unwrap();
-        let op = sdf::PathListOp::added([x.clone()]).with(sdf::ListOpType::Deleted, [x.clone()]);
-        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
-        data.set_field(&path, sdf::FieldKey::TargetPaths.as_str(), sdf::Value::PathListOp(op));
-
-        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
-        assert!(rel.remove_target(&x));
-        let op = rel.target_path_list().expect("target list op");
-        assert!(op.added_items().is_empty());
-        assert!(op.deleted_items().contains(&x));
     }
 
     #[test]

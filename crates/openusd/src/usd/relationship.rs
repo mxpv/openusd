@@ -248,11 +248,7 @@ impl Relationship {
         position: ListPosition,
     ) -> Result<Self, StageAuthoringError> {
         let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
-        self.edit(move |spec| {
-            Ok(list_edit::edit_list(spec, sdf::FieldKey::TargetPaths, |op| {
-                list_edit::insert(op, target, position);
-            })?)
-        })
+        self.edit(move |spec| Ok(spec.edit_targets().edit(|op| list_edit::insert(op, target, position))?))
     }
 
     /// Author the targets as the explicit list `targets`, strongest first
@@ -262,7 +258,7 @@ impl Relationship {
     /// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget).
     pub fn set_targets(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
         let targets = authoring::targets_for_authoring(&self.stage, &self.path, targets)?;
-        self.edit(|spec| Ok(spec.set_targets(targets)?))
+        self.edit(|spec| Ok(spec.edit_targets().set(targets)?))
     }
 
     /// Composed value of a generic metadata field on the relationship decoded
@@ -366,22 +362,19 @@ impl Relationship {
     /// holding no spec is left alone; an attribute at the path is an error.
     pub fn clear_targets(self) -> Result<Self, StageAuthoringError> {
         self.edit_existing(|spec| {
-            spec.erase(sdf::FieldKey::TargetPaths.as_str());
+            spec.edit_targets().clear();
             Ok(())
         })
     }
 
     /// Remove a target path, mapped as [`set_targets`](Self::set_targets)
-    /// maps one (C++ `UsdRelationship::RemoveTarget`). Returns `Ok(true)` if
-    /// it was present. Takes
-    /// `&self` rather than consuming — `remove_target` returns a `bool` (not
-    /// `Self`), so it doesn't fit the chain pattern. Skips cache invalidation
-    /// when the target wasn't authored (no mutation occurred).
+    /// maps one, as [`ListOp::remove`](sdf::ListOp::remove) removes it (C++
+    /// `UsdRelationship::RemoveTarget`). Returns whether an opinion changed.
     pub fn remove_target(&self, target: impl sdf::IntoPath) -> Result<bool, StageAuthoringError> {
         let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
         let mut removed = false;
         authoring::author::<Self>(&self.stage, &self.path, |spec| {
-            removed = spec.remove_target(&target);
+            removed = spec.edit_targets().remove(&target)?;
             Ok(())
         })?;
         Ok(removed)

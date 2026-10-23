@@ -333,7 +333,7 @@ impl PropertyWrite {
                     return Ok(());
                 };
                 edit_spec(data, path.clone(), Relationship::KIND, Relationship::view, |spec| {
-                    Ok(spec.set_targets(targets)?)
+                    Ok(spec.edit_targets().set(targets)?)
                 })
             }
         }
@@ -696,27 +696,16 @@ pub(super) fn target_for_authoring(
     owner: &sdf::Path,
     target: impl sdf::IntoPath,
 ) -> Result<sdf::Path, StageAuthoringError> {
-    let target = sdf::try_into_path(target)?;
-    let invalid = |path: sdf::Path| {
-        StageAuthoringError::from(sdf::AuthoringError::InvalidPath {
-            path,
-            reason: "a target names an absolute prim or property path",
-        })
-    };
-    if target.is_empty() {
-        return Err(invalid(target));
-    }
-    let target = if target.is_abs() {
-        target
-    } else {
-        owner.prim_path().make_absolute(&target)
-    };
-    let target = target.strip_variant_selections();
+    let target = sdf::list_edit::canonical(&owner.prim_path(), target)?.strip_variant_selections();
     if pcp::is_prototype_namespace(&target) {
         return Err(StageAuthoringError::PrototypeTarget { path: target });
     }
     if !(target.is_prim() || target.is_property()) {
-        return Err(invalid(target));
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: target,
+            reason: "a target names a prim or property path",
+        }
+        .into());
     }
     stage.map_to_spec_target_path(&target)
 }

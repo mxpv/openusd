@@ -5054,7 +5054,8 @@ pub(crate) mod tests {
                 true,
             )
             .unwrap()
-            .set_connections([target.clone()])
+            .edit_connections()
+            .set([target.clone()])
             .unwrap();
         });
 
@@ -5106,7 +5107,8 @@ pub(crate) mod tests {
                 true,
             )
             .unwrap()
-            .set_connections([target.clone()])
+            .edit_connections()
+            .set([target.clone()])
             .unwrap();
         });
 
@@ -5156,7 +5158,8 @@ pub(crate) mod tests {
                 true,
             )
             .unwrap()
-            .set_connections([target.clone()])
+            .edit_connections()
+            .set([target.clone()])
             .unwrap();
         });
 

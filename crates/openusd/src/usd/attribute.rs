@@ -589,7 +589,7 @@ impl Attribute {
     /// the primitive every UsdShade input/output connection is built on.
     pub fn set_connections(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
         let targets = authoring::targets_for_authoring(&self.stage, &self.path, targets)?;
-        self.edit(|spec| Ok(spec.set_connections(targets)?))
+        self.edit(|spec| Ok(spec.edit_connections().set(targets)?))
     }
 
     /// Wire this attribute to a single `source` property, replacing any
@@ -620,9 +620,9 @@ impl Attribute {
     ) -> Result<Self, StageAuthoringError> {
         let target = authoring::target_for_authoring(&self.stage, &self.path, target)?;
         self.edit(move |spec| {
-            Ok(list_edit::edit_list(spec, sdf::FieldKey::ConnectionPaths, |op| {
-                list_edit::insert(op, target, position);
-            })?)
+            Ok(spec
+                .edit_connections()
+                .edit(|op| list_edit::insert(op, target, position))?)
         })
     }
 
@@ -638,7 +638,7 @@ impl Attribute {
         // as any other write stamps it.
         let mut removed = false;
         authoring::author::<Self>(&self.stage, &self.path, |spec| {
-            removed = spec.delete_connection(&target)?;
+            removed = spec.edit_connections().remove(&target)?;
             Ok(())
         })?;
         Ok(removed)
@@ -649,7 +649,7 @@ impl Attribute {
     /// alone, and the layer records a change only when an opinion went away.
     pub fn clear_connections(self) -> Result<Self, StageAuthoringError> {
         self.edit_existing(|spec| {
-            spec.clear_connections();
+            spec.edit_connections().clear();
             Ok(())
         })
     }

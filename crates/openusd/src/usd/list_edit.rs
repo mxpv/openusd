@@ -2,7 +2,6 @@
 
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::ops::DerefMut;
 
 use crate::sdf;
 
@@ -71,10 +70,9 @@ where
             .into_iter()
             .map(|item| -> Result<T, StageAuthoringError> { into_item(item)?.translate(self.prim.stage()) })
             .collect::<Result<Vec<_>, _>>()?;
-        self.prim.clone().edit(|spec| {
-            spec.set(self.field.as_str(), sdf::ListOp::explicit(items));
-            Ok(())
-        })?;
+        self.prim
+            .clone()
+            .edit(|spec| Ok(spec.edit_list(self.field, |op| *op = sdf::ListOp::explicit(items))?))?;
         Ok(())
     }
 
@@ -95,7 +93,7 @@ where
         let item = into_item(item)?.translate(self.prim.stage())?;
         self.prim
             .clone()
-            .edit(|spec| Ok(edit_list(spec, self.field, |op| insert(op, item, position))?))?;
+            .edit(|spec| Ok(spec.edit_list(self.field, |op| insert(op, item, position))?))?;
         Ok(())
     }
 
@@ -107,7 +105,7 @@ where
     pub fn remove(&self, item: impl IntoItem<T>) -> Result<(), StageAuthoringError> {
         let item = into_item(item)?.translate(self.prim.stage())?;
         self.prim.clone().edit(|spec| {
-            Ok(edit_list(spec, self.field, |op| {
+            Ok(spec.edit_list(self.field, |op| {
                 op.remove(&item);
             })?)
         })?;
@@ -141,25 +139,6 @@ impl ListItem for sdf::Payload {
     }
 }
 
-/// Rewrites with `f` the list op `key` holds on `spec`, an op holding
-/// nothing where the field is unauthored. A field holding anything else is
-/// [`FieldType`](sdf::SpecError::FieldType), never overwritten.
-pub(super) fn edit_list<'a, T, B>(
-    spec: &mut sdf::Spec<'a, B>,
-    key: sdf::FieldKey,
-    f: impl FnOnce(&mut sdf::ListOp<T>),
-) -> Result<(), sdf::AuthoringError>
-where
-    T: Clone + PartialEq + Hash,
-    sdf::ListOp<T>: Into<sdf::Value> + TryFrom<sdf::Value>,
-    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
-{
-    let mut op = spec.typed_field::<sdf::ListOp<T>>(key, "list op")?.unwrap_or_default();
-    f(&mut op);
-    spec.set(key.as_str(), op);
-    Ok(())
-}
-
 /// Puts `item` at `position` in `op` (C++ `Usd_InsertListItem`); see
 /// [`ListPosition`]. An item the list holds already is moved there.
 pub(super) fn insert<T: Clone + PartialEq + Hash>(op: &mut sdf::ListOp<T>, item: T, position: ListPosition) {
@@ -168,11 +147,10 @@ pub(super) fn insert<T: Clone + PartialEq + Hash>(op: &mut sdf::ListOp<T>, item:
         (false, ListPosition::FrontOfPrepend | ListPosition::BackOfPrepend) => sdf::ListOpType::Prepended,
         (false, ListPosition::FrontOfAppend | ListPosition::BackOfAppend) => sdf::ListOpType::Appended,
     };
-    op.remove_item(list, &item);
     if matches!(position, ListPosition::FrontOfPrepend | ListPosition::FrontOfAppend) {
-        op.edit_items(list, |items| items.insert(0, item));
+        op.prepend_to(list, item);
     } else {
-        op.push(list, item);
+        op.append_to(list, item);
     }
 }
 

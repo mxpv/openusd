@@ -312,20 +312,69 @@ impl<T: Clone + PartialEq + Hash> ListOp<T> {
         !self.explicit && ListOpType::ALL.into_iter().all(|ty| self.items(ty).is_empty())
     }
 
-    /// Remove `item` so it is absent from the composed result, mirroring C++
-    /// `SdfListEditorProxy::Remove`.
-    ///
-    /// In explicit mode the explicit list is the whole value, so the entry is
-    /// simply dropped. Otherwise any local opinion that would add `item` is
-    /// dropped and `item` is recorded in `deleted_items` (unless already
-    /// present), which [`combined_with`](Self::combined_with) honors to
-    /// suppress the same item authored in a weaker layer. Returns whether
-    /// anything changed.
-    pub fn remove(&mut self, item: &T) -> bool {
+    /// Puts `item` among the added items where they do not hold it, and
+    /// takes it off the deleted items (C++ `SdfListEditorProxy::Add`). An
+    /// explicit op puts it among its explicit items instead.
+    pub fn add(&mut self, item: T) {
+        let ty = self.admit(ListOpType::Added, &item);
+        self.push(ty, item);
+    }
+
+    /// Puts `item` first among the prepended items, as
+    /// [`prepend_to`](Self::prepend_to) puts it, and takes it off the
+    /// deleted items (C++ `SdfListEditorProxy::Prepend`). An explicit op
+    /// puts it first among its explicit items instead.
+    pub fn prepend(&mut self, item: T) {
+        let ty = self.admit(ListOpType::Prepended, &item);
+        self.prepend_to(ty, item);
+    }
+
+    /// Puts `item` last among the appended items, as
+    /// [`append_to`](Self::append_to) puts it, and takes it off the deleted
+    /// items (C++ `SdfListEditorProxy::Append`). An explicit op puts it last
+    /// among its explicit items instead.
+    pub fn append(&mut self, item: T) {
+        let ty = self.admit(ListOpType::Appended, &item);
+        self.append_to(ty, item);
+    }
+
+    /// Puts `item` first in the list `ty` names, moving it there where the
+    /// list holds it (C++ `SdfListEditorProxy::_Prepend`).
+    pub fn prepend_to(&mut self, ty: ListOpType, item: T) {
+        self.remove_item(ty, &item);
+        self.edit_items(ty, |items| items.insert(0, item));
+    }
+
+    /// Puts `item` last in the list `ty` names, moving it there where the
+    /// list holds it (C++ `SdfListEditorProxy::_Append`).
+    pub fn append_to(&mut self, ty: ListOpType, item: T) {
+        self.remove_item(ty, &item);
+        self.push(ty, item);
+    }
+
+    /// Takes `item` off the deleted items of an op that is not explicit and
+    /// names the list it goes in: `ty`, or the explicit items of an explicit
+    /// op.
+    fn admit(&mut self, ty: ListOpType, item: &T) -> ListOpType {
         if self.explicit {
-            return remove_one(&mut self.explicit_items, item);
+            return ListOpType::Explicit;
         }
-        self.discard(item) | self.push(ListOpType::Deleted, item.clone())
+        self.remove_item(ListOpType::Deleted, item);
+        ty
+    }
+
+    /// Removes `item` from the composed list (C++
+    /// `SdfListEditorProxy::Remove`): off the explicit items of an explicit
+    /// op, which are the whole value, and otherwise off the lists that
+    /// contribute it and onto the deleted items, which
+    /// [`combined_with`](Self::combined_with) honors against a weaker
+    /// layer's copy. Returns whether anything changed.
+    pub fn remove(&mut self, item: &T) -> bool {
+        let erased = self.erase(item);
+        if self.explicit {
+            return erased;
+        }
+        erased | self.push(ListOpType::Deleted, item.clone())
     }
 
     /// Drops `item` from the list `ty` names. Returns whether the list held
@@ -334,10 +383,16 @@ impl<T: Clone + PartialEq + Hash> ListOp<T> {
         remove_one(self.items_mut(ty), item)
     }
 
-    /// Drops `item` from every list that contributes it: the explicit,
-    /// added, prepended and appended items. Returns whether any held it.
-    pub fn discard(&mut self, item: &T) -> bool {
-        remove_one(&mut self.explicit_items, item)
+    /// Drops `item` from every list that contributes it: the explicit items,
+    /// and on an op that is not explicit the added, prepended and appended
+    /// ones as well (C++ `SdfListEditorProxy::Erase`). Returns whether any
+    /// held it.
+    pub fn erase(&mut self, item: &T) -> bool {
+        let erased = remove_one(&mut self.explicit_items, item);
+        if self.explicit {
+            return erased;
+        }
+        erased
             | remove_one(&mut self.added_items, item)
             | remove_one(&mut self.prepended_items, item)
             | remove_one(&mut self.appended_items, item)
@@ -779,18 +834,77 @@ mod tests {
         assert_eq!(op.flatten(), op.compose_over(&[]));
     }
 
-    /// Dropping an item takes it out of every list that contributes it and
+    /// Erasing an item takes it out of every list that contributes it and
     /// leaves the deletes alone.
     #[test]
-    fn discard_contributed_item() {
+    fn erase_contributed_item() {
         let mut op = ListOp::prepended([1, 2])
             .with(ListOpType::Appended, [2, 3])
             .with(ListOpType::Deleted, [2]);
-        assert!(op.discard(&2));
+        assert!(op.erase(&2));
         assert_eq!(op.prepended_items(), [1]);
         assert_eq!(op.appended_items(), [3]);
         assert_eq!(op.deleted_items(), [2]);
-        assert!(!op.discard(&2));
+        assert!(!op.erase(&2));
+    }
+
+    /// Prepending and appending move an item to the end asked for in the
+    /// list of their own and take it off the deletes; adding puts it among
+    /// the added items once.
+    #[test]
+    fn prepend_append_add() {
+        let mut op = ListOp::prepended([1, 2]).with(ListOpType::Deleted, [3]);
+        op.prepend(3);
+        op.prepend(2);
+        assert_eq!(op.prepended_items(), [2, 3, 1]);
+        assert!(op.deleted_items().is_empty());
+        op.append(1);
+        op.append(4);
+        op.append(1);
+        assert_eq!(op.appended_items(), [4, 1]);
+        assert_eq!(op.prepended_items(), [2, 3, 1]);
+        op.add(5);
+        op.add(5);
+        assert_eq!(op.added_items(), [5]);
+    }
+
+    /// An explicit op takes every edit on its explicit items, which are the
+    /// whole value.
+    #[test]
+    fn explicit_takes_edits() {
+        let mut op = ListOp::explicit([1, 2]);
+        op.prepend(2);
+        assert_eq!(op.explicit_items(), [2, 1]);
+        op.append(2);
+        assert_eq!(op.explicit_items(), [1, 2]);
+        op.add(3);
+        assert_eq!(op.explicit_items(), [1, 2, 3]);
+        assert!(op.erase(&1));
+        assert!(op.remove(&2));
+        assert_eq!(op.explicit_items(), [3]);
+        assert!(op.deleted_items().is_empty());
+    }
+
+    /// Removing from an op that is not explicit records the delete, which
+    /// composition honors against a weaker layer, and drops the item's
+    /// contributions, reported even where the delete stood already.
+    #[test]
+    fn remove_records_delete() {
+        let mut op = ListOp::<i32>::default();
+        assert!(op.remove(&1));
+        assert_eq!(op.deleted_items(), [1]);
+        let composed: Vec<_> = op
+            .combined_with(&ListOp::explicit([1, 2]))
+            .expect("composable")
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(composed, [2]);
+
+        let mut op = ListOp::added([3]).with(ListOpType::Deleted, [3]);
+        assert!(op.remove(&3));
+        assert!(op.added_items().is_empty());
+        assert_eq!(op.deleted_items(), [3]);
     }
 
     /// Explicit mode replaces the weaker list entirely, regardless of its contents.
