@@ -694,6 +694,10 @@ impl<W: Write> Emitter<'_, W> {
         // USD text grammar keywords. Map them back before emitting.
         let keyword = if name == FieldKey::LayerRelocates.as_str() {
             "relocates"
+        } else if name == FieldKey::InheritPaths.as_str() {
+            "inherits"
+        } else if name == FieldKey::Documentation.as_str() {
+            "doc"
         } else if name == FieldKey::VariantSetNames.as_str() {
             "variantSets"
         } else if name == FieldKey::VariantSelection.as_str() {
@@ -1557,6 +1561,23 @@ def "Mesh" (
         assert_eq!(
             data.spec(&path).expect("spec").fields,
             reparsed.spec(&path).expect("spec").fields
+        );
+    }
+
+    /// A field stored under a name of its own is written by its keyword:
+    /// `inheritPaths` as `inherits`, `documentation` as `doc`, on a prim and
+    /// on a property.
+    #[test]
+    fn field_keywords() {
+        let source = "#usda 1.0\n\ndef \"A\" (\n    doc = \"a prim\"\n    inherits = </C>\n)\n{\n    double x = 1 (\n        doc = \"a property\"\n    )\n}\n";
+        let data = usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+        for line in ["inherits = </C>", "doc = \"a prim\"", "doc = \"a property\""] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        assert!(
+            !text.contains("inheritPaths") && !text.contains("documentation"),
+            "{text}"
         );
     }
 
