@@ -747,6 +747,7 @@ impl Resolver for DefaultResolver {
     /// candidate does not exist keeps its bare normalized spelling, so
     /// resolving the identifier goes through the search directories and a
     /// `@usd/schema.usda@` sublayer is found beside any layer that names it.
+    /// With no anchor, the current working directory is the anchor directory.
     ///
     /// A relative path is read with `\` as a separator on every host, the
     /// rule C++ `ArchNormPath` applies on Windows, so a layer authored there
@@ -812,21 +813,15 @@ impl Resolver for DefaultResolver {
                 return join_package_relative_path(&anchor_str, &joined);
             }
             if let Some(dir) = anchor.parent() {
-                let anchored = dir.join(&path);
-                if is_search_path(asset_path) {
-                    return match anchored.canonicalize() {
-                        Ok(found) => found.to_string_lossy().into_owned(),
-                        Err(_) => path.to_string_lossy().into_owned(),
-                    };
-                }
-                return canonical_identifier(anchored);
+                return anchor_in(dir, &path, asset_path);
             }
         }
 
-        // Without an anchor, resolve relative to the current working directory so
-        // every identifier is stable and absolute (matching canonicalized dependencies).
+        // Without an anchor, the current working directory is the anchor
+        // directory. C++ `ArDefaultResolver::_Resolve` looks there first for
+        // a relative path.
         if let Ok(cwd) = std::env::current_dir() {
-            return canonical_identifier(cwd.join(path));
+            return anchor_in(&cwd, &path, asset_path);
         }
 
         asset_path.to_string()
@@ -1078,6 +1073,21 @@ fn host_path(asset_path: &str) -> Option<Cow<'_, Path>> {
         Some(Component::Prefix(_) | Component::RootDir)
     )
     .then_some(Cow::Borrowed(path))
+}
+
+/// The identifier of the relative `path` (the host spelling of `asset_path`)
+/// anchored in `dir`, under the look-here-first rule: a search path keeps its
+/// bare spelling unless the asset exists in `dir`. Resolving the bare
+/// spelling goes through the search directories.
+fn anchor_in(dir: &Path, path: &Path, asset_path: &str) -> String {
+    let anchored = dir.join(path);
+    if is_search_path(asset_path) {
+        return match anchored.canonicalize() {
+            Ok(found) => found.to_string_lossy().into_owned(),
+            Err(_) => path.to_string_lossy().into_owned(),
+        };
+    }
+    canonical_identifier(anchored)
 }
 
 /// Renders `path` as a stable layer identifier: its filesystem-canonical
@@ -1641,6 +1651,30 @@ pub(crate) mod tests {
         let resolver = DefaultResolver::new();
         let id = resolver.create_identifier(abs_str, None);
         assert!(!id.is_empty());
+    }
+
+    /// With no anchor, the working directory is the anchor directory. A
+    /// search path absent from it keeps its bare spelling and resolves
+    /// through the search directories. A file-relative path anchors in it.
+    #[test]
+    fn resolver_create_identifier_unanchored() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("only_in_search.usda"),
+            "#usda 1.0
+",
+        )
+        .unwrap();
+        let resolver = DefaultResolver::with_search_paths([dir.path()]);
+        let id = resolver.create_identifier("only_in_search.usda", None);
+        assert_eq!(id, "only_in_search.usda");
+        assert!(resolver.resolve(&id).is_some());
+
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolver.create_identifier("./missing.usda", None),
+            canonical_identifier(cwd.join("missing.usda"))
+        );
     }
 
     #[test]

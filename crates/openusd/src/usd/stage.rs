@@ -6163,6 +6163,33 @@ def "T" {
         Ok(())
     }
 
+    /// An anonymous layer's tag does not anchor the paths it authors. Under a
+    /// tag ending in `.usdz`, a search-path entry still resolves through the
+    /// resolver's search directories (C++ `SdfComputeAssetPathRelativeToLayer`
+    /// creates an anonymous layer's identifiers without an anchor).
+    #[test]
+    fn anon_search_sublayer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("sub.usda"),
+            "#usda 1.0
+def \"Sub\" {}
+",
+        )?;
+        let stage = Stage::builder()
+            .resolver(ar::DefaultResolver::with_search_paths([dir.path()]))
+            .in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        let mut anon = sdf::Layer::new_anonymous("lop.usdz");
+        edit_layer(&mut anon, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        });
+        stage.insert_layer(&root_id, 0, anon, sdf::LayerOffset::IDENTITY)?;
+        assert!(stage.prim("/Sub")?.is_defined()?, "the search-path sublayer loads");
+        assert!(stage.composition_errors().is_empty());
+        Ok(())
+    }
+
     /// An anonymous layer's sublayer entry that names no asset reports an
     /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer)
     /// diagnostic rather than vanishing (C++ `PcpErrorInvalidSublayerPath`).
@@ -6177,7 +6204,6 @@ def "T" {
                 .unwrap()
                 .set_sublayers([missing.to_str().expect("utf-8 path")]);
         });
-        let _ = stage.prim("/Sub")?;
         assert!(
             stage
                 .composition_errors()
