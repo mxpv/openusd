@@ -189,7 +189,7 @@ pub(super) fn discover<'a>(graph: &'a pcp::LayerGraph, asset_path: &str, policy:
             uses: HashMap::new(),
         },
     };
-    discover_scope(graph, policy, vec![root], None, Vec::new())
+    discover_scope(graph, policy, vec![root], None)
 }
 
 /// The identifier of the root layer `asset_path` names: a layer `graph`
@@ -203,32 +203,26 @@ fn root_identifier(graph: &pcp::LayerGraph, asset_path: &str) -> String {
 
 /// Walks from `roots` over every file they reach, breadth first. In the scope
 /// of `package`, a path leading back inside it names an entry already in
-/// place and is left as authored. `unresolved` seeds what the scope reports,
-/// with what the scopes nested in its roots found.
+/// place and is left as authored.
 fn discover_scope<'a>(
     graph: &'a pcp::LayerGraph,
     policy: Discover,
     roots: Vec<Source<'a>>,
     package: Option<String>,
-    unresolved: Vec<(String, AssetKind)>,
 ) -> Result<Discovery<'a>> {
     let mut discoverer = Discoverer {
         graph,
         policy,
-        package: package.map(|package| {
-            let prefix = format!("{}[", package.trim_end_matches(']'));
-            (package, prefix)
-        }),
-        index: roots
-            .iter()
-            .enumerate()
-            .map(|(index, root)| (root.identifier.clone(), index))
-            .collect(),
+        package,
+        index: HashMap::new(),
         udim_sets: HashMap::new(),
-        queue: (0..roots.len()).filter(|&index| roots[index].is_layer()).collect(),
-        sources: roots,
-        unresolved,
+        queue: VecDeque::new(),
+        sources: Vec::new(),
+        unresolved: Vec::new(),
     };
+    for root in roots {
+        discoverer.admit(root);
+    }
     // TODO(rayon): the layers queued at one level open independently of each
     // other; open them in parallel and visit them in queue order.
     while let Some(current) = discoverer.queue.pop_front() {
@@ -260,8 +254,10 @@ fn discover_inside<'a>(graph: &'a pcp::LayerGraph, policy: Discover, package: &s
             Some((package, _)) => {
                 nested.insert(package.to_owned());
             }
+            // A layer is keyed by its entry's path, as a path leading back
+            // to it is located, whatever identifier it opened under.
             None => roots.push(Source {
-                identifier: layer.identifier().to_owned(),
+                identifier: ar::nest_packaged_path(package, entry),
                 placement: Placement::Entry(entry.to_owned()),
                 content: Content::Layer {
                     layer: SourceLayer::Live(layer),
@@ -270,12 +266,9 @@ fn discover_inside<'a>(graph: &'a pcp::LayerGraph, policy: Discover, package: &s
             }),
         }
     }
-    // What a nested scope could not resolve is this scope's to report too.
-    let mut unresolved = Vec::new();
     for name in nested {
         let identifier = ar::nest_packaged_path(package, &name);
         let inside = discover_inside(graph, policy, &identifier)?;
-        unresolved.extend(inside.unresolved.iter().cloned());
         roots.push(Source {
             placement: Placement::Entry(name),
             content: Content::Package {
@@ -285,21 +278,15 @@ fn discover_inside<'a>(graph: &'a pcp::LayerGraph, policy: Discover, package: &s
             identifier,
         });
     }
-    if roots.is_empty() {
-        return Ok(Discovery {
-            sources: Vec::new(),
-            unresolved,
-        });
-    }
-    discover_scope(graph, policy, roots, Some(package.to_owned()), unresolved)
+    discover_scope(graph, policy, roots, Some(package.to_owned()))
 }
 
 /// The state of one [`discover_scope`] walk.
 struct Discoverer<'a> {
     graph: &'a pcp::LayerGraph,
     policy: Discover,
-    /// The scope's package, with the prefix of every identifier inside it.
-    package: Option<(String, String)>,
+    /// The scope's package.
+    package: Option<String>,
     /// The source index of each identifier found.
     index: HashMap<String, usize>,
     /// Each UDIM set probed, by its anchored identifier, or `None` where no
@@ -321,6 +308,53 @@ struct UdimSet {
     numbers: Vec<u16>,
 }
 
+/// Where a path a layer authors leads: the source it names, as
+/// [`Discoverer::add`] admits one.
+struct Located {
+    /// The path's canonical identifier, anchored to the layer authoring it,
+    /// which an unresolved path is reported as.
+    target: String,
+    /// The identifier the source is indexed by: the target's own, the
+    /// package's for a path into one, the entry's for a path leading back
+    /// inside the scope's package, or the set's for a set of tiles.
+    identifier: String,
+    /// Where the source goes in its package.
+    placement: Placement,
+    /// What the source is admitted as.
+    admit: Admission,
+    /// Whether the whole path has to resolve for it to name the source, as
+    /// a path into a package does, other than a set of tiles, which
+    /// resolves through them.
+    probe: bool,
+    /// For a path into a package that names the source as that package, the
+    /// path inside it as the resolver's identifier spells it.
+    packaged: Option<String>,
+}
+
+/// What a located source is admitted as.
+#[derive(Clone, Copy)]
+enum Admission {
+    /// A layer, opened and walked.
+    Layer,
+    /// A package, carried whole, with the scope of the layers the stage
+    /// holds inside it.
+    Package,
+    /// Any other file, at its location.
+    Asset,
+    /// A set of UDIM tiles, stored as no entry itself.
+    Tiles,
+}
+
+impl From<AssetKind> for Admission {
+    fn from(kind: AssetKind) -> Self {
+        match kind {
+            AssetKind::Layer => Self::Layer,
+            AssetKind::Package => Self::Package,
+            AssetKind::Asset => Self::Asset,
+        }
+    }
+}
+
 impl<'a> Discoverer<'a> {
     /// Follows `path`, authored in the layer source `current` as `kind`:
     /// records what it names and queues a layer found through it. A UDIM
@@ -335,7 +369,7 @@ impl<'a> Discoverer<'a> {
             }
             return Ok(());
         }
-        let Some((set, new_set)) = self.add(current, &path, AssetKind::Tiles)? else {
+        let Some((set, new_set)) = self.add(current, &path, kind)? else {
             return Ok(());
         };
         let mut found_tiles = Vec::with_capacity(tiles.len());
@@ -363,7 +397,7 @@ impl<'a> Discoverer<'a> {
     /// path of each tile found beside the first one the layer reaches (C++
     /// `_GetUdimTiles`); empty for any other path, and where none resolves.
     /// A set is probed once, however many layers author it; each tile is
-    /// resolved again by [`find_or_add`](Self::find_or_add), as C++ resolves
+    /// resolved again by [`add`](Self::add), as C++ resolves
     /// the authored tile paths it hands back. Only a path of asset kind is
     /// expanded; C++ expands any asset value's path, a layer-named one
     /// included, and neither expands an arc's.
@@ -399,18 +433,37 @@ impl<'a> Discoverer<'a> {
             .collect()
     }
 
-    /// [`find_or_add`](Self::find_or_add), with whether it added the source,
-    /// queueing a layer it adds.
+    /// What `path`, authored in the layer source `current` as `kind`, names,
+    /// with whether it was admitted now: a source already found, or one
+    /// admitted and, for a layer, queued; `None` when the path does not
+    /// resolve, which is recorded.
     fn add(&mut self, current: usize, path: &str, kind: AssetKind) -> Result<Option<(Use, bool)>> {
-        let before = self.sources.len();
-        let Some(found) = self.find_or_add(current, path, kind)? else {
+        let located = self.locate(current, path, kind);
+        if located.probe && self.graph.layer_registry().resolve(&located.target).is_none() {
+            self.record_unresolved(located.target, kind);
             return Ok(None);
-        };
-        let added = self.sources.len() > before;
-        if added && self.sources[found.source].is_layer() {
-            self.queue.push_back(found.source);
         }
-        Ok(Some((found, added)))
+        let (index, added) = if let Some(&index) = self.index.get(&located.identifier) {
+            (index, false)
+        } else {
+            let Some(content) = self.content_of(&located)? else {
+                self.record_unresolved(located.target, kind);
+                return Ok(None);
+            };
+            let source = Source {
+                identifier: located.identifier,
+                placement: located.placement,
+                content,
+            };
+            (self.admit(source), true)
+        };
+        Ok(Some((
+            Use {
+                source: index,
+                packaged: located.packaged,
+            },
+            added,
+        )))
     }
 
     /// The paths the layer source `current` authors, each once, with what it
@@ -440,110 +493,76 @@ impl<'a> Discoverer<'a> {
         }
     }
 
-    /// What `path`, authored in the layer source `referrer` as `kind`, names:
-    /// a source already found, or one added now; `None` when it does not
-    /// resolve, which is recorded. A path into a package names the package
-    /// once the whole path resolves, unless packages are opened as layers. A
-    /// path leading back inside the scope's package names the entry there,
-    /// in place already.
-    fn find_or_add(&mut self, referrer: usize, path: &str, kind: AssetKind) -> Result<Option<Use>> {
+    /// Where `path`, authored in the layer source `referrer` as `kind`,
+    /// leads. A path into a package names the package, unless packages are
+    /// opened as layers; a path leading back inside the scope's package
+    /// names the entry there, in place already.
+    fn locate(&self, referrer: usize, path: &str, kind: AssetKind) -> Located {
         let registry = self.graph.layer_registry();
         let anchor = self.sources[referrer].content.anchor();
         let target = registry.create_identifier(path, anchor.as_ref());
-        if let Some((package, prefix)) = &self.package
-            && let Some(rest) = target.strip_prefix(prefix.as_str())
+        let set = self.udim_sets.get(&target).and_then(Option::as_ref);
+        let (identifier, placement, admit, packaged) = if let Some(package) = &self.package
+            && let Some(part) = packaged_part(&target, package)
         {
             // The first packaged part names the entry, deeper ones a path
             // into a package nested there.
-            let rest = rest.trim_end_matches(']');
-            let (name, packaged) = match rest.split_once('[') {
-                Some((name, deeper)) => (name, Some(deeper.to_owned())),
-                None => (rest, None),
+            let (name, packaged) = match ar::split_package_relative_path_outer(&part) {
+                Some((name, deeper)) => (name, Some(deeper)),
+                None => (part, None),
             };
-            let identifier = ar::nest_packaged_path(package, name);
-            if let Some(&index) = self.index.get(&identifier) {
-                return Ok(Some(Use {
-                    source: index,
-                    packaged,
-                }));
-            }
-            // A set of tiles resolves through its tiles, not itself.
-            let resolved = if kind == AssetKind::Tiles {
-                None
-            } else if let Some(resolved) = registry.resolve(&target) {
-                Some(resolved)
+            // An entry the stage holds no layer in is copied as it is, a
+            // layer among them.
+            let admit = if packaged.is_some() || kind == AssetKind::Package {
+                Admission::Package
+            } else if set.is_some() {
+                Admission::Tiles
             } else {
-                self.record_unresolved(target, kind);
-                return Ok(None);
+                Admission::Asset
             };
-            // An entry the stage holds no layer in, copied as it is; a package
-            // nested there has nothing live inside it, a set of tiles in it
-            // included.
-            let content = if packaged.is_some() || AssetKind::of(name, false) == AssetKind::Package {
-                Content::Package {
-                    resolved: ar::ResolvedPath::new(&identifier),
-                    inside: Discovery {
-                        sources: Vec::new(),
-                        unresolved: Vec::new(),
-                    },
-                }
-            } else if let Some(resolved) = resolved {
-                Content::Asset(resolved)
-            } else {
-                Content::Tiles(Vec::new())
-            };
-            let index = self.sources.len();
-            self.index.insert(identifier.clone(), index);
-            self.sources.push(Source {
-                identifier,
-                placement: Placement::Entry(name.to_owned()),
-                content,
-            });
-            return Ok(Some(Use {
-                source: index,
+            (
+                ar::nest_packaged_path(package, &name),
+                Placement::Entry(name),
+                admit,
                 packaged,
-            }));
-        }
-        let (identifier, to_source, kind, packaged) = match ar::split_package_relative_path_outer(path) {
-            Some((package, inner)) if !self.policy.open_packages => {
-                // A set of tiles resolves through its tiles, not itself.
-                if kind != AssetKind::Tiles && registry.resolve(&target).is_none() {
-                    self.record_unresolved(target, kind);
-                    return Ok(None);
+            )
+        } else {
+            let named = |path: String| Placement::Named { by: referrer, path };
+            match ar::split_package_relative_path_outer(path) {
+                Some((package, inner)) if !self.policy.open_packages => {
+                    let identifier = registry.create_identifier(&package, anchor.as_ref());
+                    // The packaged path is read back from the resolver's
+                    // identifier, which spells it as the entry name it reaches.
+                    let packaged = packaged_part(&target, &identifier).unwrap_or(inner);
+                    (identifier, named(package), Admission::Package, Some(packaged))
                 }
-                let identifier = registry.create_identifier(&package, anchor.as_ref());
-                // The packaged path is read back from the resolver's
-                // identifier, which spells it as the entry name it reaches.
-                let packaged = packaged_part(&target, &identifier).unwrap_or(inner);
-                (identifier, package, AssetKind::Package, Some(packaged))
+                _ if self.policy.open_packages && kind == AssetKind::Package => {
+                    (target.clone(), named(path.to_owned()), Admission::Layer, None)
+                }
+                _ => match set {
+                    Some(set) => (set.identifier.clone(), named(path.to_owned()), Admission::Tiles, None),
+                    None => (target.clone(), named(path.to_owned()), kind.into(), None),
+                },
             }
-            _ if self.policy.open_packages && kind == AssetKind::Package => {
-                (target, path.to_owned(), AssetKind::Layer, None)
-            }
-            // A set is identified as its tiles are, by the first tile's
-            // identifier with the pattern put back, canonical as the
-            // identifier of a file that exists is; `udim_tiles` probed it. A
-            // set no tile resolves for is unresolved.
-            _ if kind == AssetKind::Tiles => {
-                let Some(set) = self.udim_sets.get(&target).and_then(Option::as_ref) else {
-                    self.record_unresolved(target, kind);
-                    return Ok(None);
-                };
-                (set.identifier.clone(), path.to_owned(), kind, None)
-            }
-            _ => (target, path.to_owned(), kind, None),
         };
-        if let Some(&index) = self.index.get(&identifier) {
-            return Ok(Some(Use {
-                source: index,
-                packaged,
-            }));
+        Located {
+            probe: packaged.is_some() && set.is_none(),
+            target,
+            identifier,
+            placement,
+            admit,
+            packaged,
         }
-        let content = match kind {
-            AssetKind::Tiles => Content::Tiles(Vec::new()),
-            AssetKind::Layer => {
-                let Some(layer) = SourceLayer::open(self.graph, &identifier)? else {
-                    self.record_unresolved(identifier, kind);
+    }
+
+    /// What the source at `located` holds, read through the resolver;
+    /// `None` where it does not resolve. A set of tiles resolves through its
+    /// tiles, probed already; a package is walked in a scope of its own.
+    fn content_of(&self, located: &Located) -> Result<Option<Content<'a>>> {
+        let registry = self.graph.layer_registry();
+        let content = match located.admit {
+            Admission::Layer => {
+                let Some(layer) = SourceLayer::open(self.graph, &located.identifier)? else {
                     return Ok(None);
                 };
                 Content::Layer {
@@ -551,36 +570,42 @@ impl<'a> Discoverer<'a> {
                     uses: HashMap::new(),
                 }
             }
-            AssetKind::Package | AssetKind::Asset => {
-                let Some(resolved) = registry.resolve(&identifier) else {
-                    self.record_unresolved(identifier, kind);
+            Admission::Asset => {
+                let Some(resolved) = registry.resolve(&located.identifier) else {
                     return Ok(None);
                 };
-                if kind == AssetKind::Package {
-                    let inside = discover_inside(self.graph, self.policy, &identifier)?;
-                    for (unresolved, kind) in &inside.unresolved {
-                        self.record_unresolved(unresolved.clone(), *kind);
-                    }
-                    Content::Package { resolved, inside }
-                } else {
-                    Content::Asset(resolved)
+                Content::Asset(resolved)
+            }
+            Admission::Tiles => Content::Tiles(Vec::new()),
+            Admission::Package => {
+                let Some(resolved) = registry.resolve(&located.identifier) else {
+                    return Ok(None);
+                };
+                Content::Package {
+                    resolved,
+                    inside: discover_inside(self.graph, self.policy, &located.identifier)?,
                 }
             }
         };
+        Ok(Some(content))
+    }
+
+    /// Admits `source`, queueing a layer to be walked; what a package's own
+    /// scope could not resolve is this scope's to report too. Returns the
+    /// source's index.
+    fn admit(&mut self, source: Source<'a>) -> usize {
+        if let Content::Package { inside, .. } = &source.content {
+            for (unresolved, kind) in &inside.unresolved {
+                self.record_unresolved(unresolved.clone(), *kind);
+            }
+        }
         let index = self.sources.len();
-        self.index.insert(identifier.clone(), index);
-        self.sources.push(Source {
-            identifier,
-            placement: Placement::Named {
-                by: referrer,
-                path: to_source,
-            },
-            content,
-        });
-        Ok(Some(Use {
-            source: index,
-            packaged,
-        }))
+        if source.is_layer() {
+            self.queue.push_back(index);
+        }
+        self.index.insert(source.identifier.clone(), index);
+        self.sources.push(source);
+        index
     }
 
     fn record_unresolved(&mut self, identifier: String, kind: AssetKind) {

@@ -704,6 +704,143 @@ def "T"
         Ok(())
     }
 
+    /// A live layer naming its package's default layer, live too, finds that
+    /// layer, so the package written carries the default layer's edits.
+    #[test]
+    fn sibling_names_default_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut writer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        writer.add_layer("first.usda", b"#usda 1.0\ndef \"R\" {\n    int probe = 1\n}\n")?;
+        writer.add_layer(
+            "other.usda",
+            b"#usda 1.0\ndef \"S\" (\n    prepend references = @./first.usda@</R>\n)\n{\n}\n",
+        )?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\ndef \"B\" (\n    prepend references = @./pkg.usdz[other.usda]@</S>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/B.probe"), Some(sdf::Value::Int(1)));
+        let dependencies = all_dependencies(&stage, &root)?;
+        let default_layer = dependencies
+            .layers
+            .iter()
+            .find(|layer| layer.ends_with("pkg.usdz"))
+            .expect("the package's default layer");
+        let probe = sdf::path("/R.probe")?;
+        stage.layer_mut(default_layer).unwrap().edit(|edit| {
+            edit.data_mut()
+                .set_field(&probe, sdf::FieldKey::Default.as_str(), sdf::Value::Int(42));
+            Ok(())
+        })?;
+
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(42)));
+        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(sdf::Value::Int(42)));
+        Ok(())
+    }
+
+    /// A path from a live layer into a package nested beside it, found
+    /// already through another path, that names an entry which does not
+    /// exist is reported as skipped.
+    #[test]
+    fn missing_nested_entry() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
+        inner.add_layer("a.usda", b"#usda 1.0\ndef \"R\" {\n    int probe = 1\n}\n")?;
+        let inner = inner.finish()?.into_inner();
+        let mut outer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        outer.add_layer(
+            "first.usda",
+            b"#usda 1.0\ndef \"R\" (\n    prepend references = [@./inner.usdz[a.usda]@</R>, @./inner.usdz[missing.usda]@</R>]\n)\n{\n}\n",
+        )?;
+        outer.add_layer("inner.usdz", &inner)?;
+        outer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+        let skipped = create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None)?;
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(
+            skipped[0].ends_with("pkg.usdz[inner.usdz[missing.usda]]"),
+            "{skipped:?}"
+        );
+        Ok(())
+    }
+
+    /// A path from a live layer two packages deep beside it keeps its
+    /// brackets through the package written.
+    #[test]
+    fn deeper_entry_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut n2 = ArchiveWriter::new(Cursor::new(Vec::new()));
+        n2.add_layer("a.png", b"PNG")?;
+        let n2 = n2.finish()?.into_inner();
+        let mut n1 = ArchiveWriter::new(Cursor::new(Vec::new()));
+        n1.add_layer("n2.usdz", &n2)?;
+        let n1 = n1.finish()?.into_inner();
+        let mut outer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        outer.add_layer(
+            "first.usda",
+            b"#usda 1.0\ndef \"R\" {\n    asset t = @./n1.usdz[n2.usdz[a.png]]@\n}\n",
+        )?;
+        outer.add_layer("n1.usdz", &n1)?;
+        outer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert!(stage.prim("/A")?.is_valid()?);
+        let output = dir.path().join("out.usdz");
+        let skipped = create_usdz_package(&stage, &root, &output, None)?;
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
+        let (names, texts) = nested_entries(&nested);
+        assert_eq!(names, ["first.usda", "n1.usdz"]);
+        assert!(
+            texts["first.usda"].contains("@./n1.usdz[n2.usdz[a.png]]@"),
+            "{}",
+            texts["first.usda"]
+        );
+        Ok(())
+    }
+
+    /// A package a live layer names beside itself inside its own package,
+    /// and which does not exist, is reported as skipped.
+    #[test]
+    fn missing_sibling_package() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut writer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        writer.add_layer(
+            "first.usda",
+            b"#usda 1.0\ndef \"R\" (\n    prepend references = @./missing.usdz@</R>\n)\n{\n}\n",
+        )?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        // Composing the reference loads the packaged layer into the stage.
+        assert!(stage.prim("/A")?.is_valid()?);
+        let skipped = create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None)?;
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].ends_with("pkg.usdz[missing.usdz]"), "{skipped:?}");
+        Ok(())
+    }
+
     /// The layers the stage holds inside a referenced package, its default
     /// one and one named by entry, are re-serialized from memory with their
     /// unsaved edits, while the other entries are copied.
@@ -1058,6 +1195,11 @@ def "T"
                 "assets.usdz[missing.png]",
                 false,
             ),
+            (
+                "#usda 1.0\ndef \"A\" (\n    prepend references = @./assets.usdz[a.usda]@\n)\n{\n    asset t = @./assets.usdz[missing.png]@\n}\n",
+                "assets.usdz[missing.png]",
+                false,
+            ),
         ] {
             write(dir.path(), "root.usda", root);
             let (root, stage) = open(dir.path(), "root.usda")?;
@@ -1143,6 +1285,38 @@ def "T"
             "{}",
             texts["root.usda"]
         );
+        Ok(())
+    }
+
+    /// A UDIM set inside a package names the package, carried whole, and
+    /// the path to the set is rewritten to it.
+    #[test]
+    fn udim_set_in_package() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut writer = ArchiveWriter::create(dir.path().join("pkg.usdz"))?;
+        writer.add_layer("tex.1001.png", b"PNG")?;
+        writer.add_layer("tex.1002.png", b"PNG")?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "scene/root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset t = @../pkg.usdz[tex.<UDIM>.png]@\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "scene/root.usda")?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let (names, texts) = entries(&output);
+        assert_eq!(names, ["root.usda", "0/pkg.usdz"]);
+        assert!(
+            texts["root.usda"].contains("@0/pkg.usdz[tex.<UDIM>.png]@"),
+            "{}",
+            texts["root.usda"]
+        );
+
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
+        assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+        assert_eq!(dependencies.assets.len(), 2, "{:?}", dependencies.assets);
         Ok(())
     }
 

@@ -75,10 +75,6 @@ pub(super) enum AssetKind {
     Package,
     /// Any other file, such as a texture.
     Asset,
-    /// The set of UDIM tiles a path with a `<UDIM>` pattern names, which
-    /// discovery decides by the pattern once the tiles are found; each tile
-    /// is an asset of its own.
-    Tiles,
 }
 
 impl AssetKind {
