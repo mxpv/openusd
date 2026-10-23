@@ -186,7 +186,7 @@ impl ModelAPI {
         if let Some(parent) = parent.into() {
             return Ok(decided_draw_mode(self.prim())?.unwrap_or(parent));
         }
-        let decided = nearest(self.stage(), self.path(), |prim| Ok(Some(prim)), decided_draw_mode)?;
+        let decided = nearest(self.prim(), |prim| Ok(Some(prim)), decided_draw_mode)?;
         Ok(decided.unwrap_or(DrawMode::Default))
     }
 

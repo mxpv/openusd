@@ -164,13 +164,7 @@ impl IntoIterator for ExprVarDeps {
 /// a variant selection, or `None` if there is none (C++
 /// `_FindContainingVariantSelection`).
 fn find_containing_variant_selection(path: &Path) -> Option<Path> {
-    let mut p = path.clone();
-    loop {
-        if p.is_variant_selection() {
-            return Some(p);
-        }
-        p = p.parent()?;
-    }
+    path.ancestors().find(Path::is_variant_selection)
 }
 
 /// Maps a class-arc parent site back across the arc to the site to inherit (C++
@@ -1811,11 +1805,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// the root, stopping at the first variant-selection path — variant sets
     /// above it were already handled when that selection was made.
     fn eval_node_ancestral_variant_sets(&mut self, node: NodeId) -> BuildResult<()> {
-        let mut path = self.node(node).path().parent();
-        while let Some(p) = path {
-            if p.is_abs_root() {
-                break;
-            }
+        for p in self.node(node).path().strict_ancestors_below_root() {
             // A node restricted below this depth (a relocate source past its own
             // site) contributes no opinions here, so skip the set scan (C++
             // `_NodeCanContributeAncestralOpinions`).
@@ -1825,7 +1815,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             if p.is_variant_selection() {
                 break;
             }
-            path = p.parent();
         }
         Ok(())
     }
@@ -3260,17 +3249,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// closest ancestor that is, paired with the layer authoring that relocation.
     /// `None` when neither `path` nor any ancestor is a relocation source.
     fn prohibiting_relocation_source(&self, ambient: LayerStackId, path: &Path) -> Option<(Path, String)> {
-        let mut p = Some(path.clone());
-        while let Some(cur) = p {
-            if let Some(layer) = self.inputs.stack.relocation_source_layer(ambient, &cur) {
-                return Some((cur, layer.to_string()));
-            }
-            if cur.is_abs_root() {
-                break;
-            }
-            p = cur.parent();
-        }
-        None
+        path.ancestors().find_map(|cur| {
+            let layer = self.inputs.stack.relocation_source_layer(ambient, &cur)?.to_string();
+            Some((cur, layer))
+        })
     }
 
     /// Whether a class-based arc (inherit/specialize) to `(rep, path)` under

@@ -629,16 +629,9 @@ impl MembershipQuery {
     /// rule and whether that opinion sits on `path` itself. Returns
     /// [`PathRule::Exclude`] with `on_self = false` when no ancestor opines.
     fn closest_rule(&self, path: &Path) -> (PathRule, bool) {
-        let mut current = path.clone();
-        loop {
-            if let Some(rule) = self.rule_map.get(&current) {
-                return (*rule, &current == path);
-            }
-            match current.parent() {
-                Some(parent) if !parent.is_empty() => current = parent,
-                _ => return (PathRule::Exclude, false),
-            }
-        }
+        path.ancestors()
+            .find_map(|current| Some((*self.rule_map.get(&current)?, &current == path)))
+            .unwrap_or((PathRule::Exclude, false))
     }
 }
 
@@ -925,24 +918,14 @@ mod tests {
     }
 
     /// Evaluate membership the way `included_paths` does: fold
-    /// `is_included_below` down the ancestor chain from the root,
-    /// seeding the top element's parent rule with `effective_rule`. Must
-    /// agree with the closest-ancestor point query `is_included`.
+    /// `is_included_below` down the ancestor chain from the pseudo-root,
+    /// whose parent rule is `Exclude`. Must agree with the closest-ancestor
+    /// point query `is_included`.
     fn included_top_down(q: &MembershipQuery, path: &Path) -> bool {
-        let mut chain = vec![path.clone()];
-        while let Some(parent) = chain.last().unwrap().parent() {
-            if parent.is_empty() {
-                break;
-            }
-            chain.push(parent);
-        }
-        chain.reverse();
-        let mut parent_rule = match chain[0].parent() {
-            Some(p) if !p.is_empty() => q.effective_rule(&p),
-            _ => PathRule::Exclude,
-        };
+        let chain: Vec<Path> = path.ancestors().collect();
+        let mut parent_rule = PathRule::Exclude;
         let mut included = false;
-        for elem in &chain {
+        for elem in chain.iter().rev() {
             let (inc, rule) = q.is_included_below(elem, parent_rule);
             included = inc;
             parent_rule = rule;
@@ -952,9 +935,9 @@ mod tests {
 
     #[test]
     fn membership_methods_agree() -> Result<()> {
-        // Guards against drift between is_included (point query),
-        // is_included_below (top-down fold) and effective_rule, which
-        // share the closest-ancestor walk and rule-match logic.
+        // Guards against drift between is_included (point query) and
+        // is_included_below (top-down fold), which share the
+        // closest-ancestor walk and rule-match logic.
         let q = query(&[
             ("/W", PathRule::ExpandPrims),
             ("/W/A", PathRule::Exclude),

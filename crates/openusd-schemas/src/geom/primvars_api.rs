@@ -307,10 +307,9 @@ impl PrimvarsAPI {
     /// constant interpolation. `None` where no ancestor authors a value, and
     /// where the nearest that does is not constant.
     fn inherited(&self, local: &Primvar) -> Result<Option<Primvar>> {
-        let stage = self.stage();
         let name = tf::Token::from(local.attribute().name());
-        for path in self.path().strict_ancestors_below_root() {
-            let attribute = stage.prim(path)?.attribute(&name);
+        for ancestor in self.prim().ancestors().skip(1) {
+            let attribute = ancestor.attribute(&name);
             if attribute.has_authored_value()? && attribute.is_defined()? {
                 let nearest = Primvar::new(attribute);
                 return Ok(nearest.is_constant()?.then_some(nearest));
@@ -322,14 +321,11 @@ impl PrimvarsAPI {
     /// The set inherited through this prim from the root-most ancestor down,
     /// this prim taking all of its own primvars where `accept_all` says so.
     fn inherited_through(&self, accept_all: bool) -> Result<Vec<Primvar>> {
-        let stage = self.stage();
-        let mut lineage: Vec<sdf::Path> = self.path().ancestors_below_root().collect();
-        lineage.reverse();
-
+        let lineage: Vec<usd::Prim> = self.prim().ancestors().collect();
         let mut inherited = Vec::new();
-        for path in lineage {
-            let accept_all = accept_all && path == *self.path();
-            if let Some(changed) = inherit(&stage.prim(path)?, &inherited, accept_all)? {
+        for prim in lineage.into_iter().rev() {
+            let accept_all = accept_all && prim.path() == self.path();
+            if let Some(changed) = inherit(&prim, &inherited, accept_all)? {
                 inherited = changed;
             }
         }

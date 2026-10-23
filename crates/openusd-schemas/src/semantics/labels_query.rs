@@ -145,9 +145,7 @@ impl LabelsQuery {
     /// over `&stage`, so the ancestors could resolve at once — which needs the
     /// remembered labels behind a map several hops can write to.
     fn visit_inherited(&self, prim: &Prim, mut visit: impl FnMut(&BTreeSet<tf::Token>)) -> Result<()> {
-        let stage = prim.stage();
-        for path in prim.path().ancestors_below_root() {
-            let ancestor = stage.prim(path)?;
+        for ancestor in prim.ancestors() {
             self.populate(&ancestor)?;
             if let Some(labels) = self.labels.borrow().get(ancestor.path()).and_then(Option::as_ref) {
                 visit(labels);

@@ -84,6 +84,16 @@ impl Prim {
         self.path.parent().map(|path| Prim::new(&self.stage, path))
     }
 
+    /// The prim and the prims above it, nearest first, ending before the
+    /// pseudo-root, as [`sdf::Path::ancestors_below_root`] walks the path.
+    /// Empty for the pseudo-root.
+    pub fn ancestors(&self) -> impl Iterator<Item = Prim> + use<> {
+        let stage = self.stage.clone();
+        self.path
+            .ancestors_below_root()
+            .map(move |path| Prim::new(&stage, path))
+    }
+
     /// The stage this handle is anchored to.
     pub fn stage(&self) -> &Stage {
         &self.stage
@@ -991,11 +1001,11 @@ impl Prim {
         let Some(kind) = self.kind()?.filter(|kind| kinds.is_model(kind)) else {
             return Ok(ModelFlags::default());
         };
-        for ancestor in self.path.strict_ancestors_below_root() {
-            if self.stage.cache().is_prototype(&ancestor) {
+        for ancestor in self.ancestors().skip(1) {
+            if self.stage.cache().is_prototype(ancestor.path()) {
                 break;
             }
-            let kind = Prim::new(&self.stage, ancestor).kind()?;
+            let kind = ancestor.kind()?;
             if !kind.is_some_and(|kind| kinds.is_group(&kind)) {
                 return Ok(ModelFlags::default());
             }
@@ -1856,6 +1866,18 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(keys.len(), 2);
+        Ok(())
+    }
+
+    /// A prim's ancestors are itself and the prims above it, nearest first,
+    /// the pseudo-root left out.
+    #[test]
+    fn prim_ancestors() -> Result<()> {
+        let stage = stage()?;
+        let child = stage.define_prim("/A/B")?;
+        let names: Vec<String> = child.ancestors().map(|prim| prim.path().to_string()).collect();
+        assert_eq!(names, ["/A/B", "/A"]);
+        assert_eq!(stage.prim("/")?.ancestors().count(), 0);
         Ok(())
     }
 

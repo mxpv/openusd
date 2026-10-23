@@ -49,14 +49,14 @@ impl CoordSysAPI {
     pub fn resolve_bindings(prim: &Prim, cache: &mut CoordSysCache) -> Result<Vec<CoordSysBinding>> {
         let stage = prim.stage();
         let resolved = cache.stages.entry(stage.clone()).or_default();
-        let chain: Vec<Path> = prim.path().ancestors_below_root().collect();
-        let cached = chain.iter().position(|path| resolved.contains_key(path));
-        let mut bindings = cached.map_or_else(Vec::new, |nearest| resolved[&chain[nearest]].clone());
-        for path in chain[..cached.unwrap_or(chain.len())].iter().rev() {
-            let local = Self::local_bindings(&stage.prim(path.clone())?)?;
+        let chain: Vec<Prim> = prim.ancestors().collect();
+        let cached = chain.iter().position(|prim| resolved.contains_key(prim.path()));
+        let mut bindings = cached.map_or_else(Vec::new, |nearest| resolved[chain[nearest].path()].clone());
+        for prim in chain[..cached.unwrap_or(chain.len())].iter().rev() {
+            let local = Self::local_bindings(prim)?;
             bindings.retain(|inherited| !local.iter().any(|binding| binding.name == inherited.name));
             bindings.splice(..0, local);
-            resolved.insert(path.clone(), bindings.clone());
+            resolved.insert(prim.path().clone(), bindings.clone());
         }
         Ok(bindings)
     }
@@ -68,9 +68,8 @@ impl CoordSysAPI {
     /// [`resolve_bindings`](Self::resolve_bindings) answers every name over
     /// a cache.
     pub fn resolve_binding(&self) -> Result<Option<CoordSysBinding>> {
-        let stage = self.stage();
-        for path in self.path().ancestors_below_root() {
-            if let Some(instance) = Self::from_prim(&stage.prim(path)?, self.name())?
+        for prim in self.prim().ancestors() {
+            if let Some(instance) = Self::from_prim(&prim, self.name())?
                 && let Some(binding) = instance.local_binding()?
             {
                 return Ok(Some(binding));

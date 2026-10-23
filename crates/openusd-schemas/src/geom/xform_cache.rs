@@ -172,8 +172,7 @@ impl XformCache {
             return Ok((xform, false));
         }
         let time = self.time;
-        let mut current = Some(prim.clone());
-        while let Some(p) = current.filter(|p| p != ancestor) {
+        for p in prim.ancestors().take_while(|p| p != ancestor) {
             let query = &self.entry(&p)?.query;
             // Row-vector convention: each ancestor's transform applies after,
             // growing the product on the right.
@@ -181,7 +180,6 @@ impl XformCache {
             if query.resets_xform_stack() {
                 return Ok((xform, true));
             }
-            current = p.parent();
         }
         Ok((xform, false))
     }
@@ -213,16 +211,14 @@ impl XformCache {
     ) -> Result<Vec<f64>, SchemaError> {
         let interval = interval.into();
         let mut times = Vec::new();
-        let mut current = Some(prim.clone());
-        while let Some(p) = current.filter(|p| !p.path().is_abs_root()) {
+        for p in prim.ancestors() {
             let Some(entry) = self.admit(&p)? else {
                 break;
             };
             times.extend(entry.query.time_samples_in(interval)?);
-            current = match entry.query.resets_xform_stack() {
-                true => None,
-                false => p.parent(),
-            };
+            if entry.query.resets_xform_stack() {
+                break;
+            }
         }
         times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
         times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
@@ -247,20 +243,18 @@ impl XformCache {
         let time = self.time;
         let mut base = gf::Mat4d::IDENTITY;
         let mut chain = Vec::new();
-        let mut current = Some(prim.clone());
-        while let Some(p) = current.filter(|p| !p.path().is_abs_root()) {
+        for p in prim.ancestors() {
             let entry = self.entry(&p)?;
             if let Some(ctm) = entry.ctm {
                 base = ctm;
                 break;
             }
+            chain.push((entry.query.local_transform(time)?, p));
             // A prim that resets the stack ends the climb: its matrix is its
             // local transform alone.
-            current = match entry.query.resets_xform_stack() {
-                true => None,
-                false => p.parent(),
-            };
-            chain.push((entry.query.local_transform(time)?, p));
+            if entry.query.resets_xform_stack() {
+                break;
+            }
         }
 
         // TODO(rayon): once a shared ancestor's matrix is cached, sibling

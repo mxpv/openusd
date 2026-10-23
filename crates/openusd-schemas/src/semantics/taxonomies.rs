@@ -26,13 +26,12 @@ impl LabelsAPI {
     /// `prim` about — not the labels it answers with, which are each
     /// taxonomy's own.
     pub fn inherited_taxonomies(prim: &Prim) -> Result<Vec<tf::Token>> {
-        let stage = prim.stage();
         let mut taxonomies: BTreeSet<tf::Token> = Self::direct_taxonomies(prim)?.into_iter().collect();
         // TODO(rayon): each hop is an independent composed `apiSchemas` query
         // over `&stage`, so every ancestor could resolve at once and merge its
         // names in.
-        for path in prim.path().strict_ancestors_below_root() {
-            taxonomies.extend(Self::direct_taxonomies(&stage.prim(path)?)?);
+        for ancestor in prim.ancestors().skip(1) {
+            taxonomies.extend(Self::direct_taxonomies(&ancestor)?);
         }
         Ok(taxonomies.into_iter().collect())
     }

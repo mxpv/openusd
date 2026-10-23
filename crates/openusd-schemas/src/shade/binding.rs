@@ -227,7 +227,7 @@ impl MaterialBindingAPI {
     pub fn resolve_binding(&self, purpose: &str, cache: &mut BindingCache) -> Result<Option<ResolvedBinding>> {
         let stage = self.stage();
         let queried = self.path();
-        let chain: Vec<Path> = queried.ancestors_below_root().collect();
+        let chain: Vec<Prim> = self.prim().ancestors().collect();
         let StageCache {
             bindings,
             queries,
@@ -236,9 +236,7 @@ impl MaterialBindingAPI {
         for pass in purpose_passes(purpose) {
             let mut winner: Option<ResolvedBinding> = None;
             for current in &chain {
-                let at = cached(bindings, current, || {
-                    BindingsAtPrim::gather(&stage.prim(current.clone())?)
-                })?;
+                let at = cached(bindings, current.path(), || BindingsAtPrim::gather(current))?;
                 // Whether the winner was set at this prim, where a collection
                 // binding outranks the direct one.
                 let mut won_here = false;

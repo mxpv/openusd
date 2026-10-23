@@ -966,9 +966,7 @@ fn bake_extents(stage: &usd::Stage, layers: &[EditTarget], followups: &[Followup
 fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<bool, SchemaError> {
     let mut models: Vec<(ModelAPI, Vec<Option<TimeCode>>)> = Vec::new();
     for followup in followups {
-        let mut at = Some(followup.prim.clone());
-        // The walk stops below the pseudo-root, the one prim with no parent.
-        while let Some(prim) = at.filter(|prim| prim.parent().is_some()) {
+        for prim in followup.prim.ancestors() {
             if prim.is_model()? {
                 let model = ModelAPI::from_prim_unchecked(prim.clone());
                 if model.extents_hint_attr().is_defined()? {
@@ -978,7 +976,6 @@ fn bake_extent_hints(stage: &usd::Stage, followups: &[Followup]) -> Result<bool,
                     }
                 }
             }
-            at = prim.parent();
         }
     }
     if models.is_empty() {

@@ -1483,15 +1483,7 @@ pub(crate) mod tests {
         let path = Path::new(prim).unwrap();
 
         // Namespace chain from the topmost prim down to `path`.
-        let mut chain: Vec<Path> = Vec::new();
-        let mut p = Some(path.clone());
-        while let Some(pp) = p {
-            if pp.is_abs_root() {
-                break;
-            }
-            chain.push(pp.clone());
-            p = pp.parent();
-        }
+        let mut chain: Vec<Path> = path.ancestors_below_root().collect();
         chain.reverse();
 
         loop {

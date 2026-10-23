@@ -536,7 +536,6 @@ impl BBoxCache {
             .flat_map(sdf::Path::strict_ancestors)
             .collect();
 
-        let stage = prim.stage();
         let mut result = gf::BBox3d::default();
         // Each prim is visited with what the prim above it hands down, so
         // that a bound asked for beneath `prim` is resolved from there.
@@ -571,12 +570,12 @@ impl BBoxCache {
             // The nearest override from the visited prim up to `prim`,
             // which has none of its own, places the prim. With none, the
             // prim is placed as `prim` is.
-            let overridden = path
+            let overridden = visited
                 .ancestors()
-                .take_while(|ancestor| ancestor != prim.path())
-                .find_map(|ancestor| ctm_overrides.get(&ancestor).map(|matrix| (ancestor, *matrix)));
+                .take_while(|ancestor| ancestor != prim)
+                .find_map(|ancestor| ctm_overrides.get(ancestor.path()).map(|matrix| (ancestor, *matrix)));
             let (ancestor, placement) = match overridden {
-                Some((at, matrix)) => (stage.prim(at)?, Some(matrix)),
+                Some((at, matrix)) => (at, Some(matrix)),
                 None => (prim.clone(), prim_override),
             };
             let mut bbox = self.bound_in(&visited, &ancestor, above_visited, composed)?;
@@ -986,8 +985,7 @@ impl BBoxCache {
     fn above(&mut self, prim: &usd::Prim) -> Result<Above, SchemaError> {
         let mut inverse_component = None;
         let (mut moves, mut frame_moves) = (false, false);
-        let mut current = prim.parent();
-        while let Some(prim) = current {
+        for prim in prim.ancestors().skip(1) {
             let varies = self.xforms.transform_might_be_time_varying(&prim)?;
             moves |= varies;
             if inverse_component.is_none() {
@@ -999,7 +997,6 @@ impl BBoxCache {
             if moves && inverse_component.is_some() {
                 break;
             }
-            current = prim.parent();
         }
         Ok(Above {
             purpose: PurposeInfo::default(),

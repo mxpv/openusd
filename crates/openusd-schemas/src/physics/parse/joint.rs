@@ -198,8 +198,7 @@ fn joint_kind(prim: &usd::Prim, kind: JointType) -> Result<desc::JointKind, Sche
 /// ancestor-or-self with `PhysicsCollisionAPI`, else none.
 fn body_of(prim: &usd::Prim) -> Result<Option<usd::Prim>, SchemaError> {
     let mut collision = None;
-    for path in prim.path().ancestors_below_root() {
-        let prim = prim.stage().prim(path)?;
+    for prim in prim.ancestors() {
         let schemas = prim.api_schemas()?;
         if schemas.iter().any(|schema| schema == PHYSICS_RIGID_BODY_API) {
             return Ok(Some(prim));

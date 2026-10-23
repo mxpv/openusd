@@ -3611,17 +3611,12 @@ impl IndexCache {
 
     /// Ensures a path and all its ancestors are cached (built on the fly if needed).
     fn precache_path(&mut self, graph: &LayerGraph, path: &Path) {
-        let mut to_build = Vec::new();
-        let mut p = Some(path.clone());
-        while let Some(pp) = p {
-            if pp.is_abs_root() || self.is_indexed(&pp) {
-                break;
-            }
-            to_build.push(pp.clone());
-            p = pp.parent();
-        }
-        for pp in to_build.into_iter().rev() {
-            let _ = self.ensure_index(graph, &pp);
+        let to_build: Vec<Path> = path
+            .ancestors_below_root()
+            .take_while(|p| !self.is_indexed(p))
+            .collect();
+        for p in to_build.into_iter().rev() {
+            let _ = self.ensure_index(graph, &p);
         }
     }
 

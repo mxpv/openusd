@@ -52,7 +52,7 @@ pub trait ImageableExt: ImageableSchema {
     /// not, lets the walk continue.
     fn compute_visibility(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Visibility> {
         let time = time.into();
-        let invisible = nearest(self.stage(), self.path(), Imageable::from_prim, |ip| {
+        let invisible = nearest(self.prim(), Imageable::from_prim, |ip| {
             Ok(is_invisible(ip, time)?.then_some(Visibility::Invisible))
         })?;
         Ok(invisible.unwrap_or(Visibility::Inherited))
@@ -106,7 +106,7 @@ pub trait ImageableExt: ImageableSchema {
         if purpose == Purpose::Default {
             return Ok(PurposeVisibility::Visible);
         }
-        let authored = nearest(self.stage(), self.path(), Imageable::from_prim, |ip| {
+        let authored = nearest(self.prim(), Imageable::from_prim, |ip| {
             match ip.purpose_visibility_attr(purpose)? {
                 Some(attr) => authored_at::<PurposeVisibility>(&attr, time),
                 None => Ok(None),
@@ -136,7 +136,7 @@ pub trait ImageableExt: ImageableSchema {
     /// answers. It is inheritable when an opinion authored on this prim or an
     /// imageable ancestor decided it, and not when it is a fallback.
     fn purpose_info(&self) -> Result<PurposeInfo> {
-        let authored = nearest(self.stage(), self.path(), Imageable::from_prim, authored_purpose)?;
+        let authored = nearest(self.prim(), Imageable::from_prim, authored_purpose)?;
         match authored {
             Some(purpose) => Ok(PurposeInfo::inheritable(purpose)),
             None => fallback_purpose(Imageable::from_prim(self.prim().clone())?.as_ref()),
@@ -168,12 +168,10 @@ pub trait ImageableExt: ImageableSchema {
     fn proxy_prim(&self) -> Result<Option<(usd::Prim, usd::Prim)>> {
         // Each prim's purpose from its parent's, root-most first, so the
         // chain costs one read per prim.
-        let mut chain: Vec<_> = self.path().ancestors_below_root().collect();
-        chain.reverse();
+        let chain: Vec<_> = self.prim().ancestors().collect();
         let mut info = PurposeInfo::default();
         let mut render_root = None;
-        for path in chain {
-            let prim = self.stage().prim(path)?;
+        for prim in chain.into_iter().rev() {
             info = Imageable::from_prim_unchecked(prim.clone()).purpose_info_from(info)?;
             // The run of `render` prims that reaches this prim starts at
             // the first one after the last prim of another purpose.
@@ -235,11 +233,11 @@ pub trait ImageableExt: ImageableSchema {
         }
         // Root-most first, so an invisible ancestor is found before the
         // siblings below it are visited.
-        let mut chain: Vec<_> = self.path().ancestors_below_root().collect();
+        let mut chain: Vec<_> = self.prim().ancestors().collect();
         chain.reverse();
         let mut has_invisible_ancestor = false;
         for pair in chain.windows(2) {
-            let parent = stage.prim(&pair[0])?;
+            let parent = &pair[0];
             if let Some(ip) = Imageable::from_prim(parent.clone())?
                 && is_invisible(&ip, time)?
             {
@@ -256,7 +254,7 @@ pub trait ImageableExt: ImageableSchema {
             let mut walk = parent.filtered_descendants(every_child)?;
             while let Some(prim) = walk.next() {
                 let prim = prim?;
-                if prim.path() == &pair[1] {
+                if prim == pair[1] {
                     walk.prune_children();
                 } else if Imageable::from_prim(prim.clone())?.is_some() {
                     writes.push((prim.path().clone(), Visibility::Invisible));

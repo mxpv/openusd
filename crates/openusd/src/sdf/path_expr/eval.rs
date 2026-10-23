@@ -1086,11 +1086,7 @@ mod tests {
     fn dfs_walk(leaves: &[&str]) -> Vec<Path> {
         let mut all = vec![Path::abs_root()];
         for leaf in leaves {
-            let mut cursor = path(leaf).unwrap();
-            while !cursor.is_abs_root() {
-                all.push(cursor.clone());
-                cursor = cursor.parent().expect("fixture paths are absolute");
-            }
+            all.extend(path(leaf).unwrap().ancestors_below_root());
         }
         all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         all.dedup();

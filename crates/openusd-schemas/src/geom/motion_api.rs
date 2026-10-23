@@ -72,7 +72,7 @@ impl MotionAPI {
         T: sdf::FromValue,
         T::Error: Into<Error>,
     {
-        let supplied = nearest(self.stage(), self.path(), MotionAPI::from_prim, |api| {
+        let supplied = nearest(self.prim(), MotionAPI::from_prim, |api| {
             authored_at(&api.attribute(name), time)
         })?;
         Ok(supplied.unwrap_or(fallback))

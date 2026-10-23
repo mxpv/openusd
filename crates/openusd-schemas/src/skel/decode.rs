@@ -267,9 +267,7 @@ impl Root {
     /// `prim` itself where it is a `Root`, else its nearest `Root` ancestor
     /// (C++ `UsdSkelRoot::Find`).
     pub fn find(prim: &Prim) -> Result<Option<Root>> {
-        geom::nearest(prim.stage(), prim.path(), Root::from_prim, |root| {
-            Ok(Some(root.clone()))
-        })
+        geom::nearest(prim, Root::from_prim, |root| Ok(Some(root.clone())))
     }
 }
 
@@ -302,7 +300,7 @@ fn bound<T>(rel: &Relationship, view: fn(Prim) -> Result<Option<T>>) -> Result<B
 /// The binding `bound` reads off the nearest of `binding`'s prim and its
 /// ancestors that carries `BindingAPI` and authors one.
 fn inherited<T>(binding: &BindingAPI, bound: fn(&BindingAPI) -> Result<Bound<T>>) -> Result<Option<T>> {
-    let found = geom::nearest(binding.stage(), binding.path(), BindingAPI::from_prim, |ancestor| {
+    let found = geom::nearest(binding.prim(), BindingAPI::from_prim, |ancestor| {
         Ok(match bound(ancestor)? {
             Bound::Authored(found) => Some(found),
             Bound::Unauthored => None,
