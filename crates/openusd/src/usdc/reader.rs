@@ -936,7 +936,7 @@ impl<'a> Decoder<'a> {
             asset_path,
             prim_path,
             layer_offset,
-            custom_data,
+            custom_data: custom_data.into(),
         })
     }
 
@@ -1513,14 +1513,14 @@ impl<'a> Decoder<'a> {
             }
 
             // Empty dictionary.
-            Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
+            Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default().into()),
             Type::Dictionary => {
                 corrupt!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
                 corrupt!(!value.is_array(), "Dictionary {ty} can't be inlined");
 
                 self.stream.seek(value.payload())?;
 
-                sdf::Value::Dictionary(self.read_custom_data()?)
+                sdf::Value::Dictionary(self.read_custom_data()?.into())
             }
 
             Type::ValueBlock => sdf::Value::ValueBlock,

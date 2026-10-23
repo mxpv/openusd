@@ -675,7 +675,7 @@ fn merge_over(strong: Option<&sdf::Value>, weak: sdf::Value) -> sdf::Value {
         }
         (Some(sdf::Value::Dictionary(strong)), sdf::Value::Dictionary(weak)) => {
             let mut merged = strong.clone();
-            sdf::dictionary_over(&mut merged, weak);
+            merged.over(weak);
             sdf::Value::Dictionary(merged)
         }
         (_, weak) => weak,

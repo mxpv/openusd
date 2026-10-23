@@ -92,7 +92,7 @@ pub fn read_variables(data: &dyn sdf::AbstractData) -> Result<Cow<'_, HashMap<St
     Ok(
         match data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
             Some(Cow::Borrowed(sdf::Value::Dictionary(dict))) => Cow::Borrowed(dict),
-            Some(Cow::Owned(sdf::Value::Dictionary(dict))) => Cow::Owned(dict),
+            Some(Cow::Owned(sdf::Value::Dictionary(dict))) => Cow::Owned(dict.into()),
             _ => Cow::Owned(HashMap::new()),
         },
     )

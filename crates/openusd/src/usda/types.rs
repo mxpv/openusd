@@ -269,7 +269,7 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
 
     // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
     if cursor.at_punctuation('{')? {
-        return Ok(sdf::Value::Dictionary(parse_dictionary(cursor)?));
+        return Ok(sdf::Value::Dictionary(parse_dictionary(cursor)?.into()));
     }
 
     let token = cursor.bump()?;
@@ -315,7 +315,7 @@ pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<HashMap<String
         c.expect_punctuation('=')?;
 
         let value = if nested {
-            sdf::Value::Dictionary(parse_dictionary(c)?)
+            sdf::Value::Dictionary(parse_dictionary(c)?.into())
         } else if let Some(ty) = type_hint {
             // An entry spells its own type, and a dictionary keeps no room to
             // record one alongside a literal, so an unregistered spelling
@@ -403,7 +403,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                     c.expect_punctuation(':')?;
                 }
                 let vals = parse_tuple::<f64, 5>(c)?;
-                loop_params = sdf::Value::Dictionary(HashMap::from([
+                loop_params = sdf::Value::Dictionary(sdf::Dictionary::from([
                     ("protoStart".to_owned(), sdf::Value::Double(vals[0])),
                     ("protoEnd".to_owned(), sdf::Value::Double(vals[1])),
                     ("numPreLoops".to_owned(), sdf::Value::Double(vals[2])),
@@ -441,7 +441,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                         } else {
                             format!("{time}")
                         };
-                        knot_custom_data.insert(time_key, sdf::Value::Dictionary(dict));
+                        knot_custom_data.insert(time_key, sdf::Value::Dictionary(dict.into()));
                         continue;
                     }
 
@@ -466,7 +466,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                     }
                 }
 
-                knots.push(sdf::Value::Dictionary(HashMap::from([
+                knots.push(sdf::Value::Dictionary(sdf::Dictionary::from([
                     ("time".to_owned(), sdf::Value::Double(time)),
                     ("value".to_owned(), sdf::Value::Double(value)),
                     ("preValue".to_owned(), sdf::Value::Double(pre_value)),
@@ -482,7 +482,7 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
         Ok(())
     })?;
 
-    Ok(sdf::Value::Dictionary(HashMap::from([
+    Ok(sdf::Value::Dictionary(sdf::Dictionary::from([
         (
             "curveType".to_owned(),
             sdf::Value::token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
@@ -491,7 +491,10 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
         ("postExtrapolation".to_owned(), post_extrapolation),
         ("loopParameters".to_owned(), loop_params),
         ("knots".to_owned(), sdf::Value::ValueVec(knots)),
-        ("knotCustomData".to_owned(), sdf::Value::Dictionary(knot_custom_data)),
+        (
+            "knotCustomData".to_owned(),
+            sdf::Value::Dictionary(knot_custom_data.into()),
+        ),
     ])))
 }
 
@@ -524,7 +527,7 @@ pub(super) fn parse_reference(cursor: &mut Cursor<'_>) -> Result<sdf::Reference,
         let (offset, custom_data) =
             parse_reference_layer_offset(cursor).context("Unable to parse reference layer offset")?;
         reference.layer_offset = offset;
-        reference.custom_data = custom_data;
+        reference.custom_data = custom_data.into();
     }
 
     Ok(reference)
@@ -651,7 +654,7 @@ fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> 
     } else {
         0.0
     };
-    Ok(sdf::Value::Dictionary(HashMap::from([
+    Ok(sdf::Value::Dictionary(sdf::Dictionary::from([
         ("mode".to_owned(), sdf::Value::token(mode)),
         ("slope".to_owned(), sdf::Value::Double(slope)),
     ])))

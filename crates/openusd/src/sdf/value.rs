@@ -127,7 +127,7 @@ pub enum Value {
     Permission(Permission),
     Variability(Variability),
 
-    Dictionary(HashMap<String, Value>),
+    Dictionary(Dictionary),
 
     TokenListOp(TokenListOp),
     StringListOp(StringListOp),
@@ -169,7 +169,7 @@ pub enum Value {
     /// it survives as one, and this is what remembers that no schema asked
     /// for it (C++ wraps the same thing in `SdfUnregisteredValue`).
     #[from(skip)]
-    UnregisteredDictionary(HashMap<String, Value>),
+    UnregisteredDictionary(Dictionary),
 
     TimeCode(TimeCode),
     TimeCodeVec(Vec<TimeCode>),
@@ -1155,33 +1155,176 @@ impl FromValueCast for Vec<gf::Quatf> {
     }
 }
 
-/// Applies `stronger over weaker` dictionary composition in place
-/// (C++ `VtDictionaryOverRecursive`).
+/// A USD dictionary value (C++ `VtDictionary`): values keyed by name, the
+/// payload of [`Value::Dictionary`]. It reads and edits as the map it holds.
 ///
-/// Keys authored in the stronger dictionary win. If both dictionaries hold a
-/// dictionary at the same key, those nested dictionaries are composed
-/// recursively; otherwise the stronger value is kept. This is the dictionary
-/// combining rule of core spec §12.2.5, shared by value resolution and by
-/// schema prim-definition composition.
-pub fn dictionary_over(stronger: &mut super::Dictionary, weaker: super::Dictionary) {
-    for (key, weaker_value) in weaker {
-        match stronger.entry(key) {
-            Entry::Occupied(mut entry) => {
-                if let (Value::Dictionary(strong_dict), Value::Dictionary(weak_dict)) = (entry.get_mut(), weaker_value)
-                {
-                    dictionary_over(strong_dict, weak_dict);
+/// A key path names a value through nested dictionaries, its keys
+/// `:`-separated (`render:quality`). Its keys split as C++ `TfStringSplit`
+/// splits them, an empty key among them (`a:` names the empty key under
+/// `a`), and an empty path names no value.
+#[derive(
+    Debug, Clone, Default, PartialEq, derive_more::Deref, derive_more::DerefMut, derive_more::From, derive_more::Into,
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize), serde(transparent))]
+pub struct Dictionary(HashMap<String, Value>);
+
+impl Dictionary {
+    /// An empty dictionary.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The value at `key_path`, or `None` where a key is missing or a step
+    /// on the way holds no dictionary (C++ `VtDictionary::GetValueAtPath`).
+    pub fn get_at(&self, key_path: &str) -> Option<&Value> {
+        if key_path.is_empty() {
+            return None;
+        }
+        let mut keys = key_path.split(':');
+        let last = keys.next_back()?;
+        keys.try_fold(self, |dict, key| dict.get(key)?.try_as_dictionary_ref())?
+            .get(last)
+    }
+
+    /// Puts `value` at `key_path`, making a dictionary of each step on the
+    /// way that does not hold one (C++ `VtDictionary::SetValueAtPath`).
+    pub fn set_at(&mut self, key_path: &str, value: Value) {
+        if !key_path.is_empty() {
+            self.set_keys(&key_path.split(':').collect::<Vec<_>>(), value);
+        }
+    }
+
+    /// Drops the value at `key_path`, and each dictionary on the way that it
+    /// leaves empty (C++ `VtDictionary::EraseValueAtPath`). Returns whether
+    /// a value was there.
+    pub fn erase_at(&mut self, key_path: &str) -> bool {
+        !key_path.is_empty() && self.erase_keys(&key_path.split(':').collect::<Vec<_>>())
+    }
+
+    /// Composes `self` over `weaker` in place (C++
+    /// `VtDictionaryOverRecursive`): keys `self` holds win, and where both
+    /// hold a dictionary at a key, the two are composed recursively. This is
+    /// the dictionary combining rule of core spec §12.2.5, shared by value
+    /// resolution and by schema prim-definition composition.
+    pub fn over(&mut self, weaker: Dictionary) {
+        for (key, weaker_value) in weaker.0 {
+            match self.0.entry(key) {
+                Entry::Occupied(mut entry) => {
+                    if let (Value::Dictionary(strong_dict), Value::Dictionary(weak_dict)) =
+                        (entry.get_mut(), weaker_value)
+                    {
+                        strong_dict.over(weak_dict);
+                    }
                 }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(weaker_value);
+                Entry::Vacant(entry) => {
+                    entry.insert(weaker_value);
+                }
             }
         }
     }
+
+    /// [`set_at`](Self::set_at) over the keys of a path, at least one.
+    fn set_keys(&mut self, keys: &[&str], value: Value) {
+        let [key, rest @ ..] = keys else {
+            return;
+        };
+        if rest.is_empty() {
+            self.0.insert((*key).to_owned(), value);
+            return;
+        }
+        let entry = self
+            .0
+            .entry((*key).to_owned())
+            .or_insert(Value::Dictionary(Dictionary::new()));
+        if !entry.is_dictionary() {
+            *entry = Value::Dictionary(Dictionary::new());
+        }
+        if let Value::Dictionary(nested) = entry {
+            nested.set_keys(rest, value);
+        }
+    }
+
+    /// [`erase_at`](Self::erase_at) over the keys of a path, at least one.
+    fn erase_keys(&mut self, keys: &[&str]) -> bool {
+        let [key, rest @ ..] = keys else {
+            return false;
+        };
+        if rest.is_empty() {
+            return self.0.remove(*key).is_some();
+        }
+        let Some(Value::Dictionary(nested)) = self.0.get_mut(*key) else {
+            return false;
+        };
+        let erased = nested.erase_keys(rest);
+        if nested.is_empty() {
+            self.0.remove(*key);
+        }
+        erased
+    }
 }
 
+impl<const N: usize> From<[(String, Value); N]> for Dictionary {
+    fn from(entries: [(String, Value); N]) -> Self {
+        Self(HashMap::from(entries))
+    }
+}
+
+impl FromIterator<(String, Value)> for Dictionary {
+    fn from_iter<I: IntoIterator<Item = (String, Value)>>(entries: I) -> Self {
+        Self(entries.into_iter().collect())
+    }
+}
+
+impl IntoIterator for Dictionary {
+    type Item = (String, Value);
+    type IntoIter = std::collections::hash_map::IntoIter<String, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Dictionary {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key path walks nested dictionaries: a set makes the steps it needs,
+    /// replacing a value that is not a dictionary, an erase drops the
+    /// dictionaries it empties, an empty key is a key like any other, and an
+    /// empty path names nothing.
+    #[test]
+    fn dictionary_key_paths() {
+        let mut dict = Dictionary::new();
+        dict.set_at("a:b:c", Value::Int(1));
+        dict.set_at("a:d", Value::Int(2));
+        assert_eq!(dict.get_at("a:b:c"), Some(&Value::Int(1)));
+        assert_eq!(dict.get_at("a:d"), Some(&Value::Int(2)));
+        assert_eq!(dict.get_at("a:d:e"), None);
+
+        dict.set_at("a:d:e", Value::Int(3));
+        assert_eq!(dict.get_at("a:d:e"), Some(&Value::Int(3)));
+        dict.set_at("a::f", Value::Int(4));
+        assert_eq!(dict.get_at("a::f"), Some(&Value::Int(4)));
+        dict.set_at("", Value::Int(5));
+        assert_eq!(dict.get_at(""), None);
+        dict.set_at("g:", Value::Int(6));
+        assert_eq!(dict.get_at("g:"), Some(&Value::Int(6)));
+        assert!(dict.erase_at("g:"));
+
+        assert!(dict.erase_at("a:b:c"));
+        assert!(!dict.erase_at("a:b:c"));
+        assert_eq!(dict.get_at("a:b"), None);
+        assert!(dict.erase_at("a:d:e") && dict.erase_at("a::f"));
+        assert!(dict.is_empty());
+    }
 
     /// An array answers how many elements it holds; a single value answers
     /// that it is not an array at all.

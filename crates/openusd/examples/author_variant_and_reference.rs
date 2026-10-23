@@ -113,7 +113,7 @@ fn add_variant(
         asset_path: "./sphere.usda".into(),
         prim_path,
         layer_offset: LayerOffset::IDENTITY,
-        custom_data: HashMap::new(),
+        custom_data: sdf::Dictionary::new(),
     }]);
     variant_spec.add(FieldKey::References, Value::ReferenceListOp(ref_list));
 

@@ -769,7 +769,7 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::AssetInfo.as_str() => {
                 ensure!(list_op.is_none(), "assetInfo does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse assetInfo")?;
-                spec.add(FieldKey::AssetInfo, sdf::Value::Dictionary(value));
+                spec.add(FieldKey::AssetInfo, sdf::Value::Dictionary(value.into()));
             }
             n if n == FieldKey::VariantSelection.as_str() => {
                 ensure!(list_op.is_none(), "variants does not support list ops");
@@ -828,7 +828,7 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse clips dictionary")?;
-                spec.add(FieldKey::Clips, sdf::Value::Dictionary(value));
+                spec.add(FieldKey::Clips, sdf::Value::Dictionary(value.into()));
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
@@ -968,7 +968,7 @@ fn record_unregistered_metadata(
 ) -> Result<(), RawError> {
     if cursor.at_punctuation('{')? {
         let entries = types::parse_dictionary(cursor)?;
-        spec.add(name, sdf::Value::UnregisteredDictionary(entries));
+        spec.add(name, sdf::Value::UnregisteredDictionary(entries.into()));
         return Ok(());
     }
 

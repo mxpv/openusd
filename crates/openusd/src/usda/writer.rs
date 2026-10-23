@@ -419,7 +419,7 @@ impl<W: Write> Emitter<'_, W> {
     fn write_knot(
         &mut self,
         knot: &HashMap<String, Value>,
-        knot_custom: Option<&HashMap<String, Value>>,
+        knot_custom: Option<&sdf::Dictionary>,
     ) -> Result<(), FormatError> {
         let time = get_double(knot, "time");
         let value = get_double(knot, "value");
@@ -1912,8 +1912,8 @@ def "Mesh"
         sub.insert("n".to_owned(), Value::Int(1));
         let mut custom = HashMap::new();
         custom.insert("v".to_owned(), Value::vec3f(1.0, 2.0, 3.0));
-        custom.insert("sub".to_owned(), Value::Dictionary(sub));
-        prim.add(FieldKey::CustomData, Value::Dictionary(custom));
+        custom.insert("sub".to_owned(), Value::Dictionary(sub.into()));
+        prim.add(FieldKey::CustomData, Value::Dictionary(custom.into()));
 
         let emitted = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         assert!(emitted.contains("float3 v = "), "emitted: {emitted}");
@@ -2036,7 +2036,7 @@ def "Mesh"
         dict.insert("ns:colon:key".to_string(), Value::Int(2));
         dict.insert("key with space".to_string(), Value::Int(3));
         dict.insert("1leading-digit".to_string(), Value::Int(4));
-        root_spec.add(FieldKey::CustomLayerData, Value::Dictionary(dict));
+        root_spec.add(FieldKey::CustomLayerData, Value::Dictionary(dict.into()));
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         let parsed = Parser::new(&text)

@@ -1085,7 +1085,10 @@ fn clip_metadata(active_index: f64) -> sdf::Value {
             sdf::Value::Vec2dVec(vec![gf::vec2d(0.0, active_index)]),
         ),
     ]);
-    sdf::Value::Dictionary(HashMap::from([("default".to_string(), sdf::Value::Dictionary(set))]))
+    sdf::Value::Dictionary(sdf::Dictionary::from([(
+        "default".to_string(),
+        sdf::Value::Dictionary(set.into()),
+    )]))
 }
 
 /// A stage whose `/Model` carries a two-clip set selecting the first, with the

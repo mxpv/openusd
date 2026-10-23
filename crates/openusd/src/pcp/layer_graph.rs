@@ -3193,7 +3193,7 @@ mod tests {
             let dict = HashMap::from([(name.to_string(), Value::String(value.to_string()))]);
             e.pseudo_root_mut()
                 .unwrap()
-                .set(FieldKey::ExpressionVariables.as_str(), Value::Dictionary(dict));
+                .set(FieldKey::ExpressionVariables.as_str(), Value::Dictionary(dict.into()));
         });
     }
 
@@ -3881,7 +3881,7 @@ mod tests {
         edit_layer(&mut graph.nodes.get_mut(&src).unwrap().layer, |e| {
             e.pseudo_root_mut().unwrap().set(
                 FieldKey::ExpressionVariables.as_str(),
-                Value::Dictionary(HashMap::new()),
+                Value::Dictionary(HashMap::new().into()),
             );
         });
         graph.recompute_sublayers(Some(&HashSet::from([src])));

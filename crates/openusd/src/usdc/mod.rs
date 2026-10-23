@@ -449,7 +449,6 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::*;
@@ -517,7 +516,7 @@ mod tests {
         fn nested(depth: usize) -> sdf::Value {
             let mut value = sdf::Value::Int(1);
             for _ in 0..depth {
-                value = sdf::Value::Dictionary(HashMap::from([("inner".to_owned(), value)]));
+                value = sdf::Value::Dictionary(sdf::Dictionary::from([("inner".to_owned(), value)]));
             }
             value
         }

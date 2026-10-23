@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-use std::{collections::HashMap, fmt::Debug, mem};
+use std::{fmt::Debug, mem};
 
 use bytemuck::{Pod, Zeroable};
 use strum::FromRepr;
@@ -72,7 +72,7 @@ pub use spec::{
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
 pub use unit::{Unit, UnitCategory};
-pub use value::{CastError, FromValue, FromValueCast, Value, ValueKind, dictionary_over};
+pub use value::{CastError, Dictionary, FromValue, FromValueCast, Value, ValueKind};
 pub use value_type::{Dimensions, Role, ValueTypeError, ValueTypeName};
 
 #[repr(i32)]
@@ -394,9 +394,15 @@ pub struct Reference {
     /// The custom data associated with the reference.
     #[cfg_attr(
         feature = "serde",
-        serde(rename = "customData", skip_serializing_if = "HashMap::is_empty")
+        serde(rename = "customData", skip_serializing_if = "is_empty_dictionary")
     )]
-    pub custom_data: HashMap<String, Value>,
+    pub custom_data: Dictionary,
+}
+
+/// Whether `dict` holds nothing, for serde to skip an empty one.
+#[cfg(feature = "serde")]
+fn is_empty_dictionary(dict: &Dictionary) -> bool {
+    dict.is_empty()
 }
 
 /// Equal references name the same asset and prim, which is what is hashed:
@@ -413,10 +419,6 @@ mod list_op;
 
 pub use list_edit::PathListEdit;
 pub use list_op::{ListOp, ListOpType};
-
-/// A USD dictionary value (C++ `VtDictionary`): the payload of
-/// [`Value::Dictionary`], keyed by name.
-pub type Dictionary = std::collections::HashMap<String, Value>;
 
 pub type IntListOp = ListOp<i32>;
 pub type UintListOp = ListOp<u32>;
@@ -491,6 +493,7 @@ pub type LayerData = Box<dyn AbstractData>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn normalize_time_samples_order() {
@@ -595,8 +598,8 @@ mod tests {
 
         // A dictionary carries timecodes at any depth.
         let inner = HashMap::from([("deep".to_string(), Value::TimeCode(TimeCode(5.0)))]);
-        let mut dict = Value::Dictionary(HashMap::from([
-            ("nested".to_string(), Value::Dictionary(inner)),
+        let mut dict = Value::Dictionary(Dictionary::from([
+            ("nested".to_string(), Value::Dictionary(inner.into())),
             ("kept".to_string(), Value::Double(5.0)),
         ]));
         assert!(dict.holds_time_codes());

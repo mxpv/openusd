@@ -683,7 +683,7 @@ where
     pub fn set_expression_variables(&mut self, vars: HashMap<String, sdf::Value>) {
         self.set(
             sdf::FieldKey::ExpressionVariables.as_str(),
-            sdf::Value::Dictionary(vars),
+            sdf::Value::Dictionary(vars.into()),
         );
     }
 

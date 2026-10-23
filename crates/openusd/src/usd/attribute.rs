@@ -6,11 +6,9 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use super::authoring::PropertySpecKind;
 use super::{
     ListPosition, Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, StageEdit,
     TimeCode, TypeConflict, authoring, interp, list_edit,
@@ -511,26 +509,7 @@ impl Attribute {
     where
         F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
     {
-        authoring::check_reserved(sdf::SpecType::Attribute, key)?;
-        // Resolved before the transaction, consulted only when there is a
-        // value to author: an erase never stamps a spec.
-        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None);
-        self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let local = layer.data_mut().try_field(&path, key)?.map(Cow::into_owned);
-            // Erasing reaches only an attribute spec this layer already holds,
-            // so a property it says nothing about stays absent from it.
-            let Some(value) = f(local) else {
-                return authoring::edit_existing_spec(layer.data_mut(), path, Self::KIND, Self::view, |spec| {
-                    spec.erase(key);
-                    Ok(())
-                });
-            };
-            authoring::apply_plan(layer.data_mut(), &path, Self::KIND, &ensure?)?;
-            authoring::edit_spec(layer.data_mut(), path, Self::KIND, Self::view, |spec| {
-                spec.set(key, value);
-                Ok(())
-            })
-        })?;
+        authoring::update_metadata::<Self>(&self.stage, &self.path, key, f)?;
         Ok(self)
     }
 
@@ -4230,7 +4209,7 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage.prim("/World/MyPrim")?.set_metadata(
             "customData",
-            sdf::Value::Dictionary(HashMap::from([(
+            sdf::Value::Dictionary(sdf::Dictionary::from([(
                 "expr".to_string(),
                 sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
             )])),

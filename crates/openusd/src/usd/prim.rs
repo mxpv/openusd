@@ -354,7 +354,12 @@ impl Prim {
         // only a write needs a prim to author against, and only a write
         // composes to find one.
         let local = self.stage.local_field(&self.path, key)?;
-        let Some(value) = f(local) else {
+        let held = local.clone();
+        let value = f(local);
+        if value == held {
+            return Ok(self);
+        }
+        let Some(value) = value else {
             return self.erase_local(key);
         };
         self.edit(|spec| {
@@ -455,7 +460,7 @@ impl Prim {
         else {
             return Ok(Vec::new());
         };
-        let mut names: Vec<String> = sets.into_keys().collect();
+        let mut names: Vec<String> = sets.into_iter().map(|(name, _)| name).collect();
         names.sort();
         Ok(names)
     }
@@ -1696,7 +1701,7 @@ impl Iterator for PrimRange {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::fs;
     use std::sync::Arc;
 
@@ -2001,7 +2006,7 @@ mod tests {
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set(
                     "fallbackPrimTypes",
-                    sdf::Value::Dictionary(HashMap::from([(
+                    sdf::Value::Dictionary(sdf::Dictionary::from([(
                         "MyStudioLight".to_owned(),
                         sdf::Value::token_vec(["Unregistered", "DistantLight"]),
                     )])),
@@ -2668,7 +2673,7 @@ mod tests {
         dict.insert("hint".to_string(), sdf::Value::String("v".to_string()));
         stage
             .define_prim("/World")?
-            .set_metadata("customData", sdf::Value::Dictionary(dict))?;
+            .set_metadata("customData", sdf::Value::Dictionary(dict.into()))?;
 
         let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
             panic!("expected customData dictionary");
@@ -2684,7 +2689,7 @@ mod tests {
         dict.insert("a".to_string(), sdf::Value::Int(1));
         stage
             .define_prim("/World")?
-            .set_metadata("customData", sdf::Value::Dictionary(dict))?;
+            .set_metadata("customData", sdf::Value::Dictionary(dict.into()))?;
 
         // The closure receives the local opinion and merges into it.
         stage.define_prim("/World")?.update_metadata("customData", |local| {

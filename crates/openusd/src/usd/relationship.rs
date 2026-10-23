@@ -313,6 +313,20 @@ impl Relationship {
         })
     }
 
+    /// Read-modify-write a metadata field on the relationship's spec at the
+    /// edit target: `f` sees the local opinion, and `None` from it erases
+    /// the field. Reading the local opinion keeps weaker layers' opinions
+    /// out of the edit target. The read is fallible, so an undecodable local
+    /// field surfaces instead of being overwritten, and both sides of `f`
+    /// are in the target layer's own time frame.
+    pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
+    where
+        F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+    {
+        authoring::update_metadata::<Self>(&self.stage, &self.path, key, f)?;
+        Ok(self)
+    }
+
     /// Remove a metadata field's opinion from the relationship's spec on the
     /// edit-target layer (C++ `UsdObject::ClearMetadata`). Only the local
     /// opinion goes away; one on a weaker layer still composes. A spec the

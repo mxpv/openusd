@@ -10831,7 +10831,10 @@ fn clip_metadata(prim_path: &str) -> sdf::Value {
             sdf::Value::Vec2dVec(vec![openusd::gf::vec2d(0.0, 0.0)]),
         ),
     ]);
-    sdf::Value::Dictionary(HashMap::from([("default".to_string(), sdf::Value::Dictionary(set))]))
+    sdf::Value::Dictionary(sdf::Dictionary::from([(
+        "default".to_string(),
+        sdf::Value::Dictionary(set.into()),
+    )]))
 }
 
 /// The manifest and clip [`clip_metadata`] points at, declaring `Child.size`

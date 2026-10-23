@@ -368,7 +368,7 @@ pub(super) fn merge_metadata(
 ) -> Option<sdf::Value> {
     let mut dictionary = match current {
         Some(sdf::Value::Dictionary(dictionary)) => dictionary,
-        _ => HashMap::new(),
+        _ => sdf::Dictionary::new(),
     };
     dictionary.extend(entries.into_iter().map(|(key, value)| (key, sdf::Value::String(value))));
     (!dictionary.is_empty()).then_some(sdf::Value::Dictionary(dictionary))

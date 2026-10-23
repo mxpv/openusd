@@ -16,6 +16,7 @@
 //! properties open before the write is what a [`StageEdit`] does, so a
 //! batch of them commits together.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
 use std::sync::Arc;
@@ -375,6 +376,45 @@ impl PropertySpecKind for Relationship {
     fn view(data: &mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self::View<'_>> {
         sdf::RelationshipSpecMut::get(data, path)
     }
+}
+
+/// Rewrites with `f` the edit target's own opinion of the metadata field
+/// `key` on the property of kind `P` at `path`, as
+/// [`Attribute::update_metadata`] describes; a value `f` leaves as it was
+/// is not written again.
+pub(super) fn update_metadata<P: PropertySpecKind>(
+    stage: &Stage,
+    path: &sdf::Path,
+    key: &'static str,
+    f: impl FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+) -> Result<(), StageAuthoringError> {
+    check_reserved(P::KIND, key)?;
+    // Resolved before the transaction, consulted only when there is a value
+    // to author: an erase never stamps a spec.
+    let ensure = plan_property_spec(stage, path, P::KIND, None);
+    stage.with_target_layer_at(path, |layer, path| {
+        let data = layer.data_mut();
+        let local = data.try_field(&path, key)?.map(Cow::into_owned);
+        let held = local.clone();
+        let value = f(local);
+        if value == held {
+            return Ok(());
+        }
+        match (data.spec_type(&path), value) {
+            (None, None) => Ok(()),
+            (Some(found), _) if found != P::KIND => Err(kind_mismatch(&path, P::KIND, found)),
+            (Some(_), None) => {
+                data.erase_field(&path, key);
+                Ok(())
+            }
+            (_, Some(value)) => {
+                apply_plan(data, &path, P::KIND, &ensure?)?;
+                data.set_field(&path, key, value);
+                Ok(())
+            }
+        }
+    })?;
+    Ok(())
 }
 
 /// Stamps the spec `path` needs on the edit target and runs `edit` on it, as

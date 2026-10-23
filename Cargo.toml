@@ -24,7 +24,7 @@ openusd-build = { version = "0.8.0", path = "crates/openusd-build" }
 
 bitflags = "2.11.1"
 bytemuck = { version = "1.14.0", features = ["derive"] }
-derive_more = { version = "2.1.1", features = ["deref", "deref_mut", "add", "add_assign", "mul", "mul_assign", "not", "sum", "from"] }
+derive_more = { version = "2.1.1", features = ["deref", "deref_mut", "add", "add_assign", "mul", "mul_assign", "not", "sum", "from", "into"] }
 half = { version = "2.3.1", features = ["bytemuck", "num-traits"] }
 num-traits = "0.2.17"
 serde = { version = "1", features = ["derive"] }

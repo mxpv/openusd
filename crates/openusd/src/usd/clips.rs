@@ -13,15 +13,13 @@
 //! names are discovered via [`Prim::clip_set_names`](super::Prim::clip_set_names),
 //! which every clips view reaches through its prim.
 
-use std::collections::HashMap;
-
 use crate::Result;
 use crate::gf;
 use crate::pcp::clip::keys;
 use crate::pcp::clip_manifest;
 use crate::sdf::{self, AssetPath, Value};
 
-use super::{ClipsAPI, SchemaBase, StageAuthoringError};
+use super::{ClipsAPI, Object, SchemaBase, StageAuthoringError};
 
 /// Reading and writing the value-clip metadata on a prim. `ClipsAPI` is a
 /// non-applied schema, so any prim can be viewed as one:
@@ -311,39 +309,17 @@ impl ClipsAPI {
     /// Read the raw `Value` of a single field in `clip_set`'s entry of the
     /// composed `clips` dictionary, or `None` when the set or field is unauthored.
     fn field(&self, clip_set: &str, key: &str) -> Result<Option<Value>> {
-        let Some(mut sets) = self.clips()? else {
-            return Ok(None);
-        };
-        Ok(match sets.get_mut(clip_set) {
-            Some(Value::Dictionary(set)) => set.remove(key),
-            _ => None,
-        })
+        self.prim()
+            .metadata_by_key(sdf::FieldKey::Clips.as_str(), &format!("{clip_set}:{key}"))
     }
 
-    /// Read-modify-write a single field into `clip_set`'s entry of the `clips`
-    /// dictionary on the edit-target layer, preserving the other sets and
-    /// fields already authored there.
+    /// Author a single field into `clip_set`'s entry of the `clips`
+    /// dictionary on the edit target, preserving the other sets and fields
+    /// authored there (C++ `SetMetadataByDictKey` with `clipSet:key`).
     fn set_field(&self, clip_set: &str, key: &str, value: Value) -> Result<(), StageAuthoringError> {
-        let clip_set = clip_set.to_string();
-        let key = key.to_string();
         self.prim()
             .clone()
-            .update_metadata(sdf::FieldKey::Clips.as_str(), move |current| {
-                let mut sets = match current {
-                    Some(Value::Dictionary(d)) => d,
-                    _ => HashMap::new(),
-                };
-                match sets
-                    .entry(clip_set)
-                    .or_insert_with(|| Value::Dictionary(HashMap::new()))
-                {
-                    Value::Dictionary(set) => {
-                        set.insert(key, value);
-                    }
-                    other => *other = Value::Dictionary(HashMap::from([(key, value)])),
-                }
-                Some(Value::Dictionary(sets))
-            })?;
+            .set_metadata_by_key(sdf::FieldKey::Clips.as_str(), &format!("{clip_set}:{key}"), value)?;
         Ok(())
     }
 }
@@ -420,7 +396,8 @@ mod tests {
                 (keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(0.5)),
             ]
             .into_iter()
-            .collect::<HashMap<_, _>>(),
+            .collect::<HashMap<_, _>>()
+            .into(),
         );
         stage.define_prim("/Anim")?.set_metadata(
             "clips",

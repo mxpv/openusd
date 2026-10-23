@@ -181,7 +181,7 @@ impl Composing {
         };
         match (composed, value) {
             (Value::Dictionary(mut merged), Value::Dictionary(weaker)) => {
-                sdf::dictionary_over(&mut merged, weaker);
+                merged.over(weaker);
                 self.value = Some(Value::Dictionary(merged));
                 Folded::Composed
             }
@@ -1296,7 +1296,7 @@ impl PrimIndex {
 
         let clips = Value::Dictionary(
             sets.into_iter()
-                .map(|(name, fields)| (name, Value::Dictionary(fields)))
+                .map(|(name, fields)| (name, Value::Dictionary(fields.into())))
                 .collect(),
         );
 

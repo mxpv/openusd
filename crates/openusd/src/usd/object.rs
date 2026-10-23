@@ -1,7 +1,5 @@
 //! The metadata every composed object carries, and what a property adds.
 
-use std::collections::HashMap;
-
 use crate::{Error, Result, sdf};
 
 use super::{Attribute, Prim, Relationship, Stage, StageAuthoringError};
@@ -31,6 +29,68 @@ pub trait Object: Sized {
     /// `UsdObject::ClearMetadata`).
     fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError>;
 
+    /// Rewrite with `f` the edit target's own opinion of the metadata field
+    /// `key`: `f` sees the local value, and `None` from it erases the field.
+    fn update_metadata(
+        self,
+        key: &'static str,
+        f: impl FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+    ) -> Result<Self, StageAuthoringError>;
+
+    /// The value the dictionary field `key` holds at `key_path`, as the
+    /// layers compose it; the whole field for an empty path (C++
+    /// `UsdObject::GetMetadataByDictKey`). See [`sdf::Dictionary`] for
+    /// key paths.
+    fn metadata_by_key(&self, key: &str, key_path: &str) -> Result<Option<sdf::Value>> {
+        Ok(at_key(self.metadata::<sdf::Value>(key)?, key_path))
+    }
+
+    /// Whether a layer authors a value at `key_path` in the dictionary field
+    /// `key`, or the field itself for an empty path (C++
+    /// `UsdObject::HasAuthoredMetadataDictKey`).
+    fn has_authored_metadata_key(&self, key: &str, key_path: &str) -> Result<bool> {
+        let authored = self.stage().field::<sdf::Value>(self.path(), key)?;
+        Ok(at_key(authored, key_path).is_some())
+    }
+
+    /// Author `value` at `key_path` in the edit target's own opinion of the
+    /// dictionary field `key`, leaving its other keys and what weaker layers
+    /// author as they are; an empty path authors the whole field (C++
+    /// `UsdObject::SetMetadataByDictKey`).
+    fn set_metadata_by_key(
+        self,
+        key: &'static str,
+        key_path: &str,
+        value: impl Into<sdf::Value>,
+    ) -> Result<Self, StageAuthoringError> {
+        if key_path.is_empty() {
+            return self.set_metadata(key, value);
+        }
+        let value = self.stage().map_to_spec_value(self.path(), value);
+        self.update_metadata(key, |local| {
+            let mut dict = local.and_then(sdf::Value::try_as_dictionary).unwrap_or_default();
+            dict.set_at(key_path, value);
+            Some(sdf::Value::Dictionary(dict))
+        })
+    }
+
+    /// Drop the edit target's own opinion at `key_path` in the dictionary
+    /// field `key`, the field itself where nothing is left in it or the path
+    /// is empty; a field holding no dictionary stays as it is (C++
+    /// `UsdObject::ClearMetadataByDictKey`).
+    fn clear_metadata_by_key(self, key: &'static str, key_path: &str) -> Result<Self, StageAuthoringError> {
+        if key_path.is_empty() {
+            return self.clear_metadata(key);
+        }
+        self.update_metadata(key, |local| match local {
+            Some(sdf::Value::Dictionary(mut dict)) => {
+                dict.erase_at(key_path);
+                (!dict.is_empty()).then_some(sdf::Value::Dictionary(dict))
+            }
+            other => other,
+        })
+    }
+
     /// Whether a layer authors the metadata field `key` on the object (C++
     /// `UsdObject::HasAuthoredMetadata`). What the object's schema declares
     /// for the field is not an authored opinion.
@@ -43,6 +103,12 @@ pub trait Object: Sized {
     /// `UsdObject::GetDocumentation`).
     fn doc(&self) -> Result<Option<String>> {
         field(self, sdf::FieldKey::Documentation, sdf::Value::try_as_string)
+    }
+
+    /// Whether a layer authors the `doc` field (C++
+    /// `UsdObject::HasAuthoredDocumentation`).
+    fn has_authored_doc(&self) -> Result<bool> {
+        self.has_authored_metadata(sdf::FieldKey::Documentation.as_str())
     }
 
     /// Author the `doc` field (C++ `UsdObject::SetDocumentation`).
@@ -59,6 +125,12 @@ pub trait Object: Sized {
     /// `UsdObject::GetDisplayName`).
     fn display_name(&self) -> Result<Option<String>> {
         field(self, sdf::FieldKey::DisplayName, sdf::Value::try_as_string)
+    }
+
+    /// Whether a layer authors the `displayName` (C++
+    /// `UsdObject::HasAuthoredDisplayName`).
+    fn has_authored_display_name(&self) -> Result<bool> {
+        self.has_authored_metadata(sdf::FieldKey::DisplayName.as_str())
     }
 
     /// Author the `displayName` (C++ `UsdObject::SetDisplayName`).
@@ -78,6 +150,12 @@ pub trait Object: Sized {
         Ok(field(self, sdf::FieldKey::Hidden, sdf::Value::try_as_bool)?.unwrap_or(false))
     }
 
+    /// Whether a layer authors the `hidden` flag (C++
+    /// `UsdObject::HasAuthoredHidden`).
+    fn has_authored_hidden(&self) -> Result<bool> {
+        self.has_authored_metadata(sdf::FieldKey::Hidden.as_str())
+    }
+
     /// Author the `hidden` flag (C++ `UsdObject::SetHidden`).
     fn set_hidden(self, hidden: bool) -> Result<Self, StageAuthoringError> {
         self.set_metadata(sdf::FieldKey::Hidden.as_str(), sdf::Value::Bool(hidden))
@@ -90,12 +168,18 @@ pub trait Object: Sized {
 
     /// The composed `customData` dictionary, the user's own data, each key
     /// the strongest layer's (C++ `UsdObject::GetCustomData`).
-    fn custom_data(&self) -> Result<Option<HashMap<String, sdf::Value>>> {
+    fn custom_data(&self) -> Result<Option<sdf::Dictionary>> {
         field(self, sdf::FieldKey::CustomData, sdf::Value::try_as_dictionary)
     }
 
+    /// Whether a layer authors the `customData` dictionary (C++
+    /// `UsdObject::HasAuthoredCustomData`).
+    fn has_authored_custom_data(&self) -> Result<bool> {
+        self.has_authored_metadata(sdf::FieldKey::CustomData.as_str())
+    }
+
     /// Author the `customData` dictionary (C++ `UsdObject::SetCustomData`).
-    fn set_custom_data(self, data: HashMap<String, sdf::Value>) -> Result<Self, StageAuthoringError> {
+    fn set_custom_data(self, data: sdf::Dictionary) -> Result<Self, StageAuthoringError> {
         self.set_metadata(sdf::FieldKey::CustomData.as_str(), sdf::Value::Dictionary(data))
     }
 
@@ -105,21 +189,77 @@ pub trait Object: Sized {
         self.clear_metadata(sdf::FieldKey::CustomData.as_str())
     }
 
+    /// The `customData` value at `key_path`, as
+    /// [`metadata_by_key`](Self::metadata_by_key) reads one (C++
+    /// `UsdObject::GetCustomDataByKey`).
+    fn custom_data_by_key(&self, key_path: &str) -> Result<Option<sdf::Value>> {
+        self.metadata_by_key(sdf::FieldKey::CustomData.as_str(), key_path)
+    }
+
+    /// Author `value` at `key_path` in `customData` (C++
+    /// `UsdObject::SetCustomDataByKey`).
+    fn set_custom_data_by_key(self, key_path: &str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata_by_key(sdf::FieldKey::CustomData.as_str(), key_path, value)
+    }
+
+    /// Drop the local opinion at `key_path` in `customData` (C++
+    /// `UsdObject::ClearCustomDataByKey`).
+    fn clear_custom_data_by_key(self, key_path: &str) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata_by_key(sdf::FieldKey::CustomData.as_str(), key_path)
+    }
+
+    /// Whether a layer authors a `customData` value at `key_path` (C++
+    /// `UsdObject::HasAuthoredCustomDataKey`).
+    fn has_authored_custom_data_key(&self, key_path: &str) -> Result<bool> {
+        self.has_authored_metadata_key(sdf::FieldKey::CustomData.as_str(), key_path)
+    }
+
     /// The composed `assetInfo` dictionary, what identifies the asset the
     /// object belongs to, each key the strongest layer's (C++
     /// `UsdObject::GetAssetInfo`).
-    fn asset_info(&self) -> Result<Option<HashMap<String, sdf::Value>>> {
+    fn asset_info(&self) -> Result<Option<sdf::Dictionary>> {
         field(self, sdf::FieldKey::AssetInfo, sdf::Value::try_as_dictionary)
     }
 
+    /// Whether a layer authors the `assetInfo` dictionary (C++
+    /// `UsdObject::HasAuthoredAssetInfo`).
+    fn has_authored_asset_info(&self) -> Result<bool> {
+        self.has_authored_metadata(sdf::FieldKey::AssetInfo.as_str())
+    }
+
     /// Author the `assetInfo` dictionary (C++ `UsdObject::SetAssetInfo`).
-    fn set_asset_info(self, info: HashMap<String, sdf::Value>) -> Result<Self, StageAuthoringError> {
+    fn set_asset_info(self, info: sdf::Dictionary) -> Result<Self, StageAuthoringError> {
         self.set_metadata(sdf::FieldKey::AssetInfo.as_str(), sdf::Value::Dictionary(info))
     }
 
     /// Drop the local `assetInfo` opinion (C++ `UsdObject::ClearAssetInfo`).
     fn clear_asset_info(self) -> Result<Self, StageAuthoringError> {
         self.clear_metadata(sdf::FieldKey::AssetInfo.as_str())
+    }
+
+    /// The `assetInfo` value at `key_path`, as
+    /// [`metadata_by_key`](Self::metadata_by_key) reads one (C++
+    /// `UsdObject::GetAssetInfoByKey`).
+    fn asset_info_by_key(&self, key_path: &str) -> Result<Option<sdf::Value>> {
+        self.metadata_by_key(sdf::FieldKey::AssetInfo.as_str(), key_path)
+    }
+
+    /// Author `value` at `key_path` in `assetInfo` (C++
+    /// `UsdObject::SetAssetInfoByKey`).
+    fn set_asset_info_by_key(self, key_path: &str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+        self.set_metadata_by_key(sdf::FieldKey::AssetInfo.as_str(), key_path, value)
+    }
+
+    /// Drop the local opinion at `key_path` in `assetInfo` (C++
+    /// `UsdObject::ClearAssetInfoByKey`).
+    fn clear_asset_info_by_key(self, key_path: &str) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata_by_key(sdf::FieldKey::AssetInfo.as_str(), key_path)
+    }
+
+    /// Whether a layer authors an `assetInfo` value at `key_path` (C++
+    /// `UsdObject::HasAuthoredAssetInfoKey`).
+    fn has_authored_asset_info_key(&self, key_path: &str) -> Result<bool> {
+        self.has_authored_metadata_key(sdf::FieldKey::AssetInfo.as_str(), key_path)
     }
 }
 
@@ -158,6 +298,12 @@ pub trait Property: Object {
     /// `:`-joined.
     fn display_group(&self) -> Result<Option<String>> {
         field(self, sdf::FieldKey::DisplayGroup, sdf::Value::try_as_string)
+    }
+
+    /// Whether a layer authors the `displayGroup` (C++
+    /// `UsdProperty::HasAuthoredDisplayGroup`).
+    fn has_authored_display_group(&self) -> Result<bool> {
+        self.has_authored_metadata(sdf::FieldKey::DisplayGroup.as_str())
     }
 
     /// Author the `displayGroup` (C++ `UsdProperty::SetDisplayGroup`).
@@ -228,6 +374,14 @@ macro_rules! impl_object {
             fn clear_metadata(self, key: &'static str) -> Result<Self, StageAuthoringError> {
                 <$ty>::clear_metadata(self, key)
             }
+
+            fn update_metadata(
+                self,
+                key: &'static str,
+                f: impl FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+            ) -> Result<Self, StageAuthoringError> {
+                <$ty>::update_metadata(self, key, f)
+            }
         }
     )*};
 }
@@ -244,6 +398,15 @@ fn property_name(path: &sdf::Path) -> &str {
     path.split_property().map_or("", |(_, name)| name)
 }
 
+/// The value at `key_path` in the dictionary `value` holds, or `value`
+/// itself for an empty path.
+fn at_key(value: Option<sdf::Value>, key_path: &str) -> Option<sdf::Value> {
+    if key_path.is_empty() {
+        return value;
+    }
+    value?.try_as_dictionary()?.get_at(key_path).cloned()
+}
+
 /// The composed field `key` of `object` as `decode` takes it out of the
 /// value held; `None` where the field is unauthored or holds another type.
 fn field<O: Object, T>(
@@ -256,8 +419,6 @@ fn field<O: Object, T>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::{Object, Property};
     use crate::usd::stage::tests::stage;
     use crate::{Result, sdf};
@@ -268,7 +429,7 @@ mod tests {
     fn object_fields_round_trip() -> Result<()> {
         let stage = stage()?;
         let prim = stage.define_prim("/A")?;
-        let info: HashMap<String, sdf::Value> = [("name".to_owned(), sdf::Value::String("chair".into()))].into();
+        let info: sdf::Dictionary = [("name".to_owned(), sdf::Value::String("chair".into()))].into();
         let prim = prim
             .set_display_name("Chair")?
             .set_hidden(true)?
@@ -276,16 +437,75 @@ mod tests {
             .set_custom_data(info.clone())?;
         assert_eq!(prim.display_name()?.as_deref(), Some("Chair"));
         assert!(prim.is_hidden()?);
-        assert!(prim.has_authored_metadata(sdf::FieldKey::Hidden.as_str())?);
+        assert!(prim.has_authored_hidden()? && prim.has_authored_custom_data()?);
+        assert!(!prim.has_authored_doc()?);
         assert_eq!(prim.asset_info()?, Some(info.clone()));
         assert_eq!(prim.custom_data()?, Some(info));
         let prim = prim.clear_hidden()?.clear_display_name()?.clear_asset_info()?;
-        assert!(!prim.is_hidden()?);
+        assert!(!prim.is_hidden()? && !prim.has_authored_hidden()?);
+        assert!(!prim.has_authored_display_name()? && !prim.has_authored_asset_info()?);
         assert_eq!(prim.display_name()?, None);
         assert_eq!(prim.asset_info()?, None);
 
         let attr = prim.create_attribute("size", "double")?.set_hidden(true)?;
         assert!(attr.is_hidden()?);
+        Ok(())
+    }
+
+    /// A dictionary field's value at a key path authors beside the field's
+    /// other keys, on a prim and on each property, and clears back out,
+    /// dropping the field once it holds nothing.
+    #[test]
+    fn dictionary_by_key() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage
+            .define_prim("/A")?
+            .set_custom_data_by_key("render:quality", sdf::Value::Int(2))?
+            .set_custom_data_by_key("render:pass", sdf::Value::String("beauty".into()))?
+            .set_asset_info_by_key("name", sdf::Value::String("chair".into()))?;
+        assert_eq!(prim.custom_data_by_key("render:quality")?, Some(sdf::Value::Int(2)));
+        assert!(prim.has_authored_custom_data_key("render:pass")?);
+        assert!(!prim.has_authored_custom_data_key("render:missing")?);
+        assert_eq!(
+            prim.asset_info_by_key("name")?,
+            Some(sdf::Value::String("chair".into()))
+        );
+
+        let prim = prim.clear_custom_data_by_key("render:quality")?;
+        assert_eq!(prim.custom_data_by_key("render:quality")?, None);
+        assert!(prim.has_authored_custom_data_key("render:pass")?);
+        let prim = prim.clear_custom_data_by_key("render:pass")?;
+        assert!(!prim.has_authored_custom_data()?);
+
+        let attr = prim
+            .create_attribute("size", "double")?
+            .set_custom_data_by_key("a:b", 1.5)?;
+        assert_eq!(attr.custom_data_by_key("a:b")?, Some(sdf::Value::Double(1.5)));
+        let rel = prim
+            .create_relationship("r")?
+            .set_asset_info_by_key("id", sdf::Value::Int(7))?;
+        assert!(rel.has_authored_asset_info_key("id")?);
+        Ok(())
+    }
+
+    /// An empty key path addresses the whole field, and clearing a key of a
+    /// field that holds no dictionary leaves the field as it is.
+    #[test]
+    fn whole_field_by_key() -> Result<()> {
+        let stage = stage()?;
+        let whole: sdf::Dictionary = [("k".to_owned(), sdf::Value::Int(1))].into();
+        let prim = stage
+            .define_prim("/A")?
+            .set_custom_data_by_key("", sdf::Value::Dictionary(whole.clone()))?;
+        assert_eq!(prim.custom_data()?, Some(whole.clone()));
+        assert_eq!(prim.custom_data_by_key("")?, Some(sdf::Value::Dictionary(whole)));
+        assert!(prim.has_authored_custom_data_key("")?);
+        let prim = prim.clear_custom_data_by_key("")?;
+        assert!(!prim.has_authored_custom_data()?);
+
+        let key = sdf::FieldKey::DisplayName.as_str();
+        let prim = prim.set_display_name("Chair")?.clear_metadata_by_key(key, "a:b")?;
+        assert_eq!(prim.display_name()?.as_deref(), Some("Chair"));
         Ok(())
     }
 
@@ -328,6 +548,7 @@ mod tests {
             .create_attribute("size", "double")?
             .set_nested_display_groups(["Shape", "", "Size"])?;
         assert_eq!(attr.display_group()?.as_deref(), Some("Shape:Size"));
+        assert!(attr.has_authored_display_group()?);
         assert_eq!(attr.nested_display_groups()?, ["Shape", "Size"]);
         let attr = attr.set_display_group(":Shape::Size:")?;
         assert_eq!(attr.nested_display_groups()?, ["Shape", "Size"]);

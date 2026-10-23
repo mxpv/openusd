@@ -1,10 +1,8 @@
 //! What `UsdMediaAssetPreviewsAPI` keeps in `assetInfo` rather than in
 //! properties of its own.
 
-use std::collections::HashMap;
-
 use openusd::Result;
-use openusd::sdf::{FieldKey, Value};
+use openusd::sdf::Value;
 use openusd::usd::{Object, SchemaBase};
 
 use super::AssetPreviewsAPI;
@@ -19,16 +17,8 @@ impl AssetPreviewsAPI {
     /// `assetInfo.previews.thumbnails.default.defaultImage`, or `None` when no
     /// preview is authored. C++ `UsdMediaAssetPreviewsAPI::GetDefaultThumbnails`.
     pub fn default_thumbnail(&self) -> Result<Option<String>> {
-        let Some(asset_info) = self.prim().asset_info()? else {
-            return Ok(None);
-        };
-        let leaf = asset_info
-            .get(tokens::PREVIEWS)
-            .and_then(Value::try_as_dictionary_ref)
-            .and_then(|d| d.get(tokens::THUMBNAILS).and_then(Value::try_as_dictionary_ref))
-            .and_then(|d| d.get(DEFAULT).and_then(Value::try_as_dictionary_ref))
-            .and_then(|d| d.get(tokens::DEFAULT_IMAGE));
-        Ok(leaf.and_then(Value::as_str).map(str::to_owned))
+        let image = self.prim().asset_info_by_key(&default_image_path())?;
+        Ok(image.as_ref().and_then(Value::as_str).map(str::to_owned))
     }
 
     /// Author the default thumbnail image path under the prim's `assetInfo`
@@ -39,43 +29,31 @@ impl AssetPreviewsAPI {
     /// on weaker layers) are left to compose, so the thumbnail does not flatten
     /// them into the edit target.
     pub fn set_default_thumbnail(self, image: impl Into<String>) -> Result<Self> {
-        let image = image.into();
-        let prim = self.stage().override_prim(self.path().clone())?.update_metadata(
-            FieldKey::AssetInfo.as_str(),
-            |local| {
-                let mut asset_info = match local {
-                    Some(Value::Dictionary(d)) => d,
-                    _ => HashMap::new(),
-                };
-                let previews = nested_dict_mut(&mut asset_info, tokens::PREVIEWS);
-                let thumbnails = nested_dict_mut(previews, tokens::THUMBNAILS);
-                let default = nested_dict_mut(thumbnails, DEFAULT);
-                default.insert(tokens::DEFAULT_IMAGE.to_string(), Value::AssetPath(image.into()));
-                Some(Value::Dictionary(asset_info))
-            },
-        )?;
+        let image = Value::AssetPath(image.into().into());
+        let prim = self
+            .stage()
+            .override_prim(self.path().clone())?
+            .set_asset_info_by_key(&default_image_path(), image)?;
         Ok(Self(prim))
     }
 }
 
-/// Get-or-create a nested dictionary at `key`, replacing a non-dictionary
-/// value if one is somehow there.
-fn nested_dict_mut<'a>(d: &'a mut HashMap<String, Value>, key: &str) -> &'a mut HashMap<String, Value> {
-    let entry = d
-        .entry(key.to_string())
-        .or_insert_with(|| Value::Dictionary(HashMap::new()));
-    if !matches!(entry, Value::Dictionary(_)) {
-        *entry = Value::Dictionary(HashMap::new());
-    }
-    let Value::Dictionary(inner) = entry else {
-        unreachable!("entry was just ensured to be a dictionary")
-    };
-    inner
+/// The `assetInfo` key path of the default thumbnail's image.
+fn default_image_path() -> String {
+    format!(
+        "{}:{}:{DEFAULT}:{}",
+        tokens::PREVIEWS,
+        tokens::THUMBNAILS,
+        tokens::DEFAULT_IMAGE
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use openusd::sdf::FieldKey;
 
     use crate::media::{AuralMode, PlaybackMode, SpatialAudio, SpatialAudioSchema};
     use openusd::Result;
@@ -145,7 +123,7 @@ mod tests {
         let chair = stage
             .define_prim("/Chair")?
             .set_type_name("Xform")?
-            .set_metadata("assetInfo", Value::Dictionary(info))?;
+            .set_metadata("assetInfo", Value::Dictionary(info.into()))?;
         AssetPreviewsAPI::apply(&chair)?.set_default_thumbnail("./t.jpg")?;
 
         // The pre-existing `name` entry survives alongside the new previews.
