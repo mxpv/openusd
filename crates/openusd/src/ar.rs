@@ -1194,14 +1194,14 @@ impl UdimPath {
     }
 
     /// `tile_path`, the path of one tile, with the pattern put back where
-    /// its number is, inside the packaged part where the path leads into a
-    /// package; `None` where the path does not end with the suffix preceded
-    /// by a tile number. The suffix matches across separators, and the path
-    /// keeps its own.
+    /// its number is, inside however many packages the path leads into;
+    /// `None` where the path does not end with the suffix preceded by a tile
+    /// number. The suffix matches across separators, and the path keeps its
+    /// own.
     pub fn with_pattern(&self, tile_path: &str) -> Option<String> {
         self.pattern_of(tile_path).or_else(|| {
-            let (package, inner) = split_package_relative_path_inner(tile_path)?;
-            Some(nest_packaged_path(&package, &self.pattern_of(&inner)?))
+            let (package, inner) = split_package_relative_path_outer(tile_path)?;
+            Some(nest_packaged_path(&package, &self.with_pattern(&inner)?))
         })
     }
 
@@ -2441,6 +2441,22 @@ pub(crate) mod tests {
     }
     /// A plain path whose tiles resolve into a nested package keeps the
     /// pattern inside the innermost one.
+    /// A set authored as a path into a package, resolved inside another,
+    /// takes the pattern back at the depth it was authored at.
+    #[test]
+    fn udim_pattern_nested() {
+        let udim = UdimPath::parse("p.usdz[t.<UDIM>.png]").expect("a UDIM path");
+        assert_eq!(
+            udim.with_pattern("o.usdz[p.usdz[t.1001.png]]").as_deref(),
+            Some("o.usdz[p.usdz[t.<UDIM>.png]]")
+        );
+        assert_eq!(
+            udim.with_pattern("p.usdz[t.1001.png]").as_deref(),
+            Some("p.usdz[t.<UDIM>.png]")
+        );
+        assert_eq!(udim.with_pattern("o.usdz[p.usdz[t.png]]"), None);
+    }
+
     #[test]
     fn udim_nested_package() {
         struct Nested;
