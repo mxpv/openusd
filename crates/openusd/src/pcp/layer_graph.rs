@@ -975,9 +975,7 @@ impl LayerGraph {
                 .anchored_or_bare(anchored, sub_path)
                 .ok_or_else(|| anchored.clone());
         }
-        let anchored = self
-            .registry
-            .create_identifier_anchored(sub_path, self.real_path(parent));
+        let anchored = self.registry.create_identifier_anchored(sub_path, self.layer(parent));
         let Some(resolved) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
@@ -1219,7 +1217,7 @@ impl LayerGraph {
                 // per referrer.
                 let anchored = self
                     .registry
-                    .create_identifier_anchored(&demand.evaluated, self.real_path(demand.parent));
+                    .create_identifier_anchored(&demand.evaluated, self.layer(demand.parent));
                 match self.failed_loads.get(&anchored) {
                     Some(LoadFailure::Unresolved) if self.registry.resolve(&anchored).is_some() => {
                         self.failed_loads.remove(&anchored);
@@ -1447,26 +1445,15 @@ impl LayerGraph {
         self.nodes.get(&id).map(|node| node.layer.identifier())
     }
 
-    /// The resolved physical location of the layer with the given id — the
-    /// anchor for the relative asset paths it authors (C++
-    /// `SdfLayer::GetRealPath`). Equals the identifier except for a package,
-    /// whose real path is its package-relative default layer, and a layer found
-    /// through a resolver search directory, whose identifier is the search path.
-    /// Panics if unknown.
-    pub(crate) fn real_path(&self, id: LayerId) -> &str {
-        self.nodes[&id].layer.real_path()
-    }
-
     /// The registry that opens reference/payload targets on demand.
     pub(crate) fn layer_registry(&self) -> &sdf::LayerRegistry {
         &self.registry
     }
 
     /// The location that anchors the relative asset paths authored in the layer
-    /// `anchor`: its resolved [`real_path`](Self::real_path), recorded when the
-    /// loader opened it. Returns `None` when there is no anchor layer or it is
-    /// anonymous (no resolvable location, C++ `SdfLayer::GetRealPath` is
-    /// empty).
+    /// `anchor`: its resolved real path, recorded when the loader opened it.
+    /// Returns `None` when there is no anchor layer or it is anonymous (no
+    /// resolvable location, C++ `SdfLayer::GetRealPath` is empty).
     pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
         self.nodes[&anchor?].layer.anchor_location()
     }
@@ -2507,9 +2494,7 @@ impl LayerGraph {
     /// on-demand loader opens a sublayer demand at, and the key load failures
     /// and open attempts are recorded by.
     pub(crate) fn resolve_relative(&self, asset_path: &str, anchor: LayerId) -> Result<LayerId, String> {
-        let anchored = self
-            .registry
-            .create_identifier_anchored(asset_path, self.real_path(anchor));
+        let anchored = self.registry.create_identifier_anchored(asset_path, self.layer(anchor));
         self.anchored_or_bare(&anchored, asset_path)
             .map(|(id, _)| id)
             .ok_or(anchored)
@@ -3310,12 +3295,12 @@ mod tests {
     fn anon_parent_demands() {
         let mut root = sdf::Layer::new_anonymous("root.usda");
         edit_layer(&mut root, |e| {
-            e.pseudo_root_mut().unwrap().set_sublayers(["/abs/ghost.usda"]);
+            e.pseudo_root_mut().unwrap().set_sublayers(["ghost.usda"]);
         });
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let demands = graph.take_sublayer_demands();
         assert_eq!(demands.len(), 1);
-        assert_eq!(demands[0].evaluated, "/abs/ghost.usda");
+        assert_eq!(demands[0].evaluated, "ghost.usda");
     }
 
     /// Muting a session layer that supplies a root `${VAR}` sublayer's variable

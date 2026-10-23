@@ -19,7 +19,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -247,20 +246,18 @@ impl LayerRegistry {
         self.resolver.create_identifier(asset_path, anchor)
     }
 
-    /// Resolves `asset_path` against `anchor_location` — the resolved real path
-    /// of the layer it is authored in (its
-    /// [`real_path`](sdf::Layer::real_path), which for a package is the
-    /// package-relative default layer, not the bare package identifier) —
-    /// yielding the canonical identifier of the targeted layer. The convenience
-    /// over [`create_identifier`](Self::create_identifier) for the common case
-    /// of anchoring against another layer's location string rather than a
-    /// pre-resolved [`ar::ResolvedPath`].
+    /// The canonical identifier of the layer `asset_path` names when authored
+    /// in `anchor` (C++ `SdfComputeAssetPathRelativeToLayer`). A relative path
+    /// anchors against the layer's
+    /// [`anchor_location`](sdf::Layer::anchor_location), which for a package
+    /// is the package-relative default layer. An anonymous layer has no
+    /// location, and its paths resolve without an anchor.
     ///
     /// TODO(perf): the resolver canonicalizes via the filesystem, so each call
     /// runs a `canonicalize`. Cache resolved identifiers per
-    /// `(anchor_location, asset_path)`.
-    pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor_location: &str) -> String {
-        self.create_identifier(asset_path, Some(&ar::ResolvedPath::new(PathBuf::from(anchor_location))))
+    /// `(anchor location, asset_path)`.
+    pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor: &sdf::Layer) -> String {
+        self.create_identifier(asset_path, anchor.anchor_location().as_ref())
     }
 
     /// The identifier an in-memory layer is interned under when `asset_path`
