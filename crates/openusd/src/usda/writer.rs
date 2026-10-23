@@ -1581,6 +1581,33 @@ def "Mesh" (
         );
     }
 
+    /// A class arc authored under a variant anchors in the namespace
+    /// composition maps it in, which the written form re-reads.
+    #[test]
+    fn variant_arc_roundtrip() {
+        let source = "#usda 1.0\n\ndef \"A\" (\n    variants = {\n        string v = \"x\"\n    }\n    prepend variantSets = \"v\"\n)\n{\n    variantSet \"v\" = {\n        \"x\" {\n            def \"B\" (\n                inherits = <../D>\n                specializes = <C>\n            )\n            {\n            }\n        }\n    }\n}\n";
+        let data = usda::parse(source).expect("parses");
+        let prim = sdf::Path::new("/A{v=x}B").unwrap();
+        let arcs = |key: FieldKey| {
+            data.spec(&prim)
+                .expect("spec")
+                .get(key.as_str())
+                .expect("authored")
+                .to_owned()
+                .try_as_path_list_op()
+                .unwrap()
+        };
+        assert_eq!(arcs(FieldKey::InheritPaths).explicit_items(), [path("/A/D").unwrap()]);
+        assert_eq!(arcs(FieldKey::Specializes).explicit_items(), [path("/A/B/C").unwrap()]);
+
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+        let reparsed = usda::parse(&text).expect("re-parses");
+        assert_eq!(
+            data.spec(&prim).expect("spec").fields,
+            reparsed.spec(&prim).expect("spec").fields
+        );
+    }
+
     /// Every unit whose name is an identifier survives emit → re-parse.
     ///
     /// `%` and `default` are left out because the grammar has no term for

@@ -1005,8 +1005,8 @@ impl Path {
 
     /// Resolve a relative path against this path as anchor.
     ///
-    /// Absolute paths are returned as-is. Relative segments (`..`) walk up
-    /// from the anchor's prim path.
+    /// Absolute paths are returned as-is, and the empty path stays empty.
+    /// Relative segments (`..`) walk up from the anchor's prim path.
     ///
     /// Equivalent to C++ `SdfPath::MakeAbsolutePath`. When the combination
     /// is not a representable path (e.g. a property-relative step anchored at
@@ -1020,7 +1020,7 @@ impl Path {
     /// ```
     pub fn make_absolute(&self, target: &Path) -> Path {
         let s = target.as_str();
-        if s.starts_with('/') {
+        if s.is_empty() || s.starts_with('/') {
             return target.clone();
         }
 
@@ -2231,6 +2231,7 @@ pub(crate) mod tests {
         let abs = |anchor, target| raw(anchor).make_absolute(&raw(target));
 
         assert_eq!(abs("/A/B", "/X/Y").as_str(), "/X/Y");
+        assert!(abs("/A/B", "").is_empty());
         assert_eq!(abs("/A/B", "../C").as_str(), "/A/C");
         assert_eq!(abs("/A/B/C", "../../D").as_str(), "/A/D");
         assert_eq!(abs("/A", "../X").as_str(), "/X");

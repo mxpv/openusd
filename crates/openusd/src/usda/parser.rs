@@ -234,7 +234,7 @@ impl<'a> Parser<'a> {
         // Optional metadata block.
         if self.cursor.at_punctuation('(')? {
             self.parse_block('(', ')', |this| {
-                this.read_prim_metadata_entry(&mut spec)
+                this.read_prim_metadata_entry(&prim_path, &mut spec)
                     .context("Unable to parse prim metadata entry")
             })?;
         }
@@ -372,7 +372,7 @@ impl<'a> Parser<'a> {
             // Optional metadata block.
             if this.cursor.at_punctuation('(')? {
                 this.parse_block('(', ')', |this| {
-                    this.read_prim_metadata_entry(&mut variant_spec)
+                    this.read_prim_metadata_entry(&variant_path, &mut variant_spec)
                         .context("Unable to parse variant metadata entry")
                 })?;
             }
@@ -487,12 +487,11 @@ impl<'a> Parser<'a> {
                 // Connection targets are anchored to the owning prim, like
                 // relationship targets, so a relative path (`<../sibling>`) is
                 // stored absolute.
-                let targets: Vec<sdf::Path> = self
-                    .parse_one_or_list(|c| types::parse_path_reference(c).context("Connection path expected"))
-                    .context("Unable to parse connection targets")?
-                    .into_iter()
-                    .map(|p| current_path.make_absolute(&p))
-                    .collect();
+                let targets = anchored(
+                    current_path,
+                    self.parse_one_or_list(|c| types::parse_path_reference(c).context("Connection path expected"))
+                        .context("Unable to parse connection targets")?,
+                );
                 let path = current_path.append_property(name)?;
 
                 let spec = data
@@ -655,13 +654,11 @@ impl<'a> Parser<'a> {
             Some(op) => Some(op),
             None => self.try_list_op()?,
         };
-        let targets: Vec<sdf::Path> = self
-            .parse_one_or_list(types::parse_path_reference)
-            .context("Unable to parse relationship targets")?
-            .into_iter()
-            .filter(|p| !p.is_empty())
-            .map(|p| path.make_absolute(&p))
-            .collect();
+        let targets = anchored(
+            &path,
+            self.parse_one_or_list(types::parse_path_reference)
+                .context("Unable to parse relationship targets")?,
+        );
 
         let list_op = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
         spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
@@ -675,10 +672,27 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse an inherits or specializes list, each path anchored at the prim
+    /// `anchor` less its variant selections, the namespace composition maps
+    /// a class arc in; `arc` names the arc in a diagnostic. An arc path
+    /// addresses a prim, so a variant selection is refused here, where the
+    /// path production shared with relationship targets and connections
+    /// admits one. C++ anchors at the prim path as spelled and refuses the
+    /// selection an arc authored under a variant then carries.
+    fn parse_arc_paths(&mut self, anchor: &sdf::Path, arc: &str) -> Result<Vec<sdf::Path>, RawError> {
+        let paths = self.parse_one_or_list(types::parse_path_reference)?;
+        for p in &paths {
+            types::reject_variant_selection_in_path(p, arc)?;
+        }
+        Ok(anchored(&anchor.strip_variant_selections(), paths))
+    }
+
     /// Parse prim metadata contained either within parentheses or directly after the prim
     /// declaration (until `{` is encountered).
-    /// Parse a single prim metadata assignment, honoring list ops for supported fields.
-    fn read_prim_metadata_entry(&mut self, spec: &mut sdf::SpecData) -> Result<(), RawError> {
+    /// Parse a single prim metadata assignment, honoring list ops for
+    /// supported fields; an inherits or specializes path is anchored at the
+    /// prim `anchor` as `parse_arc_paths` anchors one.
+    fn read_prim_metadata_entry(&mut self, anchor: &sdf::Path, spec: &mut sdf::SpecData) -> Result<(), RawError> {
         let list_op = self.try_list_op()?;
         let name_token = self.cursor.bump()?;
 
@@ -732,13 +746,7 @@ impl<'a> Parser<'a> {
                 spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
-                let paths = self.parse_one_or_list(types::parse_path_reference)?;
-                // Arc targets address prims. Relationship-target and connection
-                // paths share this production and do allow a variant selection,
-                // so the restriction is applied here rather than in the parse.
-                for p in &paths {
-                    types::reject_variant_selection_in_path(p, "Inherit")?;
-                }
+                let paths = self.parse_arc_paths(anchor, "Inherit")?;
                 let list_op = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
                 spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
             }
@@ -783,10 +791,7 @@ impl<'a> Parser<'a> {
                 spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::StringListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
-                let paths = self.parse_one_or_list(types::parse_path_reference)?;
-                for p in &paths {
-                    types::reject_variant_selection_in_path(p, "Specializes")?;
-                }
+                let paths = self.parse_arc_paths(anchor, "Specializes")?;
                 let list_op = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
                 spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
             }
@@ -916,6 +921,17 @@ impl<'a> Parser<'a> {
         let items = self.parse_one_or_list(parse)?;
         Ok(wrap(apply_list_op(op, items)?))
     }
+}
+
+/// Each of `paths` made absolute against the prim `anchor`, as C++ anchors
+/// a target, connection, inherits or specializes path; one left empty, the
+/// empty path included, is dropped where C++ refuses the file.
+fn anchored(anchor: &sdf::Path, paths: Vec<sdf::Path>) -> Vec<sdf::Path> {
+    paths
+        .into_iter()
+        .map(|p| anchor.make_absolute(&p))
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// Wrap `items` in the list op the `op` keyword names, or an explicit list when
@@ -2050,6 +2066,32 @@ def Mesh "visual" (
         assert_eq!(reference.prim_path.as_str(), "/visual");
         assert_eq!(reference.layer_offset.offset, 0.0);
         assert_eq!(reference.layer_offset.scale, 1.0);
+    }
+
+    /// A relative inherits or specializes path is anchored at the prim, as a
+    /// relationship target is, and an empty one is dropped.
+    #[test]
+    fn arc_paths_anchored() {
+        let parser = Parser::new(
+            "#usda 1.0\n\ndef \"A\"\n{\n    def \"B\" (\n        inherits = [<>, <../C>]\n        specializes = <D>\n    )\n    {\n    }\n}\n",
+        );
+        let data = parser.parse().unwrap();
+        let prim = data.get(&sdf::path("/A/B").unwrap()).unwrap();
+        let arcs = |field: FieldKey| {
+            prim.get(field.as_str())
+                .unwrap()
+                .to_owned()
+                .try_as_path_list_op()
+                .unwrap()
+        };
+        assert_eq!(
+            arcs(FieldKey::InheritPaths).explicit_items(),
+            [sdf::path("/A/C").unwrap()]
+        );
+        assert_eq!(
+            arcs(FieldKey::Specializes).explicit_items(),
+            [sdf::path("/A/B/D").unwrap()]
+        );
     }
 
     #[test]
