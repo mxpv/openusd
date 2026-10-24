@@ -84,9 +84,10 @@ fn normalize_json(v: &mut serde_json::Value) {
     }
 }
 
-/// Every spec's fields. A prim's properties are compared as a set: the text
-/// writer sorts them by name, as C++ does, so text does not keep the order
-/// they were stored in (`reorder properties` is what keeps an order).
+/// Every spec's fields. A prim's properties and a variant set's variants are
+/// compared as sets: the text writer sorts them by name, as C++ does, so text
+/// does not keep the order they were stored in (`reorder properties` is what
+/// keeps an order).
 fn snapshot(reader: &sdf::Data) -> serde_json::Value {
     let mut out: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
@@ -95,8 +96,10 @@ fn snapshot(reader: &sdf::Data) -> serde_json::Value {
     }
     let mut json = serde_json::to_value(&out).expect("serialize");
     for fields in json.as_object_mut().expect("a map of specs").values_mut() {
-        if let Some(serde_json::Value::Array(names)) = fields.get_mut("propertyChildren") {
-            names.sort_by_key(|name| name.as_str().unwrap_or_default().to_owned());
+        for children in ["propertyChildren", "variantChildren"] {
+            if let Some(serde_json::Value::Array(names)) = fields.get_mut(children) {
+                names.sort_by_key(|name| name.as_str().unwrap_or_default().to_owned());
+            }
         }
     }
     json
