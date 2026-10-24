@@ -1,8 +1,11 @@
 //! Integration tests for the UsdLux schema views, exercised against the
-//! `usdLux_scene.usda` and `usdLux_linking` fixtures plus a few small
-//! in-memory stages: every concrete light, the `Light` interface inputs, the
-//! `ShapingAPI` / `ShadowAPI` / `LightListAPI` / `LightAPI` applied schemas,
-//! and light, shadow and filter linking.
+//! `usdLux_scene.usda`, `usdLux_linking` and `usdLux_lightList` fixtures plus
+//! a few small in-memory stages: every concrete light, the `Light` interface
+//! inputs, the `ShapingAPI` / `ShadowAPI` / `LightListAPI` / `LightAPI`
+//! applied schemas, light, shadow and filter linking, and light-list
+//! discovery and its cache.
+
+use std::collections::BTreeSet;
 
 use openusd::Result;
 use openusd::sdf;
@@ -13,9 +16,9 @@ use openusd_schemas::geom::{self, XformableExt, XformableSchema};
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
-    LightAPI, LightFilter, LightFilterExt, LightFilterSchema, LightListAPI, LightListCacheBehavior,
-    NonboundableLightBaseSchema, PluginLightFilter, PortalLight, PortalLightSchema, RectLight, RectLightSchema,
-    ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema, TextureFormat,
+    LightAPI, LightFilter, LightFilterExt, LightFilterSchema, LightList, LightListAPI, LightListCacheBehavior,
+    LightListMode, ListAPI, NonboundableLightBaseSchema, PluginLightFilter, PortalLight, PortalLightSchema, RectLight,
+    RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema, TextureFormat,
 };
 
 mod common;
@@ -686,5 +689,139 @@ fn dome_orient_errors() -> Result<(), SchemaError> {
     let dome = dome.set_xform_op_order(["xformOp:rotateX:orientToStageUpAxis", "!resetXformStack!"])?;
     let result = dome.orient_to_stage_up_axis();
     assert!(matches!(result, Err(SchemaError::XformOpExists { .. })), "{result:?}");
+    Ok(())
+}
+
+/// A stage over `root`, a file of `testUsdLuxLightListAPI`, with no payload
+/// loaded.
+fn light_list_stage(root: &str) -> Result<Stage> {
+    Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .load(usd::InitialLoadSet::LoadNone)
+        .open(&format!("fixtures/usdLux_lightList/{root}"))
+}
+
+/// The paths `list` computes in `mode`, as text.
+fn light_names(list: &impl LightList, mode: LightListMode) -> Result<Vec<String>> {
+    Ok(list
+        .compute_light_list(mode)?
+        .iter()
+        .map(sdf::Path::to_string)
+        .collect())
+}
+
+/// `testUsdLuxLightListAPI.py:_test`, over `stage`.
+fn check_light_list(stage: &Stage) -> Result<()> {
+    const SKY: &str = "/World/Lights/Sky_light";
+    const TORCH_1: &str = "/World/Geo/torch_1/light";
+    const TORCH_2: &str = "/World/Geo/torch_2/light";
+    let list = LightListAPI::from_prim_unchecked(stage.prim("/World")?);
+    let count = |mode| list.compute_light_list(mode).map(|lights| lights.len());
+
+    // Unloaded, a walk finds the one light outside a payload, and the cache
+    // `torch_2` publishes adds its light.
+    assert!(list.light_list_rel().targets()?.is_empty());
+    assert_eq!(light_names(&list, LightListMode::IgnoreCache)?, [SKY]);
+    assert_eq!(light_names(&list, LightListMode::ConsultCache)?, [TORCH_2, SKY]);
+
+    // Loaded, a walk finds every light. The cache still sees nothing below
+    // the model hierarchy.
+    stage.load("/", usd::LoadPolicy::WithDescendants)?;
+    assert_eq!(light_names(&list, LightListMode::ConsultCache)?, [TORCH_2, SKY]);
+    assert_eq!(light_names(&list, LightListMode::IgnoreCache)?, [TORCH_1, TORCH_2, SKY]);
+    let all = list.compute_light_list(LightListMode::IgnoreCache)?;
+
+    list.store_light_list(&all)?;
+    assert_eq!(list.compute_light_list(LightListMode::ConsultCache)?, all);
+
+    // A deactivated torch drops out of a walk but stays in the cache until
+    // the cache is invalidated.
+    stage.prim("/World/Geo/torch_1")?.set_active(false)?;
+    assert_eq!(count(LightListMode::IgnoreCache)?, 2);
+    assert_eq!(count(LightListMode::ConsultCache)?, 3);
+    list.invalidate_light_list()?;
+    assert_eq!(count(LightListMode::ConsultCache)?, 2);
+
+    // A light filter counts, and an untyped prim counts once LightAPI
+    // applies.
+    LightFilter::define(stage, "/World/Lights/TestFilter")?;
+    assert_eq!(count(LightListMode::IgnoreCache)?, 3);
+    let prim = stage.define_prim("/World/Lights/PrimWithLightAPI")?;
+    assert_eq!(count(LightListMode::IgnoreCache)?, 3);
+    LightAPI::apply(&prim)?;
+    assert_eq!(count(LightListMode::IgnoreCache)?, 4);
+    Ok(())
+}
+
+#[test]
+fn light_list_compute() -> Result<()> {
+    check_light_list(&light_list_stage("root.usda")?)
+}
+
+#[test]
+fn light_list_instanced() -> Result<()> {
+    check_light_list(&light_list_stage("root_with_instances.usda")?)
+}
+
+/// A stored relative path is anchored at the prim, and an absolute one
+/// outside its subtree is left out.
+#[test]
+fn light_list_relative() -> Result<()> {
+    let stage = memory()?;
+    let list = LightListAPI::apply(&stage.define_prim("/World")?)?;
+    let lights = BTreeSet::from([sdf::path("Lights/Key")?, sdf::path("/Elsewhere/Light")?]);
+    list.store_light_list(&lights)?;
+    assert_eq!(list.light_list_rel().targets()?, [sdf::path("/World/Lights/Key")?]);
+    assert_eq!(
+        list.light_list_cache_behavior()?,
+        Some(LightListCacheBehavior::ConsumeAndContinue)
+    );
+    Ok(())
+}
+
+/// `consumeAndHalt` takes the cache and skips the prim and its subtree.
+#[test]
+fn light_list_halt() -> Result<()> {
+    let stage = memory()?;
+    let list = LightListAPI::apply(&stage.define_prim("/World")?)?;
+    SphereLight::define(&stage, "/World/Walked")?;
+    list.store_light_list(&BTreeSet::from([sdf::path("/World/Cached")?]))?;
+    list.light_list_cache_behavior_attr()
+        .set(LightListCacheBehavior::ConsumeAndHalt)?;
+    assert_eq!(light_names(&list, LightListMode::ConsultCache)?, ["/World/Cached"]);
+    assert_eq!(light_names(&list, LightListMode::IgnoreCache)?, ["/World/Walked"]);
+
+    // A halting cache below the root prunes only its own subtree, and a
+    // filter of a derived type counts as a filter.
+    let root = LightListAPI::from_prim_unchecked(stage.prim("/")?);
+    stage.define_prim("/Group")?.set_kind("group")?;
+    let model = stage.define_prim("/Group/Model")?.set_kind("component")?;
+    SphereLight::define(&stage, "/Group/Model/Hidden")?;
+    let cached = LightListAPI::apply(&model)?;
+    cached.store_light_list(&BTreeSet::from([sdf::path("/Group/Model/Cached")?]))?;
+    cached
+        .light_list_cache_behavior_attr()
+        .set(LightListCacheBehavior::ConsumeAndHalt)?;
+    PluginLightFilter::define(&stage, "/Group/Filter")?;
+    stage.prim("/Group/Filter")?.set_kind("component")?;
+    assert_eq!(
+        light_names(&root, LightListMode::ConsultCache)?,
+        ["/Group/Filter", "/Group/Model/Cached"]
+    );
+    Ok(())
+}
+
+/// The deprecated `ListAPI` answers as `LightListAPI` does.
+#[test]
+fn list_api_deprecated() -> Result<()> {
+    let stage = memory()?;
+    let list = ListAPI::apply(&stage.define_prim("/World")?)?;
+    SphereLight::define(&stage, "/World/Bulb")?;
+    assert_eq!(light_names(&list, LightListMode::IgnoreCache)?, ["/World/Bulb"]);
+    let lights = list.compute_light_list(LightListMode::IgnoreCache)?;
+    list.store_light_list(&lights)?;
+    assert_eq!(list.compute_light_list(LightListMode::ConsultCache)?, lights);
+    list.invalidate_light_list()?;
+    assert_eq!(list.light_list_cache_behavior()?.as_deref(), Some("ignore"));
     Ok(())
 }

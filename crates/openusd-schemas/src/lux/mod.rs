@@ -30,7 +30,8 @@
 //! [`LightFilterExt::shader_id_for`] name the shader each render context
 //! draws a light or a filter with. [`DomeLight::orient_to_stage_up_axis`]
 //! turns a dome's texture to a `Z`-up stage. [`blackbody_rgb`] is the color
-//! a light's color temperature stands for.
+//! a light's color temperature stands for. [`LightList`] finds the lights
+//! below a prim and keeps them as a cache on it.
 //!
 //! # Example
 //!
@@ -72,9 +73,11 @@ openusd::include_schema!("usdLux");
 mod blackbody;
 mod dome;
 mod light;
+mod light_list;
 
 pub use blackbody::blackbody_rgb;
 pub use light::LightFilterExt;
+pub use light_list::{LightList, LightListMode};
 
 use openusd::{gf, usd};
 

@@ -592,11 +592,17 @@ impl Prim {
             .is_a(info.schema_type_name(), &schema.into()))
     }
 
-    /// `true` when `name` is in the prim's composed `apiSchemas` (pass the full
-    /// instance name for multi-apply schemas). Mirrors C++ `UsdPrim::HasAPI`.
+    /// `true` when `name` is among the prim's
+    /// [`api_schemas`](Self::api_schemas) (pass the full instance name for
+    /// multi-apply schemas). Mirrors C++ `UsdPrim::HasAPI`.
     pub fn has_api_schema(&self, name: impl Into<Token>) -> Result<bool> {
         let name = name.into();
-        Ok(self.api_schemas()?.iter().any(|s| s.as_str() == name.as_str()))
+        let info = self.prim_type_info()?;
+        let definition = info.prim_definition().applied_api_schemas();
+        Ok(definition
+            .iter()
+            .chain(info.id().applied_api_schemas())
+            .any(|schema| schema.as_str() == name.as_str()))
     }
 
     /// The registered concrete schema backing this prim's type, or `None` when

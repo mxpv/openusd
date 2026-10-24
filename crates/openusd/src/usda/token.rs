@@ -12,7 +12,8 @@ use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash, strum::Display, strum::EnumIs, strum::EnumTryAs)]
 #[logos(skip r"[ \t\r\n\f]+")] // Skip whitespace
-#[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip line and block comments
+// Skip `#` and `//` line comments and `/* */` block comments.
+#[logos(skip(r"(#|//)[^\r\n]*", allow_greedy = true))]
 #[logos(skip r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/")]
 pub enum Token<'source> {
     /// Magic header - extract version number.
@@ -773,6 +774,28 @@ mod tests {
         assert_tokens(
             "a /* one */ /* two */ b",
             &[(Token::Identifier("a"), "a"), (Token::Identifier("b"), "b")],
+        );
+    }
+
+    /// `//` line comments are skipped to the end of the line or the file,
+    /// and `//` inside a path, an asset path or a string stays part of it.
+    #[test]
+    fn line_comments() {
+        assert_tokens(
+            "a // one\nb",
+            &[(Token::Identifier("a"), "a"), (Token::Identifier("b"), "b")],
+        );
+        assert_tokens(
+            "<a//b> @c//d@ \"e//f\" // tail",
+            &[
+                (Token::PathRef("a//b"), "a//b"),
+                (Token::AssetRef("c//d"), "c//d"),
+                (Token::String("e//f".into()), "e//f"),
+            ],
+        );
+        assert!(
+            Token::lexer("a // b c").nth(1).is_none(),
+            "the comment runs to the end of the file"
         );
     }
 }

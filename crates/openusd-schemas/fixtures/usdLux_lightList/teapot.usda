@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    defaultPrim = "teapot_Base"
+    endFrame = 1
+    startFrame = 1
+)
+
+def Mesh "teapot_Base" (
+    kind = "model"
+    customData = {
+        bool "zUp" = false
+    }
+)
+{
+    uniform bool doubleSided = 1
+    Vec3f[] extent = [(-71.8925, 0, -47.9284), (82.294, 59.873, 47.9284)]
+}
+
+def Mesh "teapot_Top" (
+    kind = "model"
+)
+{
+    uniform bool doubleSided = 1
+    Vec3f[] extent = [(-33.5647, 58.9385, -33.5647), (33.5647, 79.0066, 33.5647)]
+}
