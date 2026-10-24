@@ -8,7 +8,8 @@ use openusd::Result;
 use openusd::sdf;
 use openusd::tf;
 use openusd::usd::{self, CollectionAPI, SchemaBase, Stage};
-use openusd_schemas::geom::{self, XformableSchema};
+use openusd_schemas::SchemaError;
+use openusd_schemas::geom::{self, XformableExt, XformableSchema};
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
@@ -613,5 +614,77 @@ fn shader_id_contexts() -> Result<()> {
         assert_eq!(other.variability()?, Some(sdf::Variability::Uniform));
         assert!(!other.is_custom()?);
     }
+    Ok(())
+}
+
+/// `testUsdLuxLight.py:test_DomeLight_OrientToStageUpAxis`: a `Y`-up stage
+/// needs no op, and a `Z`-up one a 90 degree turn about X.
+#[test]
+fn dome_orient_axis() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    geom::set_stage_up_axis(&stage, geom::UpAxis::Y)?;
+    let dome = DomeLight::define(&stage, "/dome")?;
+    assert!(dome.ordered_xform_ops()?.0.is_empty());
+    dome.orient_to_stage_up_axis()?;
+    assert!(dome.ordered_xform_ops()?.0.is_empty());
+
+    geom::set_stage_up_axis(&stage, geom::UpAxis::Z)?;
+    dome.orient_to_stage_up_axis()?;
+    let (ops, _) = dome.ordered_xform_ops()?;
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].name(), "xformOp:rotateX:orientToStageUpAxis");
+    assert_eq!(ops[0].kind(), Some(geom::XformOpKind::RotateX));
+    assert_eq!(ops[0].attribute().get::<f32>()?, Some(90.0));
+    Ok(())
+}
+
+/// A dome already turned is not turned again.
+#[test]
+fn dome_orient_idempotent() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    geom::set_stage_up_axis(&stage, geom::UpAxis::Z)?;
+    let dome = DomeLight::define(&stage, "/dome")?;
+    dome.orient_to_stage_up_axis()?;
+    dome.orient_to_stage_up_axis()?;
+    assert_eq!(dome.ordered_xform_ops()?.0.len(), 1);
+    Ok(())
+}
+
+/// The op already listed inverted counts as the turn, and one a layer
+/// declares at double precision, unlisted, takes 90 as a double.
+#[test]
+fn dome_orient_existing() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    geom::set_stage_up_axis(&stage, geom::UpAxis::Z)?;
+    let name = "xformOp:rotateX:orientToStageUpAxis";
+
+    let inverted = DomeLight::define(&stage, "/Inverted")?;
+    stage.prim("/Inverted")?.create_attribute(name, "float")?;
+    let inverted = inverted.set_xform_op_order([format!("!invert!{name}")])?;
+    inverted.orient_to_stage_up_axis()?;
+    assert_eq!(inverted.xform_op_order()?.map(|order| order.len()), Some(1));
+
+    let double = DomeLight::define(&stage, "/Double")?;
+    stage.prim("/Double")?.create_attribute(name, "double")?;
+    double.orient_to_stage_up_axis()?;
+    let (ops, _) = double.ordered_xform_ops()?;
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].attribute().get::<f64>()?, Some(90.0));
+    Ok(())
+}
+
+/// An `upAxis` naming no axis is an error, as is the op listed before a
+/// `!resetXformStack!` the stack ignores.
+#[test]
+fn dome_orient_errors() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    stage.set_stage_metadata("upAxis", sdf::Value::token("X"))?;
+    let dome = DomeLight::define(&stage, "/dome")?;
+    assert!(dome.orient_to_stage_up_axis().is_err());
+
+    geom::set_stage_up_axis(&stage, geom::UpAxis::Z)?;
+    let dome = dome.set_xform_op_order(["xformOp:rotateX:orientToStageUpAxis", "!resetXformStack!"])?;
+    let result = dome.orient_to_stage_up_axis();
+    assert!(matches!(result, Err(SchemaError::XformOpExists { .. })), "{result:?}");
     Ok(())
 }

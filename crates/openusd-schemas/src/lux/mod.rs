@@ -28,8 +28,9 @@
 //! and is shadowed by, and [`LightFilterExt::filter_link_collection`] the
 //! geometry a filter applies to. [`LightAPI::shader_id_for`] and
 //! [`LightFilterExt::shader_id_for`] name the shader each render context
-//! draws a light or a filter with. [`blackbody_rgb`] is the color a light's color temperature stands
-//! for.
+//! draws a light or a filter with. [`DomeLight::orient_to_stage_up_axis`]
+//! turns a dome's texture to a `Z`-up stage. [`blackbody_rgb`] is the color
+//! a light's color temperature stands for.
 //!
 //! # Example
 //!
@@ -69,6 +70,7 @@
 openusd::include_schema!("usdLux");
 
 mod blackbody;
+mod dome;
 mod light;
 
 pub use blackbody::blackbody_rgb;
