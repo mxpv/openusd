@@ -55,7 +55,7 @@ impl TextWriter {
     /// rather than a layer — showing a schema's fallback in documentation, say.
     pub fn value_to_string(value: &sdf::Value) -> Result<String, FormatError> {
         let mut text = String::new();
-        format_value(&mut ValueText::of(&mut text), value)?;
+        format_value(&mut ValueText::of(&mut text), value, 0)?;
         Ok(text)
     }
 
@@ -126,12 +126,31 @@ impl Emitter<'_> {
         };
         meta_fields.sort();
 
+        // As C++ `SdfUsdaFileFormat` writes the header: the comment first,
+        // the fields in order, then the relocates. An empty `doc` and a false
+        // `hasOwnedSubLayers` are not written.
+        meta_fields.retain(|name| match get_value(data, &root, name) {
+            Some(Value::String(doc)) if name == FieldKey::Documentation.as_str() => !doc.is_empty(),
+            Some(Value::Bool(owned)) if name == FieldKey::HasOwnedSubLayers.as_str() => owned,
+            _ => true,
+        });
+        let last = |name: &String| {
+            (
+                name != FieldKey::Comment.as_str(),
+                name == FieldKey::LayerRelocates.as_str(),
+            )
+        };
+        meta_fields.sort_by_key(last);
         if !meta_fields.is_empty() {
             writeln!(self.out, "(")?;
             self.indent += 1;
             for name in &meta_fields {
                 if name == FieldKey::SubLayers.as_str() {
                     self.emit_sub_layers(data, &root)?;
+                    continue;
+                }
+                if let Some(Value::Relocates(relocates)) = get_value(data, &root, name) {
+                    self.emit_relocates(&relocates)?;
                     continue;
                 }
                 let value = data.field(&root, name)?;
@@ -143,7 +162,10 @@ impl Emitter<'_> {
 
         // Layer-level `reorder rootPrims`, stored as `primOrder` on the
         // pseudo-root. Emitted between the metadata block and the root prims.
-        if has_root && let Some(Value::TokenVec(v)) = get_value(data, &root, FieldKey::PrimOrder.as_str()) {
+        if has_root
+            && let Some(Value::TokenVec(v)) = get_value(data, &root, FieldKey::PrimOrder.as_str())
+            && v.len() > 1
+        {
             writeln!(self.out)?;
             self.emit_reorder("rootPrims", &v)?;
         }
@@ -187,12 +209,7 @@ impl Emitter<'_> {
         write_quoted(&mut quoted, name)?;
         write!(self.out, " {quoted}")?;
 
-        let meta_fields: Vec<String> = data
-            .list_fields(path)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| !is_prim_structural_field(n))
-            .collect();
+        let meta_fields = metadata_fields(data, path, is_prim_structural_field);
 
         if !meta_fields.is_empty() {
             writeln!(self.out, " (")?;
@@ -321,12 +338,7 @@ impl Emitter<'_> {
         let time_samples = get_value(data, path, FieldKey::TimeSamples.as_str());
         let spline = get_value(data, path, SPLINE_FIELD);
         let connections = get_value(data, path, FieldKey::ConnectionPaths.as_str());
-        let meta_fields: Vec<String> = data
-            .list_fields(path)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| !is_attribute_structural_field(n))
-            .collect();
+        let meta_fields = metadata_fields(data, path, is_attribute_structural_field);
 
         // The declaration, which C++ `Sdf_WriteAttribute` writes only when it
         // carries something or no other statement would declare the attribute.
@@ -528,7 +540,7 @@ impl Emitter<'_> {
         };
         if let Some(Value::Dictionary(custom)) = knot_custom.and_then(|m| m.get(&time_key)) {
             buf.push_str("; ");
-            format_dictionary(&mut ValueText::of(&mut buf), custom)?;
+            format_dictionary(&mut ValueText::of(&mut buf), custom, 0)?;
         }
 
         buf.push(',');
@@ -542,12 +554,26 @@ impl Emitter<'_> {
     }
 
     fn emit_relationship(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
-        self.write_indent()?;
-
-        if matches!(
+        let custom = matches!(
             get_value(data, path, FieldKey::Custom.as_str()),
             Some(Value::Bool(true))
-        ) {
+        );
+        let targets = get_value(data, path, FieldKey::TargetPaths.as_str());
+        let meta_fields = metadata_fields(data, path, is_relationship_structural_field);
+        let (explicit, list_ops) = match &targets {
+            Some(Value::PathListOp(op)) => (op.is_explicit(), !op.is_empty() && !op.is_explicit()),
+            _ => (false, false),
+        };
+
+        // The declaration, which C++ `Sdf_WriteRelationship` writes only when
+        // it carries metadata or explicit targets, or nothing else declares
+        // the relationship.
+        if meta_fields.is_empty() && !explicit && list_ops && !custom {
+            return self.emit_relationship_list_ops(name, &targets);
+        }
+
+        self.write_indent()?;
+        if custom {
             self.out.write_all(b"custom ")?;
         }
         // A relationship is uniform unless it says otherwise, the reverse of an
@@ -560,14 +586,6 @@ impl Emitter<'_> {
         }
 
         write!(self.out, "rel {name}")?;
-
-        let targets = get_value(data, path, FieldKey::TargetPaths.as_str());
-        let meta_fields: Vec<String> = data
-            .list_fields(path)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| !is_relationship_structural_field(n))
-            .collect();
 
         // Non-explicit list ops for rel targets: emit on a separate line below.
         if let Some(Value::PathListOp(op)) = &targets
@@ -590,33 +608,42 @@ impl Emitter<'_> {
         }
 
         writeln!(self.out)?;
+        self.emit_relationship_list_ops(name, &targets)
+    }
 
-        // Non-explicit list op target paths
-        if let Some(Value::PathListOp(op)) = &targets
+    /// A relationship's `delete`, `add`, `prepend`, `append` and `reorder`
+    /// target statements.
+    fn emit_relationship_list_ops(&mut self, name: &str, targets: &Option<Value>) -> Result<(), FormatError> {
+        if let Some(Value::PathListOp(op)) = targets
             && !op.is_explicit()
         {
             self.emit_targets_statement(&format!("rel {name}"), op)?;
         }
-
         Ok(())
     }
 
     // ---------- variant set / variant ----------
 
+    /// A variant set, its variants in byte order of their names, as C++
+    /// `Sdf_WriteVariantSet` sorts them; a set with no variants is not
+    /// written.
     fn emit_variant_set(&mut self, data: &dyn AbstractData, vset_path: &Path, name: &str) -> Result<(), FormatError> {
+        let mut variant_names = children(data, vset_path, ChildrenKey::VariantChildren);
+        if variant_names.is_empty() {
+            return Ok(());
+        }
+        variant_names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
         self.write_indent()?;
         let mut quoted = String::new();
         write_quoted(&mut quoted, name)?;
         writeln!(self.out, "variantSet {quoted} = {{")?;
         self.indent += 1;
 
-        if let Some(Value::TokenVec(variant_names)) = get_value(data, vset_path, ChildrenKey::VariantChildren.as_str())
-        {
-            let prim = vset_path.prim_path();
-            for v_name in &variant_names {
-                let v_path = prim.append_variant_selection(name, v_name)?;
-                self.emit_variant(data, &v_path, v_name.as_str())?;
-            }
+        let prim = vset_path.prim_path();
+        for v_name in &variant_names {
+            let v_path = prim.append_variant_selection(name, v_name)?;
+            self.emit_variant(data, &v_path, v_name.as_str())?;
         }
 
         self.indent -= 1;
@@ -631,12 +658,7 @@ impl Emitter<'_> {
         write_quoted(&mut quoted, name)?;
         self.out.write_all(quoted.as_bytes())?;
 
-        let meta_fields: Vec<String> = data
-            .list_fields(path)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| !is_prim_structural_field(n))
-            .collect();
+        let meta_fields = metadata_fields(data, path, is_prim_structural_field);
 
         if !meta_fields.is_empty() {
             writeln!(self.out, " (")?;
@@ -661,6 +683,19 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A layer's relocates, one pair per line, as C++ `WriteRelocates`
+    /// writes them multi-line (`, ` ends every pair but the last).
+    fn emit_relocates(&mut self, relocates: &[(Path, Path)]) -> Result<(), FormatError> {
+        self.write_line("relocates = {")?;
+        self.indent += 1;
+        for (i, (source, target)) in relocates.iter().enumerate() {
+            let separator = if i + 1 < relocates.len() { ", " } else { "" };
+            self.write_line(&format!("<{}>: <{}>{separator}", source.as_str(), target.as_str()))?;
+        }
+        self.indent -= 1;
+        self.write_line("}")
+    }
+
     /// Combine `subLayers` (asset paths) with `subLayerOffsets` at emit time —
     /// the text grammar wants them fused into `subLayers = [@path@ (offset=X; scale=Y), ...]`.
     fn emit_sub_layers(&mut self, data: &dyn AbstractData, root: &Path) -> Result<(), FormatError> {
@@ -681,7 +716,7 @@ impl Emitter<'_> {
             let mut buf = String::new();
             write_asset_path(&mut buf, path)?;
             if let Some(offset) = offsets.get(i) {
-                write_arc_metadata(&mut buf, offset, &HashMap::new())?;
+                write_layer_offset(&mut buf, offset);
             }
             buf.push_str(if i + 1 < sublayers.len() { "," } else { "" });
             self.write_line(&buf)?;
@@ -808,7 +843,10 @@ impl Emitter<'_> {
                 Ok(Some(true))
             }
             Value::ReferenceListOp(op) => {
-                self.emit_listop_statement(name, op, write_reference)?;
+                // A reference with custom data spans lines, one level in
+                // from the statement, as it is always one item of a list.
+                let indent = self.indent + 1;
+                self.emit_listop_statement(name, op, |s, r| write_reference(s, r, indent))?;
                 Ok(Some(true))
             }
             Value::PayloadListOp(op) => {
@@ -944,7 +982,7 @@ impl Emitter<'_> {
             text: &mut self.scratch,
             spill: Some(&mut *self.out),
         };
-        format_value(&mut text, value)?;
+        format_value(&mut text, value, self.indent)?;
         text.finish()?;
         Ok(())
     }
@@ -1027,8 +1065,10 @@ impl DerefMut for ValueText<'_> {
 // One arm per variant, grouped by value type family so a new variant has an
 // obvious home. Folding together the distinct variants that happen to share
 // a formatter would scatter that grouping.
+/// A value whose line is indented `indent` levels: a dictionary in it spans
+/// several lines, its entries one level in and its `}` at `indent`.
 #[allow(clippy::match_same_arms)]
-fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
+fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), FormatError> {
     match v {
         // The USDA parser reads the `None` token as `Value::ValueBlock`. Emitting
         // either `Value::None` (absent-opinion marker) or `Value::Value` (expression
@@ -1049,7 +1089,7 @@ fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
         // C++ streams a bool as an int (`VtStreamOut(bool const &)`).
         Value::Bool(b) => s.push_str(if *b { "1" } else { "0" }),
         Value::BoolVec(v) => format_vec(s, v, |s, b| {
-            s.push_str(if *b { "1" } else { "0" });
+            s.push(if *b { '1' } else { '0' });
             Ok(())
         })?,
 
@@ -1139,7 +1179,9 @@ fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
             Variability::Uniform => "uniform",
         }),
 
-        Value::Dictionary(dict) => format_dictionary(s, dict)?,
+        Value::Dictionary(dict) | Value::UnregisteredDictionary(dict) => {
+            format_dictionary(s, dict, indent)?;
+        }
 
         Value::TokenListOp(op) => format_inline_listop(s, op, |s, t: &Token| write_quoted(s, t.as_str()))?,
         Value::StringListOp(op) => format_inline_listop(s, op, |s, t: &String| write_quoted(s, t))?,
@@ -1147,7 +1189,7 @@ fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
             write!(s, "<{}>", p.as_str())?;
             Ok(())
         })?,
-        Value::ReferenceListOp(op) => format_inline_listop(s, op, |s, r| write_reference(s, r))?,
+        Value::ReferenceListOp(op) => format_inline_listop(s, op, |s, r| write_reference(s, r, indent))?,
         Value::PayloadListOp(op) => format_inline_listop(s, op, |s, p| write_payload(s, p))?,
         Value::IntListOp(op) => format_inline_listop(s, op, |s, v| write!(s, "{v}").map_err(Into::into))?,
         Value::Int64ListOp(op) => format_inline_listop(s, op, |s, v| write!(s, "{v}").map_err(Into::into))?,
@@ -1169,20 +1211,14 @@ fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
             }
             s.push_str(" }");
         }
+        // C++ `Sdf_WritePrimMetadata` writes the selections as a dictionary
+        // of strings.
         Value::VariantSelectionMap(m) => {
-            let mut keys: Vec<&String> = m.keys().collect();
-            keys.sort();
-            s.push_str("{ ");
-            for (i, k) in keys.iter().enumerate() {
-                if i > 0 {
-                    s.push_str("; ");
-                }
-                s.push_str("string ");
-                write_quoted(s, k)?;
-                s.push_str(" = ");
-                write_quoted(s, &m[*k])?;
-            }
-            s.push_str(" }");
+            let selections = m
+                .iter()
+                .map(|(set, variant)| (set.clone(), Value::String(variant.clone())))
+                .collect();
+            format_dictionary(s, &selections, indent)?;
         }
 
         Value::TimeSamples(_) => {
@@ -1201,7 +1237,7 @@ fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
             format_vec(s, offsets, |s, o| format_tuple_float(s, &[o.offset, o.scale]))?;
         }
 
-        Value::ValueVec(v) => format_vec(s, v, format_value)?,
+        Value::ValueVec(v) => format_vec(s, v, |s, v| format_value(s, v, indent))?,
         // An unregistered value is the literal a layer was written with,
         // recorded because nothing could type it. Quoting it would make it a
         // string; it is copied out as it came in.
@@ -1210,7 +1246,6 @@ fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
             s.push_str(body);
             Ok(())
         })?,
-        Value::UnregisteredDictionary(dict) => format_dictionary(s, dict)?,
 
         Value::TimeCode(t) => tf::stringify_float(s, t.0),
         Value::TimeCodeVec(v) => format_vec(s, v, |s, t| {
@@ -1398,13 +1433,16 @@ fn get_double(dict: &HashMap<String, Value>, key: &str) -> f64 {
     }
 }
 
-fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
+/// A dictionary, an entry per line one level in from the line that opens it,
+/// which is indented `indent` levels, and the `}` at that level (C++
+/// `Sdf_FileIOUtility::_WriteDictionary`).
+fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>, indent: usize) -> Result<(), FormatError> {
     let mut keys: Vec<&String> = dict.keys().collect();
     keys.sort();
-    s.push('{');
-    s.push('\n');
+    s.push_str("{\n");
     for k in &keys {
         let value = &dict[k.as_str()];
+        push_indent(s, indent + 1);
         // A nested dictionary is introduced by the `dictionary` keyword; any
         // other entry carries the role-blind name of its value's kind, as C++
         // emits it.
@@ -1414,7 +1452,6 @@ fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Re
             Value::Dictionary(_) | Value::UnregisteredDictionary(_) => Some(Token::new("dictionary")),
             other => sdf::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
         };
-        s.push_str("    ");
         if let Some(ty) = type_name {
             s.push_str(ty.as_str());
             s.push(' ');
@@ -1428,11 +1465,16 @@ fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Re
             write_quoted(s, k)?;
         }
         s.push_str(" = ");
-        format_value(s, value)?;
+        format_value(s, value, indent + 1)?;
         s.push('\n');
     }
+    push_indent(s, indent);
     s.push('}');
     Ok(())
+}
+
+fn push_indent(s: &mut String, levels: usize) {
+    s.extend(iter::repeat_n("    ", levels));
 }
 
 /// Writes `text` as a USDA string, quoted as C++ `Sdf_FileIOUtility::Quote`
@@ -1486,36 +1528,59 @@ fn write_asset_path(s: &mut String, path: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn write_reference(s: &mut String, r: &Reference) -> Result<(), FormatError> {
-    if !r.asset_path.is_empty() {
-        write_asset_path(s, &r.asset_path)?;
+/// A reference on a line indented `indent` levels, as C++
+/// `_ListOpWriter<SdfReference>` writes one: custom data puts its layer
+/// offset and the data on lines of their own, in parentheses.
+fn write_reference(s: &mut String, r: &Reference, indent: usize) -> Result<(), FormatError> {
+    write_arc_target(s, &r.asset_path, &r.prim_path)?;
+    if r.custom_data.is_empty() {
+        write_layer_offset(s, &r.layer_offset);
+        return Ok(());
     }
-    if !r.prim_path.is_empty() {
-        write!(s, "<{}>", r.prim_path.as_str())?;
+    s.push_str(" (\n");
+    for (name, value, identity) in [
+        ("offset", r.layer_offset.offset, 0.0),
+        ("scale", r.layer_offset.scale, 1.0),
+    ] {
+        if value != identity {
+            push_indent(s, indent + 1);
+            write!(s, "{name} = ")?;
+            tf::stringify_float(s, value);
+            s.push('\n');
+        }
     }
-    write_arc_metadata(s, &r.layer_offset, &r.custom_data)
+    push_indent(s, indent + 1);
+    s.push_str("customData = ");
+    format_dictionary(&mut ValueText::of(s), &r.custom_data, indent + 1)?;
+    s.push('\n');
+    push_indent(s, indent);
+    s.push(')');
+    Ok(())
 }
 
 fn write_payload(s: &mut String, p: &Payload) -> Result<(), FormatError> {
-    if !p.asset_path.is_empty() {
-        write_asset_path(s, &p.asset_path)?;
-    }
-    if !p.prim_path.is_empty() {
-        write!(s, "<{}>", p.prim_path.as_str())?;
-    }
-    write_arc_metadata(s, &p.layer_offset, &HashMap::new())
+    write_arc_target(s, &p.asset_path, &p.prim_path)?;
+    write_layer_offset(s, &p.layer_offset);
+    Ok(())
 }
 
-/// Writes the parenthesized metadata after a sublayer, reference, or payload
-/// asset: the layer offset unless it is the identity, then any custom data.
-/// Writes nothing when neither is present.
-fn write_arc_metadata(
-    s: &mut String,
-    offset: &LayerOffset,
-    custom_data: &HashMap<String, Value>,
-) -> Result<(), FormatError> {
+/// An arc's asset and prim path. An internal arc always writes its prim
+/// path, `<>` when empty, since that is what targets the default prim.
+fn write_arc_target(s: &mut String, asset_path: &str, prim_path: &Path) -> Result<(), FormatError> {
+    if !asset_path.is_empty() {
+        write_asset_path(s, asset_path)?;
+        if prim_path.is_empty() {
+            return Ok(());
+        }
+    }
+    write!(s, "<{}>", prim_path.as_str())?;
+    Ok(())
+}
+
+/// A sublayer's, reference's or payload's layer offset on one line, each
+/// part only when it differs from the identity (C++ `WriteLayerOffset`).
+fn write_layer_offset(s: &mut String, offset: &LayerOffset) {
     let mut parts = Vec::new();
-    // Each part only when it differs, as C++ `WriteLayerOffset` writes them.
     if offset.offset != 0.0 {
         let mut part = String::from("offset = ");
         tf::stringify_float(&mut part, offset.offset);
@@ -1526,15 +1591,9 @@ fn write_arc_metadata(
         tf::stringify_float(&mut part, offset.scale);
         parts.push(part);
     }
-    if !custom_data.is_empty() {
-        let mut part = String::from("customData = ");
-        format_dictionary(&mut ValueText::of(&mut part), custom_data)?;
-        parts.push(part);
-    }
     if !parts.is_empty() {
-        write!(s, " ({})", parts.join("; "))?;
+        s.push_str(&format!(" ({})", parts.join("; ")));
     }
-    Ok(())
 }
 
 fn specifier_keyword(s: Specifier) -> &'static str {
@@ -1593,6 +1652,24 @@ const RELATIONSHIP_STRUCTURAL_FIELDS: &[&str] = &[
     ChildrenKey::RelationshipTargetChildren.as_str(),
 ];
 
+/// A spec's metadata fields in the order C++ writes them
+/// (`Sdf_WritePrimMetadata`, `Sdf_WriteAttribute`, `Sdf_WriteRelationship`):
+/// the comment first, then the rest sorted by field name with
+/// `TfDictionaryLessThan`.
+fn metadata_fields(data: &dyn AbstractData, path: &Path, structural: fn(&str) -> bool) -> Vec<String> {
+    let mut fields: Vec<String> = data
+        .list_fields(path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !structural(n))
+        .collect();
+    fields.sort_by(|a, b| {
+        let comment = |n: &str| n != FieldKey::Comment.as_str();
+        comment(a).cmp(&comment(b)).then_with(|| tf::dictionary_cmp(a, b))
+    });
+    fields
+}
+
 fn is_prim_structural_field(name: &str) -> bool {
     PRIM_STRUCTURAL_FIELDS.contains(&name)
 }
@@ -1621,6 +1698,7 @@ mod tests {
             format_value(
                 &mut ValueText::of(&mut out),
                 &Value::UnregisteredValue(literal.to_owned()),
+                0,
             )
             .expect("writes");
             assert_eq!(out, literal);
@@ -1634,7 +1712,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit(["1, 2".to_owned()]);
 
         let mut out = String::new();
-        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op)).expect("writes");
+        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op), 0).expect("writes");
         assert_eq!(out, "[1, 2]");
     }
 
@@ -1644,7 +1722,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit([]);
 
         let mut out = String::new();
-        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op)).expect("writes");
+        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op), 0).expect("writes");
         assert_eq!(out, "[]");
     }
 
@@ -1670,12 +1748,15 @@ def "Mesh" (
         assert!(text.contains("delete madeUpList = [3]"), "{text}");
         assert!(text.contains("madeUpField = 1.50"), "{text}");
 
+        // The writer sorts metadata as C++ does, so compare the fields as a set.
         let reparsed = usda::parse(&text).expect("re-parses");
         let path = sdf::Path::new("/Mesh").unwrap();
-        assert_eq!(
-            data.spec(&path).expect("spec").fields,
-            reparsed.spec(&path).expect("spec").fields
-        );
+        let sorted = |data: &sdf::Data| {
+            let mut fields = data.spec(&path).expect("spec").fields.clone();
+            fields.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+            fields
+        };
+        assert_eq!(sorted(&data), sorted(&reparsed));
     }
 
     /// A field stored under a name of its own is written by its keyword:
@@ -2349,6 +2430,205 @@ def Xform "P" (
 
 "#;
         let parsed = Parser::new(source).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
+    }
+
+    /// A hand-written layer is written as OpenUSD 26.11 writes it
+    /// (`Sdf.Layer.OpenAsAnonymous(source).ExportToString()`), byte for byte:
+    /// metadata comment first and then sorted, nested dictionaries indented, a
+    /// reference's custom data on lines of its own, `<>` for an internal arc to
+    /// the default prim, variants sorted and selections as a dictionary, a
+    /// relationship's bare declaration left out unless it is custom, and the
+    /// layer header with its relocates last and no empty `doc` or false
+    /// `hasOwnedSubLayers`.
+    #[test]
+    fn metadata_as_cpp() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+(
+    relocates = {
+        </A/B>: </A/C>,
+        </A/D>: </A/E>
+    }
+    "layer comment"
+    doc = ""
+    upAxis = "Z"
+    hasOwnedSubLayers = false
+)
+
+def "P" (
+    kind = "component"
+    customData = {
+        int b = 1
+        dictionary nested = {
+            string s = "x"
+        }
+    }
+    "prim comment"
+    variants = {
+        string look = "red"
+        string size = "big"
+    }
+    prepend variantSets = ["size", "look"]
+    references = @r.usda@</R> (offset = 2; customData = {int n = 1})
+    hidden = true
+)
+{
+    custom rel r (doc = "d")
+    rel q
+    prepend rel q = </X>
+    custom rel c
+    add rel c = </Y>
+
+    variantSet "size" = {
+        "small" {
+        }
+        "big" {
+        }
+    }
+    variantSet "look" = {
+        "red" {
+        }
+    }
+}
+
+def "Q" (
+    references = <>
+    payload = <>
+)
+{
+}
+"#;
+        let written = r#"#usda 1.0
+(
+    "layer comment"
+    upAxis = "Z"
+    relocates = {
+        </A/B>: </A/C>, 
+        </A/D>: </A/E>
+    }
+)
+
+def "P" (
+    "prim comment"
+    customData = {
+        int b = 1
+        dictionary nested = {
+            string s = "x"
+        }
+    }
+    hidden = true
+    kind = "component"
+    references = [
+        @r.usda@</R> (
+            offset = 2
+            customData = {
+                int n = 1
+            }
+        )
+    ]
+    variants = {
+        string look = "red"
+        string size = "big"
+    }
+    prepend variantSets = ["size", "look"]
+)
+{
+    custom rel c
+    add rel c = </Y>
+    prepend rel q = </X>
+    custom rel r (
+        doc = "d"
+    )
+    variantSet "size" = {
+        "big" {
+
+        }
+        "small" {
+
+        }
+    }
+    variantSet "look" = {
+        "red" {
+
+        }
+    }
+}
+
+def "Q" (
+    payload = <>
+    references = <>
+)
+{
+}
+
+"#;
+        let parsed = Parser::new(source).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
+    }
+
+    /// A true `hasOwnedSubLayers` and a `doc` with text are written, as
+    /// OpenUSD 26.11 writes this header back.
+    #[test]
+    fn header_kept() {
+        let text = "#usda 1.0\n(\n    doc = \"kept\"\n    hasOwnedSubLayers = true\n)\n\n";
+        let parsed = usda::parser::Parser::new(text).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, text);
+    }
+
+    /// A variant set with no variants is not written, though the prim still
+    /// names it, as OpenUSD 26.11 writes a layer built with
+    /// `Sdf.VariantSetSpec(prim, "empty")` and a set `v` with the variants `b`
+    /// and `a`. The text grammar has no empty variant set, so the layer is
+    /// built in memory.
+    #[test]
+    fn empty_variant_set() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+def "Q" (
+    prepend variantSets = ["empty", "v"]
+)
+{
+    variantSet "v" = {
+        "b" {
+        }
+        "a" {
+        }
+    }
+}
+"#;
+        let written = r#"#usda 1.0
+
+def "Q" (
+    prepend variantSets = ["empty", "v"]
+)
+{
+    variantSet "v" = {
+        "a" {
+
+        }
+        "b" {
+
+        }
+    }
+}
+
+"#;
+        let mut parsed = Parser::new(source).parse().expect("parse");
+        let prim = path("/Q").unwrap();
+        parsed.insert(
+            prim.append_variant_selection("empty", "").unwrap(),
+            sdf::SpecData::new(SpecType::VariantSet),
+        );
+        parsed
+            .get_mut(&prim)
+            .unwrap()
+            .add(ChildrenKey::VariantSetChildren, Value::token_vec(["empty", "v"]));
         let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
         assert_eq!(emitted, written);
     }
