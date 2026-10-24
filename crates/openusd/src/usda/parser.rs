@@ -608,6 +608,15 @@ impl<'a> Parser<'a> {
 
             this.cursor.expect_punctuation('=')?;
 
+            if name == FieldKey::Permission.as_str() {
+                ensure!(list_op.is_none(), "permission does not support list ops");
+                return this.read_permission(spec);
+            }
+            if name == FieldKey::SymmetryFunction.as_str() {
+                ensure!(list_op.is_none(), "symmetryFunction does not support list ops");
+                return this.read_symmetry_function(spec);
+            }
+
             let Some(declared) = sdf::registered_field_type(&name) else {
                 return record_unregistered_metadata(&mut this.cursor, spec, &name, list_op.as_ref())
                     .with_context(|| format!("Unable to record attribute metadata value for {name}"));
@@ -631,6 +640,37 @@ impl<'a> Parser<'a> {
             Ok(())
         })?;
 
+        Ok(())
+    }
+
+    /// `permission`'s value, the bare `public` or `private` (C++
+    /// `PermissionMetadata`).
+    fn read_permission(&mut self, spec: &mut sdf::SpecData) -> Result<(), RawError> {
+        let permission = match self.cursor.expect_identifier().context("Unable to parse permission")? {
+            "public" => sdf::Permission::Public,
+            "private" => sdf::Permission::Private,
+            other => bail!("Invalid permission value: {other}"),
+        };
+        spec.add(FieldKey::Permission, sdf::Value::Permission(permission));
+        Ok(())
+    }
+
+    /// `symmetryFunction`'s value, a bare identifier that may be left out
+    /// (C++ `SymmetryFunctionMetadata`), which authors an empty function.
+    fn read_symmetry_function(&mut self, spec: &mut sdf::SpecData) -> Result<(), RawError> {
+        // The function is optional and ends at the line (C++
+        // `SymmetryFunctionMetadata`'s `opt<Identifier>`), so an empty one
+        // never takes the next field's name.
+        let same_line = !self.cursor.source()[self.cursor.consumed_end()..self.cursor.next_offset()].contains('\n');
+        let function = match self.cursor.peek()? {
+            Some(Token::Identifier(name) | Token::NamespacedIdentifier(name)) if same_line => {
+                let name = *name;
+                self.cursor.bump()?;
+                name
+            }
+            _ => "",
+        };
+        spec.add(FieldKey::SymmetryFunction, sdf::Value::token(function));
         Ok(())
     }
 
@@ -737,6 +777,7 @@ impl<'a> Parser<'a> {
             Token::CustomData => "customData",
             Token::Doc => FieldKey::Documentation.as_str(),
             Token::Permission => FieldKey::Permission.as_str(),
+            Token::SymmetryFunction => FieldKey::SymmetryFunction.as_str(),
             other => bail!("Unexpected metadata name token: {other:?}"),
         };
 
@@ -835,13 +876,11 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Permission.as_str() => {
                 ensure!(list_op.is_none(), "permission does not support list ops");
-                let value = self.cursor.expect_identifier().context("Unable to parse permission")?;
-                let perm = match value {
-                    "public" => sdf::Permission::Public,
-                    "private" => sdf::Permission::Private,
-                    other => bail!("Invalid permission value: {other}"),
-                };
-                spec.add(FieldKey::Permission, sdf::Value::Permission(perm));
+                self.read_permission(spec)?;
+            }
+            n if n == FieldKey::SymmetryFunction.as_str() => {
+                ensure!(list_op.is_none(), "symmetryFunction does not support list ops");
+                self.read_symmetry_function(spec)?;
             }
             n if n == FieldKey::Prefix.as_str() => {
                 ensure!(list_op.is_none(), "prefix does not support list ops");
