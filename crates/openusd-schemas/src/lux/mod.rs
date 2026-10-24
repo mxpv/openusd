@@ -37,7 +37,9 @@
 //! [`ShadowAPI`], [`LightFilter`] and [`PluginLightFilter`] are
 //! [`shade::Connectable`](crate::shade::Connectable), and a prim with
 //! `LightAPI` or of a `LightFilter` type is a container whose inputs connect
-//! across scopes, without encapsulation.
+//! across scopes, without encapsulation. [`PluginLight::node_def`] and
+//! [`PluginLightFilter::node_def`] identify the shader of a light or filter a
+//! renderer plugin defines.
 //!
 //! # Example
 //!
@@ -81,6 +83,7 @@ mod connectable;
 mod dome;
 mod light;
 mod light_list;
+mod plugin;
 
 pub use blackbody::blackbody_rgb;
 pub(crate) use connectable::register_behaviors;

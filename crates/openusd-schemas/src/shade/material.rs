@@ -8,13 +8,11 @@ use openusd::Result;
 use openusd::pcp;
 use openusd::sdf;
 use openusd::tf;
-use openusd::usd;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 
 use super::ConnectableContext;
-use super::node_def;
 use super::tokens;
 use super::utils::ProducerFilter;
 use super::{AttributeType, Connectable, Material, NodeDefAPI, Output, Shader, ShadingAttribute};
@@ -22,105 +20,10 @@ use crate::SchemaError;
 
 impl Shader {
     /// The `UsdShadeNodeDefAPI` view of this shader, which is where upstream
-    /// declares what implementation a shader stands for.
+    /// declares what implementation a shader stands for (C++
+    /// `UsdShadeShader` forwards each `NodeDefAPI` query to it).
     pub fn node_def(&self) -> NodeDefAPI {
         NodeDefAPI::from_prim_unchecked((**self).clone())
-    }
-
-    /// The Sdr registry identifier, e.g. `UsdPreviewSurface` or `UsdUVTexture`.
-    /// C++ `UsdShadeShader::GetIdAttr` (via `UsdShadeNodeDefAPI`).
-    ///
-    /// Type `uniform token`. Fetch with `get::<tf::Token>()?`.
-    pub fn id_attr(&self) -> usd::Attribute {
-        self.node_def().id_attr()
-    }
-
-    /// Author `info:id` (`uniform token`) (C++ `CreateIdAttr`). Authoring an id
-    /// implies `info:implementationSource = "id"` (the schema default), so the
-    /// latter is left unauthored unless set explicitly.
-    pub fn create_id_attr(&self) -> Result<usd::Attribute> {
-        self.node_def().create_id_attr()
-    }
-
-    /// The composed `info:id` as a string when identifier mode is active — the
-    /// convenience behind dispatching on shader type (C++
-    /// `UsdShadeShader::GetShaderId`).
-    pub fn id(&self) -> Result<Option<String>> {
-        if self.implementation_source()? != super::ImplementationSource::Id {
-            return Ok(None);
-        }
-        Ok(self.id_attr().get::<tf::Token>()?.map(Into::into))
-    }
-
-    /// Which `info:*` attribute carries the implementation
-    /// (`id` / `sourceAsset` / `sourceCode`).
-    /// C++ `UsdShadeShader::GetImplementationSourceAttr`.
-    ///
-    /// Type `uniform token`. Fetch with
-    /// `get::<`[`ImplementationSource`](super::ImplementationSource)`>()?`
-    /// (defaults to [`ImplementationSource::Id`](super::ImplementationSource::Id)).
-    pub fn implementation_source_attr(&self) -> usd::Attribute {
-        self.node_def().implementation_source_attr()
-    }
-
-    /// Author `info:implementationSource` (`uniform token`)
-    /// (C++ `CreateImplementationSourceAttr`). Pass an
-    /// [`ImplementationSource`](super::ImplementationSource) to `set`.
-    pub fn create_implementation_source_attr(&self) -> Result<usd::Attribute> {
-        self.node_def().create_implementation_source_attr()
-    }
-
-    /// Path to a shader source asset parsed by an Sdr plugin (e.g. an `.mdl` /
-    /// `.osl` file); pairs with `info:implementationSource = "sourceAsset"`.
-    /// C++ `UsdShadeShader::GetSourceAssetAttr`.
-    ///
-    /// Type `uniform asset`. Fetch with `get::<sdf::AssetPath>()?`.
-    pub fn source_asset_attr(&self) -> usd::Attribute {
-        self.attribute(node_def::INFO_SOURCE_ASSET)
-    }
-
-    /// Author `info:sourceAsset` (`uniform asset`) (C++ `SetSourceAsset`).
-    pub fn create_source_asset_attr(&self) -> Result<usd::Attribute> {
-        Ok(self
-            .attribute_builder(node_def::INFO_SOURCE_ASSET, sdf::ValueTypeName::ASSET)
-            .custom(false)
-            .variability(sdf::Variability::Uniform)
-            .build()?)
-    }
-
-    /// Selects one definition inside a multi-shader source asset.
-    /// C++ `UsdShadeShader::GetSourceAssetSubIdentifierAttr`.
-    ///
-    /// Type `uniform token`. Fetch with `get::<tf::Token>()?`.
-    pub fn source_asset_subidentifier_attr(&self) -> usd::Attribute {
-        self.attribute(node_def::INFO_SOURCE_ASSET_SUBIDENTIFIER)
-    }
-
-    /// Author `info:sourceAsset:subIdentifier` (`uniform token`).
-    pub fn create_source_asset_subidentifier_attr(&self) -> Result<usd::Attribute> {
-        Ok(self
-            .attribute_builder(node_def::INFO_SOURCE_ASSET_SUBIDENTIFIER, sdf::ValueTypeName::TOKEN)
-            .custom(false)
-            .variability(sdf::Variability::Uniform)
-            .build()?)
-    }
-
-    /// Inline shader source; pairs with
-    /// `info:implementationSource = "sourceCode"`.
-    /// C++ `UsdShadeShader::GetSourceCodeAttr`.
-    ///
-    /// Type `uniform string`. Fetch with `get::<String>()?`.
-    pub fn source_code_attr(&self) -> usd::Attribute {
-        self.attribute(node_def::INFO_SOURCE_CODE)
-    }
-
-    /// Author `info:sourceCode` (`uniform string`) (C++ `SetSourceCode`).
-    pub fn create_source_code_attr(&self) -> Result<usd::Attribute> {
-        Ok(self
-            .attribute_builder(node_def::INFO_SOURCE_CODE, sdf::ValueTypeName::STRING)
-            .custom(false)
-            .variability(sdf::Variability::Uniform)
-            .build()?)
     }
 }
 

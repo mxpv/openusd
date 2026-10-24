@@ -203,7 +203,8 @@ fn view(
             /// `info:id`.
             pub fn from_shader(shader: #shade::Shader) -> ::openusd::Result<::std::option::Option<Self>> {
                 ::std::result::Result::Ok(
-                    (shader.id()?.as_deref() == ::std::option::Option::Some(Self::ID)).then_some(Self(shader)),
+                    (shader.node_def().shader_id()?.as_deref() == ::std::option::Option::Some(Self::ID))
+                        .then_some(Self(shader)),
                 )
             }
 
@@ -223,7 +224,7 @@ fn view(
             /// and views it.
             pub fn define(stage: &::openusd::usd::Stage, path: impl ::openusd::sdf::IntoPath) -> ::openusd::Result<Self> {
                 let shader = #shade::Shader::define(stage, path)?;
-                shader.create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
+                shader.node_def().create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
                 ::std::result::Result::Ok(Self(shader))
             }
 

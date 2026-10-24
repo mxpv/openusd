@@ -49,9 +49,10 @@
 //! [`MaterialBindingAPI::create_subset`] and [`MaterialBindingAPI::subsets`]
 //! are the `materialBind` family of [`Subset`](crate::geom::Subset)s a prim's
 //! geometry is bound by.
-//! [`Shader::implementation_source`] and the source queries interpret the
+//! [`NodeDefAPI::implementation`] and the source queries interpret the
 //! active `NodeDef` implementation family, which the matching setters
-//! ([`Shader::set_source_asset`] and friends) select. [`SdrMetadata`] carries
+//! ([`NodeDefAPI::set_source_asset`] and friends) select. A shader reaches
+//! them through [`Shader::node_def`]. [`SdrMetadata`] carries
 //! the composed shader-registry metadata on shaders, inputs, and outputs.
 //! To find every shading prim on a stage, traverse it and gate each prim
 //! through the typed `get` (e.g. [`Material::get`]), mirroring C++
@@ -68,7 +69,7 @@
 //!     .in_memory("scene.usda").unwrap();
 //!
 //! let surface = shade::Shader::define(&stage, "/Mat/Surface").unwrap();
-//! surface.create_id_attr().unwrap().set(sdf::Value::token("UsdPreviewSurface")).unwrap();
+//! surface.node_def().create_id_attr().unwrap().set(sdf::Value::token("UsdPreviewSurface")).unwrap();
 //! surface.create_input("roughness", "float").unwrap().set(0.4_f32).unwrap();
 //! let terminal = surface.create_output("surface", "token").unwrap();
 //!
@@ -80,7 +81,7 @@
 //! let terminal = mat.surface_source(&[]).unwrap().expect("surface terminal");
 //! let source = terminal.sources().first().expect("surface source");
 //! let shader = source.shader().expect("shader-typed source");
-//! assert_eq!(shader.id().unwrap().as_deref(), Some("UsdPreviewSurface"));
+//! assert_eq!(shader.node_def().shader_id().unwrap().as_deref(), Some("UsdPreviewSurface"));
 //! ```
 
 openusd::include_schema!("usdShade");

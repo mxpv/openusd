@@ -41,7 +41,8 @@ impl TinySurface {
         shader: crate::shade::Shader,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
         ::std::result::Result::Ok(
-            (shader.id()?.as_deref() == ::std::option::Option::Some(Self::ID))
+            (shader.node_def().shader_id()?.as_deref()
+                == ::std::option::Option::Some(Self::ID))
                 .then_some(Self(shader)),
         )
     }
@@ -65,7 +66,7 @@ impl TinySurface {
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<Self> {
         let shader = crate::shade::Shader::define(stage, path)?;
-        shader.create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
+        shader.node_def().create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
         ::std::result::Result::Ok(Self(shader))
     }
     /// The `Shader` this node is.
@@ -148,7 +149,8 @@ impl TinyReaderFloat2 {
         shader: crate::shade::Shader,
     ) -> ::openusd::Result<::std::option::Option<Self>> {
         ::std::result::Result::Ok(
-            (shader.id()?.as_deref() == ::std::option::Option::Some(Self::ID))
+            (shader.node_def().shader_id()?.as_deref()
+                == ::std::option::Option::Some(Self::ID))
                 .then_some(Self(shader)),
         )
     }
@@ -172,7 +174,7 @@ impl TinyReaderFloat2 {
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<Self> {
         let shader = crate::shade::Shader::define(stage, path)?;
-        shader.create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
+        shader.node_def().create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
         ::std::result::Result::Ok(Self(shader))
     }
     /// The `Shader` this node is.

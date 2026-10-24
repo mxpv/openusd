@@ -142,7 +142,7 @@ if let Some(material) = shade::Material::get(&stage, "/World/Material")? {
     if let Some(terminal) = material.surface_source(&[])? {
         for source in terminal.sources() {
             if let Some(shader) = source.shader() {
-                println!("surface shader: {:?}", shader.id()?);
+                println!("surface shader: {:?}", shader.node_def().shader_id()?);
             }
         }
     }

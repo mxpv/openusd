@@ -145,13 +145,18 @@ fn author_then_read_back_roundtrip() -> Result<(), SchemaError> {
 
     // Texture → diffuseColor; scalar metallic/roughness.
     let tex = Shader::define(&stage, "/World/Looks/M/Albedo")?;
-    tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
+    tex.node_def()
+        .create_id_attr()?
+        .set(sdf::Value::token("UsdUVTexture"))?;
     tex.create_input("file", "asset")?
         .set(sdf::Value::AssetPath("./wood.png".into()))?;
     tex.create_output("rgb", "float3")?;
 
     let surface = Shader::define(&stage, "/World/Looks/M/Surface")?;
-    surface.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
+    surface
+        .node_def()
+        .create_id_attr()?
+        .set(sdf::Value::token("UsdPreviewSurface"))?;
     surface
         .create_input("diffuseColor", "color3f")?
         .set_connections(["/World/Looks/M/Albedo.outputs:rgb"])?;
@@ -208,10 +213,10 @@ def Shader "Source"
         .schema_registry(openusd_schemas::schema_registry())
         .open(scene.as_ref())?;
     let shader = Shader::get(&stage, "/Source")?.expect("Shader");
-    assert_eq!(shader.implementation_source()?, ImplementationSource::SourceAsset);
-    assert_eq!(shader.source_types()?, vec![tf::Token::from("osl")]);
+    assert_eq!(shader.node_def().implementation()?, ImplementationSource::SourceAsset);
+    assert_eq!(shader.node_def().source_types()?, vec![tf::Token::from("osl")]);
 
-    let asset = shader.source_asset("osl")?.expect("OSL source asset");
+    let asset = shader.node_def().source_asset("osl")?.expect("OSL source asset");
     assert_eq!(asset.authored_path, "./shader.osl");
     let resolved = source_path.canonicalize()?;
     assert_eq!(asset.resolved_path(), Some(resolved.to_string_lossy().as_ref()));
@@ -228,8 +233,8 @@ fn authors_node_def_source() -> Result<()> {
         .schema_registry(openusd_schemas::schema_registry())
         .in_memory("anon.usda")?;
     let shader = Shader::define(&stage, "/Source")?;
-    shader.set_source_asset("./shader.mdl", "mdl")?;
-    shader.set_source_asset_subidentifier("Main", "mdl")?;
+    shader.node_def().set_source_asset("./shader.mdl", "mdl")?;
+    shader.node_def().set_source_asset_subidentifier("Main", "mdl")?;
     shader.set_sdr_metadata_by_key("role", "surface")?;
     shader
         .create_input("gain", "float")?
@@ -242,13 +247,16 @@ fn authors_node_def_source() -> Result<()> {
         .schema_registry(openusd_schemas::schema_registry())
         .open(&scene)?;
     let shader = Shader::get(&stage, "/Source")?.expect("Shader");
-    assert_eq!(shader.implementation_source()?, ImplementationSource::SourceAsset);
-    assert_eq!(shader.source_types()?, vec![tf::Token::from("mdl")]);
+    assert_eq!(shader.node_def().implementation()?, ImplementationSource::SourceAsset);
+    assert_eq!(shader.node_def().source_types()?, vec![tf::Token::from("mdl")]);
     assert_eq!(
-        shader.source_asset("mdl")?.expect("MDL asset").authored_path,
+        shader.node_def().source_asset("mdl")?.expect("MDL asset").authored_path,
         "./shader.mdl"
     );
-    assert_eq!(shader.source_asset_subidentifier("mdl")?.as_deref(), Some("Main"));
+    assert_eq!(
+        shader.node_def().source_asset_subidentifier("mdl")?.as_deref(),
+        Some("Main")
+    );
     assert_eq!(shader.sdr_metadata_by_key("role")?.as_deref(), Some("surface"));
 
     let gain = shader.inputs()?.pop().expect("gain input");
@@ -261,14 +269,17 @@ fn authors_node_def_source() -> Result<()> {
 fn shader_id_and_inputs() -> Result<()> {
     let stage = memory()?;
     let shader = Shader::define(&stage, "/Mat/Surface")?;
-    shader.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
+    shader
+        .node_def()
+        .create_id_attr()?
+        .set(sdf::Value::token("UsdPreviewSurface"))?;
     shader
         .create_input("diffuseColor", "color3f")?
         .set(sdf::Value::vec3f(0.8_f32, 0.2, 0.2))?;
     shader.create_output("surface", "token")?;
 
     let shader = Shader::get(&stage, "/Mat/Surface")?.expect("Shader");
-    assert_eq!(shader.id()?.as_deref(), Some("UsdPreviewSurface"));
+    assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("UsdPreviewSurface"));
     assert_eq!(
         shader.input("diffuseColor").get::<sdf::Value>()?,
         Some(sdf::Value::vec3f(0.8_f32, 0.2, 0.2))
@@ -301,19 +312,15 @@ fn lists_skip_relationships() -> Result<()> {
 fn shader_source_asset() -> Result<()> {
     let stage = memory()?;
     let shader = Shader::define(&stage, "/Mat/MdlShader")?;
-    shader
-        .create_implementation_source_attr()?
-        .set(ImplementationSource::SourceAsset)?;
-    shader
-        .create_source_asset_attr()?
-        .set(sdf::Value::AssetPath("./OmniPBR.mdl".into()))?;
-    shader
-        .create_source_asset_subidentifier_attr()?
-        .set(sdf::Value::token("OmniPBR"))?;
+    shader.node_def().set_source_asset("./OmniPBR.mdl", "")?;
+    shader.node_def().set_source_asset_subidentifier("OmniPBR", "")?;
 
     let shader = Shader::get(&stage, "/Mat/MdlShader")?.expect("Shader");
     assert_eq!(
-        shader.implementation_source_attr().get::<ImplementationSource>()?,
+        shader
+            .node_def()
+            .implementation_source_attr()
+            .get::<ImplementationSource>()?,
         Some(ImplementationSource::SourceAsset)
     );
     Ok(())
@@ -323,6 +330,7 @@ fn shader_source_asset() -> Result<()> {
 fn material_surface_terminal() -> Result<(), SchemaError> {
     let stage = memory()?;
     Shader::define(&stage, "/Mat/Surface")?
+        .node_def()
         .create_id_attr()?
         .set(sdf::Value::token("UsdPreviewSurface"))?;
     Shader::get(&stage, "/Mat/Surface")?

@@ -11,7 +11,7 @@ use openusd::usd::SchemaBase;
 use openusd::{sdf, tf, usd};
 
 use super::tokens;
-use super::{ImplementationSource, Shader};
+use super::{ImplementationSource, NodeDefAPI, Shader};
 
 /// The namespace a shader's source is named under. A render context interposes
 /// its own name after it, as in `info:<context>:sourceAsset`, and no schema
@@ -68,14 +68,28 @@ const SOURCE_CODE: SourceAttr = SourceAttr {
     type_name: sdf::ValueTypeName::STRING,
 };
 
-impl Shader {
-    /// The active shader implementation family.
+impl NodeDefAPI {
+    /// The active shader implementation family (C++
+    /// `UsdShadeNodeDefAPI::GetImplementationSource`).
     ///
-    /// An unauthored, mistyped, or unrecognized
-    /// `info:implementationSource` resolves to [`ImplementationSource::Id`],
-    /// matching C++ `UsdShadeNodeDefAPI::GetImplementationSource`.
-    pub fn implementation_source(&self) -> Result<ImplementationSource> {
-        implementation_source(self)
+    /// The attribute is read as its raw token: an unauthored, mistyped, or
+    /// unrecognized `info:implementationSource` resolves to
+    /// [`ImplementationSource::Id`].
+    pub fn implementation(&self) -> Result<ImplementationSource> {
+        let value = self.implementation_source_attr().get::<sdf::Value>()?;
+        Ok(value
+            .and_then(sdf::Value::try_as_token)
+            .and_then(ImplementationSource::from_token)
+            .unwrap_or_default())
+    }
+
+    /// The composed `info:id` when identifier mode is active, and `None` in
+    /// the other modes (C++ `UsdShadeNodeDefAPI::GetShaderId`).
+    pub fn shader_id(&self) -> Result<Option<tf::Token>> {
+        if self.implementation()? != ImplementationSource::Id {
+            return Ok(None);
+        }
+        self.id()
     }
 
     /// The composed source asset for `source_type` when source-asset mode is
@@ -152,18 +166,25 @@ impl Shader {
         )
     }
 
-    /// Author `info:id` and select identifier mode (C++ `SetShaderId`).
+    /// Author `info:id` and select identifier mode, as one edit (C++
+    /// `SetShaderId`).
     ///
-    /// `info:implementationSource` is written only when some layer authors one.
-    /// Identifier mode is the schema fallback, so a shader that never selected a
-    /// family needs no opinion, while one that did has an opinion to correct —
-    /// the test C++ applies when it writes the attribute sparsely.
-    pub fn set_id(&self, id: impl Into<tf::Token>) -> Result<usd::Attribute> {
-        if self.implementation_source_attr().has_authored_value()? {
-            self.create_implementation_source_attr()?
-                .set(ImplementationSource::Id)?;
-        }
-        Ok(self.create_id_attr()?.set(sdf::Value::Token(id.into()))?)
+    /// `info:implementationSource` is written sparsely, as C++ writes it: an
+    /// unauthored attribute whose fallback is already `id` gets no opinion,
+    /// and an authored one is corrected.
+    pub fn set_shader_id(&self, id: impl Into<tf::Token>) -> Result<usd::Attribute> {
+        let source = self.implementation_source_attr();
+        let id_mode = sdf::Value::token(ImplementationSource::Id.as_token());
+        let sparse = !source.has_authored_value()? && source.get::<sdf::Value>()? == Some(id_mode);
+        Ok(self.stage().edit(|edit| {
+            if !sparse {
+                self.implementation_source_attr_builder()
+                    .set(ImplementationSource::Id)
+                    .in_edit(edit)
+                    .build()?;
+            }
+            self.id_attr_builder().set(id.into()).in_edit(edit).build()
+        })?)
     }
 
     /// The source types declared for the active source-asset or source-code
@@ -175,7 +196,7 @@ impl Shader {
     /// reports. Universal properties carry no source type and are not included.
     /// Identifier mode returns an empty list.
     pub fn source_types(&self) -> Result<Vec<tf::Token>> {
-        let suffix = match implementation_source(self)? {
+        let suffix = match self.implementation()? {
             ImplementationSource::Id => return Ok(Vec::new()),
             ImplementationSource::SourceAsset => tokens::SOURCE_ASSET,
             ImplementationSource::SourceCode => tokens::SOURCE_CODE,
@@ -187,7 +208,9 @@ impl Shader {
             .filter_map(|name| source_type(name.as_str(), suffix).map(tf::Token::from))
             .collect())
     }
+}
 
+impl Shader {
     /// The composed shader-level `sdrMetadata` dictionary.
     ///
     /// TODO(perf): every query in this group re-composes and clones the whole
@@ -260,21 +283,21 @@ impl Shader {
 
 /// Reads an implementation-specific value, with universal fallback when the
 /// requested attribute is not defined.
-fn source_value<T>(prim: &usd::Prim, attr: &SourceAttr, source_type: &str) -> Result<Option<T>>
+fn source_value<T>(node_def: &NodeDefAPI, attr: &SourceAttr, source_type: &str) -> Result<Option<T>>
 where
     T: sdf::FromValue,
     T::Error: Into<openusd::Error>,
 {
-    if implementation_source(prim)? != attr.implementation {
+    if node_def.implementation()? != attr.implementation {
         return Ok(None);
     }
 
     let name = source_property_name(attr, source_type);
-    let attribute = prim.attribute(name.as_ref());
+    let attribute = node_def.attribute(name.as_ref());
     if source_type.is_empty() || attribute.is_defined()? {
         return attribute.get();
     }
-    prim.attribute(attr.universal_name).get()
+    node_def.attribute(attr.universal_name).get()
 }
 
 /// Authors a `NodeDef` source attribute together with the implementation
@@ -282,41 +305,29 @@ where
 /// `info:implementationSource` alongside its own value, so authoring a source
 /// is what activates it.
 ///
-/// Both properties are authored as one stage edit, so the shader never composes
+/// Both properties are authored as one stage edit. The prim never composes
 /// with a source selected and no source to read.
 fn set_source_value(
-    shader: &Shader,
+    node_def: &NodeDefAPI,
     attr: &SourceAttr,
     source_type: &str,
     value: sdf::Value,
 ) -> Result<usd::Attribute> {
     let name = source_property_name(attr, source_type);
-    Ok(shader.stage().edit(|edit| {
-        let shader = edit.prim(shader.path())?;
-
-        shader
-            .attribute_builder(tokens::INFO_IMPLEMENTATION_SOURCE, sdf::ValueTypeName::TOKEN)
-            .custom(false)
-            .variability(sdf::Variability::Uniform)
+    Ok(node_def.stage().edit(|edit| {
+        node_def
+            .implementation_source_attr_builder()
             .set(attr.implementation)
+            .in_edit(edit)
             .build()?;
-
-        shader
+        node_def
             .attribute_builder(name.as_ref(), attr.type_name.clone())
             .custom(false)
             .variability(sdf::Variability::Uniform)
             .set(value)
+            .in_edit(edit)
             .build()
     })?)
-}
-
-/// Resolves the active implementation family on a `NodeDef` prim.
-fn implementation_source(prim: &usd::Prim) -> Result<ImplementationSource> {
-    let value = prim.attribute(tokens::INFO_IMPLEMENTATION_SOURCE).get::<sdf::Value>()?;
-    Ok(value
-        .and_then(sdf::Value::try_as_token)
-        .and_then(ImplementationSource::from_token)
-        .unwrap_or_default())
 }
 
 /// Builds a universal or source-type-specific `NodeDef` property name.
@@ -473,7 +484,7 @@ mod tests {
     /// Source types sorted, since the order follows the prim's property order
     /// and that depends on what the schema registry declares for the type.
     fn sorted_source_types(shader: &Shader) -> Result<Vec<String>> {
-        let mut types = shader.source_types()?;
+        let mut types = shader.node_def().source_types()?;
         types.sort();
         Ok(types.into_iter().map(String::from).collect())
     }
@@ -491,21 +502,23 @@ mod tests {
     fn implementation_selects_id() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
-        shader.create_id_attr()?.set(sdf::Value::token("Example"))?;
+        shader.node_def().create_id_attr()?.set(sdf::Value::token("Example"))?;
 
-        assert_eq!(shader.implementation_source()?, ImplementationSource::Id);
-        assert_eq!(shader.id()?.as_deref(), Some("Example"));
+        assert_eq!(shader.node_def().implementation()?, ImplementationSource::Id);
+        assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
 
         shader
+            .node_def()
             .create_implementation_source_attr()?
             .set(sdf::Value::token("invalid"))?;
-        assert_eq!(shader.implementation_source()?, ImplementationSource::Id);
-        assert_eq!(shader.id()?.as_deref(), Some("Example"));
+        assert_eq!(shader.node_def().implementation()?, ImplementationSource::Id);
+        assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
 
         shader
+            .node_def()
             .implementation_source_attr()
             .set(ImplementationSource::SourceAsset)?;
-        assert_eq!(shader.id()?, None);
+        assert_eq!(shader.node_def().shader_id()?, None);
         Ok(())
     }
 
@@ -513,12 +526,9 @@ mod tests {
     fn source_asset_fallback() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
-        shader
-            .create_implementation_source_attr()?
-            .set(ImplementationSource::SourceAsset)?;
-        shader
-            .create_source_asset_attr()?
-            .set(sdf::Value::AssetPath("./universal.osl".into()))?;
+        let node_def = shader.node_def();
+        node_def.set_source_asset("./universal.osl", "")?;
+        node_def.set_source_asset_subidentifier("Universal", "")?;
         shader
             .create_attribute("info:osl:sourceAsset", "asset")?
             .set(sdf::Value::AssetPath("./specific.osl".into()))?;
@@ -527,35 +537,24 @@ mod tests {
             .create_attribute("info:osl:sourceAsset:subIdentifier", "token")?
             .set(sdf::Value::token("Specific"))?;
         shader
-            .create_source_asset_subidentifier_attr()?
-            .set(sdf::Value::token("Universal"))?;
-        shader
             .create_attribute("info:ri:sourceCode", "string")?
             .set("inactive")?;
 
+        let asset = |source_type: &str| -> Result<Option<String>> {
+            Ok(node_def.source_asset(source_type)?.map(|asset| asset.authored_path))
+        };
+        assert_eq!(asset("osl")?.as_deref(), Some("./specific.osl"));
+        assert_eq!(asset("ri")?.as_deref(), Some("./universal.osl"), "fallback asset");
         assert_eq!(
-            shader.source_asset("osl")?.expect("OSL asset").authored_path,
-            "./specific.osl"
+            asset("bad type")?.as_deref(),
+            Some("./universal.osl"),
+            "malformed source type falls back"
         );
-        assert_eq!(
-            shader.source_asset("ri")?.expect("fallback asset").authored_path,
-            "./universal.osl"
-        );
-        assert_eq!(
-            shader
-                .source_asset("bad type")?
-                .expect("malformed source type falls back")
-                .authored_path,
-            "./universal.osl"
-        );
-        assert_eq!(shader.source_asset("mdl")?, None);
-        assert_eq!(
-            shader.source_asset("")?.expect("universal asset").authored_path,
-            "./universal.osl"
-        );
-        assert_eq!(shader.source_asset_subidentifier("osl")?.as_deref(), Some("Specific"));
-        assert_eq!(shader.source_asset_subidentifier("ri")?.as_deref(), Some("Universal"));
-        assert_eq!(shader.source_asset_subidentifier("")?.as_deref(), Some("Universal"));
+        assert_eq!(asset("mdl")?, None);
+        assert_eq!(asset("")?.as_deref(), Some("./universal.osl"));
+        assert_eq!(node_def.source_asset_subidentifier("osl")?.as_deref(), Some("Specific"));
+        assert_eq!(node_def.source_asset_subidentifier("ri")?.as_deref(), Some("Universal"));
+        assert_eq!(node_def.source_asset_subidentifier("")?.as_deref(), Some("Universal"));
         assert_eq!(sorted_source_types(&shader)?, ["mdl", "osl"]);
         Ok(())
     }
@@ -564,10 +563,7 @@ mod tests {
     fn source_code_selection() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
-        shader
-            .create_implementation_source_attr()?
-            .set(ImplementationSource::SourceCode)?;
-        shader.create_source_code_attr()?.set("universal")?;
+        shader.node_def().set_source_code("universal", "")?;
         shader
             .create_attribute("info:osl:sourceCode", "string")?
             .set("specific")?;
@@ -578,11 +574,11 @@ mod tests {
             .create_attribute("info:mdl:sourceAsset", "asset")?
             .set(sdf::Value::AssetPath("./inactive.mdl".into()))?;
 
-        assert_eq!(shader.source_code("osl")?.as_deref(), Some("specific"));
-        assert_eq!(shader.source_code("ri")?, None);
-        assert_eq!(shader.source_code("glsl")?.as_deref(), Some("universal"));
-        assert_eq!(shader.source_code("")?.as_deref(), Some("universal"));
-        assert_eq!(shader.source_asset("mdl")?, None);
+        assert_eq!(shader.node_def().source_code("osl")?.as_deref(), Some("specific"));
+        assert_eq!(shader.node_def().source_code("ri")?, None);
+        assert_eq!(shader.node_def().source_code("glsl")?.as_deref(), Some("universal"));
+        assert_eq!(shader.node_def().source_code("")?.as_deref(), Some("universal"));
+        assert_eq!(shader.node_def().source_asset("mdl")?, None);
         assert_eq!(sorted_source_types(&shader)?, ["osl", "ri"]);
         Ok(())
     }
@@ -594,34 +590,52 @@ mod tests {
 
         // An id needs no authored `info:implementationSource`: identifier mode
         // is the schema's own fallback, which the registry answers with.
-        shader.set_id("Example")?;
-        assert_eq!(shader.id()?.as_deref(), Some("Example"));
+        shader.node_def().set_shader_id("Example")?;
+        assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
         assert_eq!(
-            shader.implementation_source_attr().get()?,
+            shader.node_def().implementation_source_attr().get()?,
             Some(sdf::Value::token("id"))
         );
 
-        shader.set_source_asset("./shader.mdl", "mdl")?;
-        assert_eq!(shader.implementation_source()?, ImplementationSource::SourceAsset);
+        shader.node_def().set_source_asset("./shader.mdl", "mdl")?;
+        assert_eq!(shader.node_def().implementation()?, ImplementationSource::SourceAsset);
         assert_eq!(
-            shader.source_asset("mdl")?.expect("MDL asset").authored_path,
+            shader.node_def().source_asset("mdl")?.expect("MDL asset").authored_path,
             "./shader.mdl"
         );
-        assert_eq!(shader.id()?, None);
+        assert_eq!(shader.node_def().shader_id()?, None);
 
-        shader.set_source_asset_subidentifier("Main", "mdl")?;
-        assert_eq!(shader.source_asset_subidentifier("mdl")?.as_deref(), Some("Main"));
+        shader.node_def().set_source_asset_subidentifier("Main", "mdl")?;
+        assert_eq!(
+            shader.node_def().source_asset_subidentifier("mdl")?.as_deref(),
+            Some("Main")
+        );
 
         // Selecting an id again has a stale family to correct, so this time the
         // opinion is authored.
-        shader.set_id("Example")?;
-        assert_eq!(shader.implementation_source()?, ImplementationSource::Id);
-        assert_eq!(shader.id()?.as_deref(), Some("Example"));
+        shader.node_def().set_shader_id("Example")?;
+        assert_eq!(shader.node_def().implementation()?, ImplementationSource::Id);
+        assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
 
-        shader.set_source_code("shader Example() {}", "")?;
-        assert_eq!(shader.implementation_source()?, ImplementationSource::SourceCode);
-        assert_eq!(shader.source_code("")?.as_deref(), Some("shader Example() {}"));
-        assert_eq!(shader.source_types()?, Vec::<tf::Token>::new());
+        shader.node_def().set_source_code("shader Example() {}", "")?;
+        assert_eq!(shader.node_def().implementation()?, ImplementationSource::SourceCode);
+        assert_eq!(
+            shader.node_def().source_code("")?.as_deref(),
+            Some("shader Example() {}")
+        );
+        assert_eq!(shader.node_def().source_types()?, Vec::<tf::Token>::new());
+        Ok(())
+    }
+
+    /// A prim whose schema gives `info:implementationSource` no fallback gets
+    /// the `id` opinion written, as C++'s sparse write does.
+    #[test]
+    fn shader_id_without_fallback() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let node_def = NodeDefAPI::from_prim_unchecked(stage.define_prim("/Untyped")?);
+        node_def.set_shader_id("Example")?;
+        assert!(node_def.implementation_source_attr().has_authored_value()?);
+        assert_eq!(node_def.shader_id()?.as_deref(), Some("Example"));
         Ok(())
     }
 
@@ -641,16 +655,18 @@ mod tests {
         stage.set_edit_target(usd::EditTarget::for_layer(&weak_id))?;
         let shader = Shader::define(&stage, "/Shader")?;
         shader
+            .node_def()
             .create_implementation_source_attr()?
             .set(ImplementationSource::SourceCode)?;
         stage.set_edit_target(stage.edit_target_root())?;
         shader
+            .node_def()
             .create_implementation_source_attr()?
             .set(ImplementationSource::Id)?;
-        assert_eq!(shader.implementation_source()?, ImplementationSource::Id);
+        assert_eq!(shader.node_def().implementation()?, ImplementationSource::Id);
 
         stage.set_edit_target(usd::EditTarget::for_layer(&weak_id))?;
-        shader.set_id("Example")?;
+        shader.node_def().set_shader_id("Example")?;
 
         let weak = stage.layer(&weak_id).expect("weak layer").export_to_string()?;
         assert!(!weak.contains(tokens::SOURCE_CODE));

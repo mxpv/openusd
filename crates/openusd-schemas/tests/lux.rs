@@ -18,11 +18,12 @@ use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
     LightAPI, LightFilter, LightFilterExt, LightFilterSchema, LightList, LightListAPI, LightListCacheBehavior,
-    LightListMode, ListAPI, NonboundableLightBaseSchema, PluginLightFilter, PortalLight, PortalLightSchema, RectLight,
-    RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema, TextureFormat,
+    LightListMode, ListAPI, NonboundableLightBaseSchema, PluginLight, PluginLightFilter, PortalLight,
+    PortalLightSchema, RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema,
+    TextureFormat,
 };
 use openusd_schemas::shade::{
-    Connectable, ConnectableAPI, Input, NodeGraph, NodeGraphInterface, ProducerFilter, Shader,
+    Connectable, ConnectableAPI, ImplementationSource, Input, NodeGraph, NodeGraphInterface, ProducerFilter, Shader,
 };
 
 mod common;
@@ -976,5 +977,29 @@ fn light_container_sources() -> Result<(), SchemaError> {
     let consumers = graph.interface_input_consumers(false)?;
     let consumers = consumers.consumers(&gain).expect("gain is an interface input");
     assert_eq!(paths(consumers), [intensity.path().clone()]);
+    Ok(())
+}
+
+/// A plugin light's and a plugin filter's `NodeDefAPI` read and write the
+/// shader they stand for.
+#[test]
+fn plugin_light_node_def() -> Result<()> {
+    let stage = memory()?;
+    let light = PluginLight::define(&stage, "/Light")?.node_def();
+    light.set_shader_id("MyLight")?;
+    assert_eq!(light.shader_id()?.as_deref(), Some("MyLight"));
+    assert_eq!(light.implementation()?, ImplementationSource::Id);
+
+    light.set_source_asset("./light.osl", "osl")?;
+    assert_eq!(light.implementation()?, ImplementationSource::SourceAsset);
+    assert_eq!(
+        light.source_asset("osl")?.expect("OSL asset").authored_path,
+        "./light.osl"
+    );
+    assert_eq!(light.shader_id()?, None);
+
+    let filter = PluginLightFilter::define(&stage, "/Filter")?.node_def();
+    filter.set_shader_id("MyFilter")?;
+    assert_eq!(filter.shader_id()?.as_deref(), Some("MyFilter"));
     Ok(())
 }

@@ -24,7 +24,10 @@ mod tests {
     fn define_round_trip() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let surface = PreviewSurface::define(&stage, "/Mat/Surface")?;
-        assert_eq!(surface.shader().id()?.as_deref(), Some(tokens::USD_PREVIEW_SURFACE));
+        assert_eq!(
+            surface.shader().node_def().shader_id()?.as_deref(),
+            Some(tokens::USD_PREVIEW_SURFACE)
+        );
 
         let found = PreviewSurface::get(&stage, "/Mat/Surface")?.expect("a PreviewSurface");
         assert_eq!(found.shader().path(), surface.shader().path());
@@ -73,7 +76,10 @@ mod tests {
     fn other_id_refused() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Other")?;
-        shader.create_id_attr()?.set(sdf::Value::token("ND_standard_surface"))?;
+        shader
+            .node_def()
+            .create_id_attr()?
+            .set(sdf::Value::token("ND_standard_surface"))?;
         assert!(PreviewSurface::from_shader(shader)?.is_none());
         Ok(())
     }

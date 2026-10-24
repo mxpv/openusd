@@ -7,7 +7,7 @@
 //! the texture's `inputs:file` asset path. Renderer-specific shader dialects
 //! (MDL / OmniPBR / MaterialX `standard_surface`) are intentionally out of
 //! scope; consumers that need them dispatch on
-//! [`Shader::id`](super::Shader::id).
+//! [`NodeDefAPI::shader_id`](super::NodeDefAPI::shader_id).
 
 use openusd::Result;
 
@@ -233,7 +233,9 @@ mod tests {
     fn context_only_surface() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
+        surf.node_def()
+            .create_id_attr()?
+            .set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
         surf.create_output("surface", "token")?;
 
@@ -255,13 +257,17 @@ mod tests {
 
         // A UsdUVTexture feeding diffuseColor; roughness/metallic are scalars.
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
-        tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
+        tex.node_def()
+            .create_id_attr()?
+            .set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
             .set(sdf::Value::AssetPath("./albedo.png".into()))?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
+        surf.node_def()
+            .create_id_attr()?
+            .set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections(["/Mat/DiffuseTex.outputs:rgb"])?;
         surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
@@ -294,13 +300,17 @@ mod tests {
             .set(sdf::Value::AssetPath("./albedo.png".into()))?;
 
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
-        tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
+        tex.node_def()
+            .create_id_attr()?
+            .set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
             .set_connections(["/Mat.inputs:diffuseTexFile"])?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
+        surf.node_def()
+            .create_id_attr()?
+            .set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections(["/Mat/DiffuseTex.outputs:rgb"])?;
         surf.create_output("surface", "token")?;
@@ -316,7 +326,8 @@ mod tests {
     fn non_preview_surface_none() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        surf.create_id_attr()?
+        surf.node_def()
+            .create_id_attr()?
             .set(sdf::Value::token("ND_standard_surface_surfaceshader"))?;
         surf.create_output("surface", "token")?;
         Material::define(&stage, "/Mat")?
