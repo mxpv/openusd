@@ -31,6 +31,8 @@
 //! # Example
 //!
 //! ```
+//! use std::collections::BTreeMap;
+//!
 //! use openusd_schemas::vol::{self, VolumeFieldAssetSchema, VolumeSchema};
 //! use openusd::{sdf, usd};
 //!
@@ -50,7 +52,7 @@
 //!
 //! assert_eq!(
 //!     volume.field_paths().unwrap(),
-//!     vec![("density".to_string(), sdf::path("/Smoke/density").unwrap())],
+//!     BTreeMap::from([("density".to_string(), sdf::path("/Smoke/density").unwrap())]),
 //! );
 //! ```
 

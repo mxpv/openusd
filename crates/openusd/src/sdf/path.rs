@@ -319,8 +319,7 @@ impl Path {
         // `primvars:displayColor` — the same alphabet the path validator
         // accepts. A tail carrying structural characters (`}`, `]`) belongs to
         // a variant selection or target path, not a property.
-        let tail = &self.path[pos + 1..];
-        !tail.is_empty() && tail.chars().all(|c| c == ':' || is_identifier_cont(c))
+        is_property_name(&self.path[pos + 1..])
     }
 
     /// Returns `true` if this path's final component is a variant selection,
@@ -364,6 +363,17 @@ impl Path {
         let mut components = PathComponents::over(rest);
         let last = components.by_ref().last();
         components.remainder().is_empty() && matches!(last, Some(PathComponent::Prim(_)))
+    }
+
+    /// Returns `true` if this path names a property directly on a prim (C++
+    /// `SdfPath::IsPrimPropertyPath`): `/A.attr`, `/A{v=s}.attr` or the
+    /// relative `.attr`. A target path (`/A.rel[/T]`) and a relational
+    /// attribute (`/A.rel[/T].attr`) are not.
+    pub fn is_prim_property(&self) -> bool {
+        // The owner of `.attr` is the empty reflexive anchor.
+        self.split_property().is_some_and(|(owner, name)| {
+            is_property_name(name) && (owner.is_empty() || owner.is_prim() || owner.is_variant_selection())
+        })
     }
 
     /// Returns the variant set name of the deepest `{set=sel}` (or `{set=}`)
@@ -1233,6 +1243,12 @@ fn is_identifier_cont(c: char) -> bool {
     c.is_ascii_digit() || is_identifier_start(c)
 }
 
+/// Whether `name` is a non-empty run of identifier characters and the `:`
+/// namespace delimiter, the alphabet of one property name.
+fn is_property_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c == ':' || is_identifier_cont(c))
+}
+
 /// Whether `c` may appear in a variant set or selection name: identifier
 /// characters plus `|`, `-`, and `.` (C++ `SdfSchemaBase`'s variant
 /// identifier alphabet).
@@ -1819,6 +1835,34 @@ pub(crate) mod tests {
         for (path, expected) in cases {
             assert_eq!(Path::new(path).unwrap().is_property(), expected);
         }
+    }
+
+    #[test]
+    fn is_prim_property() {
+        for path in [
+            "/A.attr",
+            "/A.inputs:x",
+            "/A{v=s}B.attr",
+            "/A{v=s}.attr",
+            "../B.attr",
+            ".attr",
+        ] {
+            assert!(raw(path).is_prim_property(), "{path}");
+        }
+        for path in [
+            "/",
+            "/A",
+            "/A{v=s}",
+            "/A.rel[/T]",
+            "/A.rel[/T].attr",
+            "/A.attr[/T.x]",
+            "/A.attr.mapper[/T]",
+            "/A.attr.mapper[/T].arg",
+        ] {
+            assert!(!raw(path).is_prim_property(), "{path}");
+        }
+        // A relational attribute is a property, though not one on a prim.
+        assert!(raw("/A.rel[/T].attr").is_property());
     }
 
     #[test]

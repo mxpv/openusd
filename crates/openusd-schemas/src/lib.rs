@@ -59,6 +59,8 @@
 //! reads the properties they all share. It defines nothing, no prim being of
 //! that type itself.
 
+#[cfg(any(feature = "skel", feature = "vol"))]
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -182,6 +184,14 @@ pub enum SchemaError {
     /// A volume field relationship needs a non-empty field name.
     #[error("Volume field name must not be empty")]
     EmptyFieldName,
+
+    /// A volume field target is neither a prim nor a property directly on
+    /// one (C++ `SdfPath::IsPrimPath` and `IsPrimPropertyPath`).
+    #[error("Volume field target {path} is neither a prim nor a prim property")]
+    FieldTarget {
+        /// The refused target.
+        path: sdf::Path,
+    },
 
     /// A labels query needs a taxonomy to read labels under.
     #[error("Labels query taxonomy must not be empty")]
@@ -698,6 +708,17 @@ where
     match attr.has_authored_value()? {
         true => attr.get_at(time),
         false => Ok(None),
+    }
+}
+
+/// `name` under `namespace`, a prefix ending in `:`, and `name` unchanged when
+/// it already starts with it (C++ `_MakeNamespaced` on `UsdVolVolume` and
+/// `UsdSkelBlendShape`).
+#[cfg(any(feature = "skel", feature = "vol"))]
+pub(crate) fn namespaced<'a>(namespace: &str, name: &'a str) -> Cow<'a, str> {
+    match name.starts_with(namespace) {
+        true => Cow::Borrowed(name),
+        false => Cow::Owned(format!("{namespace}{name}")),
     }
 }
 

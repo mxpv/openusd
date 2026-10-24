@@ -1,11 +1,15 @@
 //! Integration test for the `UsdVol` schema views against a fixture.
 
+use std::collections::BTreeMap;
+
 use openusd::Result;
 
 use openusd::gf;
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{self, Stage};
+use openusd_schemas::SchemaError;
+use openusd_schemas::geom;
 use openusd_schemas::vol::{
     self, Field3DAsset, Field3DAssetSchema, OpenVDBAsset, OpenVDBAssetSchema, ParticleField3DGaussianSplatSchema,
     SplatData, VectorDataRoleHint, VolumeFieldAssetSchema,
@@ -22,10 +26,10 @@ fn volume_and_fields_from_fixture() -> Result<()> {
     let v = vol::Volume::get(&stage, sdf::path("/Smoke")?)?.expect("Volume");
     assert_eq!(
         v.field_paths()?,
-        vec![
+        BTreeMap::from([
             ("density".to_string(), sdf::path("/Smoke/density")?),
             ("temperature".to_string(), sdf::path("/Smoke/temperature")?),
-        ],
+        ]),
     );
 
     let vdb = vol::OpenVDBAsset::get(&stage, sdf::path("/Smoke/density")?)?.expect("OpenVDBAsset");
@@ -153,5 +157,88 @@ fn splat_precision_at_earliest_time() -> Result<()> {
         .set_at(vec![gf::vec3f(0.0, 0.0, 0.0)], usd::TimeCode::from(1.0))?
         .set_at(Vec::<gf::Vec3f>::new(), usd::TimeCode::from(2.0))?;
     assert!(filled.uses_float(SplatData::Positions)?);
+    Ok(())
+}
+
+/// `testUsdVolVolume.py:test_VolumeFieldManagement`: bindings composed through
+/// a reference, blocked and re-established on the referencing prim.
+#[test]
+fn field_rels_referenced() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    geom::Xform::define(&stage, "/base")?;
+    let vol = vol::Volume::define(&stage, "/base/volume")?;
+    let f1 = Field3DAsset::define(&stage, "/base/volume/f3dField")?;
+    let f2 = OpenVDBAsset::define(&stage, "/base/volume/vdbField")?;
+    vol.create_field_rel("diffuse", f1.path().clone())?
+        .create_field_rel("emissive", f2.path().clone())?;
+
+    stage.define_prim("/volModel")?.references().add(sdf::Reference {
+        prim_path: sdf::path("/base")?,
+        ..Default::default()
+    })?;
+    let ref_vol = vol::Volume::get(&stage, "/volModel/volume")?.expect("Volume");
+    let diffuse = ("diffuse".to_string(), sdf::path("/volModel/volume/f3dField")?);
+    let emissive = ("emissive".to_string(), sdf::path("/volModel/volume/vdbField")?);
+    let specular = ("specular".to_string(), sdf::path("/no/such/prim")?);
+    assert!(ref_vol.has_field_rel("diffuse")?);
+    assert_eq!(ref_vol.field_path("diffuse")?.as_ref(), Some(&diffuse.1));
+    assert_eq!(
+        ref_vol.field_paths()?,
+        BTreeMap::from([diffuse.clone(), emissive.clone()])
+    );
+
+    // A block drops the binding but not the relationship.
+    assert!(ref_vol.block_field_rel("diffuse")?);
+    assert_eq!(ref_vol.field_paths()?, BTreeMap::from([emissive.clone()]));
+    assert_eq!(ref_vol.field_path("diffuse")?, None);
+    assert!(ref_vol.has_field_rel("diffuse")?);
+    assert!(!ref_vol.block_field_rel("unbound")?, "nothing to block");
+
+    // A target need not exist.
+    let ref_vol = ref_vol.create_field_rel("specular", specular.1.clone())?;
+    assert_eq!(
+        ref_vol.field_paths()?,
+        BTreeMap::from([emissive.clone(), specular.clone()])
+    );
+    assert!(ref_vol.has_field_rel("specular")?);
+
+    // Re-establish diffuse locally.
+    let ref_vol = ref_vol.create_field_rel("diffuse", diffuse.1.clone())?;
+    assert_eq!(ref_vol.field_paths()?, BTreeMap::from([diffuse, emissive, specular]));
+    Ok(())
+}
+
+/// A second create replaces the targets, and the relationship is the
+/// caller's own.
+#[test]
+fn create_field_replaces() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let volume = vol::Volume::define(&stage, "/V")?
+        .create_field_rel("density", "/V/a")?
+        .create_field_rel("density", "/V/b")?;
+    let rel = volume.field_rel("density");
+    assert_eq!(rel.targets()?, [sdf::path("/V/b")?]);
+    assert!(rel.is_custom()?);
+    Ok(())
+}
+
+/// A field binds a prim or a property directly on one; a relational attribute
+/// or a target path is refused before anything is authored.
+#[test]
+fn field_target_rejected() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let volume = vol::Volume::define(&stage, "/V")?;
+    for target in ["/V/f.rel[/T].attr", "/V/f.rel[/T]"] {
+        let result = volume.clone().create_field_rel("density", target);
+        assert!(
+            matches!(&result, Err(SchemaError::FieldTarget { path }) if path.as_str() == target),
+            "{target}: {result:?}"
+        );
+        assert!(!volume.has_field_rel("density")?, "{target} authored nothing");
+    }
+    let volume = volume.create_field_rel("density", "/V/f.grid")?;
+    assert_eq!(volume.field_rel("density").targets()?, [sdf::path("/V/f.grid")?]);
+    // A property is a target, but not a bound prim.
+    assert_eq!(volume.field_path("density")?, None);
     Ok(())
 }

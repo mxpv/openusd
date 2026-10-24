@@ -8,6 +8,7 @@ use openusd::sdf::{self, Value};
 use openusd::usd::{Attribute, Object, StageAuthoringError};
 
 use super::{AttributeMetadata, BlendShape, tokens};
+use crate::namespaced;
 
 /// The namespace an inbetween shape is authored under (C++'s own
 /// `inbetweensPrefix`), which names no property and so has no token.
@@ -135,7 +136,7 @@ impl BlendShape {
             return Ok(None);
         }
         let attribute = self
-            .attribute_builder(namespaced(name), "point3f[]")
+            .attribute_builder(namespaced(INBETWEENS_NAMESPACE, name).as_ref(), "point3f[]")
             .custom(false)
             .variability(sdf::Variability::Uniform)
             .build()?;
@@ -145,7 +146,7 @@ impl BlendShape {
     /// The view over the inbetween `name`, whether or not it exists (C++
     /// `GetInbetween`).
     pub fn inbetween(&self, name: &str) -> InbetweenShape {
-        InbetweenShape::new(self.attribute(namespaced(name)))
+        InbetweenShape::new(self.attribute(namespaced(INBETWEENS_NAMESPACE, name).as_ref()))
     }
 
     /// `true` when the inbetween `name` exists (C++ `HasInbetween`).
@@ -175,15 +176,6 @@ fn inbetweens_among(attributes: Vec<Attribute>) -> Vec<InbetweenShape> {
         .filter(|attribute| !attribute.name().ends_with(NORMAL_OFFSETS_SUFFIX))
         .map(InbetweenShape::new)
         .collect()
-}
-
-/// `name` in the `inbetweens:` namespace (C++ `_MakeNamespaced`).
-fn namespaced(name: &str) -> String {
-    if name.starts_with(INBETWEENS_NAMESPACE) {
-        name.to_string()
-    } else {
-        format!("{INBETWEENS_NAMESPACE}{name}")
-    }
 }
 
 #[cfg(test)]
