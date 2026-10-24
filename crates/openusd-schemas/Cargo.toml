@@ -31,7 +31,9 @@ physics = ["geom", "shade"]
 # UsdProcGenerativeProcedural is a UsdGeomBoundable-derived prim, so the proc
 # views build on the geom schema traits.
 proc = ["geom"]
-render = []
+# A render product renders through a UsdGeomCamera, so the render spec reads
+# the camera through the geom views.
+render = ["geom"]
 semantics = []
 # UsdShade binds materials to UsdGeomSubsets of a prim's geometry, so the
 # shade views build on the geom views.

@@ -1,7 +1,7 @@
 //! The computed render spec (`UsdRenderComputeSpec`).
 //!
 //! Flattens a `Settings` prim, its products, vars, and cameras into
-//! a self-contained [`spec::RenderSpec`]: each product's base attributes
+//! a self-contained [`RenderSpec`]: each product's base attributes
 //! are resolved (settings, then authored product overrides), the
 //! aspect-ratio conform policy is applied against the bound camera's
 //! aperture, and the products' `orderedVars` are de-duplicated into one
@@ -9,156 +9,149 @@
 //! `namespace:`-prefixed settings are gathered per level (settings,
 //! product, var) into `namespacedSettings`.
 
-use openusd::Result;
-use openusd::gf;
-
 use std::collections::HashMap;
 
 use openusd::sdf::{self, FieldKey, Path, Value};
-use openusd::usd::{Attribute, Relationship, Stage};
+use openusd::usd::{Attribute, Stage};
+use openusd::{Result, gf, tf};
 
 use super::conform::conform_aperture;
-use super::spec::{Product as SpecProduct, RenderSpec, Var as SpecVar};
+use super::spec::{Product as SpecProduct, RenderSpec, SpecDiagnostic, Var as SpecVar};
 use super::{
     AspectRatioConformPolicy, Product, ProductSchema, Settings, SettingsBaseSchema, SettingsSchema, Var, VarSchema,
+    schema_prim,
 };
 use crate::authored_at;
+use crate::geom::{self, CameraSchema};
 
-/// Compute the [`RenderSpec`](super::spec::RenderSpec) for the `Settings`
-/// prim at `settings_prim`. Returns `None` when the prim is not a
-/// `Settings`.
+/// Compute the [`RenderSpec`] for the `Settings`
+/// prim at `settings_prim`. Returns `None` when `settings_prim` names no
+/// `Settings` prim.
 ///
 /// Mirrors C++ `UsdRenderComputeSpec`: resolve the settings base, then per
 /// product copy that base and override it with the product's authored
 /// opinions, apply the conform policy against the bound camera, and gather
-/// the global de-duplicated var list.
+/// the global de-duplicated var list. A product whose camera is not a
+/// `Camera`, and a var target that is not a `Var`, are left out and recorded
+/// in [`RenderSpec::diagnostics`].
 ///
 /// `namespaces` filters the gathered `namespacedSettings` (render-delegate
 /// `namespace:`-prefixed opinions) by top-level namespace; an empty slice
 /// gathers every namespace.
 pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> Result<Option<RenderSpec>> {
-    let Some(settings) = Settings::get(stage, settings_prim.clone())? else {
+    let Some(settings) = schema_prim(stage, settings_prim, Settings::from_prim)? else {
         return Ok(None);
     };
-    // Resolve the settings base against the spec defaults.
-    let settings_base = ResolvedBase::resolve(&settings, &ResolvedBase::spec_default())?;
+    let settings_base = ResolvedBase::read(&settings, None)?;
 
-    let mut render_vars: Vec<SpecVar> = Vec::new();
-    // var path → index into `render_vars`, so de-duplication is O(1) rather
-    // than scanning the vector for each product's vars.
-    let mut var_index: HashMap<String, usize> = HashMap::new();
-    let mut products: Vec<SpecProduct> = Vec::new();
+    let mut spec = RenderSpec::default();
+    // var path → index into `spec.render_vars`, for the de-duplication.
+    let mut var_index: HashMap<Path, usize> = HashMap::new();
 
     for product_path in settings.products_rel().forwarded_targets()? {
-        let Some(product) = Product::get(stage, product_path.clone())? else {
+        let Some(product) = schema_prim(stage, &product_path, Product::from_prim)? else {
             continue; // a `products` target that isn't a Product is ignored
         };
 
         // Product attributes override the resolved settings base where authored.
-        let base = ResolvedBase::resolve(&product, &settings_base)?;
+        let base = ResolvedBase::read(&product, Some(&settings_base))?;
 
-        // Apply the conform policy against the bound camera's aperture. With
-        // no camera bound there is no aperture to reconcile.
-        let (aperture_size, pixel_aspect_ratio) = match &base.camera {
-            Some(camera) => {
-                let aperture = read_camera_aperture(stage, &Path::new(camera)?)?;
-                let conformed = conform_aperture(
-                    base.aspect_ratio_conform_policy,
-                    base.resolution,
-                    base.pixel_aspect_ratio,
-                    aperture,
-                );
-                (conformed.aperture_size, conformed.pixel_aspect_ratio)
-            }
-            None => ([0.0, 0.0], base.pixel_aspect_ratio),
+        let camera = match &base.camera {
+            Some(path) => schema_prim(stage, path, geom::Camera::from_prim)?,
+            None => None,
         };
+        let Some(camera) = camera else {
+            spec.diagnostics.push(SpecDiagnostic::MissingCamera {
+                product: product_path,
+                camera: base.camera,
+            });
+            continue;
+        };
+        let resolution: [i32; 2] = base.resolution.into();
+        // An aperture that does not read stays zero, as in the C++ spec's
+        // product, and conforming then adjusts nothing.
+        let conformed = conform_aperture(
+            AspectRatioConformPolicy::from_token(&base.aspect_ratio_conform_policy),
+            resolution,
+            base.pixel_aspect_ratio,
+            [
+                camera.horizontal_aperture()?.unwrap_or_default(),
+                camera.vertical_aperture()?.unwrap_or_default(),
+            ],
+        );
 
-        let render_var_indices = collect_var_indices(
-            stage,
-            &product.ordered_vars_rel(),
-            &mut render_vars,
-            &mut var_index,
-            namespaces,
-        )?;
+        let render_var_indices =
+            collect_var_indices(stage, &product, &product_path, &mut spec, &mut var_index, namespaces)?;
 
-        products.push(SpecProduct {
-            render_product_path: product_path.as_str().to_string(),
+        spec.products.push(SpecProduct {
             product_type: product.product_type()?.unwrap_or_default(),
-            name: product.product_name_attr().cast::<String>()?.unwrap_or_default(),
-            camera_path: base.camera,
+            name: product.product_name()?.map(String::from).unwrap_or_default(),
+            camera_path: camera.path().clone(),
             disable_motion_blur: base.disable_motion_blur,
             disable_depth_of_field: base.disable_depth_of_field,
-            resolution: base.resolution,
-            pixel_aspect_ratio,
+            resolution,
+            pixel_aspect_ratio: conformed.pixel_aspect_ratio,
             aspect_ratio_conform_policy: base.aspect_ratio_conform_policy,
-            aperture_size,
+            aperture_size: conformed.aperture_size,
             data_window_ndc: base.data_window_ndc,
             render_var_indices,
             namespaced_settings: namespaced_settings(stage, &product_path, namespaces)?,
+            render_product_path: product_path,
         });
     }
 
-    Ok(Some(RenderSpec {
-        products,
-        render_vars,
-        included_purposes: read_token_vec(&settings.included_purposes_attr())?
-            .unwrap_or_else(|| vec!["default".to_string(), "render".to_string()]),
-        material_binding_purposes: read_token_vec(&settings.material_binding_purposes_attr())?
-            .unwrap_or_else(|| vec!["full".to_string(), String::new()]),
-        namespaced_settings: namespaced_settings(stage, settings_prim, namespaces)?,
-    }))
+    spec.included_purposes = settings.included_purposes()?.unwrap_or_default();
+    spec.material_binding_purposes = settings.material_binding_purposes()?.unwrap_or_default();
+    spec.namespaced_settings = namespaced_settings(stage, settings_prim, namespaces)?;
+    Ok(Some(spec))
 }
 
-/// The camera + framing attributes resolved from a [`SettingsBaseSchema`] view,
-/// with per-attribute fallback to a weaker base (the spec defaults for the
-/// settings, the resolved settings for a product). The intermediate value the
-/// render-spec computation flattens.
+/// The camera + framing attributes resolved from a [`SettingsBaseSchema`] view:
+/// the intermediate value the render-spec computation flattens.
 struct ResolvedBase {
-    resolution: [i32; 2],
+    resolution: gf::Vec2i,
     pixel_aspect_ratio: f32,
-    aspect_ratio_conform_policy: AspectRatioConformPolicy,
+    aspect_ratio_conform_policy: tf::Token,
     data_window_ndc: [f32; 4],
     disable_motion_blur: bool,
     disable_depth_of_field: bool,
-    camera: Option<String>,
+    camera: Option<Path>,
 }
 
 impl ResolvedBase {
-    /// The `usdRender/schema.usda` fallbacks for the base attributes.
-    fn spec_default() -> Self {
-        Self {
-            resolution: [2048, 1080],
-            pixel_aspect_ratio: 1.0,
-            aspect_ratio_conform_policy: AspectRatioConformPolicy::ExpandAperture,
-            data_window_ndc: [0.0, 0.0, 1.0, 1.0],
-            disable_motion_blur: false,
-            disable_depth_of_field: false,
-            camera: None,
-        }
-    }
-
-    /// Resolve each base attribute on `view`, falling back to the matching
-    /// field of `fallback` for any unauthored attribute. With `fallback =
-    /// spec_default()` this resolves the spec fallbacks; with `fallback =
-    /// settings-base` it implements the product-overrides-settings rule: a
-    /// product attribute overrides only where the product authors it, mirroring
-    /// C++ `_Get(attr, val, getDefaultValue=false)`, which uses the value only
-    /// when the attribute has an authored opinion.
-    fn resolve(view: &impl SettingsBaseSchema, fallback: &ResolvedBase) -> Result<Self> {
+    /// Resolve each base attribute on `view`. With no `inherited` base (the
+    /// settings) a value resolves its schema fallback; with one (a product)
+    /// only an authored value overrides the inherited one, as C++
+    /// `_ReadSettingsBase`'s `getDefault` selects.
+    ///
+    /// The camera is the first forwarded `camera` target, and an empty
+    /// relationship keeps the inherited camera.
+    ///
+    /// The conform policy stays the authored token, as in C++. A token that
+    /// names no [`AspectRatioConformPolicy`](super::AspectRatioConformPolicy)
+    /// adjusts nothing.
+    fn read(view: &impl SettingsBaseSchema, inherited: Option<&ResolvedBase>) -> Result<Self> {
         Ok(Self {
-            resolution: read_int2(&view.resolution_attr())?.unwrap_or(fallback.resolution),
-            pixel_aspect_ratio: read_f32(&view.pixel_aspect_ratio_attr())?.unwrap_or(fallback.pixel_aspect_ratio),
-            aspect_ratio_conform_policy: authored_at::<Value>(&view.aspect_ratio_conform_policy_attr(), None)?
-                .and_then(|value| AspectRatioConformPolicy::try_from(value).ok())
-                .unwrap_or(fallback.aspect_ratio_conform_policy),
-            data_window_ndc: read_float4(&view.data_window_ndc_attr())?.unwrap_or(fallback.data_window_ndc),
-            disable_motion_blur: authored_at::<Value>(&view.disable_motion_blur_attr(), None)?
-                .and_then(|value| value.try_as_bool())
-                .unwrap_or(fallback.disable_motion_blur),
-            disable_depth_of_field: authored_at::<Value>(&view.disable_depth_of_field_attr(), None)?
-                .and_then(|value| value.try_as_bool())
-                .unwrap_or(fallback.disable_depth_of_field),
-            camera: read_rel_first_target(&view.camera_rel())?.or_else(|| fallback.camera.clone()),
+            resolution: read_attr(&view.resolution_attr(), inherited.map(|base| base.resolution))?,
+            pixel_aspect_ratio: read_attr(
+                &view.pixel_aspect_ratio_attr(),
+                inherited.map(|base| base.pixel_aspect_ratio),
+            )?,
+            aspect_ratio_conform_policy: read_attr(
+                &view.aspect_ratio_conform_policy_attr(),
+                inherited.map(|base| base.aspect_ratio_conform_policy.clone()),
+            )?,
+            data_window_ndc: read_attr(&view.data_window_ndc_attr(), inherited.map(|base| base.data_window_ndc))?,
+            disable_motion_blur: read_attr(
+                &view.disable_motion_blur_attr(),
+                inherited.map(|base| base.disable_motion_blur),
+            )?,
+            disable_depth_of_field: read_attr(
+                &view.disable_depth_of_field_attr(),
+                inherited.map(|base| base.disable_depth_of_field),
+            )?,
+            camera: (view.camera_rel().forwarded_targets()?.into_iter().next())
+                .or_else(|| inherited.and_then(|base| base.camera.clone())),
         })
     }
 }
@@ -195,94 +188,58 @@ pub fn namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> R
     Ok(out)
 }
 
-/// Resolve a product's `orderedVars` to indices into the shared
-/// `render_vars` list, appending any var not seen before (de-duplication
-/// by var path). Targets that aren't `Var` prims are skipped.
+/// Resolve `product`'s `orderedVars` to indices into `spec.render_vars`,
+/// appending any var not seen before (de-duplication by var path). A target
+/// that isn't a `Var` prim is skipped with a
+/// [`SpecDiagnostic::MissingVar`].
 fn collect_var_indices(
     stage: &Stage,
-    ordered_vars_rel: &Relationship,
-    render_vars: &mut Vec<SpecVar>,
-    var_index: &mut HashMap<String, usize>,
+    product: &Product,
+    product_path: &Path,
+    spec: &mut RenderSpec,
+    var_index: &mut HashMap<Path, usize>,
     namespaces: &[&str],
 ) -> Result<Vec<usize>> {
     let mut indices = Vec::new();
-    for var_path in ordered_vars_rel.forwarded_targets()? {
-        let key = var_path.as_str().to_string();
-        if let Some(&i) = var_index.get(&key) {
+    for var_path in product.ordered_vars_rel().forwarded_targets()? {
+        if let Some(&i) = var_index.get(&var_path) {
             indices.push(i);
             continue;
         }
-        let Some(var) = Var::get(stage, var_path.clone())? else {
+        let Some(var) = schema_prim(stage, &var_path, Var::from_prim)? else {
+            spec.diagnostics.push(SpecDiagnostic::MissingVar {
+                product: product_path.clone(),
+                var: var_path,
+            });
             continue;
         };
-        render_vars.push(SpecVar {
-            render_var_path: key.clone(),
-            data_type: var
-                .data_type_attr()
-                .cast::<String>()?
-                .unwrap_or_else(|| sdf::ValueTypeName::COLOR3F.as_str().to_string()),
+        let i = spec.render_vars.len();
+        spec.render_vars.push(SpecVar {
+            data_type: var.data_type()?.map(String::from).unwrap_or_default(),
             source_name: var.source_name()?.unwrap_or_default(),
             source_type: var.source_type()?.unwrap_or_default(),
             namespaced_settings: namespaced_settings(stage, &var_path, namespaces)?,
+            render_var_path: var_path.clone(),
         });
-        let i = render_vars.len() - 1;
-        var_index.insert(key, i);
+        var_index.insert(var_path, i);
         indices.push(i);
     }
     Ok(indices)
 }
 
-/// Read a camera prim's `(horizontalAperture, verticalAperture)`, falling
-/// back to the apertures of [`gf::Camera::default`]. Reads the
-/// aperture attributes by name so it needs no dependency on the `geom`
-/// feature — the conform policy only needs these two floats.
-fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
-    let prim = stage.prim(camera.clone())?;
-    Ok([
-        read_f32(&prim.attribute("horizontalAperture"))?.unwrap_or(gf::Camera::DEFAULT_HORIZONTAL_APERTURE),
-        read_f32(&prim.attribute("verticalAperture"))?.unwrap_or(gf::Camera::DEFAULT_VERTICAL_APERTURE),
-    ])
-}
-
-/// Narrow a `f64` to `f32`, clamping to the finite `f32` range so a large
-/// authored double can't silently become `inf`.
-fn f64_to_f32(d: f64) -> f32 {
-    d.clamp(f32::MIN as f64, f32::MAX as f64) as f32
-}
-
-fn read_f32(attr: &Attribute) -> Result<Option<f32>> {
-    Ok(match authored_at::<Value>(attr, None)? {
-        Some(Value::Float(f)) => Some(f),
-        Some(Value::Double(d)) => Some(f64_to_f32(d)),
-        Some(Value::Half(h)) => Some(h.to_f32()),
-        _ => None,
+/// `attr`'s value read as C++ `_Get(attr, val, getDefault)`: with no
+/// `inherited` value the fallback-resolving read, else the authored value
+/// over `inherited`. A value neither reads keeps the type's default, as the
+/// C++ spec's zero-initialized field does.
+fn read_attr<T>(attr: &Attribute, inherited: Option<T>) -> Result<T>
+where
+    T: sdf::FromValue + Default,
+    T::Error: Into<openusd::Error>,
+{
+    Ok(match inherited {
+        None => attr.get::<T>()?.unwrap_or_default(),
+        Some(inherited) => authored_at::<T>(attr, None)?.unwrap_or(inherited),
     })
-}
-
-fn read_int2(attr: &Attribute) -> Result<Option<[i32; 2]>> {
-    Ok(authored_at::<Value>(attr, None)?
-        .and_then(|v| v.try_as_vec_2i())
-        .map(|v| [v.x, v.y]))
-}
-
-fn read_float4(attr: &Attribute) -> Result<Option<[f32; 4]>> {
-    Ok(match authored_at::<Value>(attr, None)? {
-        Some(Value::Vec4f(v)) => Some([v.x, v.y, v.z, v.w]),
-        Some(Value::Vec4d(v)) => Some([f64_to_f32(v.x), f64_to_f32(v.y), f64_to_f32(v.z), f64_to_f32(v.w)]),
-        _ => None,
-    })
-}
-
-fn read_token_vec(attr: &Attribute) -> Result<Option<Vec<String>>> {
-    Ok(match attr.get::<Value>()? {
-        Some(Value::TokenVec(v)) => Some(v.into_iter().map(Into::into).collect()),
-        Some(Value::StringVec(v)) => Some(v),
-        _ => None,
-    })
-}
-
-fn read_rel_first_target(rel: &Relationship) -> Result<Option<String>> {
-    Ok(rel.targets()?.into_iter().next().map(|p| p.as_str().to_string()))
 }
 
 #[cfg(test)]
@@ -293,6 +250,29 @@ mod tests {
     use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
+    use openusd::usd::SchemaBase;
+
+    /// A `Camera` at `path`, with a 10×10 aperture.
+    fn camera(stage: &Stage, path: &str) -> Result<geom::Camera> {
+        let camera = geom::Camera::define(stage, path)?;
+        camera.create_horizontal_aperture_attr()?.set(10.0_f32)?;
+        camera.create_vertical_aperture_attr()?.set(10.0_f32)?;
+        Ok(camera)
+    }
+
+    /// A settings prim at `/Render/Settings` binding `/World/Cam` and
+    /// producing `products`.
+    fn settings(stage: &Stage, products: &[&str]) -> Result<Settings> {
+        camera(stage, "/World/Cam")?;
+        let settings = Settings::define(stage, "/Render/Settings")?;
+        settings.create_camera_rel()?.add_target("/World/Cam")?;
+        settings.create_products_rel()?.set_targets(products.iter().copied())?;
+        Ok(settings)
+    }
+
+    fn compute(stage: &Stage) -> Result<RenderSpec> {
+        Ok(render_spec(stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec"))
+    }
 
     /// Two products share one var: it appears once in the global list and is
     /// referenced by index from both products.
@@ -317,25 +297,23 @@ mod tests {
             .create_ordered_vars_rel()?
             .set_targets(["/Render/Vars/color"])?;
 
-        let settings = Settings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set(gf::vec2i(1024, 512))?;
-        settings.create_products_rel()?.set_targets([
-            sdf::path("/Render/Products/beauty")?,
-            sdf::path("/Render/Products/matte")?,
-        ])?;
+        settings(&stage, &["/Render/Products/beauty", "/Render/Products/matte"])?
+            .create_resolution_attr()?
+            .set(gf::vec2i(1024, 512))?;
 
-        let spec = render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
+        let spec = compute(&stage)?;
         assert_eq!(spec.products.len(), 2);
         // color + alpha → exactly two global vars (color shared, not duplicated).
         assert_eq!(spec.render_vars.len(), 2);
-        assert_eq!(spec.render_vars[0].render_var_path, "/Render/Vars/color");
-        assert_eq!(spec.render_vars[1].render_var_path, "/Render/Vars/alpha");
+        assert_eq!(spec.render_vars[0].render_var_path, sdf::path("/Render/Vars/color")?);
+        assert_eq!(spec.render_vars[1].render_var_path, sdf::path("/Render/Vars/alpha")?);
 
         // beauty references both; matte references the shared `color` (index 0).
         assert_eq!(spec.products[0].render_var_indices, vec![0, 1]);
         assert_eq!(spec.products[1].render_var_indices, vec![0]);
         // resolution inherited from the settings base.
         assert_eq!(spec.products[0].resolution, [1024, 512]);
+        assert!(spec.diagnostics.is_empty());
         Ok(())
     }
 
@@ -344,16 +322,15 @@ mod tests {
     #[test]
     fn product_overrides_only_authored() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
-        let settings = Settings::define(&stage, "/Render/Settings")?;
+        let settings = settings(&stage, &["/Render/Products/p"])?;
         settings.create_resolution_attr()?.set(gf::vec2i(1920, 1080))?;
         settings.create_pixel_aspect_ratio_attr()?.set(2.0_f32)?;
-        settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
         // Product authors only `resolution`.
         Product::define(&stage, "/Render/Products/p")?
             .create_resolution_attr()?
             .set(gf::vec2i(512, 512))?;
 
-        let spec = render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
+        let spec = compute(&stage)?;
         let p = &spec.products[0];
         assert_eq!(p.resolution, [512, 512]); // overridden by the product
         assert!((p.pixel_aspect_ratio - 2.0).abs() < 1e-6); // inherited from settings
@@ -365,24 +342,239 @@ mod tests {
     #[test]
     fn conform_against_bound_camera() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
-        let cam = stage.define_prim("/World/Cam")?.set_type_name("Camera")?;
-        for (name, v) in [("horizontalAperture", 10.0f32), ("verticalAperture", 10.0)] {
-            stage
-                .create_attribute(cam.path().append_property(name)?, "float")?
-                .set(sdf::Value::Float(v))?;
-        }
         Product::define(&stage, "/Render/Products/p")?;
-        let settings = Settings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set(gf::vec2i(200, 100))?;
-        settings.create_camera_rel()?.add_target("/World/Cam")?;
-        settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
+        settings(&stage, &["/Render/Products/p"])?
+            .create_resolution_attr()?
+            .set(gf::vec2i(200, 100))?;
 
-        let spec = render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
+        let spec = compute(&stage)?;
         let p = &spec.products[0];
-        assert_eq!(p.camera_path.as_deref(), Some("/World/Cam"));
+        assert_eq!(p.camera_path, sdf::path("/World/Cam")?);
         // expandAperture, square aperture vs 2:1 image → width grows to 20.
         assert!((p.aperture_size[0] - 20.0).abs() < 1e-3);
         assert!((p.aperture_size[1] - 10.0).abs() < 1e-3);
+        Ok(())
+    }
+
+    /// A product with no camera is left out with its vars; the next product
+    /// is kept.
+    #[test]
+    fn missing_camera_skips() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        Var::define(&stage, "/Render/Vars/X")?;
+        Var::define(&stage, "/Render/Vars/Y")?;
+        Product::define(&stage, "/Render/Products/a")?
+            .create_ordered_vars_rel()?
+            .set_targets(["/Render/Vars/X"])?;
+        let b = Product::define(&stage, "/Render/Products/b")?;
+        b.create_ordered_vars_rel()?.set_targets(["/Render/Vars/Y"])?;
+        camera(&stage, "/World/Cam")?;
+        b.create_camera_rel()?.add_target("/World/Cam")?;
+        Settings::define(&stage, "/Render/Settings")?
+            .create_products_rel()?
+            .set_targets(["/Render/Products/a", "/Render/Products/b"])?;
+
+        let spec = compute(&stage)?;
+        assert_eq!(spec.products.len(), 1);
+        assert_eq!(spec.products[0].render_product_path, sdf::path("/Render/Products/b")?);
+        assert_eq!(spec.products[0].render_var_indices, vec![0]);
+        assert_eq!(spec.render_vars.len(), 1);
+        assert_eq!(spec.render_vars[0].render_var_path, sdf::path("/Render/Vars/Y")?);
+        assert_eq!(
+            spec.diagnostics,
+            vec![SpecDiagnostic::MissingCamera {
+                product: sdf::path("/Render/Products/a")?,
+                camera: None,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_camera_skips() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/World/Scope")?.set_type_name("Scope")?;
+        Product::define(&stage, "/Render/Products/p")?;
+        let settings = Settings::define(&stage, "/Render/Settings")?;
+        settings.create_camera_rel()?.add_target("/World/Scope")?;
+        settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert!(spec.products.is_empty());
+        assert_eq!(
+            spec.diagnostics,
+            vec![SpecDiagnostic::MissingCamera {
+                product: sdf::path("/Render/Products/p")?,
+                camera: Some(sdf::path("/World/Scope")?),
+            }]
+        );
+        Ok(())
+    }
+
+    /// A camera target naming a property of a `Camera` is no camera.
+    #[test]
+    fn camera_property_path() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        camera(&stage, "/World/Cam")?;
+        Product::define(&stage, "/Render/Products/p")?
+            .create_camera_rel()?
+            .add_target("/World/Cam.focalLength")?;
+        Settings::define(&stage, "/Render/Settings")?
+            .create_products_rel()?
+            .set_targets(["/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert!(spec.products.is_empty());
+        assert_eq!(
+            spec.diagnostics,
+            vec![SpecDiagnostic::MissingCamera {
+                product: sdf::path("/Render/Products/p")?,
+                camera: Some(sdf::path("/World/Cam.focalLength")?),
+            }]
+        );
+        Ok(())
+    }
+
+    /// A `products` target naming a property of a `Product` is ignored
+    /// without a diagnostic, as a target that is no product is.
+    #[test]
+    fn product_property_path() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        Product::define(&stage, "/Render/Products/p")?;
+        settings(&stage, &["/Render/Products/p.resolution", "/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert_eq!(spec.products.len(), 1);
+        assert_eq!(spec.products[0].render_product_path, sdf::path("/Render/Products/p")?);
+        assert!(spec.diagnostics.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn var_property_path() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        Var::define(&stage, "/Render/Vars/v")?;
+        Product::define(&stage, "/Render/Products/p")?
+            .create_ordered_vars_rel()?
+            .set_targets(["/Render/Vars/v.sourceName"])?;
+        settings(&stage, &["/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert_eq!(spec.products.len(), 1);
+        assert!(spec.products[0].render_var_indices.is_empty());
+        assert!(spec.render_vars.is_empty());
+        assert_eq!(
+            spec.diagnostics,
+            vec![SpecDiagnostic::MissingVar {
+                product: sdf::path("/Render/Products/p")?,
+                var: sdf::path("/Render/Vars/v.sourceName")?,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_var_diagnostic() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/Render/Vars/scope")?.set_type_name("Scope")?;
+        Product::define(&stage, "/Render/Products/p")?
+            .create_ordered_vars_rel()?
+            .set_targets(["/Render/Vars/scope"])?;
+        settings(&stage, &["/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert_eq!(spec.products.len(), 1);
+        assert_eq!(
+            spec.diagnostics,
+            vec![SpecDiagnostic::MissingVar {
+                product: sdf::path("/Render/Products/p")?,
+                var: sdf::path("/Render/Vars/scope")?,
+            }]
+        );
+        Ok(())
+    }
+
+    /// A property path of a `Settings` prim names no settings.
+    #[test]
+    fn settings_property_path() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        settings(&stage, &[])?;
+        assert!(render_spec(&stage, &sdf::path("/Render/Settings.camera")?, &[])?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn product_camera_overrides() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        camera(&stage, "/World/Other")?;
+        Product::define(&stage, "/Render/Products/p")?
+            .create_camera_rel()?
+            .add_target("/World/Other")?;
+        settings(&stage, &["/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert_eq!(spec.products[0].camera_path, sdf::path("/World/Other")?);
+        Ok(())
+    }
+
+    /// The settings' `camera` targets a relationship that targets the camera.
+    #[test]
+    fn camera_forwarded() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        camera(&stage, "/World/Cam")?;
+        let rig = stage.define_prim("/World/Rig")?;
+        stage
+            .create_relationship(rig.path().append_property("active")?)?
+            .add_target("/World/Cam")?;
+        Product::define(&stage, "/Render/Products/p")?;
+        let settings = Settings::define(&stage, "/Render/Settings")?;
+        settings.create_camera_rel()?.add_target("/World/Rig.active")?;
+        settings.create_products_rel()?.set_targets(["/Render/Products/p"])?;
+
+        let spec = compute(&stage)?;
+        assert_eq!(spec.products[0].camera_path, sdf::path("/World/Cam")?);
+        Ok(())
+    }
+
+    /// A conform policy outside the enum is kept and adjusts nothing.
+    #[test]
+    fn unknown_policy_kept() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        Product::define(&stage, "/Render/Products/p")?
+            .create_aspect_ratio_conform_policy_attr()?
+            .set(sdf::Value::token("bogus"))?;
+        settings(&stage, &["/Render/Products/p"])?
+            .create_resolution_attr()?
+            .set(gf::vec2i(200, 100))?;
+
+        let spec = compute(&stage)?;
+        let p = &spec.products[0];
+        assert_eq!(p.aspect_ratio_conform_policy, "bogus");
+        assert_eq!(p.aperture_size, [10.0, 10.0]);
+        Ok(())
+    }
+
+    /// A blocked settings attribute reads its schema fallback.
+    #[test]
+    fn blocked_purposes_fallback() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        settings(&stage, &[])?.create_included_purposes_attr()?.block()?;
+        assert_eq!(compute(&stage)?.included_purposes, vec!["default", "render"]);
+        Ok(())
+    }
+
+    /// A block is not an authored value. A product that blocks an attribute
+    /// inherits the settings' value, not the schema fallback.
+    #[test]
+    fn blocked_product_inherits() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        Product::define(&stage, "/Render/Products/p")?
+            .create_resolution_attr()?
+            .block()?;
+        settings(&stage, &["/Render/Products/p"])?
+            .create_resolution_attr()?
+            .set(gf::vec2i(1024, 512))?;
+        assert_eq!(compute(&stage)?.products[0].resolution, [1024, 512]);
         Ok(())
     }
 
@@ -416,7 +608,7 @@ mod tests {
         assert_eq!(spec.namespaced_settings[0].1, sdf::Value::Int(64));
 
         // An empty namespace filter gathers both delegate settings.
-        let all = render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
+        let all = compute(&stage)?;
         assert_eq!(all.namespaced_settings.len(), 2);
         Ok(())
     }

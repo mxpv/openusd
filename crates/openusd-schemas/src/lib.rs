@@ -24,7 +24,7 @@
 //! | `media`   | `media`   | `UsdMedia`    | asset-preview thumbnails, which live in `assetInfo`; needs `geom` |
 //! | `physics` | `physics` | `UsdPhysics`  | the token enums, a rigid body's mass properties from its colliders, the parser that describes a stage's physics objects to a simulator; needs `geom`, `shade` |
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
-//! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim |
+//! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim; needs `geom` |
 //! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, and the labels it carries under one of them over time and down namespace |
 //! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, material bindings and their `materialBind` subsets, the `UsdPreviewSurface` reader; needs `geom` |
 //! | `skel`    | `skel`    | `UsdSkel`     | the skinning toolkit: topology, animation mapping, resolvers, pure-math LBS; needs `geom` |
@@ -727,7 +727,7 @@ pub fn connectable_registry() -> &'static shade::BehaviorRegistry {
 // it keeps. A single read at `time` that drops a fallback is not the same
 // answer: an attribute with samples and no default reads its fallback at
 // the default time, and that read still counts as authored.
-#[cfg(any(feature = "geom", feature = "render"))]
+#[cfg(feature = "geom")]
 pub(crate) fn authored_at<T>(attr: &usd::Attribute, time: Option<usd::TimeCode>) -> openusd::Result<Option<T>>
 where
     T: sdf::FromValue,

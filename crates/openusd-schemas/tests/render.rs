@@ -104,7 +104,7 @@ fn computes_render_spec_end_to_end() -> Result<()> {
     let p = &spec.products[0];
     // Product overrides resolution; camera inherited from the settings.
     assert_eq!(p.resolution, [1024, 512]);
-    assert_eq!(p.camera_path.as_deref(), Some("/World/Camera"));
+    assert_eq!(p.camera_path, sdf::path("/World/Camera")?);
     // expandAperture: square 24×24 aperture vs a 2:1 image → width grows to 48.
     assert!((p.aperture_size[0] - 48.0).abs() < 1e-3);
     assert!((p.aperture_size[1] - 24.0).abs() < 1e-3);

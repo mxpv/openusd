@@ -26,8 +26,11 @@ pub struct ConformedAperture {
 /// policies pin one dimension; `adjustPixelAspectRatio` leaves the aperture
 /// alone and changes `pixelAspectRatio` instead. The adjusted dimension is
 /// always set so `width / height == imageAspectRatio`.
+///
+/// A `None` policy, which stands for a token that names no policy, adjusts
+/// nothing.
 pub fn conform_aperture(
-    policy: AspectRatioConformPolicy,
+    policy: Option<AspectRatioConformPolicy>,
     resolution: [i32; 2],
     pixel_aspect_ratio: f32,
     aperture: [f32; 2],
@@ -70,26 +73,27 @@ pub fn conform_aperture(
     // which dimension they pick under the same `aperture_aspect > image_aspect`
     // test, so getting the comparison backwards crops where it should expand.
     let adjust = match policy {
-        AspectRatioConformPolicy::AdjustPixelAspectRatio => {
+        Some(AspectRatioConformPolicy::AdjustPixelAspectRatio) => {
             par = aperture_aspect / res_aspect;
             Adjust::None
         }
-        AspectRatioConformPolicy::AdjustApertureHeight => Adjust::Height,
-        AspectRatioConformPolicy::AdjustApertureWidth => Adjust::Width,
-        AspectRatioConformPolicy::ExpandAperture => {
+        Some(AspectRatioConformPolicy::AdjustApertureHeight) => Adjust::Height,
+        Some(AspectRatioConformPolicy::AdjustApertureWidth) => Adjust::Width,
+        Some(AspectRatioConformPolicy::ExpandAperture) => {
             if aperture_aspect > image_aspect {
                 Adjust::Height
             } else {
                 Adjust::Width
             }
         }
-        AspectRatioConformPolicy::CropAperture => {
+        Some(AspectRatioConformPolicy::CropAperture) => {
             if aperture_aspect > image_aspect {
                 Adjust::Width
             } else {
                 Adjust::Height
             }
         }
+        None => Adjust::None,
     };
 
     match adjust {
@@ -116,7 +120,7 @@ mod tests {
     const APERTURE: [f32; 2] = [10.0, 10.0];
 
     fn run(policy: AspectRatioConformPolicy) -> ConformedAperture {
-        conform_aperture(policy, RES, PAR, APERTURE)
+        conform_aperture(Some(policy), RES, PAR, APERTURE)
     }
 
     fn approx(a: [f32; 2], b: [f32; 2]) -> bool {
@@ -165,10 +169,17 @@ mod tests {
             ([200, 100], -1.0, [10.0, 10.0]), // negative pixel aspect ratio
             ([200, 100], 0.0, [10.0, 10.0]),  // zero pixel aspect ratio
         ] {
-            let c = conform_aperture(policy, res, par, aperture);
+            let c = conform_aperture(Some(policy), res, par, aperture);
             assert_eq!(c.aperture_size, aperture);
             assert!(c.aperture_size.iter().all(|v| v.is_finite()));
         }
+    }
+
+    #[test]
+    fn unknown_policy_unchanged() {
+        let c = conform_aperture(None, RES, PAR, APERTURE);
+        assert_eq!(c.aperture_size, APERTURE);
+        assert_eq!(c.pixel_aspect_ratio, PAR);
     }
 
     #[test]

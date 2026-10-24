@@ -17,7 +17,7 @@
 //! by [`Settings`] and [`Product`]. The centrepiece is the computed
 //! *render spec* ([`render_spec`]): a `Settings` prim, its
 //! products, vars, and camera are flattened into a self-contained,
-//! fallback-resolved [`RenderSpec`](spec::RenderSpec) (product attributes
+//! fallback-resolved [`RenderSpec`] (product attributes
 //! overriding settings, the aspect-ratio conform policy applied, vars
 //! de-duplicated). That computation reads through these views and is the
 //! spec-faithful crux of the family.
@@ -34,8 +34,12 @@
 //!     .schema_registry(openusd_schemas::schema_registry())
 //!     .in_memory("scene.usda").unwrap();
 //!
+//! // A product renders through a camera, its own or the settings'.
+//! openusd_schemas::geom::Camera::define(&stage, "/World/Camera").unwrap();
+//!
 //! let settings = render::Settings::define(&stage, "/Render/Settings").unwrap();
 //! settings.create_resolution_attr().unwrap().set(gf::vec2i(1920, 1080)).unwrap();
+//! settings.create_camera_rel().unwrap().add_target("/World/Camera").unwrap();
 //! settings.create_products_rel().unwrap().add_target("/Render/Products/beauty").unwrap();
 //!
 //! render::Product::define(&stage, "/Render/Products/beauty").unwrap()
@@ -47,6 +51,9 @@
 //! assert_eq!(spec.products.len(), 1);
 //! ```
 
+use openusd::usd::{Prim, Stage};
+use openusd::{Result, sdf};
+
 openusd::include_schema!("usdRender");
 
 pub mod spec;
@@ -57,9 +64,23 @@ mod settings;
 
 pub use compute::{namespaced_settings, render_spec};
 pub use conform::{ConformedAperture, conform_aperture};
+pub use spec::{RenderSpec, SpecDiagnostic};
 
 // The collections a `RenderPass` carries, each an instance name of
 // `UsdCollectionAPI` rather than a property of the pass.
 pub const COLLECTION_CAMERA_VISIBILITY: &str = "cameraVisibility";
 pub const COLLECTION_PRUNE: &str = "prune";
 pub const COLLECTION_MATTE: &str = "matte";
+
+/// The prim at `path` seen through `view`, a schema's `from_prim`: `None`
+/// where `path` names no prim, or a prim `view` does not accept.
+///
+/// [`Stage::prim`] reads a property path as its prim, where C++
+/// `GetPrimAtPath` finds nothing. Every render lookup of a relationship target
+/// goes through here.
+fn schema_prim<T>(stage: &Stage, path: &sdf::Path, view: fn(Prim) -> Result<Option<T>>) -> Result<Option<T>> {
+    match path.is_prim() {
+        true => view(stage.prim(path.clone())?),
+        false => Ok(None),
+    }
+}
