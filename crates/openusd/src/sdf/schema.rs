@@ -314,7 +314,13 @@ impl FieldType {
 // is worth a third copy of the field names before a profile asks for it.
 pub fn registered_field_type(name: &str) -> Option<FieldType> {
     let Some(spelling) = schema_field_spelling(name) else {
-        return FieldKey::from_name(name).map(|_| FieldType::Untyped);
+        return FieldKey::from_name(name).map(|key| match key {
+            // The bool core fields C++ `SdfSchema` registers that no
+            // production of the text parser claims: read as words, they
+            // would come back as tokens.
+            FieldKey::Hidden | FieldKey::NoLoadHint => FieldType::Value(ValueTypeName::BOOL),
+            _ => FieldType::Untyped,
+        });
     };
     FieldType::from_spelling(spelling)
 }

@@ -2985,7 +2985,7 @@ def Xform "Root" (
     #[test]
     fn registered_metadata_stays_typed() {
         let text = "#usda 1.0\ndef \"P\" (\n    hidden = true\n)\n{\n}\n";
-        assert_eq!(field(text, "/P", "hidden"), Some(sdf::Value::token("true")));
+        assert_eq!(field(text, "/P", "hidden"), Some(sdf::Value::Bool(true)));
     }
 
     /// A field its schema declares as a list op reads as one, each operation
