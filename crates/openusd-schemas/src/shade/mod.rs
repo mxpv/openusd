@@ -19,7 +19,11 @@
 //! ```
 //!
 //! [`Connectable`] is the shared `inputs:` / `outputs:` surface (C++
-//! `UsdShadeConnectableAPI`). [`Input`] and [`Output`] are typed views over the
+//! `UsdShadeConnectableAPI`). A prim is connectable where it has a
+//! [`Behavior`], which a [`BehaviorRegistry`] finds for its type and API
+//! schemas; [`ConnectableAPI::from_prim`] views any such prim, and every query
+//! that asks whether a prim is a container runs under a
+//! [`ConnectableContext`]. [`Input`] and [`Output`] are typed views over the
 //! underlying [`Attribute`](openusd::usd::Attribute). Connections remain core
 //! attribute `connectionPaths`, available as raw composed paths through
 //! [`Attribute::connections`](openusd::usd::Attribute::connections).
@@ -80,6 +84,7 @@ openusd::include_schema!("usdShade");
 
 pub mod nodes;
 
+pub(crate) mod behavior;
 mod binding;
 mod connectable;
 mod coord_sys;
@@ -92,6 +97,7 @@ mod preview;
 mod traits;
 mod utils;
 
+pub use behavior::{Behavior, BehaviorRegistry, ConnectableContext};
 pub use binding::{
     BindingCache, CollectionBinding, DirectBinding, MATERIAL_PURPOSES, ResolvedBinding, binding_strength,
     set_binding_strength,
@@ -349,10 +355,7 @@ macro_rules! impl_shading_attribute {
                 &self,
                 filter: $crate::shade::ProducerFilter,
             ) -> Result<Vec<$crate::shade::ShadingAttribute>, $crate::SchemaError> {
-                $crate::shade::utils::value_producing_attributes(
-                    $crate::shade::ShadingAttribute::from(self.clone()),
-                    filter,
-                )
+                $crate::shade::ConnectableContext::default().value_producing_attributes(self.clone(), filter)
             }
 
             /// Wrap `attribute` without checking its namespace, for the

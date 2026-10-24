@@ -6,6 +6,7 @@ use crate::SchemaError;
 
 use openusd::sdf;
 
+use super::ConnectableContext;
 use super::connectable::{AttributeType, ConnectionSource, ShadingAttribute};
 
 /// Which upstream attributes count as producing a value, the choice C++
@@ -31,61 +32,100 @@ pub enum ProducerFilter {
 /// is treated as scene description the walk refuses to trust.
 const MAX_CONNECTION_DEPTH: usize = 256;
 
-pub(super) fn value_producing_attributes(
-    attribute: ShadingAttribute,
-    filter: ProducerFilter,
-) -> Result<Vec<ShadingAttribute>, SchemaError> {
-    let mut producing = Vec::new();
-    resolve_recursive(attribute, &mut Vec::new(), &mut producing, filter)?;
-    Ok(producing)
+impl ConnectableContext {
+    /// The logical attributes that produce `attribute`'s value, following
+    /// connections through the containers this context knows (C++
+    /// `UsdShadeUtils::GetValueProducingAttributes`).
+    pub fn value_producing_attributes(
+        &self,
+        attribute: impl Into<ShadingAttribute>,
+        filter: ProducerFilter,
+    ) -> Result<Vec<ShadingAttribute>, SchemaError> {
+        let mut walk = Walk {
+            context: self,
+            chain: Vec::new(),
+            producing: Vec::new(),
+            filter,
+        };
+        walk.resolve(attribute.into())?;
+        Ok(walk.producing)
+    }
 }
 
-/// Walk `attribute`'s connections, appending every attribute that produces a
-/// value to `producing`, and report whether any was found.
-///
-/// `chain` holds the connected attributes between the walk's origin and
-/// `attribute`, so it is both the cycle guard and the depth counter: an
-/// attribute already on the chain is a back edge, while one a sibling branch
-/// reached and left is not.
-fn resolve_recursive(
-    attribute: ShadingAttribute,
-    chain: &mut Vec<sdf::Path>,
-    producing: &mut Vec<ShadingAttribute>,
+/// The state one producer walk carries from hop to hop.
+struct Walk<'a> {
+    context: &'a ConnectableContext,
+    /// The connected attributes between the walk's origin and the attribute
+    /// being resolved, both the cycle guard and the depth counter: an
+    /// attribute already on the chain is a back edge, while one a sibling
+    /// branch reached and left is not.
+    chain: Vec<sdf::Path>,
+    /// Every attribute found to produce a value, in walk order.
+    producing: Vec<ShadingAttribute>,
     filter: ProducerFilter,
-) -> Result<bool, SchemaError> {
-    if !attribute.attribute().is_defined()? || chain.contains(attribute.path()) {
-        return Ok(false);
-    }
+}
 
-    let sources = attribute.connected_sources()?;
-    let sources = distinct_sources(&sources);
-    let connected = !sources.is_empty();
-    if connected {
-        if chain.len() >= MAX_CONNECTION_DEPTH {
-            return Err(SchemaError::ConnectionDepthExceeded {
-                attribute: attribute.path().clone(),
-                max: MAX_CONNECTION_DEPTH,
-            });
+impl Walk<'_> {
+    /// Walk `attribute`'s connections, appending every attribute that
+    /// produces a value to `producing`, and report whether any was found.
+    fn resolve(&mut self, attribute: ShadingAttribute) -> Result<bool, SchemaError> {
+        if !attribute.attribute().is_defined()? || self.chain.contains(attribute.path()) {
+            return Ok(false);
         }
-        chain.push(attribute.path().clone());
+
+        let sources = attribute.connected_sources()?;
+        let sources = distinct_sources(&sources);
+        let connected = !sources.is_empty();
+        if connected {
+            if self.chain.len() >= MAX_CONNECTION_DEPTH {
+                return Err(SchemaError::ConnectionDepthExceeded {
+                    attribute: attribute.path().clone(),
+                    max: MAX_CONNECTION_DEPTH,
+                });
+            }
+            self.chain.push(attribute.path().clone());
+        }
+
+        let mut found = false;
+        for source in sources {
+            found |= self.follow(source)?;
+        }
+
+        if connected {
+            self.chain.pop();
+        }
+
+        // Nothing upstream produced a value, so an authored value here is
+        // what a consumer resolves to — a NodeGraph or Material interface
+        // value.
+        if self.filter == ProducerFilter::Any && !found && attribute.attribute().has_authored_value()? {
+            self.producing.push(attribute);
+            found = true;
+        }
+        Ok(found)
     }
 
-    let mut found = false;
-    for source in sources {
-        found |= follow_source(source, chain, producing, filter)?;
+    /// Follow one connection to `source`, reporting whether a value was found
+    /// behind it.
+    fn follow(&mut self, source: &ConnectionSource) -> Result<bool, SchemaError> {
+        let attribute = source.attribute();
+        let container = self.context.is_container(source.prim())?;
+        match source.source_type() {
+            // An output on a node that holds no others is a terminal
+            // producer; nothing upstream of it takes part in the value.
+            AttributeType::Output if !container => {
+                self.producing.push(attribute);
+                Ok(true)
+            }
+            // Reaching an input on a node that holds no others ends the
+            // chain: an input can only legally consume, so there is nothing
+            // further to follow and no value to take.
+            AttributeType::Input if !container => Ok(false),
+            // A container was reached through its interface, so the value
+            // comes from whatever that interface resolves to inside.
+            AttributeType::Input | AttributeType::Output => self.resolve(attribute),
+        }
     }
-
-    if connected {
-        chain.pop();
-    }
-
-    // Nothing upstream produced a value, so an authored value here is what a
-    // consumer resolves to — a NodeGraph or Material interface value.
-    if filter == ProducerFilter::Any && !found && attribute.attribute().has_authored_value()? {
-        producing.push(attribute);
-        found = true;
-    }
-    Ok(found)
 }
 
 /// The sources of `connected` with repeats dropped, keeping composed order.
@@ -100,30 +140,6 @@ fn distinct_sources(connected: &super::ConnectedSources) -> Vec<&ConnectionSourc
         }
     }
     distinct
-}
-
-fn follow_source(
-    source: &ConnectionSource,
-    chain: &mut Vec<sdf::Path>,
-    producing: &mut Vec<ShadingAttribute>,
-    filter: ProducerFilter,
-) -> Result<bool, SchemaError> {
-    let attribute = source.attribute();
-    match source.source_type() {
-        // An output on a shader node is a terminal producer; nothing upstream
-        // of it takes part in the value.
-        AttributeType::Output if !source.source_is_container() => {
-            producing.push(attribute);
-            Ok(true)
-        }
-        // Reaching an input on a node that holds no others ends the chain: an
-        // input can only legally consume, so there is nothing further to
-        // follow and no value to take.
-        AttributeType::Input if !source.source_is_container() => Ok(false),
-        // A container was reached through its interface, so the value comes
-        // from whatever that interface resolves to inside.
-        AttributeType::Input | AttributeType::Output => resolve_recursive(attribute, chain, producing, filter),
-    }
 }
 
 #[cfg(test)]

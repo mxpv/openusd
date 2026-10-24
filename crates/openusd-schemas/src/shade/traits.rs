@@ -10,7 +10,8 @@ use super::tokens::{INPUTS, OUTPUTS};
 use super::{Input, Output};
 
 /// The `inputs:` and `outputs:` surface shared by Shader, NodeGraph, and
-/// Material prims (C++ `UsdShadeConnectableAPI`).
+/// Material prims, and by any prim a [`ConnectableAPI`](super::ConnectableAPI)
+/// views (C++ `UsdShadeConnectableAPI`).
 pub trait Connectable: SchemaBase {
     /// The `inputs:<base>` attribute view (C++ `GetInput`).
     ///
@@ -93,11 +94,12 @@ pub trait Connectable: SchemaBase {
     }
 }
 
-// The three views a shading network connects through, which is what the trait
-// is about; a generated view carries no membership of a hand-written trait.
+// The views a shading network connects through, which is what the trait is
+// about; a generated view carries no membership of a hand-written trait.
 impl Connectable for super::Shader {}
 impl Connectable for super::NodeGraph {}
 impl Connectable for super::Material {}
+impl Connectable for super::ConnectableAPI {}
 
 #[cfg(test)]
 mod tests {

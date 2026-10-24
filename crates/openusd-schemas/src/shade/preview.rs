@@ -17,7 +17,7 @@ use openusd::{gf, sdf, usd};
 
 use super::nodes::{PreviewSurface, UVTexture};
 use super::tokens::*;
-use super::{Input, Material, ProducerFilter, Shader};
+use super::{ConnectableContext, Input, Material, ProducerFilter, Shader, TerminalKind};
 
 /// One UsdPreviewSurface channel: either a constant value, a texture asset path
 /// (the input connects to a `UsdUVTexture`), or unauthored.
@@ -83,43 +83,59 @@ pub fn read_preview_surface(
     stage: &usd::Stage,
     material: &sdf::Path,
 ) -> Result<Option<ReadPreviewSurface>, SchemaError> {
-    let Some(material) = Material::get(stage, material.clone())? else {
-        return Ok(None);
-    };
-    let Some(terminal) = resolve_surface_terminal(&material)? else {
-        return Ok(None);
-    };
-    let Some(source) = terminal.sources().first() else {
-        return Ok(None);
-    };
-    let Some(shader) = source.shader() else {
-        return Ok(None);
-    };
-    let Some(surface) = PreviewSurface::from_shader(shader.clone())? else {
-        return Ok(None);
-    };
+    ConnectableContext::default().read_preview_surface(stage, material)
+}
 
-    Ok(Some(ReadPreviewSurface {
-        shader: shader.path().as_str().to_string(),
-        diffuse_color: read_color_channel(&surface.diffuse_color_input())?,
-        emissive_color: read_color_channel(&surface.emissive_color_input())?,
-        specular_color: read_color_channel(&surface.specular_color_input())?,
-        metallic: read_scalar_channel(&surface.metallic_input())?,
-        roughness: read_scalar_channel(&surface.roughness_input())?,
-        clearcoat: read_scalar_channel(&surface.clearcoat_input())?,
-        clearcoat_roughness: read_scalar_channel(&surface.clearcoat_roughness_input())?,
-        opacity: read_scalar_channel(&surface.opacity_input())?,
-        opacity_threshold: read_scalar_channel(&surface.opacity_threshold_input())?,
-        ior: read_scalar_channel(&surface.ior_input())?,
-        normal: read_color_channel(&surface.normal_input())?,
-        occlusion: read_scalar_channel(&surface.occlusion_input())?,
-    }))
+impl ConnectableContext {
+    /// `material`'s `UsdPreviewSurface`, as [`read_preview_surface`] decodes
+    /// it, each prim the connections reach asked of this context whether it
+    /// is a container.
+    pub fn read_preview_surface(
+        &self,
+        stage: &usd::Stage,
+        material: &sdf::Path,
+    ) -> Result<Option<ReadPreviewSurface>, SchemaError> {
+        let Some(material) = Material::get(stage, material.clone())? else {
+            return Ok(None);
+        };
+        let Some(terminal) = resolve_surface_terminal(self, &material)? else {
+            return Ok(None);
+        };
+        let Some(source) = terminal.sources().first() else {
+            return Ok(None);
+        };
+        let Some(shader) = source.shader() else {
+            return Ok(None);
+        };
+        let Some(surface) = PreviewSurface::from_shader(shader.clone())? else {
+            return Ok(None);
+        };
+
+        Ok(Some(ReadPreviewSurface {
+            shader: shader.path().as_str().to_string(),
+            diffuse_color: read_color_channel(self, &surface.diffuse_color_input())?,
+            emissive_color: read_color_channel(self, &surface.emissive_color_input())?,
+            specular_color: read_color_channel(self, &surface.specular_color_input())?,
+            metallic: read_scalar_channel(self, &surface.metallic_input())?,
+            roughness: read_scalar_channel(self, &surface.roughness_input())?,
+            clearcoat: read_scalar_channel(self, &surface.clearcoat_input())?,
+            clearcoat_roughness: read_scalar_channel(self, &surface.clearcoat_roughness_input())?,
+            opacity: read_scalar_channel(self, &surface.opacity_input())?,
+            opacity_threshold: read_scalar_channel(self, &surface.opacity_threshold_input())?,
+            ior: read_scalar_channel(self, &surface.ior_input())?,
+            normal: read_color_channel(self, &surface.normal_input())?,
+            occlusion: read_scalar_channel(self, &surface.occlusion_input())?,
+        }))
+    }
 }
 
 /// Resolve the surface terminal: the universal context first, then the
 /// authored render-context terminals in sorted order for a stable choice.
-fn resolve_surface_terminal(material: &Material) -> Result<Option<super::ResolvedTerminal>, SchemaError> {
-    if let Some(terminal) = material.surface_source(&[])? {
+fn resolve_surface_terminal(
+    context: &ConnectableContext,
+    material: &Material,
+) -> Result<Option<super::ResolvedTerminal>, SchemaError> {
+    if let Some(terminal) = context.terminal_source(material, TerminalKind::Surface, &[])? {
         return Ok(Some(terminal));
     }
     let suffix = format!(":{}", SURFACE);
@@ -134,7 +150,7 @@ fn resolve_surface_terminal(material: &Material) -> Result<Option<super::Resolve
         return Ok(None);
     }
     let contexts: Vec<&str> = contexts.iter().map(String::as_str).collect();
-    material.surface_source(&contexts)
+    context.terminal_source(material, TerminalKind::Surface, &contexts)
 }
 
 /// If `input` resolves to a `UsdUVTexture`, return that texture's
@@ -143,8 +159,8 @@ fn resolve_surface_terminal(material: &Material) -> Result<Option<super::Resolve
 /// The input is resolved to the shader output that produces it, so a texture
 /// reached through a NodeGraph interface is found the same as one wired
 /// directly.
-fn connected_texture_file(input: &Input) -> Result<Option<String>, SchemaError> {
-    let produced = input.value_producing_attributes(ProducerFilter::ShaderOutputsOnly)?;
+fn connected_texture_file(context: &ConnectableContext, input: &Input) -> Result<Option<String>, SchemaError> {
+    let produced = context.value_producing_attributes(input.clone(), ProducerFilter::ShaderOutputsOnly)?;
     let Some(source) = produced.first() else {
         return Ok(None);
     };
@@ -154,7 +170,7 @@ fn connected_texture_file(input: &Input) -> Result<Option<String>, SchemaError> 
     let Some(texture) = UVTexture::from_shader(shader)? else {
         return Ok(None);
     };
-    resolve_asset_value(&texture.file_input())
+    resolve_asset_value(context, &texture.file_input())
 }
 
 /// Resolve an `asset`-typed input to its authored path. When the input is
@@ -164,8 +180,8 @@ fn connected_texture_file(input: &Input) -> Result<Option<String>, SchemaError> 
 ///
 /// TODO: the returned path is the raw authored token; anchoring it to the layer
 /// that authored the opinion is not yet done.
-fn resolve_asset_value(input: &Input) -> Result<Option<String>, SchemaError> {
-    let produced = input.value_producing_attributes(ProducerFilter::Any)?;
+fn resolve_asset_value(context: &ConnectableContext, input: &Input) -> Result<Option<String>, SchemaError> {
+    let produced = context.value_producing_attributes(input.clone(), ProducerFilter::Any)?;
     let Some(source) = produced.first() else {
         return Ok(None);
     };
@@ -179,8 +195,8 @@ fn resolve_asset_value(input: &Input) -> Result<Option<String>, SchemaError> {
 
 /// A colour channel: the texture feeding `input`, else the value the shader
 /// authors on it, widened to `f32` components.
-fn read_color_channel(input: &Input) -> Result<Channel<gf::Vec3f>, SchemaError> {
-    if let Some(file) = connected_texture_file(input)? {
+fn read_color_channel(context: &ConnectableContext, input: &Input) -> Result<Channel<gf::Vec3f>, SchemaError> {
+    if let Some(file) = connected_texture_file(context, input)? {
         return Ok(Channel::Texture(file));
     }
     Ok(match input.get::<sdf::Value>()? {
@@ -193,8 +209,8 @@ fn read_color_channel(input: &Input) -> Result<Channel<gf::Vec3f>, SchemaError> 
 
 /// A scalar channel: the texture feeding `input`, else the value the shader
 /// authors on it, as `f32`.
-fn read_scalar_channel(input: &Input) -> Result<Channel<f32>, SchemaError> {
-    if let Some(file) = connected_texture_file(input)? {
+fn read_scalar_channel(context: &ConnectableContext, input: &Input) -> Result<Channel<f32>, SchemaError> {
+    if let Some(file) = connected_texture_file(context, input)? {
         return Ok(Channel::Texture(file));
     }
     Ok(match input.get::<sdf::Value>()? {

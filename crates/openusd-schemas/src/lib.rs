@@ -697,6 +697,22 @@ pub fn extent_registry() -> &'static geom::ExtentRegistry {
     })
 }
 
+/// The connectable behavior of every schema of this crate that has one, among
+/// the families enabled: what a [`shade::ConnectableContext`] answers with by
+/// default.
+///
+/// A clone of it is the starting point for a registry that also knows types
+/// declared elsewhere.
+#[cfg(feature = "shade")]
+pub fn connectable_registry() -> &'static shade::BehaviorRegistry {
+    static REGISTRY: OnceLock<shade::BehaviorRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = shade::BehaviorRegistry::new();
+        shade::behavior::register_behaviors(&mut registry);
+        registry
+    })
+}
+
 /// `attr`'s value at `time`, where `None` is the default time, when some layer
 /// authors one, and `None` where the value would be the schema's fallback.
 ///

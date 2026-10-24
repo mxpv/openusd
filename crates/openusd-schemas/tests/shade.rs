@@ -460,3 +460,31 @@ fn connect_connectability_render_type() -> Result<()> {
     assert_eq!(base_name("outputs:rgb"), "rgb");
     Ok(())
 }
+
+/// `testUsdShadeHasConnectableAPI.cpp`: the shading types are connectable and
+/// a Sphere is not, by type and by prim.
+#[test]
+fn has_connectable_api() -> Result<()> {
+    let schemas = openusd_schemas::schema_registry();
+    for schema in ["Shader", "Material", "NodeGraph"] {
+        assert!(
+            shade::ConnectableAPI::has_connectable_api(&schemas, &tf::Token::from(schema)),
+            "{schema}"
+        );
+    }
+    assert!(!shade::ConnectableAPI::has_connectable_api(
+        &schemas,
+        &tf::Token::from("Sphere")
+    ));
+
+    let stage = memory()?;
+    Material::define(&stage, "/Mat")?;
+    Shader::define(&stage, "/Mat/Shader")?;
+    let material = shade::ConnectableAPI::from_prim(stage.prim("/Mat")?)?.expect("a Material is connectable");
+    assert!(material.is_container()? && material.requires_encapsulation()?);
+    let shader = shade::ConnectableAPI::from_prim(stage.prim("/Mat/Shader")?)?.expect("a Shader is connectable");
+    assert!(!shader.is_container()? && shader.requires_encapsulation()?);
+    let sphere = stage.define_prim("/Sphere")?.set_type_name("Sphere")?;
+    assert!(shade::ConnectableAPI::from_prim(sphere)?.is_none());
+    Ok(())
+}

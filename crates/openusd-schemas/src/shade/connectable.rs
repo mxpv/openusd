@@ -6,7 +6,7 @@ use openusd::Result;
 
 use openusd::{pcp, sdf, tf, usd};
 
-use super::tokens::{INPUTS, NODE_GRAPH, OUTPUTS};
+use super::tokens::{INPUTS, OUTPUTS};
 use super::{Input, Output};
 
 /// Whether a shading attribute is an `inputs:` or `outputs:` property.
@@ -102,7 +102,6 @@ pub struct ConnectionSource {
     source_name: tf::Token,
     source_type: AttributeType,
     type_name: Option<sdf::ValueTypeName>,
-    source_is_container: bool,
 }
 
 impl ConnectionSource {
@@ -149,10 +148,6 @@ impl ConnectionSource {
             AttributeType::Output => ShadingAttribute::Output(Output::new(attribute)),
         }
     }
-
-    pub(super) const fn source_is_container(&self) -> bool {
-        self.source_is_container
-    }
 }
 
 /// Valid and invalid sources found on one UsdShade attribute.
@@ -183,6 +178,8 @@ impl ConnectedSources {
     }
 }
 
+/// The valid and invalid sources `attribute` connects to, in composed order
+/// (C++ `UsdShadeConnectableAPI::GetConnectedSources`).
 pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedSources> {
     let mut result = ConnectedSources::default();
     for source_path in attribute.connections()? {
@@ -194,10 +191,11 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
             result.invalid_paths.push(source_path);
             continue;
         };
-        let Some((source_prim, source_is_container)) = source_prim(attribute.stage(), &source_prim_path)? else {
+        let source_prim = attribute.stage().prim(source_prim_path)?;
+        if !source_prim.is_valid()? {
             result.invalid_paths.push(source_path);
             continue;
-        };
+        }
 
         let source_attribute = attribute.stage().attribute(source_path.clone())?;
         if !source_attribute.is_defined()? {
@@ -212,7 +210,6 @@ pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedS
             source_name,
             source_type,
             type_name: source_attribute.type_name()?,
-            source_is_container,
         });
     }
     Ok(result)
@@ -246,31 +243,6 @@ pub fn base_name_and_type(full_name: &str) -> Option<(&str, AttributeType)> {
                 .strip_prefix(OUTPUTS)
                 .map(|name| (name, AttributeType::Output))
         })
-}
-
-/// The connectable prim owning a source attribute, paired with whether it is a
-/// container.
-fn source_prim(stage: &usd::Stage, path: &sdf::Path) -> Result<Option<(usd::Prim, bool)>> {
-    let prim = stage.prim(path.clone())?;
-    if !prim.is_valid()? {
-        return Ok(None);
-    }
-    let source_is_container = is_container(&prim)?;
-    Ok(Some((prim, source_is_container)))
-}
-
-/// Whether `prim` is a NodeGraph or Material container.
-///
-/// A container holds other connectable prims and reaches them through its own
-/// interface. A prim of any other type produces its outputs directly.
-///
-/// TODO: C++ reads containment off a plugin-registered connectable behavior,
-/// so a site can teach it about its own container types. Naming the two
-/// built-in ones stands in for that registry.
-pub(super) fn is_container(prim: &usd::Prim) -> Result<bool> {
-    // A `Material` inherits `NodeGraph`, so one question answers for both —
-    // which is what C++ `UsdShadeConnectableAPI::IsContainer` amounts to.
-    prim.is_a(NODE_GRAPH)
 }
 
 /// The authored `inputs:` attributes of `prim` in composed property order —
@@ -411,7 +383,8 @@ mod tests {
         let connected = shader.input("value").connected_sources()?;
         let source = connected.sources().first().expect("connected source");
         assert_eq!(source.source_type(), AttributeType::Input);
-        assert!(source.source_is_container(), "a Material is a NodeGraph container");
+        let context = crate::shade::ConnectableContext::default();
+        assert!(context.is_container(source.prim())?, "a Material is a container");
         Ok(())
     }
 }

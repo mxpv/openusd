@@ -13,6 +13,7 @@ use openusd::usd;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+use super::ConnectableContext;
 use super::node_def;
 use super::tokens;
 use super::utils::ProducerFilter;
@@ -333,51 +334,31 @@ impl Material {
     /// The earliest context with valid shader sources wins. The universal
     /// context is tried last unless it already appears in `render_contexts`.
     pub fn surface_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
-        self.compute_terminal_source(TerminalKind::Surface, render_contexts)
+        ConnectableContext::default().terminal_source(self, TerminalKind::Surface, render_contexts)
     }
 
     /// Resolve the displacement terminal for the ordered render-context
     /// preferences, with universal fallback.
     pub fn displacement_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
-        self.compute_terminal_source(TerminalKind::Displacement, render_contexts)
+        ConnectableContext::default().terminal_source(self, TerminalKind::Displacement, render_contexts)
     }
 
     /// Resolve the volume terminal for the ordered render-context preferences,
     /// with universal fallback.
     pub fn volume_source(&self, render_contexts: &[&str]) -> Result<Option<ResolvedTerminal>, SchemaError> {
-        self.compute_terminal_source(TerminalKind::Volume, render_contexts)
-    }
-
-    fn compute_terminal_source(
-        &self,
-        kind: TerminalKind,
-        render_contexts: &[&str],
-    ) -> Result<Option<ResolvedTerminal>, SchemaError> {
-        for &render_context in render_contexts {
-            checked_context(render_context)?;
-        }
-        let mut universal_visited = false;
-        for &render_context in render_contexts {
-            universal_visited |= render_context == tokens::UNIVERSAL_RENDER_CONTEXT;
-            if let Some(resolved) = self.resolve_terminal(kind, render_context)? {
-                return Ok(Some(resolved));
-            }
-        }
-        if !universal_visited {
-            return self.resolve_terminal(kind, tokens::UNIVERSAL_RENDER_CONTEXT);
-        }
-        Ok(None)
+        ConnectableContext::default().terminal_source(self, TerminalKind::Volume, render_contexts)
     }
 
     fn resolve_terminal(
         &self,
+        context: &ConnectableContext,
         kind: TerminalKind,
         render_context: &str,
     ) -> Result<Option<ResolvedTerminal>, SchemaError> {
         let output = self.terminal_output(render_context, kind);
         let mut sources = Vec::new();
         let mut seen = HashSet::new();
-        for attribute in output.value_producing_attributes(ProducerFilter::ShaderOutputsOnly)? {
+        for attribute in context.value_producing_attributes(output, ProducerFilter::ShaderOutputsOnly)? {
             // Sibling branches can converge on one endpoint; report it once.
             if !seen.insert(attribute.path().clone()) {
                 continue;
@@ -487,6 +468,34 @@ impl Material {
         Ok(Output::new(
             self.attribute_builder(name.as_ref(), "token").custom(false).build()?,
         ))
+    }
+}
+
+impl ConnectableContext {
+    /// `material`'s `kind` terminal for the ordered render-context
+    /// preferences, as [`Material::surface_source`] and its siblings resolve
+    /// it, each prim the producer walk meets asked of this context whether
+    /// it is a container.
+    pub fn terminal_source(
+        &self,
+        material: &Material,
+        kind: TerminalKind,
+        render_contexts: &[&str],
+    ) -> Result<Option<ResolvedTerminal>, SchemaError> {
+        for &render_context in render_contexts {
+            checked_context(render_context)?;
+        }
+        let mut universal_visited = false;
+        for &render_context in render_contexts {
+            universal_visited |= render_context == tokens::UNIVERSAL_RENDER_CONTEXT;
+            if let Some(resolved) = material.resolve_terminal(self, kind, render_context)? {
+                return Ok(Some(resolved));
+            }
+        }
+        if !universal_visited {
+            return material.resolve_terminal(self, kind, tokens::UNIVERSAL_RENDER_CONTEXT);
+        }
+        Ok(None)
     }
 }
 

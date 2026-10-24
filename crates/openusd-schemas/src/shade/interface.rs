@@ -6,9 +6,9 @@ use openusd::Result;
 
 use openusd::{sdf, usd};
 
-use super::connectable::{authored_inputs, is_container};
-
-use super::{Connectable, Input, Material, NodeGraph};
+use super::connectable::authored_inputs;
+use super::tokens::NODE_GRAPH;
+use super::{Connectable, ConnectableContext, Input, Material, NodeGraph};
 
 /// A NodeGraph's interface inputs and the inputs that consume their values.
 ///
@@ -105,13 +105,30 @@ pub trait NodeGraphInterface: Connectable {
     /// Rust counterpart of
     /// `UsdShadeNodeGraph::ComputeInterfaceInputConsumersMap`.
     fn interface_input_consumers(&self, transitive: bool) -> Result<InterfaceInputConsumersMap> {
-        let direct = compute_direct_map(self.prim())?;
+        ConnectableContext::default().interface_input_consumers(self, transitive)
+    }
+}
+
+impl NodeGraphInterface for NodeGraph {}
+impl NodeGraphInterface for Material {}
+
+impl ConnectableContext {
+    /// The consumers of each of `container`'s interface inputs, as
+    /// [`NodeGraphInterface::interface_input_consumers`] maps them, each
+    /// prim on the way asked of this context whether it is connectable.
+    pub fn interface_input_consumers(
+        &self,
+        container: &(impl NodeGraphInterface + ?Sized),
+        transitive: bool,
+    ) -> Result<InterfaceInputConsumersMap> {
+        let root = container.prim();
+        let direct = compute_direct_map(self, root)?;
         if !transitive {
             return Ok(direct);
         }
 
         let mut nested_maps = HashMap::new();
-        collect_nested_maps(&direct, self.stage(), &mut nested_maps)?;
+        collect_nested_maps(self, &direct, root.stage(), &mut nested_maps)?;
         if nested_maps.is_empty() {
             return Ok(direct);
         }
@@ -126,21 +143,20 @@ pub trait NodeGraphInterface: Connectable {
     }
 }
 
-impl NodeGraphInterface for NodeGraph {}
-impl NodeGraphInterface for Material {}
-
 /// Builds the non-transitive map for `root`: every interface input of the
 /// container, each with the consumer inputs inside the container's subtree
 /// that connect directly to it.
-fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
+fn compute_direct_map(context: &ConnectableContext, root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
     let mut result = InterfaceInputConsumersMap::default();
-    for interface_input in connectable_inputs(root)?.unwrap_or_default() {
+    // The container's own inputs are its interface whatever its behavior
+    // (C++ `nodeGraph.GetInputs()`, `nodeGraph.cpp:225-228`).
+    for interface_input in authored_inputs(root)? {
         result.insert(InterfaceInputConsumers::new(interface_input));
     }
 
     for prim in root.filtered_descendants(usd::PrimPredicate::DEFAULT)? {
         let prim = prim?;
-        let Some(inputs) = connectable_inputs(&prim)? else {
+        let Some(inputs) = connectable_inputs(context, &prim)? else {
             continue;
         };
         for input in inputs {
@@ -157,26 +173,22 @@ fn compute_direct_map(root: &usd::Prim) -> Result<InterfaceInputConsumersMap> {
     Ok(result)
 }
 
-/// The authored inputs of `prim` when it takes part in connectable
-/// evaluation, or `None` for a prim whose inputs never consume.
-///
-/// Any typed prim participates — shaders, containers, and the light family,
-/// whose inputs C++ admits through `UsdShadeConnectableAPIBehavior`; an
-/// untyped prim has no behavior and is skipped.
-// TODO(shade): replace the any-typed-prim heuristic with a
-// connectable-behavior registry so typed prims without a behavior (e.g.
-// Scope) are excluded, as in C++.
-fn connectable_inputs(prim: &usd::Prim) -> Result<Option<Vec<Input>>> {
-    if prim.type_name()?.is_none() {
+/// The authored inputs of `prim` when `context` gives it a behavior, which is
+/// what makes it connectable (C++ `UsdShadeConnectableAPI` over `prim`,
+/// `nodeGraph.cpp:236-238`), or `None` for a prim whose inputs never consume.
+fn connectable_inputs(context: &ConnectableContext, prim: &usd::Prim) -> Result<Option<Vec<Input>>> {
+    if context.behaviors().behavior(prim)?.is_none() {
         return Ok(None);
     }
     Ok(Some(authored_inputs(prim)?))
 }
 
-/// Computes the direct map of every container reachable through consumer
-/// inputs, keyed by container prim path. Non-container consumers are visited
-/// once and dropped.
+/// Computes the direct map of every NodeGraph reachable through consumer
+/// inputs, keyed by prim path (C++
+/// `_RecursiveComputeNodeGraphInterfaceInputConsumers`, which recurses on a
+/// `UsdShadeNodeGraph`). Every other consumer is visited once and dropped.
 fn collect_nested_maps(
+    context: &ConnectableContext,
     consumers: &InterfaceInputConsumersMap,
     stage: &usd::Stage,
     maps: &mut HashMap<sdf::Path, InterfaceInputConsumersMap>,
@@ -189,10 +201,10 @@ fn collect_nested_maps(
             continue;
         }
         let prim = stage.prim(path.clone())?;
-        if !is_container(&prim)? {
+        if !prim.is_a(NODE_GRAPH)? {
             continue;
         }
-        let nested = compute_direct_map(&prim)?;
+        let nested = compute_direct_map(context, &prim)?;
         let mut nested_paths = nested_container_paths(&nested);
         nested_paths.reverse();
         maps.insert(path, nested);
@@ -428,22 +440,24 @@ mod tests {
         Ok(())
     }
 
+    /// Only a prim with a connectable behavior consumes an interface input: a
+    /// Shader does, while a typed `Scope` and an untyped prim do not.
     #[test]
-    fn typed_consumer_included() -> Result<()> {
+    fn scope_not_interface() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
-        // A non-Shader typed prim (a light) consumes the interface input; an
-        // untyped defined prim does not.
-        let light = stage.define_prim("/Graph/Light")?.set_type_name("SphereLight")?;
-        Input::new(light.create_attribute("inputs:intensity", "float")?).connect_to(&gain)?;
+        let shader = Shader::define(&stage, "/Graph/Shader")?;
+        shader.create_input("gain", "float")?.connect_to(&gain)?;
+        let scope = stage.define_prim("/Graph/Scope")?.set_type_name("Scope")?;
+        Input::new(scope.create_attribute("inputs:gain", "float")?).connect_to(&gain)?;
         let plain = stage.define_prim("/Graph/Plain")?;
-        Input::new(plain.create_attribute("inputs:x", "float")?).connect_to(&gain)?;
+        Input::new(plain.create_attribute("inputs:gain", "float")?).connect_to(&gain)?;
 
         let map = graph.interface_input_consumers(false)?;
         assert_eq!(
             paths(map.consumers(&gain).expect("gain entry")),
-            ["/Graph/Light.inputs:intensity"]
+            ["/Graph/Shader.inputs:gain"]
         );
         Ok(())
     }

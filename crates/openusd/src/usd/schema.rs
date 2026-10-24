@@ -124,6 +124,12 @@ impl SchemaKind {
         matches!(self, SchemaKind::ConcreteTyped)
     }
 
+    /// Whether a schema of this kind is abstract, a base no prim is an
+    /// instance of alone (C++ `UsdSchemaRegistry::IsAbstract`).
+    pub fn is_abstract(self) -> bool {
+        matches!(self, SchemaKind::AbstractBase | SchemaKind::AbstractTyped)
+    }
+
     /// Whether a schema of this kind is an API schema, applied or not.
     pub fn is_api(self) -> bool {
         matches!(
