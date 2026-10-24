@@ -105,6 +105,7 @@ impl<'a> Parser<'a> {
         // Read root defs and any layer-level `reorder rootPrims` statements.
         while let Some(token) = self.cursor.peek()? {
             if matches!(token, Token::Reorder) {
+                self.cursor.bump()?;
                 self.read_reorder(&mut pseudo_root_spec)?;
             } else {
                 self.read_prim(&current_path, &mut root_children, &mut data)?;
@@ -287,10 +288,17 @@ impl<'a> Parser<'a> {
                     this.read_relationship(path, false, sdf::Variability::Uniform, &mut properties, data, None)?;
                 }
                 Token::Reorder => {
-                    this.read_reorder(owner_spec)?;
+                    let op = this.cursor.bump()?;
+                    // `reorder` also opens a target or connection list op
+                    // statement (`reorder rel r = [...]`), as in C++.
+                    match this.cursor.peek()? {
+                        Some(Token::NameChildren | Token::Properties) => this.read_reorder(owner_spec)?,
+                        _ => this.read_attribute(path, &mut properties, data, Some(op))?,
+                    }
                 }
                 _ => {
-                    this.read_attribute(path, &mut properties, data)?;
+                    let op = this.try_list_op()?;
+                    this.read_attribute(path, &mut properties, data, op)?;
                 }
             }
             Ok(())
@@ -299,15 +307,13 @@ impl<'a> Parser<'a> {
         Ok((children, properties, variant_sets))
     }
 
-    /// Parse `reorder nameChildren = [...]`, `reorder properties = [...]`, or
-    /// the layer-level `reorder rootPrims = [...]`.
+    /// Parse `nameChildren = [...]`, `properties = [...]`, or the layer-level
+    /// `rootPrims = [...]`, after the `reorder` that opens the statement.
     ///
     /// These statements set the `primOrder` or `propertyOrder` fields on the
     /// owning prim/variant spec, controlling child/property display order;
     /// `rootPrims` sets `primOrder` on the pseudo-root.
     fn read_reorder(&mut self, owner_spec: &mut sdf::SpecData) -> Result<(), RawError> {
-        self.cursor.bump()?; // consume `reorder`
-
         let token = self
             .cursor
             .bump()
@@ -391,14 +397,17 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
-    /// Merge a spec's fields into an existing spec at the given path, or insert it.
-    fn merge_spec(data: &mut sdf::PathMap<sdf::SpecData>, path: sdf::Path, spec: sdf::SpecData) {
+    /// Merge a spec's fields into an existing spec at the given path, or insert
+    /// it, and return the spec at that path.
+    fn merge_spec(data: &mut sdf::PathMap<sdf::SpecData>, path: sdf::Path, spec: sdf::SpecData) -> &mut sdf::SpecData {
         use std::collections::hash_map::Entry;
         match data.entry(path) {
-            Entry::Occupied(mut e) => e.get_mut().extend_from(spec),
-            Entry::Vacant(e) => {
-                e.insert(spec);
+            Entry::Occupied(e) => {
+                let merged = e.into_mut();
+                merged.extend_from(spec);
+                merged
             }
+            Entry::Vacant(e) => e.insert(spec),
         }
     }
 
@@ -422,14 +431,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an attribute/property declaration, including variability, metadata, and default value.
+    /// `list_op` is the keyword that opened the statement (`add`, `reorder`, ...), already read.
     fn read_attribute(
         &mut self,
         current_path: &sdf::Path,
         properties: &mut Vec<String>,
         data: &mut sdf::PathMap<sdf::SpecData>,
+        list_op: Option<Token<'a>>,
     ) -> Result<(), RawError> {
         let mut custom = false;
-        let list_op = self.try_list_op()?;
 
         if self.cursor.eat(&Token::Custom)? {
             custom = true;
@@ -653,14 +663,16 @@ impl<'a> Parser<'a> {
         );
 
         let list_op = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
-        spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
 
         if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse relationship metadata")?;
         }
 
-        Self::merge_spec(data, path, spec);
+        // Each statement's targets join those of the relationship's earlier
+        // statements (`delete rel r = ...` then `add rel r = ...`), as a
+        // connection's do.
+        Self::merge_spec(data, path, spec).add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
         Ok(())
     }
 
@@ -3297,5 +3309,48 @@ def "p" {
             .unwrap();
         let names: Vec<&str> = names.iter().map(|t| t.as_str()).collect();
         assert_eq!(names, ["a", "b", "c", "d"]);
+    }
+
+    /// Each statement of a relationship adds its list op to the others', as
+    /// each statement of a connection does.
+    #[test]
+    fn relationship_list_ops_accumulate() {
+        let text =
+            "#usda 1.0\ndef \"P\" {\n    rel m (doc = \"m\")\n    delete rel m = </k>\n    add rel m = </j>\n}\n";
+        let data = Parser::new(text).parse().unwrap();
+        let spec = data.get(&sdf::path("/P.m").unwrap()).unwrap();
+        let op = spec
+            .get(FieldKey::TargetPaths.as_str())
+            .unwrap()
+            .try_as_path_list_op_ref()
+            .unwrap();
+        assert_eq!(op.deleted_items(), [sdf::path("/k").unwrap()]);
+        assert_eq!(op.added_items(), [sdf::path("/j").unwrap()]);
+    }
+
+    /// `reorder` opens a target or connection statement too, and joins the
+    /// statements before it. The expected list ops are what OpenUSD 26.11
+    /// reads from the same text.
+    #[test]
+    fn reorder_list_ops() {
+        let text = "#usda 1.0\ndef \"P\" {\n    add rel r = </a>\n    reorder rel r = [</b>, </a>]\n    \
+                    add float c.connect = </x.y>\n    reorder float c.connect = [</y.z>, </x.y>]\n}\n";
+        let data = Parser::new(text).parse().unwrap();
+        let op = |path: &str, key: FieldKey| {
+            data.get(&sdf::path(path).unwrap())
+                .unwrap()
+                .get(key.as_str())
+                .unwrap()
+                .clone()
+                .try_as_path_list_op()
+                .unwrap()
+        };
+        let paths = |paths: &[&str]| paths.iter().map(|p| sdf::path(p).unwrap()).collect::<Vec<_>>();
+        let targets = op("/P.r", FieldKey::TargetPaths);
+        assert_eq!(targets.added_items(), paths(&["/a"]));
+        assert_eq!(targets.ordered_items(), paths(&["/b", "/a"]));
+        let connections = op("/P.c", FieldKey::ConnectionPaths);
+        assert_eq!(connections.added_items(), paths(&["/x.y"]));
+        assert_eq!(connections.ordered_items(), paths(&["/y.z", "/x.y"]));
     }
 }
