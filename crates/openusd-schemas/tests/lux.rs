@@ -6,15 +6,15 @@
 
 use openusd::Result;
 use openusd::sdf;
-use openusd::tf::Token;
-use openusd::usd::{CollectionAPI, SchemaBase, Stage};
+use openusd::tf;
+use openusd::usd::{self, CollectionAPI, SchemaBase, Stage};
 use openusd_schemas::geom::{self, XformableSchema};
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
-    LightAPI, LightFilter, LightFilterExt, LightListAPI, LightListCacheBehavior, NonboundableLightBaseSchema,
-    PluginLightFilter, PortalLight, PortalLightSchema, RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight,
-    SphereLightSchema, TextureFormat,
+    LightAPI, LightFilter, LightFilterExt, LightFilterSchema, LightListAPI, LightListCacheBehavior,
+    NonboundableLightBaseSchema, PluginLightFilter, PortalLight, PortalLightSchema, RectLight, RectLightSchema,
+    ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema, TextureFormat,
 };
 
 mod common;
@@ -132,7 +132,7 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
     );
     assert_eq!(
         dome.texture_format_attr()
-            .get::<Token>()?
+            .get::<tf::Token>()?
             .as_deref()
             .and_then(TextureFormat::from_token),
         Some(TextureFormat::Latlong)
@@ -175,7 +175,7 @@ fn light_list_api() -> Result<()> {
     let list = LightListAPI::get(&stage, sdf::path("/World")?)?.expect("LightListAPI");
     assert_eq!(
         list.light_list_cache_behavior_attr()
-            .get::<Token>()?
+            .get::<tf::Token>()?
             .as_deref()
             .and_then(LightListCacheBehavior::from_token),
         Some(LightListCacheBehavior::ConsumeAndContinue)
@@ -540,5 +540,78 @@ fn plugin_filter_linking() -> Result<()> {
     assert!(includes(&links, "/Anything")?);
     links.exclude_path("/Geom")?;
     assert!(!includes(&links, "/Geom/a")?);
+    Ok(())
+}
+
+/// The shader-id queries a light and a light filter share, over the
+/// universal attribute `universal`.
+struct ShaderIds<'a> {
+    attr_for: &'a dyn Fn(&str) -> Result<Option<usd::Attribute>>,
+    builder_for: &'a dyn Fn(&str) -> usd::AttributeBuilder<'static>,
+    id_for: &'a dyn Fn(&[&str]) -> Result<Option<tf::Token>>,
+    universal: usd::Attribute,
+}
+
+/// `testUsdLuxLight.py:test_GetShaderId`'s `_TestShaderIDs`.
+fn check_shader_ids(ids: ShaderIds<'_>) -> Result<()> {
+    let name = ids.universal.name();
+    let names = |context: &str| -> Result<Option<String>> {
+        Ok((ids.attr_for)(context)?.map(|attribute| attribute.name().to_owned()))
+    };
+    let id = |contexts: &[&str]| -> Result<Option<String>> { Ok((ids.id_for)(contexts)?.map(|id| id.to_string())) };
+
+    // The universal attribute exists through the schema; no other does yet.
+    assert_eq!(names("")?.as_deref(), Some(name));
+    assert_eq!(names("ri")?, None);
+    assert_eq!(names("other")?, None);
+    assert_eq!(id(&[])?, None);
+    assert_eq!(id(&["other", "ri"])?, None);
+
+    ids.universal.clone().set(sdf::Value::token("DefaultLight"))?;
+    assert_eq!(names("ri")?, None);
+    assert_eq!(id(&[])?.as_deref(), Some("DefaultLight"));
+    assert_eq!(id(&["other", "ri"])?.as_deref(), Some("DefaultLight"));
+
+    (ids.builder_for)("ri").set(sdf::Value::token("SphereLight")).build()?;
+    assert_eq!(names("")?.as_deref(), Some(name));
+    assert_eq!(names("ri")?, Some(format!("ri:{name}")));
+    assert_eq!(names("other")?, None);
+    assert_eq!(id(&[])?.as_deref(), Some("DefaultLight"));
+    assert_eq!(id(&["other", "ri"])?.as_deref(), Some("SphereLight"));
+    assert_eq!(id(&["ri"])?.as_deref(), Some("SphereLight"));
+    assert_eq!(id(&["other"])?.as_deref(), Some("DefaultLight"));
+    Ok(())
+}
+
+/// `testUsdLuxLight.py:test_GetShaderId`, over a `LightAPI` applied to an
+/// untyped prim and over a `LightFilter`.
+#[test]
+fn shader_id_contexts() -> Result<()> {
+    let stage = memory()?;
+    let light = LightAPI::apply(&stage.define_prim("/PrimLight")?)?;
+    check_shader_ids(ShaderIds {
+        attr_for: &|context| light.shader_id_attr_for(context),
+        builder_for: &|context| light.shader_id_attr_builder_for(context),
+        id_for: &|contexts| light.shader_id_for(contexts),
+        universal: light.shader_id_attr(),
+    })?;
+
+    let filter = LightFilter::define(&stage, "/PrimLightFilter")?;
+    check_shader_ids(ShaderIds {
+        attr_for: &|context| filter.shader_id_attr_for(context),
+        builder_for: &|context| filter.shader_id_attr_builder_for(context),
+        id_for: &|contexts| filter.shader_id_for(contexts),
+        universal: filter.shader_id_attr(),
+    })?;
+
+    // A context attribute is a uniform token the schema does not declare.
+    for other in [
+        light.create_shader_id_attr_for("other")?,
+        filter.create_shader_id_attr_for("other")?,
+    ] {
+        assert_eq!(other.type_name()?, Some(sdf::ValueTypeName::TOKEN));
+        assert_eq!(other.variability()?, Some(sdf::Variability::Uniform));
+        assert!(!other.is_custom()?);
+    }
     Ok(())
 }

@@ -26,8 +26,10 @@
 //! schemas. [`LightAPI::light_link_collection`] and
 //! [`LightAPI::shadow_link_collection`] are the geometry a light illuminates
 //! and is shadowed by, and [`LightFilterExt::filter_link_collection`] the
-//! geometry a filter applies to. [`blackbody_rgb`] is the color a light's
-//! color temperature stands for.
+//! geometry a filter applies to. [`LightAPI::shader_id_for`] and
+//! [`LightFilterExt::shader_id_for`] name the shader each render context
+//! draws a light or a filter with. [`blackbody_rgb`] is the color a light's color temperature stands
+//! for.
 //!
 //! # Example
 //!
