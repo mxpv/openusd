@@ -271,7 +271,6 @@ impl<'a> Parser<'a> {
     ) -> Result<PrimBodyNames, RawError> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
-        let mut suffixed_properties = Vec::<String>::new();
         let mut variant_sets = Vec::new();
 
         self.parse_block('{', '}', |this| {
@@ -291,17 +290,11 @@ impl<'a> Parser<'a> {
                     this.read_reorder(owner_spec)?;
                 }
                 _ => {
-                    this.read_attribute(path, &mut properties, &mut suffixed_properties, data)?;
+                    this.read_attribute(path, &mut properties, data)?;
                 }
             }
             Ok(())
         })?;
-
-        // Append properties that were only declared via suffixed forms
-        // (e.g. `.connect`, `.timeSamples`) and never had a bare declaration.
-        for name in suffixed_properties {
-            push_unique(&mut properties, &name);
-        }
 
         Ok((children, properties, variant_sets))
     }
@@ -433,7 +426,6 @@ impl<'a> Parser<'a> {
         &mut self,
         current_path: &sdf::Path,
         properties: &mut Vec<String>,
-        suffixed_properties: &mut Vec<String>,
         data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<(), RawError> {
         let mut custom = false;
@@ -478,7 +470,7 @@ impl<'a> Parser<'a> {
         }
 
         if matches!(suffix, Some(Token::Connect)) {
-            push_unique(suffixed_properties, name);
+            push_unique(properties, name);
             if self.cursor.eat_punctuation('=')? {
                 let list_op = match list_op {
                     Some(op) => Some(op),
@@ -505,7 +497,7 @@ impl<'a> Parser<'a> {
         }
 
         if matches!(suffix, Some(Token::TimeSamples)) {
-            push_unique(suffixed_properties, name);
+            push_unique(properties, name);
             self.cursor.expect_punctuation('=')?;
             let samples = types::parse_time_samples(&mut self.cursor, &type_name)?;
             let path = current_path.append_property(name)?;
@@ -518,7 +510,7 @@ impl<'a> Parser<'a> {
         }
 
         if matches!(suffix, Some(Token::Spline)) {
-            push_unique(suffixed_properties, name);
+            push_unique(properties, name);
             self.cursor.expect_punctuation('=')?;
             let spline = types::parse_spline(&mut self.cursor)?;
             let path = current_path.append_property(name)?;
@@ -3289,5 +3281,21 @@ def "p" {
             .unwrap();
         assert_eq!(knot.get("preValue"), Some(&sdf::Value::Double(1.0)));
         assert_eq!(knot.get("value"), Some(&sdf::Value::Double(9.0)));
+    }
+
+    /// A property declared only by a suffixed statement keeps its place among
+    /// the others, as C++ records properties in the order they first appear.
+    #[test]
+    fn suffixed_property_order() {
+        let text = "#usda 1.0\ndef \"p\" {\n    token a = \"x\"\n    float3 b.connect = </q.out>\n    double c.timeSamples = { 1: 2 }\n    float d = 1\n}\n";
+        let data = Parser::new(text).parse().unwrap();
+        let spec = data.get(&sdf::path("/p").unwrap()).unwrap();
+        let names = spec
+            .get(ChildrenKey::PropertyChildren.as_str())
+            .unwrap()
+            .try_as_token_vec_ref()
+            .unwrap();
+        let names: Vec<&str> = names.iter().map(|t| t.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d"]);
     }
 }
