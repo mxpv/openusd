@@ -615,26 +615,51 @@ pub(super) fn schema_definition(
     Ok(Some((stage.prim_type_info_composed(prim)?, tf::Token::from(name))))
 }
 
-/// The field `key` the declaring schema gives the property at `path`, or
-/// `None` where no schema declares the property or the field (C++
-/// `UsdStage::_GetSchemaAttribute` and its relationship counterpart).
+/// The field `key` the schema declares for the object at `path`: a prim's
+/// from its prim definition, a property's from the property's declaration
+/// there (C++ `UsdPrimDefinition`, keyed by the property name or by the empty
+/// one for the prim). `None` where no schema declares the object or the
+/// field.
 ///
-/// Everything a schema states about a property — its type, its variability,
-/// its display metadata — lives on the same declaration, whether or not any
-/// layer authors a spec, so this is what a property's generic metadata read
-/// falls back to where nothing authors the field.
-pub(super) fn schema_property_field(
-    stage: &Stage,
-    path: &sdf::Path,
-    key: &str,
-) -> Result<Option<sdf::Value>, pcp::QueryError> {
-    let Some((info, name)) = schema_definition(stage, path)? else {
-        return Ok(None);
+/// Everything a schema states about an object (a property's type and
+/// variability, the display metadata of either) lives on that declaration,
+/// whether or not any layer authors a spec.
+pub(super) fn schema_field(stage: &Stage, path: &sdf::Path, key: &str) -> Result<Option<sdf::Value>, pcp::QueryError> {
+    let (prim, name) = path.split_property().unwrap_or((path.clone(), ""));
+    let info = stage.prim_type_info_composed(prim)?;
+    let definition = info.prim_definition();
+    Ok(match name {
+        "" => definition.metadata(key).cloned(),
+        name => definition
+            .property(&tf::Token::from(name))
+            .and_then(|property| property.field(key).cloned()),
+    })
+}
+
+/// The composed metadata field `key` of the object at `path` decoded to `T`
+/// (C++ `UsdStage::_GetGeneralMetadataImpl`): the strongest layer opinion,
+/// with the dictionary the schema declares composed under an authored
+/// dictionary, or the schema's declaration where no layer authors the field.
+pub(super) fn metadata<T>(stage: &Stage, path: &sdf::Path, key: &str) -> crate::Result<Option<T>>
+where
+    T: TryFrom<sdf::Value>,
+    T::Error: Into<crate::Error>,
+{
+    let authored = match stage.field::<sdf::Value>(path, key)? {
+        Some(sdf::Value::Dictionary(mut dict)) => {
+            // TODO(perf): this clones the declared dictionary on every read; a
+            // borrowing compose would copy only the keys no layer authors.
+            if let Some(sdf::Value::Dictionary(declared)) = schema_field(stage, path, key)? {
+                dict.over(declared);
+            }
+            sdf::Value::Dictionary(dict)
+        }
+        Some(authored) => authored,
+        // Schema metadata parses untyped, so a declaration may hold a variant
+        // the caller did not ask for; that is "not declared", not an error.
+        None => return Ok(schema_field(stage, path, key)?.and_then(|value| T::try_from(value).ok())),
     };
-    Ok(info
-        .prim_definition()
-        .property(&name)
-        .and_then(|property| property.field(key).cloned()))
+    super::decode_value(Some(authored))
 }
 
 /// Run `f` on the `kind` spec at `path` on the edit-target layer, or return

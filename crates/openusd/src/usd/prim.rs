@@ -257,24 +257,14 @@ impl Prim {
     /// that accessor ([`kind`](Self::kind) and friends), which tolerates an
     /// authored value of the wrong type where a generic decode reports it.
     ///
-    /// TODO: a schema-declared dictionary should compose *under* the authored
-    /// one (C++ `VtDictionaryOver`) rather than being shadowed by it; the same
-    /// generalization is missing from [`Attribute::metadata`].
+    /// A dictionary the schema declares composes under an authored one, its
+    /// keys answering where no layer authors them.
     pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: Into<crate::Error>,
     {
-        if let Some(authored) = self.stage.field::<sdf::Value>(&self.path, key)? {
-            return super::decode_value(Some(authored));
-        }
-        // Schema metadata parses untyped, so a declaration may hold a variant
-        // the caller did not ask for; that is "not declared", not an error.
-        let definition = self.prim_definition()?;
-        Ok(definition
-            .metadata(key)
-            .cloned()
-            .and_then(|value| T::try_from(value).ok()))
+        super::authoring::metadata(&self.stage, &self.path, key)
     }
 
     /// Author a prim-level metadata field (e.g. `assetInfo`, `customData`,

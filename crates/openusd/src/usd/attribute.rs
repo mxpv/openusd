@@ -723,9 +723,7 @@ impl Attribute {
     /// [`type_name`](Self::type_name), [`role`](Self::role) and the value
     /// checks; it never feeds spec creation.
     fn declared_type_token(&self) -> Result<Option<tf::Token>, pcp::QueryError> {
-        if let Some(declared) =
-            authoring::schema_property_field(&self.stage, &self.path, sdf::FieldKey::TypeName.as_str())?
-        {
+        if let Some(declared) = authoring::schema_field(&self.stage, &self.path, sdf::FieldKey::TypeName.as_str())? {
             return Ok(declared.try_as_token());
         }
         Ok(self
@@ -1079,7 +1077,8 @@ impl Attribute {
     }
 
     /// Composed value of a generic metadata field on the attribute decoded to
-    /// `T`, falling back to what the attribute's schema declares. Mirrors C++
+    /// `T`, falling back to what the attribute's schema declares; a declared
+    /// dictionary composes under an authored one. Mirrors C++
     /// `UsdObject::GetMetadata(name, &value)`.
     ///
     /// The read counterpart of [`Attribute::set_metadata`]; used for the
@@ -1099,12 +1098,7 @@ impl Attribute {
         if let Some(special) = self.special_metadata(key)? {
             return Ok(T::try_from(special).ok());
         }
-        if let Some(authored) = self.stage.field::<sdf::Value>(&self.path, key)? {
-            return super::decode_value(Some(authored));
-        }
-        // Schema metadata parses untyped, so a declaration may hold a variant
-        // the caller did not ask for; that is "not declared", not an error.
-        Ok(authoring::schema_property_field(&self.stage, &self.path, key)?.and_then(|value| T::try_from(value).ok()))
+        authoring::metadata(&self.stage, &self.path, key)
     }
 
     /// The value of a field whose resolution is not plain composition, or

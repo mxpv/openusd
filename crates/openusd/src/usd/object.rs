@@ -42,6 +42,11 @@ pub trait Object: Sized {
     /// `UsdObject::GetMetadataByDictKey`). See [`sdf::Dictionary`] for
     /// key paths.
     fn metadata_by_key(&self, key: &str, key_path: &str) -> Result<Option<sdf::Value>> {
+        // TODO(perf): this composes and clones the whole dictionary to read one
+        // key. A key-path form of `resolve_field` could read only `key_path` in
+        // each layer's opinion and stop at the strongest layer holding a value
+        // there that is not a dictionary, as C++ hands `keyPath` to its
+        // metadata composer.
         Ok(at_key(self.metadata::<sdf::Value>(key)?, key_path))
     }
 
@@ -167,7 +172,8 @@ pub trait Object: Sized {
     }
 
     /// The composed `customData` dictionary, the user's own data, each key
-    /// the strongest layer's (C++ `UsdObject::GetCustomData`).
+    /// the strongest layer's or else the schema's (C++
+    /// `UsdObject::GetCustomData`).
     fn custom_data(&self) -> Result<Option<sdf::Dictionary>> {
         field(self, sdf::FieldKey::CustomData, sdf::Value::try_as_dictionary)
     }
@@ -215,8 +221,8 @@ pub trait Object: Sized {
     }
 
     /// The composed `assetInfo` dictionary, what identifies the asset the
-    /// object belongs to, each key the strongest layer's (C++
-    /// `UsdObject::GetAssetInfo`).
+    /// object belongs to, each key the strongest layer's or else the schema's
+    /// (C++ `UsdObject::GetAssetInfo`).
     fn asset_info(&self) -> Result<Option<sdf::Dictionary>> {
         field(self, sdf::FieldKey::AssetInfo, sdf::Value::try_as_dictionary)
     }
@@ -421,6 +427,7 @@ fn field<O: Object, T>(
 mod tests {
     use super::{Object, Property};
     use crate::usd::stage::tests::stage;
+    use crate::usd::{SchemaRegistry, Stage};
     use crate::{Result, sdf};
 
     /// The fields every object shares author and read back on a prim and
@@ -553,6 +560,66 @@ mod tests {
         let attr = attr.set_display_group(":Shape::Size:")?;
         assert_eq!(attr.nested_display_groups()?, ["Shape", "Size"]);
         assert!(attr.clear_display_group()?.nested_display_groups()?.is_empty());
+        Ok(())
+    }
+
+    /// A dictionary the schema declares composes under the authored one on a
+    /// prim, an attribute and a relationship: a declared key answers where no
+    /// layer authors it, nested dictionaries merge, and an authored key wins.
+    #[test]
+    fn declared_dictionary_under() -> Result<()> {
+        const MANIFEST: &str = r#"#usda 1.0
+
+def "Marker"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+        const SCHEMATICS: &str = r#"#usda 1.0
+
+class Marker "Marker" (
+    assetInfo = {
+        string declared = "schema"
+        string shared = "schema"
+        dictionary nested = {
+            int x = 1
+        }
+    }
+)
+{
+    float size (
+        assetInfo = {
+            string declared = "schema"
+            string shared = "schema"
+        }
+    )
+    rel link (
+        assetInfo = {
+            string declared = "schema"
+            string shared = "schema"
+        }
+    )
+}
+"#;
+        /// Authors `shared` on `object`, whose schema declares `declared` and
+        /// `shared`, and checks both keys read the strongest opinion.
+        fn shared_over_declared<O: Object>(object: O) -> Result<O> {
+            let string = |s: &str| sdf::Value::String(s.into());
+            let object = object.set_asset_info_by_key("shared", string("layer"))?;
+            assert_eq!(object.asset_info_by_key("declared")?, Some(string("schema")));
+            assert_eq!(object.asset_info_by_key("shared")?, Some(string("layer")));
+            Ok(object)
+        }
+
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_family(MANIFEST, SCHEMATICS))
+            .in_memory("anon.usda")?;
+        let prim = stage.define_prim("/M")?.set_type_name("Marker")?;
+        let prim = shared_over_declared(prim)?.set_asset_info_by_key("nested:y", sdf::Value::Int(2))?;
+        assert_eq!(prim.asset_info_by_key("nested:x")?, Some(sdf::Value::Int(1)));
+        assert_eq!(prim.asset_info_by_key("nested:y")?, Some(sdf::Value::Int(2)));
+        shared_over_declared(stage.attribute("/M.size")?)?;
+        shared_over_declared(stage.relationship("/M.link")?)?;
         Ok(())
     }
 }

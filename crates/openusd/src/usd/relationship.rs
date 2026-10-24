@@ -274,20 +274,16 @@ impl Relationship {
     }
 
     /// Composed value of a generic metadata field on the relationship decoded
-    /// to `T`, falling back to what the relationship's schema declares.
-    /// Mirrors C++ `UsdObject::GetMetadata(name, &value)`; the read
-    /// counterpart of [`set_metadata`](Self::set_metadata).
+    /// to `T`, falling back to what the relationship's schema declares; a
+    /// declared dictionary composes under an authored one. Mirrors C++
+    /// `UsdObject::GetMetadata(name, &value)`; the read counterpart of
+    /// [`set_metadata`](Self::set_metadata).
     pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: Into<crate::Error>,
     {
-        if let Some(authored) = self.stage.field::<sdf::Value>(&self.path, key)? {
-            return super::decode_value(Some(authored));
-        }
-        // Schema metadata parses untyped, so a declaration may hold a variant
-        // the caller did not ask for; that is "not declared", not an error.
-        Ok(authoring::schema_property_field(&self.stage, &self.path, key)?.and_then(|value| T::try_from(value).ok()))
+        authoring::metadata(&self.stage, &self.path, key)
     }
 
     /// Author a generic metadata field on the relationship spec.

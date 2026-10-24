@@ -10,13 +10,20 @@
 //! SchemaBase
 //!  ├ Backdrop                           (typed; a labelled box behind nodes)
 //!  ├ SceneGraphPrimAPI   (single-apply; outliner label + grouping)
-//!  └ NodeGraphNodeAPI    (single-apply; node-editor layout)
+//!  ├ NodeGraphNodeAPI    (single-apply; node-editor layout)
+//!  └ AccessibilityAPI    (multiple-apply; label, description, priority)
 //! ```
 //!
 //! [`SceneGraphPrimAPI`] adds `ui:displayName` / `ui:displayGroup` for an
 //! outliner. [`NodeGraphNodeAPI`] adds a shading node's editor layout
 //! (position, size, color, icon, expansion state, doc URI). [`Backdrop`] is a
-//! concrete prim carrying only `ui:description`.
+//! concrete prim carrying only `ui:description`. [`AccessibilityAPI`]
+//! describes a prim to assistive technology, one instance per purpose.
+//!
+//! [`Hints`] is not a schema: it reads and writes the `uiHints` dictionary
+//! any prim, attribute or relationship carries, falling back to the core
+//! `displayName`, `hidden` and `displayGroup` fields it supersedes. Its keys
+//! are [`hint_keys`].
 //!
 //! # Example
 //!
@@ -45,3 +52,7 @@
 //! ```
 
 openusd::include_schema!("usdUI");
+
+mod hints;
+
+pub use hints::{Hints, hint_keys};
