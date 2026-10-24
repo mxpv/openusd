@@ -45,7 +45,7 @@ impl TextWriter {
         Ok(())
     }
 
-    /// One value as `usda` writes it, e.g. `(1.0, 1.0, 1.0)` for a `double3`.
+    /// One value as `usda` writes it, e.g. `(1, 1, 1)` for a `double3`.
     ///
     /// The same rendering a layer's own text uses, for a caller that has a value
     /// rather than a layer — showing a schema's fallback in documentation, say.
@@ -389,7 +389,7 @@ impl<W: Write> Emitter<'_, W> {
                 };
                 if slope != 0.0 {
                     let mut buf = String::new();
-                    format_double(&mut buf, slope);
+                    format_float(&mut buf, slope);
                     writeln!(self.out, "{dir}: {mode} ({buf}),")?;
                 } else {
                     writeln!(self.out, "{dir}: {mode},")?;
@@ -409,15 +409,15 @@ impl<W: Write> Emitter<'_, W> {
         self.write_indent()?;
         let mut buf = String::new();
         buf.push_str("loop: (");
-        format_double(&mut buf, a);
+        format_float(&mut buf, a);
         buf.push_str(", ");
-        format_double(&mut buf, b);
+        format_float(&mut buf, b);
         buf.push_str(", ");
-        format_double(&mut buf, c);
+        format_float(&mut buf, c);
         buf.push_str(", ");
-        format_double(&mut buf, e);
+        format_float(&mut buf, e);
         buf.push_str(", ");
-        format_double(&mut buf, g);
+        format_float(&mut buf, g);
         buf.push(')');
         writeln!(self.out, "{buf},")?;
         Ok(())
@@ -442,21 +442,21 @@ impl<W: Write> Emitter<'_, W> {
 
         self.write_indent()?;
         let mut buf = String::new();
-        format_double(&mut buf, time);
+        format_float(&mut buf, time);
         buf.push_str(": ");
         if pre_value != 0.0 {
             let mut pv = String::new();
-            format_double(&mut pv, pre_value);
+            format_float(&mut pv, pre_value);
             buf.push_str(&pv);
             buf.push_str(" & ");
         }
-        format_double(&mut buf, value);
+        format_float(&mut buf, value);
 
         if pre_slope != 0.0 || pre_width != 0.0 {
             buf.push_str("; pre (");
-            format_double(&mut buf, pre_slope);
+            format_float(&mut buf, pre_slope);
             buf.push_str(", ");
-            format_double(&mut buf, pre_width);
+            format_float(&mut buf, pre_width);
             buf.push(')');
         }
 
@@ -465,9 +465,9 @@ impl<W: Write> Emitter<'_, W> {
             buf.push_str(interp);
             if post_slope != 0.0 || post_width != 0.0 {
                 buf.push_str(" (");
-                format_double(&mut buf, post_slope);
+                format_float(&mut buf, post_slope);
                 buf.push_str(", ");
-                format_double(&mut buf, post_width);
+                format_float(&mut buf, post_width);
                 buf.push(')');
             }
         }
@@ -751,6 +751,13 @@ impl<W: Write> Emitter<'_, W> {
             return Ok(());
         }
 
+        // A bool field (`active`, `hidden`, `instanceable`) is written as a
+        // word; a bool value elsewhere streams as an int.
+        if let Value::Bool(b) = value {
+            writeln!(self.out, "{b}")?;
+            return Ok(());
+        }
+
         self.write_value(value)?;
         writeln!(self.out)?;
         Ok(())
@@ -900,7 +907,7 @@ impl<W: Write> Emitter<'_, W> {
         for (time, value) in samples {
             self.write_indent()?;
             let mut t = String::new();
-            format_double(&mut t, *time);
+            format_float(&mut t, *time);
             write!(self.out, "{t}: ")?;
             self.write_value(value)?;
             writeln!(self.out, ",")?;
@@ -936,9 +943,10 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         }
         Value::ValueBlock => s.push_str("None"),
 
-        Value::Bool(b) => s.push_str(if *b { "true" } else { "false" }),
+        // C++ streams a bool as an int (`VtStreamOut(bool const &)`).
+        Value::Bool(b) => s.push_str(if *b { "1" } else { "0" }),
         Value::BoolVec(v) => format_vec(s, v, |s, b| {
-            s.push_str(if *b { "true" } else { "false" });
+            s.push_str(if *b { "1" } else { "0" });
             Ok(())
         })?,
 
@@ -953,19 +961,19 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         Value::Uint64(n) => write!(s, "{n}")?,
         Value::Uint64Vec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
 
-        Value::Half(h) => format_double(s, h.to_f64()),
+        Value::Half(h) => format_half(s, *h),
         Value::HalfVec(v) => format_vec(s, v, |s, h| {
-            format_double(s, h.to_f64());
+            format_half(s, *h);
             Ok(())
         })?,
-        Value::Float(f) => format_double(s, f64::from(*f)),
+        Value::Float(f) => format_float(s, *f),
         Value::FloatVec(v) => format_vec(s, v, |s, f| {
-            format_double(s, f64::from(*f));
+            format_float(s, *f);
             Ok(())
         })?,
-        Value::Double(d) => format_double(s, *d),
+        Value::Double(d) => format_float(s, *d),
         Value::DoubleVec(v) => format_vec(s, v, |s, d| {
-            format_double(s, *d);
+            format_float(s, *d);
             Ok(())
         })?,
 
@@ -1104,9 +1112,9 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         })?,
         Value::UnregisteredDictionary(dict) => format_dictionary(s, dict)?,
 
-        Value::TimeCode(t) => format_double(s, t.0),
+        Value::TimeCode(t) => format_float(s, t.0),
         Value::TimeCodeVec(v) => format_vec(s, v, |s, t| {
-            format_double(s, t.0);
+            format_float(s, t.0);
             Ok(())
         })?,
 
@@ -1211,7 +1219,7 @@ fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) ->
         if i > 0 {
             s.push_str(", ");
         }
-        format_double(s, v.to_f64());
+        format_half(s, *v);
     }
     s.push(')');
     Ok(())
@@ -1223,7 +1231,7 @@ fn format_tuple_f32<const N: usize>(s: &mut String, a: &[f32; N]) -> Result<(), 
         if i > 0 {
             s.push_str(", ");
         }
-        format_double(s, f64::from(*v));
+        format_float(s, *v);
     }
     s.push(')');
     Ok(())
@@ -1235,7 +1243,7 @@ fn format_tuple_f64<const N: usize>(s: &mut String, a: &[f64; N]) -> Result<(), 
         if i > 0 {
             s.push_str(", ");
         }
-        format_double(s, *v);
+        format_float(s, *v);
     }
     s.push(')');
     Ok(())
@@ -1253,8 +1261,10 @@ fn format_tuple_int<const N: usize>(s: &mut String, a: &[i32; N]) -> Result<(), 
     Ok(())
 }
 
+/// A matrix as C++ streams one (`operator<<(std::ostream&, GfMatrix4d)`):
+/// `( (a, b), (c, d) )`.
 fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<(), FormatError> {
-    s.push('(');
+    s.push_str("( ");
     for row in 0..dim {
         if row > 0 {
             s.push_str(", ");
@@ -1264,11 +1274,11 @@ fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<(), FormatErro
             if col > 0 {
                 s.push_str(", ");
             }
-            format_double(s, m[row * dim + col]);
+            format_float(s, m[row * dim + col]);
         }
         s.push(')');
     }
-    s.push(')');
+    s.push_str(" )");
     Ok(())
 }
 
@@ -1281,19 +1291,84 @@ fn get_double(dict: &HashMap<String, Value>, key: &str) -> f64 {
     }
 }
 
-fn format_double(s: &mut String, v: f64) {
-    if v.is_nan() {
+/// A float or double as C++ `TfStringify` writes one: double-conversion's
+/// shortest digits that read back to it at its own precision (`ToShortest`,
+/// `ToShortestSingle`), the nearest of those, an exact tie rounded to even,
+/// so a float `0.65` is not `0.6499999761581421`. zmij picks the same
+/// digits. They are laid out as double-conversion lays them out with
+/// `decimal_in_shortest_low` -6 and `decimal_in_shortest_high` 15: decimal for
+/// exponents from -6 up to 14, exponent form outside, no `+` on an exponent
+/// and no trailing `.0`.
+fn format_float<F: zmij::Float + Into<f64>>(s: &mut String, v: F) {
+    let wide: f64 = v.into();
+    if wide.is_nan() {
         s.push_str("nan");
-    } else if v.is_infinite() {
-        s.push_str(if v > 0.0 { "inf" } else { "-inf" });
-    } else if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e16 {
-        // Integer-valued floats need an explicit `.0` to re-parse as a float
-        // rather than an int in type-free contexts (time samples, dict entries).
-        let as_int = v as i64;
-        write!(s, "{as_int}.0").unwrap();
+        return;
+    }
+    if wide.is_infinite() {
+        s.push_str(if wide > 0.0 { "inf" } else { "-inf" });
+        return;
+    }
+    let mut buffer = zmij::Buffer::new();
+    let printed = buffer.format(v);
+    let (sign, printed) = printed.strip_prefix('-').map_or(("", printed), |p| ("-", p));
+    s.push_str(sign);
+    let (mantissa, scale) = printed.split_once('e').unwrap_or((printed, "0"));
+    let scale: i32 = scale.parse().expect("zmij writes an integer exponent");
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = format!("{whole}{fraction}");
+    let significant = all.trim_start_matches('0');
+    // Where the decimal point falls after the first significant digit; zero
+    // has none, and is written `0`.
+    let decimal_point = whole.len() as i32 + scale - (all.len() - significant.len()) as i32;
+    let digits = significant.trim_end_matches('0');
+    if digits.is_empty() {
+        s.push('0');
+        return;
+    }
+    let exponent = decimal_point - 1;
+    let n = digits.len() as i32;
+    if (-6..15).contains(&exponent) {
+        if decimal_point <= 0 {
+            write!(s, "0.{}{digits}", "0".repeat((-decimal_point) as usize))
+        } else if decimal_point >= n {
+            write!(s, "{digits}{}", "0".repeat((decimal_point - n) as usize))
+        } else {
+            let (whole, fraction) = digits.split_at(decimal_point as usize);
+            write!(s, "{whole}.{fraction}")
+        }
+    } else if n == 1 {
+        write!(s, "{digits}e{exponent}")
     } else {
-        // Ryu-backed shortest round-trip.
-        write!(s, "{v}").unwrap();
+        write!(s, "{}.{}e{exponent}", &digits[..1], &digits[1..])
+    }
+    .expect("writing to a String cannot fail");
+}
+
+/// A half as C++ writes it, through `std::ostream` at its default precision:
+/// `%g` with six significant digits, in exponent form below 1e-4 (a half
+/// is never 1e6 or more).
+fn format_half(s: &mut String, v: crate::gf::f16) {
+    let v = v.to_f64();
+    if !v.is_finite() {
+        return format_float(s, v);
+    }
+    let rounded = format!("{v:.5e}");
+    let (mantissa, exponent) = rounded.split_once('e').expect("{:e} writes an exponent");
+    let exponent: i32 = exponent.parse().expect("{:e} writes an integer exponent");
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            s
+        }
+    };
+    if (-4..6).contains(&exponent) {
+        s.push_str(&trim(format!("{v:.*}", (5 - exponent) as usize)));
+    } else {
+        let sign = if exponent < 0 { '-' } else { '+' };
+        write!(s, "{}e{sign}{:02}", trim(mantissa.to_owned()), exponent.abs())
+            .expect("writing to a String cannot fail");
     }
 }
 
@@ -1345,9 +1420,9 @@ fn is_bare_dict_key(k: &str) -> bool {
 
 fn format_layer_offset(s: &mut String, o: &LayerOffset) {
     s.push('(');
-    format_double(s, o.offset);
+    format_float(s, o.offset);
     s.push_str(", ");
-    format_double(s, o.scale);
+    format_float(s, o.scale);
     s.push(')');
 }
 
@@ -1418,9 +1493,9 @@ fn write_arc_metadata(
     let mut parts = Vec::new();
     if !offset.is_identity() {
         let mut part = String::from("offset = ");
-        format_double(&mut part, offset.offset);
+        format_float(&mut part, offset.offset);
         part.push_str("; scale = ");
-        format_double(&mut part, offset.scale);
+        format_float(&mut part, offset.scale);
         parts.push(part);
     }
     if !custom_data.is_empty() {
@@ -2061,6 +2136,122 @@ def "Mesh"
                 "lost key {k:?}; roundtripped keys: {:?}",
                 got.keys().collect::<Vec<_>>()
             );
+        }
+    }
+
+    /// Numbers, bools and matrices as OpenUSD 26.11 writes them: the layer
+    /// below is its output for these values, made with `Sdf.AttributeSpec`
+    /// and `Layer.ExportToString`.
+    #[test]
+    fn numbers_as_cpp() {
+        use crate::usda::parser::Parser;
+
+        let written = r#"#usda 1.0
+
+def "P" (
+    active = false
+)
+{
+    bool b = 1
+    double big = 1e15
+    bool[] bs = [1, 0]
+    double d = 24
+    float f = 0.65
+    half h = 0.0999756
+    half3 h3 = (0.0999756, 1000.5, 3)
+    matrix2d m = ( (1, 0.5), (0, 1) )
+    double s.timeSamples = {
+        1: 2.5,
+        2.5: 3,
+    }
+    double tiny = 2.220446049250313e-16
+}
+"#;
+        let parsed = Parser::new(written).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        for line in written.lines().skip(3) {
+            assert!(emitted.contains(line), "{line:?} missing from:\n{emitted}");
+        }
+    }
+
+    /// `v` as [`format_float`] writes it.
+    fn shortest<F: zmij::Float + Into<f64>>(v: F) -> String {
+        let mut text = String::new();
+        format_float(&mut text, v);
+        text
+    }
+
+    /// Values exactly halfway between two shortest spellings, as OpenUSD
+    /// 26.11 wrote them: the tie goes to the even digit.
+    #[test]
+    fn shortest_ties_to_even() {
+        for (bits, written) in [
+            (0x3f83210000000000, "0.009340286254882812"),
+            (0x3fea93d000000000, "0.8305435180664062"),
+            (0x3ff98c0800000000, "1.5966873168945312"),
+            (0x4002bc5400000000, "2.3419570922851562"),
+            (0x4008d22400000000, "3.1026077270507812"),
+            (0x400ee7f400000000, "3.8632583618164062"),
+            (0x4022785200000000, "9.235000610351562"),
+            (0x4025833a00000000, "10.756301879882812"),
+            (0x40288e2200000000, "12.277603149414062"),
+            (0x402b990a00000000, "13.798904418945312"),
+            (0x402ea3f200000000, "15.320205688476562"),
+            (0x4030d0dd00000000, "16.815872192382812"),
+        ] {
+            assert_eq!(shortest(f64::from_bits(bits)), written);
+        }
+        for (bits, written) in [
+            (0x3d340000, "0.043945312"),
+            (0x40a9a000, "5.3007812"),
+            (0x41a65000, "20.789062"),
+            (0x41f79000, "30.945312"),
+            (0x4224a800, "41.164062"),
+            (0x424d4800, "51.320312"),
+            (0x4275e800, "61.476562"),
+            (0x430f4400, "143.26562"),
+            (0x43239400, "163.57812"),
+            (0x4337e400, "183.89062"),
+            (0x434c3400, "204.20312"),
+            (0x43608400, "224.51562"),
+        ] {
+            assert_eq!(shortest(f32::from_bits(bits)), written);
+        }
+    }
+
+    /// Where a number switches between decimal and exponent form, as OpenUSD
+    /// 26.11 writes it.
+    #[test]
+    fn shortest_layout() {
+        for (v, written) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (1e15, "1e15"),
+            (123456789012345.0, "123456789012345"),
+            (1e-7, "1e-7"),
+            (1e-6, "0.000001"),
+            (1.5e300, "1.5e300"),
+            (2.5e-300, "2.5e-300"),
+        ] {
+            assert_eq!(shortest(v), written);
+        }
+    }
+
+    /// Halves as OpenUSD 26.11 writes them in a `half[]`: six significant
+    /// digits, in exponent form below 1e-4.
+    #[test]
+    fn half_layout() {
+        for (v, written) in [
+            (0.5, "0.5"),
+            (1e-3, "0.0010004"),
+            (1e-4, "0.000100017"),
+            (1e-5, "1.00136e-05"),
+            (6e-8, "5.96046e-08"),
+            (65504.0, "65504"),
+        ] {
+            let mut text = String::new();
+            format_half(&mut text, crate::gf::f16::from_f64(v));
+            assert_eq!(text, written, "{v}");
         }
     }
 }

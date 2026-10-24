@@ -800,8 +800,7 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Red chromaticity coordinates
     ///
-    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:redChroma = (1.0,
-    /// 0.0)`.
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:redChroma = (1, 0)`.
     pub fn red_chroma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(
@@ -849,8 +848,8 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Green chromaticity coordinates
     ///
-    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:greenChroma = (0.0,
-    /// 1.0)`.
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:greenChroma = (0,
+    /// 1)`.
     pub fn green_chroma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(
@@ -900,8 +899,8 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Blue chromaticity coordinates
     ///
-    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:blueChroma = (0.0,
-    /// 0.0)`.
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:blueChroma = (0,
+    /// 0)`.
     pub fn blue_chroma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(
@@ -950,7 +949,7 @@ impl ColorSpaceDefinitionAPI {
     /// Whitepoint chromaticity coordinates
     ///
     /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:whitePoint =
-    /// (0.3333333432674408, 0.3333333432674408)`.
+    /// (0.33333334, 0.33333334)`.
     pub fn white_point_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(
@@ -998,7 +997,7 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Gamma value of the log section
     ///
-    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:gamma = 1.0`.
+    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:gamma = 1`.
     pub fn gamma_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(
@@ -1042,7 +1041,7 @@ impl ColorSpaceDefinitionAPI {
     }
     /// Linear bias of the log section
     ///
-    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:linearBias = 0.0`.
+    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:linearBias = 0`.
     pub fn linear_bias_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(

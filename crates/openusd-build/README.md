@@ -83,14 +83,13 @@ the generated core `usd` schemas in
 [`core_schemas.rs`](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/core_schemas.rs).
 
 Generated property methods use names and documentation from the source schema.
-For example, an attribute accessor includes the declared type, fallback value,
-and Rust type used to read it:
+For example, an attribute accessor's documentation includes the declared type
+and fallback value, as the text format writes them:
 
 ```rust
 /// The bounds, in the shape's own space.
 ///
-/// Declared `double3 extent = (1.0, 1.0, 1.0)`. Read it with
-/// `get::<::openusd::gf::Vec3d>()`.
+/// Declared `double3 extent = (1, 1, 1)`.
 fn extent_attr(&self) -> ::openusd::usd::Attribute {
     self.prim().attribute(tokens::EXTENT)
 }
