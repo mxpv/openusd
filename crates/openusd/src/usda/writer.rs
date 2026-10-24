@@ -796,6 +796,16 @@ impl Emitter<'_> {
             return Ok(());
         }
 
+        // A symmetry function is a bare identifier, empty when none is named
+        // (C++ `Sdf_WritePrimMetadata`, `Sdf_WriteAttribute`,
+        // `Sdf_WriteRelationship`).
+        if keyword == FieldKey::SymmetryFunction.as_str()
+            && let Value::Token(function) = value
+        {
+            writeln!(self.out, "{}", function.as_str())?;
+            return Ok(());
+        }
+
         // A bool field (`active`, `hidden`, `instanceable`) is written as a
         // word; a bool value elsewhere streams as an int.
         if let Value::Bool(b) = value {
@@ -2629,6 +2639,67 @@ def "Q" (
             .get_mut(&prim)
             .unwrap()
             .add(ChildrenKey::VariantSetChildren, Value::token_vec(["empty", "v"]));
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
+    }
+
+    /// `permission` and `symmetryFunction` are bare identifiers on prims and
+    /// properties alike, and a symmetry function may be namespaced or left
+    /// out, ending at the line, as OpenUSD 26.11 writes this layer back
+    /// (`Sdf.Layer.OpenAsAnonymous(source).ExportToString()`).
+    #[test]
+    fn identifier_metadata() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+def "P" (
+    permission = private
+    symmetryFunction = mirror
+)
+{
+    int a = 1 (
+        permission = public
+        symmetryFunction = flip
+    )
+    int b = 2 (
+        symmetryFunction =
+        doc = "next"
+    )
+    int c = 3 (
+        symmetryFunction = Foo::bar
+    )
+    rel r (
+        permission = private
+        symmetryFunction = s
+    )
+}
+"#;
+        let written = r#"#usda 1.0
+
+def "P" (
+    permission = private
+    symmetryFunction = mirror
+)
+{
+    int a = 1 (
+        permission = public
+        symmetryFunction = flip
+    )
+    int b = 2 (
+        doc = "next"
+        symmetryFunction = 
+    )
+    int c = 3 (
+        symmetryFunction = Foo::bar
+    )
+    rel r (
+        permission = private
+        symmetryFunction = s
+    )
+}
+
+"#;
+        let parsed = Parser::new(source).parse().expect("parse");
         let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
         assert_eq!(emitted, written);
     }
