@@ -230,7 +230,7 @@ impl Emitter<'_> {
             .map(|name| Ok((path.append_property(&name)?, name)))
             .collect::<Result<Vec<_>, FormatError>>()?;
         props.sort_by(|(a_path, a), (b_path, b)| {
-            sdf::element_cmp(a.as_str(), b.as_str()).then_with(|| {
+            tf::dictionary_cmp(a.as_str(), b.as_str()).then_with(|| {
                 let kind = |p: &Path| data.spec_type(p).map(|t| t as u32);
                 kind(a_path).cmp(&kind(b_path))
             })
@@ -538,10 +538,7 @@ impl Emitter<'_> {
 
     fn emit_connection(&mut self, attr_name: &str, op: &ListOp<Path>, type_name: &str) -> Result<(), FormatError> {
         // Emit as `typeName attr.connect = paths` or list-op form.
-        self.emit_listop_statement(&format!("{type_name} {attr_name}.connect"), op, |s, p| {
-            write!(s, "<{}>", p.as_str())?;
-            Ok(())
-        })
+        self.emit_targets_statement(&format!("{type_name} {attr_name}.connect"), op)
     }
 
     fn emit_relationship(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
@@ -576,24 +573,8 @@ impl Emitter<'_> {
         if let Some(Value::PathListOp(op)) = &targets
             && op.is_explicit()
         {
-            match op.explicit_items().len() {
-                0 => {
-                    self.out.write_all(b" = None")?;
-                }
-                1 => {
-                    write!(self.out, " = <{}>", op.explicit_items()[0].as_str())?;
-                }
-                _ => {
-                    self.out.write_all(b" = [")?;
-                    for (i, p) in op.explicit_items().iter().enumerate() {
-                        if i > 0 {
-                            self.out.write_all(b", ")?;
-                        }
-                        write!(self.out, "<{}>", p.as_str())?;
-                    }
-                    self.out.write_all(b"]")?;
-                }
-            }
+            self.out.write_all(b" = ")?;
+            self.write_listop_items(op.explicit_items(), &mut write_path, Items::Terminated)?;
         }
 
         if !meta_fields.is_empty() {
@@ -614,10 +595,7 @@ impl Emitter<'_> {
         if let Some(Value::PathListOp(op)) = &targets
             && !op.is_explicit()
         {
-            self.emit_listop_statement(&format!("rel {name}"), op, |s, p| {
-                write!(s, "<{}>", p.as_str())?;
-                Ok(())
-            })?;
+            self.emit_targets_statement(&format!("rel {name}"), op)?;
         }
 
         Ok(())
@@ -864,7 +842,28 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<(), FormatError>
+    fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
+    where
+        T: Bracketed,
+        F: FnMut(&mut String, &T) -> Result<(), FormatError>,
+    {
+        self.emit_list_statements(prefix, op, fmt_item, Items::Separated)
+    }
+
+    /// A relationship's targets or an attribute's connections, whose items
+    /// each end with a comma when they go one per line (C++
+    /// `Sdf_WriteRelationshipTargetList`, `Sdf_WriteConnectionStatement`).
+    fn emit_targets_statement(&mut self, prefix: &str, op: &ListOp<sdf::Path>) -> Result<(), FormatError> {
+        self.emit_list_statements(prefix, op, write_path, Items::Terminated)
+    }
+
+    fn emit_list_statements<T, F>(
+        &mut self,
+        prefix: &str,
+        op: &ListOp<T>,
+        mut fmt_item: F,
+        items_end: Items,
+    ) -> Result<(), FormatError>
     where
         T: Bracketed,
         F: FnMut(&mut String, &T) -> Result<(), FormatError>,
@@ -872,7 +871,7 @@ impl Emitter<'_> {
         if op.is_explicit() {
             self.write_indent()?;
             write!(self.out, "{prefix} = ")?;
-            self.write_listop_items(op.explicit_items(), &mut fmt_item)?;
+            self.write_listop_items(op.explicit_items(), &mut fmt_item, items_end)?;
             writeln!(self.out)?;
             return Ok(());
         }
@@ -887,7 +886,7 @@ impl Emitter<'_> {
             if !items.is_empty() {
                 self.write_indent()?;
                 write!(self.out, "{kw} {prefix} = ")?;
-                self.write_listop_items(items, &mut fmt_item)?;
+                self.write_listop_items(items, &mut fmt_item, items_end)?;
                 writeln!(self.out)?;
             }
         }
@@ -897,7 +896,7 @@ impl Emitter<'_> {
     /// The body of one list-op statement: the items bracketed, `None` for an
     /// empty list, and a lone item bare where its type allows it
     /// (C++ `_WriteListOpList`).
-    fn write_listop_items<T, F>(&mut self, items: &[T], fmt_item: &mut F) -> Result<(), FormatError>
+    fn write_listop_items<T, F>(&mut self, items: &[T], fmt_item: &mut F, items_end: Items) -> Result<(), FormatError>
     where
         T: Bracketed,
         F: FnMut(&mut String, &T) -> Result<(), FormatError>,
@@ -908,6 +907,20 @@ impl Emitter<'_> {
             self.scratch.clear();
             fmt_item(&mut self.scratch, &items[0])?;
             self.out.write_all(self.scratch.as_bytes())?;
+        } else if T::PER_LINE {
+            writeln!(self.out, "[")?;
+            self.indent += 1;
+            for (i, item) in items.iter().enumerate() {
+                let mut line = String::new();
+                fmt_item(&mut line, item)?;
+                if items_end == Items::Terminated || i + 1 < items.len() {
+                    line.push(',');
+                }
+                self.write_line(&line)?;
+            }
+            self.indent -= 1;
+            self.write_indent()?;
+            self.out.write_all(b"]")?;
         } else {
             self.out.write_all(b"[")?;
             for (i, item) in items.iter().enumerate() {
@@ -1239,6 +1252,10 @@ where
 /// `prepend references = @a.usd@` does.
 trait Bracketed: Clone + PartialEq + Hash {
     fn needs_brackets(&self) -> bool;
+
+    /// Whether a list of several is written one item per line, as C++ writes
+    /// paths, references and payloads (`_ListOpWriter<T>::ItemPerLine`).
+    const PER_LINE: bool = false;
 }
 
 /// A lone name or number keeps its brackets: nothing else marks it as a list.
@@ -1270,6 +1287,8 @@ impl Bracketed for sdf::Path {
     fn needs_brackets(&self) -> bool {
         false
     }
+
+    const PER_LINE: bool = true;
 }
 
 /// A lone payload is already delimited by its asset path.
@@ -1277,6 +1296,8 @@ impl Bracketed for sdf::Payload {
     fn needs_brackets(&self) -> bool {
         false
     }
+
+    const PER_LINE: bool = true;
 }
 
 /// A reference writes bare like a payload, until custom data gives it a
@@ -1285,6 +1306,22 @@ impl Bracketed for sdf::Reference {
     fn needs_brackets(&self) -> bool {
         !self.custom_data.is_empty()
     }
+
+    const PER_LINE: bool = true;
+}
+
+/// How the items of a list written one per line end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Items {
+    /// A comma between items (a list-op field).
+    Separated,
+    /// A comma after every item (relationship targets and connections).
+    Terminated,
+}
+
+fn write_path(s: &mut String, path: &sdf::Path) -> Result<(), FormatError> {
+    write!(s, "<{}>", path.as_str())?;
+    Ok(())
 }
 
 fn format_inline_listop<'o, T, F>(s: &mut ValueText<'o>, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
@@ -1382,7 +1419,10 @@ fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Re
             s.push_str(ty.as_str());
             s.push(' ');
         }
-        if is_bare_dict_key(k) {
+        // A key is bare only when it is an identifier (C++
+        // `TfIsValidIdentifier`); C++ refuses a bare namespaced key
+        // (`int a:b = 3`) in a dictionary.
+        if tf::is_valid_identifier(k) {
             s.push_str(k);
         } else {
             write_quoted(s, k)?;
@@ -1393,18 +1433,6 @@ fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Re
     }
     s.push('}');
     Ok(())
-}
-
-/// A dictionary key can be emitted unquoted only when it tokenizes as a USDA
-/// `Identifier` or `NamespacedIdentifier`: starts with a letter/underscore and
-/// continues with alphanumerics, underscores, or colons.
-fn is_bare_dict_key(k: &str) -> bool {
-    let mut chars = k.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
 /// Writes `text` as a USDA string, quoted as C++ `Sdf_FileIOUtility::Quote`
@@ -2263,6 +2291,60 @@ two"""
 
         }
     }
+}
+
+"#;
+        let parsed = Parser::new(source).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
+    }
+
+    /// A hand-written layer is written as OpenUSD 26.11 writes it
+    /// (`Sdf.Layer.OpenAsAnonymous(source).ExportToString()`), byte for byte:
+    /// a list of more than one path or reference one item per line, and
+    /// properties in `TfDictionaryLessThan` order (`abc2` before `abc10`,
+    /// `xformOp:transform` before `xformOpOrder`).
+    #[test]
+    fn lists_as_cpp() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+
+def Xform "P" (
+    prepend references = [@a.usda@</A>, </B>]
+)
+{
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+    matrix4d xformOp:transform = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
+    rel many = [</A>, </B>]
+    rel one = </A>
+    float in.connect = [</A.x>, </B.y>]
+    int abc10 = 1
+    int abc2 = 2
+}
+"#;
+        let written = r#"#usda 1.0
+
+def Xform "P" (
+    prepend references = [
+        @a.usda@</A>,
+        </B>
+    ]
+)
+{
+    int abc2 = 2
+    int abc10 = 1
+    float in.connect = [
+        </A.x>,
+        </B.y>,
+    ]
+    rel many = [
+        </A>,
+        </B>,
+    ]
+    rel one = </A>
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform token[] xformOpOrder = ["xformOp:transform"]
 }
 
 "#;
