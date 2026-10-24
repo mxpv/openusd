@@ -260,20 +260,14 @@ impl Emitter<'_> {
     }
 
     fn emit_attribute(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
-        self.write_indent()?;
-
-        if matches!(
+        let custom = matches!(
             get_value(data, path, FieldKey::Custom.as_str()),
             Some(Value::Bool(true))
-        ) {
-            self.out.write_all(b"custom ")?;
-        }
-        if matches!(
-            get_value(data, path, FieldKey::Variability.as_str()),
-            Some(Value::Variability(Variability::Uniform))
-        ) {
-            self.out.write_all(b"uniform ")?;
-        }
+        );
+        let variability = match get_value(data, path, FieldKey::Variability.as_str()) {
+            Some(Value::Variability(Variability::Uniform)) => "uniform ",
+            _ => "",
+        };
 
         // The declared spelling is written back as its standard spelling (C++
         // `GetSerializationName`): `Color` in, `color3d` out; an unregistered
@@ -286,17 +280,11 @@ impl Emitter<'_> {
                 });
             }
         };
-        write!(self.out, "{type_name} {name}")?;
 
         let default = get_value(data, path, FieldKey::Default.as_str());
         let time_samples = get_value(data, path, FieldKey::TimeSamples.as_str());
         let spline = get_value(data, path, SPLINE_FIELD);
-
-        if let Some(v) = default {
-            self.out.write_all(b" = ")?;
-            self.write_value(&v)?;
-        }
-
+        let connections = get_value(data, path, FieldKey::ConnectionPaths.as_str());
         let meta_fields: Vec<String> = data
             .list_fields(path)
             .unwrap_or_default()
@@ -304,40 +292,58 @@ impl Emitter<'_> {
             .filter(|n| !is_attribute_structural_field(n))
             .collect();
 
-        if !meta_fields.is_empty() {
-            self.out.write_all(b" (")?;
-            writeln!(self.out)?;
-            self.indent += 1;
-            for name in &meta_fields {
-                let value = data.field(path, name)?;
-                self.emit_metadata_entry(name, &value)?;
-            }
-            self.indent -= 1;
+        // The declaration, which C++ `Sdf_WriteAttribute` writes only when it
+        // carries something or no other statement would declare the attribute.
+        // Every statement carries the variability, so a uniform attribute
+        // stays uniform whichever of them declares it.
+        if !meta_fields.is_empty()
+            || default.is_some()
+            || custom
+            || (time_samples.is_none() && spline.is_none() && connections.is_none())
+        {
             self.write_indent()?;
-            self.out.write_all(b")")?;
+            if custom {
+                self.out.write_all(b"custom ")?;
+            }
+            write!(self.out, "{variability}{type_name} {name}")?;
+
+            if let Some(v) = default {
+                self.out.write_all(b" = ")?;
+                self.write_value(&v)?;
+            }
+
+            if !meta_fields.is_empty() {
+                self.out.write_all(b" (")?;
+                writeln!(self.out)?;
+                self.indent += 1;
+                for name in &meta_fields {
+                    let value = data.field(path, name)?;
+                    self.emit_metadata_entry(name, &value)?;
+                }
+                self.indent -= 1;
+                self.write_indent()?;
+                self.out.write_all(b")")?;
+            }
+
+            writeln!(self.out)?;
         }
 
-        writeln!(self.out)?;
-
-        // Time samples (separate statement if present)
         if let Some(Value::TimeSamples(samples)) = time_samples {
             self.write_indent()?;
-            write!(self.out, "{type_name} {name}.timeSamples = ")?;
+            write!(self.out, "{variability}{type_name} {name}.timeSamples = ")?;
             self.write_time_samples(&samples)?;
             writeln!(self.out)?;
         }
 
-        // Connections (separate statement if present)
-        if let Some(Value::PathListOp(op)) = get_value(data, path, FieldKey::ConnectionPaths.as_str()) {
-            self.emit_connection(name, &op, &type_name)?;
-        }
-
-        // Splines (separate statement if present)
         if let Some(Value::Dictionary(dict)) = spline {
             self.write_indent()?;
-            write!(self.out, "{type_name} {name}.spline = ")?;
+            write!(self.out, "{variability}{type_name} {name}.spline = ")?;
             self.write_spline(&dict)?;
             writeln!(self.out)?;
+        }
+
+        if let Some(Value::PathListOp(op)) = connections {
+            self.emit_connection(name, &op, &format!("{variability}{type_name}"))?;
         }
 
         Ok(())
@@ -2095,6 +2101,36 @@ def "Mesh"
                 got.keys().collect::<Vec<_>>()
             );
         }
+    }
+
+    /// An attribute declared only by its `.connect`, `.timeSamples` or
+    /// `.spline` statement is written without a bare declaration, and the
+    /// statement keeps its variability, as OpenUSD 26.11 writes this layer
+    /// back. The spline's body is left out of the check: it is written in the
+    /// dictionary form.
+    #[test]
+    fn declared_by_statement() {
+        use crate::usda::parser::Parser;
+
+        let text = r#"#usda 1.0
+def Shader "Mapping"
+{
+    float3 inputs:in1.connect = </Material/Coords.outputs:out>
+    uniform double u.timeSamples = { 1: 2 }
+    float s.spline = { 1: 2, }
+}
+"#;
+        let parsed = Parser::new(text).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert!(
+            emitted.contains("    float3 inputs:in1.connect = </Material/Coords.outputs:out>\n"),
+            "{emitted}"
+        );
+        assert!(emitted.contains("    uniform double u.timeSamples = {\n"), "{emitted}");
+        assert!(!emitted.contains("float3 inputs:in1\n"), "{emitted}");
+        assert!(!emitted.contains("double u\n"), "{emitted}");
+        assert!(emitted.contains("    float s.spline = {\n"), "{emitted}");
+        assert!(!emitted.contains("float s\n"), "{emitted}");
     }
 
     /// Numbers, bools and matrices as OpenUSD 26.11 writes them: the layer
