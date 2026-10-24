@@ -474,6 +474,107 @@ pub(crate) fn push_digits(s: &mut String, digits: impl Iterator<Item = char>, po
     }
 }
 
+/// Orders two strings as C++ `TfDictionaryLessThan` does, the order the text
+/// writer lists properties and metadata in: ASCII letters compare without
+/// case, and `_` before them; a run of digits compares by its value; any
+/// other byte compares by its value, so `xformOp:transform` sorts before
+/// `xformOpOrder`. Strings differing only in case or leading zeros fall back
+/// on the first such difference. A byte-for-byte port of
+/// `TfDictionaryLessThan::_LessImpl` (`pxr/base/tf/stringUtils.cpp`).
+pub fn dictionary_cmp(lhs: &str, rhs: &str) -> Ordering {
+    if dictionary_less(lhs.as_bytes(), rhs.as_bytes()) {
+        Ordering::Less
+    } else if dictionary_less(rhs.as_bytes(), lhs.as_bytes()) {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+fn dictionary_less(l: &[u8], r: &[u8]) -> bool {
+    let digit = |b: u8| b.is_ascii_digit();
+    let alpha = |b: u8| b.is_ascii_alphabetic();
+    // The first indices from `i` and `j` on where the strings differ, `i`
+    // running no further than `end`.
+    let mismatch = |mut i: usize, mut j: usize, end: usize| {
+        while i < end && l[i] == r[j] {
+            i += 1;
+            j += 1;
+        }
+        (i, j)
+    };
+
+    let mut end = l.len().min(r.len());
+    let (mut lc, mut rc) = mismatch(0, 0, end);
+    if lc == end && l.len() == r.len() {
+        return false;
+    }
+    while lc != end {
+        let (lb, rb) = (l[lc], r[rc]);
+        let differs_ignoring_case = (lb & !0x20) != (rb & !0x20);
+        if lb < 0x80 && rb < 0x80 && differs_ignoring_case && lb >= 0x40 && rb >= 0x40 {
+            // Adding 5 mod 32 puts `_` before every letter.
+            return (u32::from(lb) + 5) & 31 < (u32::from(rb) + 5) & 31;
+        } else if digit(lb) || digit(rb) {
+            if digit(lb) && digit(rb) {
+                let (mut ls, mut rs) = (lc, rc);
+                while ls > 0 && digit(l[ls - 1]) {
+                    ls -= 1;
+                }
+                while rs > 0 && digit(r[rs - 1]) {
+                    rs -= 1;
+                }
+                let (mut le, mut re) = (lc, rc);
+                while le < l.len() && digit(l[le]) {
+                    le += 1;
+                }
+                while re < r.len() && digit(r[re]) {
+                    re += 1;
+                }
+                while ls != le && l[ls] == b'0' {
+                    ls += 1;
+                }
+                while rs != re && r[rs] == b'0' {
+                    rs += 1;
+                }
+                while ls != le && rs != re && l[ls] == r[rs] {
+                    ls += 1;
+                    rs += 1;
+                }
+                if (ls == le) != (rs == re) {
+                    return ls == le;
+                }
+                if ls != le {
+                    return (le - ls, l[ls]) < (re - rs, r[rs]);
+                }
+                // Equal values: go on past both runs.
+                (lc, rc) = (le, re);
+                end = lc + (l.len() - lc).min(r.len() - rc);
+            } else {
+                if lc == 0 {
+                    return lb < rb;
+                }
+                // One digit: a digit before them says which run is longer.
+                return if digit(l[lc - 1]) { digit(rb) } else { digit(lb) };
+            }
+        } else if !alpha(lb) || !alpha(rb) {
+            return lb < rb;
+        } else {
+            // Letters differing only in case.
+            lc += 1;
+            rc += 1;
+        }
+        (lc, rc) = mismatch(lc, rc, end);
+    }
+    if lc != l.len() || rc != r.len() {
+        return lc == l.len();
+    }
+    // Equal but for case or leading zeros: the first such difference decides.
+    let (i, j) = mismatch(0, 0, l.len().min(r.len()));
+    let (lb, rb) = (l.get(i).copied().unwrap_or(0), r.get(j).copied().unwrap_or(0));
+    rb == b'0' || (lb != b'0' && lb < rb)
+}
+
 /// Locks `mutex`, reading through a poisoned lock, for a lock whose state
 /// is whole after every statement that changes it.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -607,5 +708,28 @@ mod tests {
         for (v, written) in [(0.65f32, "0.65"), (1e13f32, "10000000000000"), (1e15f32, "1e15")] {
             assert_eq!(shortest(v), written, "{v}");
         }
+    }
+
+    /// Orders C++ `TfDictionaryLessThan` gives, from its own documentation and
+    /// from OpenUSD's text output.
+    #[test]
+    fn dictionary_order() {
+        let sorted = [
+            "_a",
+            "aardvark",
+            "Abc",
+            "abc",
+            "abc1",
+            "abc2",
+            "abc10",
+            "abc010",
+            "xformOp:transform",
+            "xformOpOrder",
+        ];
+        for pair in sorted.windows(2) {
+            assert_eq!(dictionary_cmp(pair[0], pair[1]), Ordering::Less, "{pair:?}");
+            assert_eq!(dictionary_cmp(pair[1], pair[0]), Ordering::Greater, "{pair:?}");
+        }
+        assert_eq!(dictionary_cmp("abc", "abc"), Ordering::Equal);
     }
 }
