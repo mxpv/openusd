@@ -23,8 +23,11 @@
 //! by every concrete light and by the standalone [`LightAPI`] applied-schema
 //! view, which makes an arbitrary prim (a `Mesh`, `Volume`, …) emissive.
 //! [`ShapingAPI`], [`ShadowAPI`], and [`LightListAPI`] are the other applied
-//! schemas. [`blackbody_rgb`] is the color a light's color temperature
-//! stands for.
+//! schemas. [`LightAPI::light_link_collection`] and
+//! [`LightAPI::shadow_link_collection`] are the geometry a light illuminates
+//! and is shadowed by, and [`LightFilterExt::filter_link_collection`] the
+//! geometry a filter applies to. [`blackbody_rgb`] is the color a light's
+//! color temperature stands for.
 //!
 //! # Example
 //!
@@ -64,8 +67,10 @@
 openusd::include_schema!("usdLux");
 
 mod blackbody;
+mod light;
 
 pub use blackbody::blackbody_rgb;
+pub use light::LightFilterExt;
 
 use openusd::{gf, usd};
 

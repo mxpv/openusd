@@ -1,19 +1,20 @@
 //! Integration tests for the UsdLux schema views, exercised against the
-//! `usdLux_scene.usda` fixture plus a few small in-memory stages: every
-//! concrete light, the `Light` interface inputs, and the `ShapingAPI` /
-//! `ShadowAPI` / `LightListAPI` / `LightAPI` applied schemas.
+//! `usdLux_scene.usda` and `usdLux_linking` fixtures plus a few small
+//! in-memory stages: every concrete light, the `Light` interface inputs, the
+//! `ShapingAPI` / `ShadowAPI` / `LightListAPI` / `LightAPI` applied schemas,
+//! and light, shadow and filter linking.
 
 use openusd::Result;
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{CollectionAPI, SchemaBase, Stage};
-use openusd_schemas::geom::XformableSchema;
+use openusd_schemas::geom::{self, XformableSchema};
 use openusd_schemas::lux::{
     BoundableLightBaseSchema, CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
     DistantLightSchema, DomeLight, DomeLight_1, DomeLight_1Schema, DomeLightSchema, GeometryLight, GeometryLightSchema,
-    LightAPI, LightFilter, LightListAPI, LightListCacheBehavior, NonboundableLightBaseSchema, PortalLight,
-    PortalLightSchema, RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema,
-    TextureFormat,
+    LightAPI, LightFilter, LightFilterExt, LightListAPI, LightListCacheBehavior, NonboundableLightBaseSchema,
+    PluginLightFilter, PortalLight, PortalLightSchema, RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight,
+    SphereLightSchema, TextureFormat,
 };
 
 mod common;
@@ -326,8 +327,11 @@ fn light_links_include_root() -> Result<()> {
     stage.define_prim("/World/Geo")?.set_type_name("Mesh")?;
     let light = DistantLight::define(&stage, "/World/Sun")?;
 
-    for name in ["lightLink", "shadowLink"] {
-        let linking = CollectionAPI::from_prim_unchecked(light.prim().clone(), name);
+    let api = light.light_api();
+    for (name, linking) in [
+        ("lightLink", api.light_link_collection()),
+        ("shadowLink", api.shadow_link_collection()),
+    ] {
         assert_eq!(linking.include_root()?, Some(true), "{name} includes the pseudo-root");
         assert!(
             linking.membership_query()?.is_included(&sdf::path("/World/Geo")?),
@@ -436,5 +440,105 @@ fn sphere_light_roundtrip() -> Result<()> {
     assert_eq!(s.treat_as_point_attr().get()?, Some(sdf::Value::Bool(true)));
     assert_eq!(s.intensity_attr().get()?, Some(sdf::Value::Float(800.0)));
     assert!(SphereLight::get(&stage, "/Missing")?.is_none());
+    Ok(())
+}
+
+/// `testUsdLuxLinkingAPI/linking_example.usda`, which links lights and a
+/// filter to the geometry under `/Geom`.
+fn linking_stage() -> Result<Stage> {
+    Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open("fixtures/usdLux_linking/linking_example.usda")
+}
+
+/// Whether the collection includes the prim at `path`.
+fn includes(collection: &CollectionAPI, path: &str) -> Result<bool> {
+    Ok(collection.membership_query()?.is_included(&sdf::path(path)?))
+}
+
+/// `testUsdLuxLinkingAPI.py:test_LinkageQueries`.
+#[test]
+fn linkage_queries() -> Result<()> {
+    let stage = linking_stage()?;
+    #[rustfmt::skip]
+    let cases = [
+        ("/Lights/DefaultLinkage/include_all", "/Geom", true),
+        ("/Lights/DefaultLinkage/include_all", "/Geom/a", true),
+        ("/Lights/DefaultLinkage/include_all", "/Geom/a/sub_scope", true),
+        ("/Lights/SimpleInclude/include_a", "/Geom", false),
+        ("/Lights/SimpleInclude/include_a", "/Geom/a", true),
+        ("/Lights/SimpleInclude/include_a", "/Geom/a/sub_scope", true),
+        ("/Lights/SimpleInclude/include_a", "/Geom/b", false),
+        ("/Lights/MultiInclude/include_ab", "/Geom", false),
+        ("/Lights/MultiInclude/include_ab", "/Geom/a", true),
+        ("/Lights/MultiInclude/include_ab", "/Geom/b", true),
+        ("/Lights/SimpleExclude/exclude_a", "/Geom", true),
+        ("/Lights/SimpleExclude/exclude_a", "/Geom/a", false),
+        ("/Lights/SimpleExclude/exclude_a", "/Geom/a/sub_scope", false),
+        ("/Lights/SimpleExclude/exclude_a", "/Geom/b", true),
+        ("/Lights/FaceSetLinking/include_faceSet_example", "/", false),
+        ("/Lights/FaceSetLinking/include_faceSet_example", "/Geom", false),
+        ("/Lights/FaceSetLinking/include_faceSet_example", "/Geom/meshWithFaceSet", false),
+        ("/Lights/FaceSetLinking/include_faceSet_example", "/Geom/meshWithFaceSet/faceSet", true),
+    ];
+    for (light, path, expected) in cases {
+        let links = LightAPI::from_prim_unchecked(stage.prim(light)?).light_link_collection();
+        assert_eq!(includes(&links, path)?, expected, "{light} links {path}");
+    }
+    Ok(())
+}
+
+/// `testUsdLuxLinkingAPI.py:test_LinkageAuthoring`.
+#[test]
+fn linkage_authoring() -> Result<()> {
+    let stage = memory()?;
+    geom::Scope::define(&stage, "/Geom")?;
+    geom::Sphere::define(&stage, "/Geom/Sphere")?;
+    geom::Scope::define(&stage, "/Lights")?;
+    let light = SphereLight::define(&stage, "/Lights/light_1")?;
+    let links = light.light_api().light_link_collection();
+
+    // The schema links everything.
+    assert!(includes(&links, "/Geom")? && includes(&links, "/Geom/Sphere")?);
+    assert!(includes(&links, "/RandomOtherPath")?);
+
+    links.exclude_path("/Geom")?;
+    assert!(!includes(&links, "/Geom")? && !includes(&links, "/Geom/Sphere")?);
+    assert!(includes(&links, "/RandomOtherPath")?);
+
+    links.include_path("/Geom/Sphere")?;
+    assert!(!includes(&links, "/Geom")?);
+    assert!(includes(&links, "/Geom/Sphere")? && includes(&links, "/Geom/Sphere/Child")?);
+    assert!(includes(&links, "/RandomOtherPath")?);
+    Ok(())
+}
+
+/// `testUsdLuxLinkingAPI.py:test_FilterLinking`.
+#[test]
+fn filter_linking() -> Result<()> {
+    let stage = linking_stage()?;
+    let light = LightAPI::from_prim_unchecked(stage.prim("/Lights/FilterLinking/filter_exclude_a")?);
+    let filters = light.filters_rel().forwarded_targets()?;
+    assert_eq!(filters, [sdf::path("/Lights/FilterLinking/filter")?]);
+
+    let filter = LightFilter::get(&stage, filters[0].clone())?.expect("LightFilter");
+    assert_eq!(filter.path().as_str(), "/Lights/FilterLinking/filter");
+    let links = filter.filter_link_collection();
+    assert!(!includes(&links, "/Geom/a")?);
+    assert!(includes(&links, "/Geom/b")?);
+    Ok(())
+}
+
+/// A plugin light filter links like any filter, everything before anything
+/// is authored.
+#[test]
+fn plugin_filter_linking() -> Result<()> {
+    let stage = memory()?;
+    let filter = PluginLightFilter::define(&stage, "/Filter")?;
+    let links = filter.filter_link_collection();
+    assert_eq!(links.include_root()?, Some(true));
+    assert!(includes(&links, "/Anything")?);
+    links.exclude_path("/Geom")?;
+    assert!(!includes(&links, "/Geom/a")?);
     Ok(())
 }
