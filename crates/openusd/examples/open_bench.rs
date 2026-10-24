@@ -59,6 +59,10 @@
 //! through the `Prim` queries, so two builds can be compared with `diff`.
 //! `--load-none` opens with no payload loaded, and each `--load <path>` then
 //! loads that prim but none of its descendants.
+//!
+//! `--authored` enumerates authored attributes, excluding properties supplied
+//! only by a schema. Array counts also include their total element count for
+//! comparisons between implementations with different value representations.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(not(feature = "mmap"))]
@@ -77,7 +81,7 @@ fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
         eprintln!(
             "usage: open_bench [--time <t>] [--save] [--mute] [--retraverse] [--edit] [--no-heap] [--no-arrays] \
-             [--proxies | --all] [--mmap] [--status <file>] [--load-none] [--load <path>]... [--until <phase>] \
+             [--proxies | --all] [--authored] [--mmap] [--status <file>] [--load-none] [--load <path>]... [--until <phase>] \
              <root.usd[a|c|z]>"
         );
         process::exit(2);
@@ -138,18 +142,28 @@ fn main() -> Result<()> {
         // packaged scene opens each package once.
         let _scope = ar::CacheScope::begin();
         let time = args.time.map(TimeCode::new);
-        let (mut arrays, mut decoded) = (0usize, 0usize);
+        let (mut arrays, mut decoded, mut elements) = (0usize, 0usize, 0usize);
         for path in &prims {
-            for attribute in stage.prim(path.clone())?.attributes()? {
+            let prim = stage.prim(path.clone())?;
+            let attributes = if args.authored {
+                prim.authored_attributes()?
+            } else {
+                prim.attributes()?
+            };
+            for attribute in attributes {
                 if let Some(value) = attribute.get_at::<sdf::Value>(time)?
                     && let Some(bytes) = array_bytes(&value)
                 {
                     arrays += 1;
                     decoded += bytes;
+                    elements += value.array_len().expect("an array value");
                 }
             }
         }
-        phase.end(&format!("arrays: {arrays}  decoded: {}", mib(decoded)));
+        phase.end(&format!(
+            "arrays: {arrays}  elements: {elements}  decoded: {}",
+            mib(decoded)
+        ));
     }
 
     if args.mute && args.runs("mute") {
@@ -210,6 +224,7 @@ struct Args {
     mute: bool,
     no_heap: bool,
     no_arrays: bool,
+    authored: bool,
     predicate: PrimPredicate,
     mmap: bool,
     retraverse: bool,
@@ -234,6 +249,7 @@ impl Args {
             mute: false,
             no_heap: false,
             no_arrays: false,
+            authored: false,
             predicate: PrimPredicate::DEFAULT,
             mmap: false,
             retraverse: false,
@@ -250,6 +266,7 @@ impl Args {
                 "--mute" => parsed.mute = true,
                 "--no-heap" => parsed.no_heap = true,
                 "--no-arrays" => parsed.no_arrays = true,
+                "--authored" => parsed.authored = true,
                 "--proxies" => parsed.predicate = PrimPredicate::DEFAULT_PROXIES,
                 "--all" => parsed.predicate = PrimPredicate::ALL,
                 "--mmap" => parsed.mmap = true,

@@ -4521,6 +4521,29 @@ fn inactive_prim_no_descendants() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn population_gate_reactivates() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, INACTIVE_PARENT)?;
+    let parent = stage.prim("/P")?;
+    let own = stage.attribute("/P.x")?;
+    let child = stage.attribute("/P/C.y")?;
+    for _ in 0..2 {
+        assert_eq!(own.get::<f64>()?, Some(1.0));
+        assert_eq!(child.get::<f64>()?, None);
+    }
+    parent.clone().set_active(true)?;
+    for _ in 0..2 {
+        assert!(child.get::<f64>()?.is_some());
+    }
+    parent.set_active(false)?;
+    for _ in 0..2 {
+        assert_eq!(own.get::<f64>()?, Some(1.0));
+        assert_eq!(child.get::<f64>()?, None);
+    }
+    Ok(())
+}
+
 /// A direct read below an inactive prim composes nothing there and never
 /// demands the payload authored below it. The same payload under an active
 /// parent reports its missing target.

@@ -153,6 +153,10 @@ pub(super) struct PrimRecord {
     /// Whether the population reaches the prim and the prim exists and is
     /// active ([`IndexCache::is_populated`]).
     pub(super) populated: Answer<bool>,
+    /// Whether the mask includes the prim and its parent is populated
+    /// ([`IndexCache::population_reaches`]). An inactive prim can be reached
+    /// while its own [`Self::populated`] answer is false.
+    pub(super) reached: Answer<bool>,
     /// Whether the prim is an instance ([`IndexCache::is_instance`]).
     pub(super) instance: Answer<bool>,
     /// The prim's own status inputs, `None` when nothing composes there
@@ -352,10 +356,9 @@ const PROTOTYPE_PREFIX: &str = "__Prototype_";
 /// stands at a path is [`IndexCache::is_prototype`]; whether a path is inside
 /// one is [`IndexCache::is_in_prototype`].
 pub(crate) fn is_prototype_namespace(path: &Path) -> bool {
-    path.is_abs()
-        && path
-            .root_prim_name()
-            .is_some_and(|name| name.starts_with(PROTOTYPE_PREFIX))
+    path.as_str()
+        .strip_prefix('/')
+        .is_some_and(|relative| relative.starts_with(PROTOTYPE_PREFIX))
 }
 
 /// The index a prototype root at `prototype` composes from `canonical`'s
@@ -538,15 +541,19 @@ impl IndexCache {
         if !self.mask_includes(path) {
             return Ok(false);
         }
-        // TODO(perf): every gated stage read lands here, and building the
-        // parent path allocates before the memo is probed. A borrowed parent
-        // accessor on `Path`, with the memo keyed to accept it, would make a
-        // memo hit allocation-free.
-        match path.parent() {
-            Some(parent) => self.is_populated(graph, &parent),
-            // The pseudo-root, which nothing can deactivate.
-            None => Ok(true),
+        if let Some(reached) = self.records.get(path).and_then(|record| record.reached.known()) {
+            return Ok(*reached);
         }
+        let pending_before = self.pending_loads.len();
+        let reached = match path.parent() {
+            Some(parent) => self.is_populated(graph, &parent)?,
+            // The pseudo-root, which nothing can deactivate.
+            None => true,
+        };
+        if !self.provisional(path, pending_before) {
+            self.record_mut(path).reached = Answer::Known(reached);
+        }
+        Ok(reached)
     }
 
     /// Whether the stage's population excludes `path`: the mask hides it, or
@@ -1040,6 +1047,31 @@ mod tests {
 
     fn path(s: &str) -> Path {
         Path::new(s).expect("valid test path")
+    }
+
+    #[test]
+    fn prototype_namespace_syntax() {
+        for text in [
+            "/__Prototype_1",
+            "/__Prototype_1/Child",
+            "/__Prototype_1.attr",
+            "/__Prototype_1{v=x}Child",
+            "/__Prototype_custom",
+            "/__Prototype_",
+        ] {
+            assert!(is_prototype_namespace(&path(text)), "{text}");
+        }
+        for text in [
+            "/",
+            "/World/__Prototype_1",
+            "/World.rel[/__Prototype_1]",
+            "/__Prototype",
+            "__Prototype_1",
+            "../__Prototype_1",
+        ] {
+            assert!(!is_prototype_namespace(&path(text)), "{text}");
+        }
+        assert!(!is_prototype_namespace(&Path::default()));
     }
 
     /// A key whose identity is a single tagged selection, enough to drive the
