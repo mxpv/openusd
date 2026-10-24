@@ -23,7 +23,8 @@
 //! by every concrete light and by the standalone [`LightAPI`] applied-schema
 //! view, which makes an arbitrary prim (a `Mesh`, `Volume`, …) emissive.
 //! [`ShapingAPI`], [`ShadowAPI`], and [`LightListAPI`] are the other applied
-//! schemas.
+//! schemas. [`blackbody_rgb`] is the color a light's color temperature
+//! stands for.
 //!
 //! # Example
 //!
@@ -61,6 +62,10 @@
 //! views, via `from_token` / `as_token`.
 
 openusd::include_schema!("usdLux");
+
+mod blackbody;
+
+pub use blackbody::blackbody_rgb;
 
 use openusd::{gf, usd};
 
