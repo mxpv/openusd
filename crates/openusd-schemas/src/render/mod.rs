@@ -51,9 +51,6 @@
 //! assert_eq!(spec.products.len(), 1);
 //! ```
 
-use openusd::usd::{Prim, Stage};
-use openusd::{Result, sdf};
-
 openusd::include_schema!("usdRender");
 
 pub mod spec;
@@ -71,16 +68,3 @@ pub use spec::{RenderSpec, SpecDiagnostic};
 pub const COLLECTION_CAMERA_VISIBILITY: &str = "cameraVisibility";
 pub const COLLECTION_PRUNE: &str = "prune";
 pub const COLLECTION_MATTE: &str = "matte";
-
-/// The prim at `path` seen through `view`, a schema's `from_prim`: `None`
-/// where `path` names no prim, or a prim `view` does not accept.
-///
-/// [`Stage::prim`] reads a property path as its prim, where C++
-/// `GetPrimAtPath` finds nothing. Every render lookup of a relationship target
-/// goes through here.
-fn schema_prim<T>(stage: &Stage, path: &sdf::Path, view: fn(Prim) -> Result<Option<T>>) -> Result<Option<T>> {
-    match path.is_prim() {
-        true => view(stage.prim(path.clone())?),
-        false => Ok(None),
-    }
-}

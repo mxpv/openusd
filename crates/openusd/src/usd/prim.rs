@@ -1283,7 +1283,8 @@ impl Prim {
     /// [`Stage::prim`](crate::usd::Stage::prim): a path with no contributing
     /// spec yields a handle that is not valid, and so does one the stage's
     /// population does not reach — outside the population mask, or below an
-    /// inactive prim.
+    /// inactive prim. The handle for a path that cannot name a prim, such as
+    /// a property path, is not valid either.
     pub fn is_valid(&self) -> Result<bool> {
         Ok(self.stage.has_spec(&self.path)?)
     }

@@ -88,11 +88,7 @@ impl BlendShapeQuery {
             .enumerate()
         {
             let first = sub_shapes.len();
-            let shape = if target.is_prim() {
-                BlendShape::get(binding.stage(), target)?
-            } else {
-                None
-            };
+            let shape = BlendShape::get(binding.stage(), target)?;
             if let Some(shape) = &shape
                 && shape.is_active()?
             {

@@ -792,8 +792,8 @@ mod tests {
         Ok(())
     }
 
-    /// A target that is not a `proxy` prim, a second target, and a target no
-    /// prim is at each leave the prim without a proxy.
+    /// A target that is not a `proxy` prim, a second target, a target no prim
+    /// is at, and a property target each leave the prim without a proxy.
     #[test]
     fn proxy_prim_rejects_target() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
@@ -811,6 +811,13 @@ mod tests {
         assert!(geo.proxy_prim()?.is_none());
 
         render.proxy_prim_rel_builder().set_targets(["/Missing"]).build()?;
+        assert!(geo.proxy_prim()?.is_none());
+
+        // A property of the proxy prim names no prim.
+        render
+            .proxy_prim_rel_builder()
+            .set_targets(["/Proxy.purpose"])
+            .build()?;
         assert!(geo.proxy_prim()?.is_none());
         Ok(())
     }

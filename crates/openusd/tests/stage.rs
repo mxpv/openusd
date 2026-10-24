@@ -3049,14 +3049,28 @@ def Xform "World"
     Ok(())
 }
 
-/// Property paths resolve to the owning prim's schemas (matches the
-/// `specifier` / `kind` convention).
+/// A path that names no prim gives the invalid prim, as C++
+/// `GetPrimAtPath` does, even where its owning prim is composed.
 #[test]
-fn api_schemas_property_path() -> Result<()> {
+fn prim_at_non_prim_path() -> Result<()> {
     let stage = Stage::open("fixtures/api_schemas.usda")?;
-    let prim = sdf::Path::new("/World/Geo")?;
-    let prop = sdf::Path::new("/World/Geo.points")?;
-    assert_eq!(stage.prim(prop)?.api_schemas()?, stage.prim(prim)?.api_schemas()?);
+    assert!(stage.prim("/World/Geo")?.is_valid()?);
+    for path in [
+        "/World/Geo.points",
+        "/World/Geo{v=a}",
+        "/World{v=a}Geo",
+        "World/Geo",
+        ".",
+    ] {
+        let prim = stage.prim(path)?;
+        assert!(prim.path().is_empty(), "{path}");
+        assert!(!prim.is_valid()?, "{path}");
+        assert!(prim.api_schemas()?.is_empty(), "{path}");
+    }
+    let root = stage.prim("/")?;
+    assert!(root.path().is_abs_root());
+    assert!(root.is_valid()?);
+    assert_eq!(root.children()?.len(), 1);
     Ok(())
 }
 

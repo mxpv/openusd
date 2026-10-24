@@ -290,7 +290,7 @@ fn bound<T>(rel: &Relationship, view: fn(Prim) -> Result<Option<T>>) -> Result<B
     if !rel.has_authored_targets()? {
         return Ok(Bound::Unauthored);
     }
-    let Some(target) = rel.forwarded_targets()?.into_iter().next().filter(sdf::Path::is_prim) else {
+    let Some(target) = rel.forwarded_targets()?.into_iter().next() else {
         return Ok(Bound::Authored(None));
     };
     let prim = rel.stage().prim(target)?;

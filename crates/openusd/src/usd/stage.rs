@@ -3103,8 +3103,18 @@ impl Stage {
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
     /// wrapper; `Ok` does not assert that a prim is composed at the path
     /// (query the handle to find out) — `Err` means `path` failed to parse.
+    ///
+    /// A path that cannot name a prim on the stage gives the invalid prim,
+    /// whose path is empty, as in C++. That is a property or a relationship
+    /// target, a path with a variant selection in it, and a relative path.
     pub fn prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, sdf::PathParseError> {
-        Ok(super::Prim::new(self, sdf::try_into_path(path)?.prim_path()))
+        let path = sdf::try_into_path(path)?;
+        let names_prim = path.is_abs() && (path.is_abs_root() || (path.is_prim() && !path.has_variant_selection()));
+        let path = match names_prim {
+            true => path,
+            false => sdf::Path::default(),
+        };
+        Ok(super::Prim::new(self, path))
     }
 
     /// Returns an [`Attribute`](super::Attribute) handle anchored to `path`.

@@ -19,7 +19,6 @@ use super::conform::conform_aperture;
 use super::spec::{Product as SpecProduct, RenderSpec, SpecDiagnostic, Var as SpecVar};
 use super::{
     AspectRatioConformPolicy, Product, ProductSchema, Settings, SettingsBaseSchema, SettingsSchema, Var, VarSchema,
-    schema_prim,
 };
 use crate::authored_at;
 use crate::geom::{self, CameraSchema};
@@ -39,7 +38,7 @@ use crate::geom::{self, CameraSchema};
 /// `namespace:`-prefixed opinions) by top-level namespace; an empty slice
 /// gathers every namespace.
 pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> Result<Option<RenderSpec>> {
-    let Some(settings) = schema_prim(stage, settings_prim, Settings::from_prim)? else {
+    let Some(settings) = Settings::get(stage, settings_prim)? else {
         return Ok(None);
     };
     let settings_base = ResolvedBase::read(&settings, None)?;
@@ -49,7 +48,7 @@ pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> 
     let mut var_index: HashMap<Path, usize> = HashMap::new();
 
     for product_path in settings.products_rel().forwarded_targets()? {
-        let Some(product) = schema_prim(stage, &product_path, Product::from_prim)? else {
+        let Some(product) = Product::get(stage, &product_path)? else {
             continue; // a `products` target that isn't a Product is ignored
         };
 
@@ -57,7 +56,7 @@ pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> 
         let base = ResolvedBase::read(&product, Some(&settings_base))?;
 
         let camera = match &base.camera {
-            Some(path) => schema_prim(stage, path, geom::Camera::from_prim)?,
+            Some(path) => geom::Camera::get(stage, path)?,
             None => None,
         };
         let Some(camera) = camera else {
@@ -206,7 +205,7 @@ fn collect_var_indices(
             indices.push(i);
             continue;
         }
-        let Some(var) = schema_prim(stage, &var_path, Var::from_prim)? else {
+        let Some(var) = Var::get(stage, &var_path)? else {
             spec.diagnostics.push(SpecDiagnostic::MissingVar {
                 product: product_path.clone(),
                 var: var_path,
