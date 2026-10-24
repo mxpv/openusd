@@ -7,12 +7,19 @@ use openusd::usd::SchemaBase;
 
 use super::connectable::{authored_inputs, input_name, output_name};
 use super::tokens::{INPUTS, OUTPUTS};
-use super::{Input, Output};
+use super::{ConnectableAPI, Input, Output};
 
 /// The `inputs:` and `outputs:` surface shared by Shader, NodeGraph, and
-/// Material prims, and by any prim a [`ConnectableAPI`](super::ConnectableAPI)
-/// views (C++ `UsdShadeConnectableAPI`).
+/// Material prims, and by any prim a [`ConnectableAPI`] views (C++
+/// `UsdShadeConnectableAPI`).
 pub trait Connectable: SchemaBase {
+    /// The prim as a [`ConnectableAPI`] where it has a connectable behavior,
+    /// and `None` where it does not (C++ `ConnectableAPI()`, which each
+    /// connectable schema declares).
+    fn connectable_api(&self) -> Result<Option<ConnectableAPI>> {
+        ConnectableAPI::from_prim(self.prim().clone())
+    }
+
     /// The `inputs:<base>` attribute view (C++ `GetInput`).
     ///
     /// The handle comes back whether or not anything is authored there, as

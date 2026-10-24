@@ -33,6 +33,12 @@
 //! a light's color temperature stands for. [`LightList`] finds the lights
 //! below a prim and keeps them as a cache on it.
 //!
+//! Lights and light filters are shading nodes: [`LightAPI`], [`ShapingAPI`],
+//! [`ShadowAPI`], [`LightFilter`] and [`PluginLightFilter`] are
+//! [`shade::Connectable`](crate::shade::Connectable), and a prim with
+//! `LightAPI` or of a `LightFilter` type is a container whose inputs connect
+//! across scopes, without encapsulation.
+//!
 //! # Example
 //!
 //! ```
@@ -71,11 +77,13 @@
 openusd::include_schema!("usdLux");
 
 mod blackbody;
+mod connectable;
 mod dome;
 mod light;
 mod light_list;
 
 pub use blackbody::blackbody_rgb;
+pub(crate) use connectable::register_behaviors;
 pub use light::LightFilterExt;
 pub use light_list::{LightList, LightListMode};
 

@@ -352,8 +352,9 @@ macro_rules! impl_shading_attribute {
             }
 
             /// The logical attributes that produce this attribute's value,
-            /// following connections through NodeGraph and Material interfaces
-            /// (C++ `UsdShadeUtils::GetValueProducingAttributes`).
+            /// following connections through the interfaces of the containers
+            /// the default [`ConnectableContext`](crate::shade::ConnectableContext)
+            /// knows (C++ `UsdShadeUtils::GetValueProducingAttributes`).
             ///
             /// A connection cycle terminates the walk that entered it, so a
             /// chain that closes on itself contributes no producer.

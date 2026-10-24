@@ -31,7 +31,7 @@ openusd-schemas = { version = "0.8", features = ["geom", "lux"] }
 
 Nothing is enabled by default. A family that builds on another's views enables
 it, so `lux`, `media`, `physics`, `proc`, `shade`, `skel` and `vol` each pull
-in `geom`.
+in `geom`, and `lux` and `physics` pull in `shade`.
 
 Hand `schema_registry()` to the stage you open. It is what makes a prim a
 `Mesh`, what resolves the fallback a schema declares for a property nothing

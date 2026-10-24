@@ -20,7 +20,7 @@
 //! | Feature | Module | Schemas | Beyond the views |
 //! |---------|--------|---------|------------------|
 //! | `geom`    | `geom`    | `UsdGeom`     | `ImageableExt` (visibility / purpose down namespace), `XformableExt` (the transform stack), `Primvar` and the `PrimvarsAPI` queries (indexed values, inheritance down namespace), the token enums |
-//! | `lux`     | `lux`     | `UsdLux`      | the token enums; needs `geom` |
+//! | `lux`     | `lux`     | `UsdLux`      | the token enums, light lists and their cache, lights and filters as shading nodes; needs `geom`, `shade` |
 //! | `media`   | `media`   | `UsdMedia`    | asset-preview thumbnails, which live in `assetInfo`; needs `geom` |
 //! | `physics` | `physics` | `UsdPhysics`  | the token enums, a rigid body's mass properties from its colliders, the parser that describes a stage's physics objects to a simulator; needs `geom`, `shade` |
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
@@ -709,6 +709,8 @@ pub fn connectable_registry() -> &'static shade::BehaviorRegistry {
     REGISTRY.get_or_init(|| {
         let mut registry = shade::BehaviorRegistry::new();
         shade::behavior::register_behaviors(&mut registry);
+        #[cfg(feature = "lux")]
+        lux::register_behaviors(&mut registry);
         registry
     })
 }

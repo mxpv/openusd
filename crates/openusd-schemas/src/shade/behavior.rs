@@ -60,13 +60,14 @@ pub enum NodeKind {
     Basic,
     /// A container whose inputs are fed from the nodes it holds, and whose
     /// outputs pass nothing through (C++ `DerivedContainerNodes`): a
-    /// Material.
+    /// Material, and a light or light filter of `lux`.
     Container,
 }
 
 /// The rule that refuses a connection: the reasons C++ gives in
-/// `connectableAPIBehavior.cpp:52-293`, and a Shader's refusal of every
-/// output connection (`shader.cpp:123-128`).
+/// `connectableAPIBehavior.cpp:52-293`, and the refusal of every output
+/// connection a Shader and a light filter make (`shader.cpp:123-128`,
+/// `lightFilter.cpp:176-182`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The input being connected is not defined.
@@ -109,7 +110,8 @@ pub enum Refusal {
     PassthroughElsewhere,
     /// An output source's prim is not a child of the output's prim.
     OutputSourceNotChild,
-    /// The prim's outputs connect to nothing, as a Shader's do.
+    /// The prim's outputs connect to nothing, as a Shader's and a light
+    /// filter's do.
     OutputsNotConnectable,
 }
 
@@ -343,16 +345,16 @@ impl ConnectableAPI {
     }
 }
 
-/// The behavior of a built-in schema of this family: what is fixed for every
+/// The behavior of a built-in schema of this crate: what is fixed for every
 /// prim of the schema, and the rules its inputs and outputs connect by.
 #[derive(Debug)]
-struct BuiltIn {
-    container: bool,
-    encapsulation: bool,
+pub(crate) struct BuiltIn {
+    pub(crate) container: bool,
+    pub(crate) encapsulation: bool,
     /// The rules the prim's inputs and outputs follow.
-    kind: NodeKind,
+    pub(crate) kind: NodeKind,
     /// Whether outputs connect at all.
-    outputs: bool,
+    pub(crate) outputs: bool,
 }
 
 impl Behavior for BuiltIn {

@@ -6,6 +6,7 @@
 //! discovery and its cache.
 
 use std::collections::BTreeSet;
+use std::ops::Deref;
 
 use openusd::Result;
 use openusd::sdf;
@@ -19,6 +20,9 @@ use openusd_schemas::lux::{
     LightAPI, LightFilter, LightFilterExt, LightFilterSchema, LightList, LightListAPI, LightListCacheBehavior,
     LightListMode, ListAPI, NonboundableLightBaseSchema, PluginLightFilter, PortalLight, PortalLightSchema, RectLight,
     RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema, TextureFormat,
+};
+use openusd_schemas::shade::{
+    Connectable, ConnectableAPI, Input, NodeGraph, NodeGraphInterface, ProducerFilter, Shader,
 };
 
 mod common;
@@ -823,5 +827,154 @@ fn list_api_deprecated() -> Result<()> {
     assert_eq!(list.compute_light_list(LightListMode::ConsultCache)?, lights);
     list.invalidate_light_list()?;
     assert_eq!(list.light_list_cache_behavior()?.as_deref(), Some("ignore"));
+    Ok(())
+}
+
+/// The paths of `attributes`.
+fn paths<T: Deref<Target = usd::Attribute>>(attributes: &[T]) -> Vec<sdf::Path> {
+    attributes.iter().map(|attribute| attribute.path().clone()).collect()
+}
+
+/// `testUsdLuxLight.py:test_BasicConnectableLights`.
+#[test]
+fn connectable_lights() -> Result<()> {
+    let stage = memory()?;
+    let rect = RectLight::define(&stage, "/RectLight")?;
+    let light = rect.light_api();
+    assert!(light.connectable_api()?.is_some());
+
+    // The built-in inputs are listed, prefixed, and are the schema's own
+    // attributes. None is authored.
+    let built_in = [
+        "color",
+        "colorTemperature",
+        "diffuse",
+        "enableColorTemperature",
+        "exposure",
+        "height",
+        "intensity",
+        "normalize",
+        "specular",
+        "texture:file",
+        "width",
+    ];
+    assert!(light.authored_inputs()?.is_empty());
+    let inputs = light.inputs()?;
+    let names: Vec<_> = inputs.iter().map(Input::base_name).collect();
+    for name in built_in {
+        assert!(names.contains(&name), "{name} is built in");
+        assert_eq!(light.input(name).name(), format!("inputs:{name}"));
+    }
+    assert_eq!(light.input("color").path(), rect.color_attr().path());
+    assert_eq!(light.input("texture:file").path(), rect.texture_file_attr().path());
+
+    let light_input = light.create_input("newInput", "float")?;
+    assert_eq!(paths(&light.authored_inputs()?), [light_input.path().clone()]);
+    assert_eq!(light.input("newInput").path(), light_input.path());
+
+    // A light declares no outputs.
+    assert!(light.authored_outputs()?.is_empty());
+    assert!(light.outputs()?.is_empty());
+    let light_output = light.create_output("newOutput", "float")?;
+    assert_eq!(paths(&light.authored_outputs()?), [light_output.path().clone()]);
+    assert_eq!(paths(&light.outputs()?), [light_output.path().clone()]);
+
+    // A light filter declares neither.
+    let filter = LightFilter::define(&stage, "/LightFilter")?;
+    assert!(filter.connectable_api()?.is_some());
+    assert!(filter.authored_inputs()?.is_empty());
+    let filter_input = filter.create_input("newInput", "float")?;
+    assert_eq!(paths(&filter.authored_inputs()?), [filter_input.path().clone()]);
+    assert!(filter.outputs()?.is_empty());
+    let filter_output = filter.create_output("newOutput", "float")?;
+    assert_eq!(paths(&filter.outputs()?), [filter_output.path().clone()]);
+
+    // Sources under the light and under the filter.
+    let light_graph = NodeGraph::define(&stage, "/RectLight/Prim")?.create_output("graphOut", "float")?;
+    let filter_graph = NodeGraph::define(&stage, "/LightFilter/Prim")?.create_output("graphOut", "float")?;
+
+    // A light's outputs connect, and its inputs connect across scopes.
+    assert!(light_output.can_connect(&light_graph)?);
+    assert!(light_output.can_connect(&filter_graph)?);
+    assert!(light_input.can_connect(&light_output)?);
+    assert!(light_input.can_connect(&light_graph)?);
+    assert!(light_input.can_connect(&filter_graph)?);
+
+    // A filter's outputs connect to nothing, and its inputs across scopes.
+    assert!(!filter_output.can_connect(&light_graph)?);
+    assert!(!filter_output.can_connect(&filter_graph)?);
+    assert!(filter_input.can_connect(&filter_output)?);
+    assert!(filter_input.can_connect(&filter_graph)?);
+    assert!(filter_input.can_connect(&light_graph)?);
+
+    // ShapingAPI and ShadowAPI inputs on a light connect as the light's do.
+    let shaping = ShapingAPI::apply(light.prim())?;
+    assert!(shaping.connectable_api()?.is_some());
+    let shadow = ShadowAPI::apply(light.prim())?;
+    assert!(shadow.connectable_api()?.is_some());
+    for (input, attribute) in [
+        (shaping.input("shaping:cone:angle"), shaping.shaping_cone_angle_attr()),
+        (shaping.input("shaping:focus"), shaping.shaping_focus_attr()),
+        (shadow.input("shadow:color"), shadow.shadow_color_attr()),
+        (shadow.input("shadow:distance"), shadow.shadow_distance_attr()),
+    ] {
+        assert_eq!(input.path(), attribute.path());
+    }
+    for input in [shaping.input("shaping:focus"), shadow.input("shadow:color")] {
+        assert!(input.can_connect(&light_output)?);
+        assert!(input.can_connect(&light_graph)?);
+        assert!(input.can_connect(&filter_graph)?);
+    }
+    Ok(())
+}
+
+/// `testUsdLuxLight.py:test_UsdLux_HasConnectableAPI`, and the type checks
+/// `test_BasicConnectableLights` opens with.
+#[test]
+fn light_has_connectable() -> Result<()> {
+    let stage = memory()?;
+    let connectable = |schema: &str| ConnectableAPI::has_connectable_api(stage.schema_registry(), &schema.into());
+    for schema in ["LightAPI", "LightFilter", "RectLight", "PluginLightFilter"] {
+        assert!(connectable(schema), "{schema}");
+    }
+    assert!(!connectable("ShadowAPI"));
+    Ok(())
+}
+
+/// ShadowAPI and ShapingAPI give a prim whose type is not connectable no
+/// behavior (the end of `test_BasicConnectableLights`).
+#[test]
+fn shadow_api_unconnectable() -> Result<()> {
+    let stage = memory()?;
+    let sphere = stage.define_prim("/Sphere")?.set_type_name("Sphere")?;
+    assert!(ShadowAPI::apply(&sphere)?.connectable_api()?.is_none());
+    assert!(ShapingAPI::apply(&sphere)?.connectable_api()?.is_none());
+    Ok(())
+}
+
+/// The shade walks see a light's behavior. A value routed out through a
+/// light's output resolves to the shader inside it, the light being a
+/// container. A light's input consumes the interface input of the graph it
+/// sits in, the light being connectable.
+#[test]
+fn light_container_sources() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let rig = RectLight::define(&stage, "/Rig")?.light_api();
+    let inner = Shader::define(&stage, "/Rig/Tex")?.create_output("out", "float")?;
+    let routed = rig.create_output("out", "float")?.connect_to(&inner)?;
+    let consumer = Shader::define(&stage, "/Consumer")?
+        .create_input("in", "float")?
+        .connect_to(&routed)?;
+    let producing = consumer.value_producing_attributes(ProducerFilter::Any)?;
+    let producing: Vec<_> = producing.iter().map(|attribute| attribute.path().clone()).collect();
+    assert_eq!(producing, [inner.path().clone()]);
+
+    let graph = NodeGraph::define(&stage, "/Graph")?;
+    let gain = graph.create_input("gain", "float")?;
+    let bulb = SphereLight::define(&stage, "/Graph/Bulb")?.light_api();
+    let intensity = bulb.input("intensity").connect_to(&gain)?;
+    let consumers = graph.interface_input_consumers(false)?;
+    let consumers = consumers.consumers(&gain).expect("gain is an interface input");
+    assert_eq!(paths(consumers), [intensity.path().clone()]);
     Ok(())
 }
