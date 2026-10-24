@@ -7,7 +7,7 @@ use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
 use super::tokens::{CONNECTABILITY, INPUTS};
-use super::{Connectability, ConnectionTarget, ShadingAttribute};
+use super::{Connectability, ConnectableContext, ConnectionTarget, ShadingAttribute};
 
 /// A UsdShade input backed by an `inputs:<base>` USD attribute
 /// (C++ `UsdShadeInput`).
@@ -39,6 +39,13 @@ impl Input {
         self.attribute
             .set_metadata(CONNECTABILITY, connectability)
             .map(Self::new)
+    }
+
+    /// Whether this input may connect to `source` under the behavior of its
+    /// prim (C++ `UsdShadeConnectableAPI::CanConnect`). An [`Input`] or an
+    /// [`Output`](super::Output) passes as its attribute.
+    pub fn can_connect(&self, source: &usd::Attribute) -> Result<bool> {
+        ConnectableContext::default().can_connect_input(self, source)
     }
 
     /// Drop this input's local `connectability` opinion

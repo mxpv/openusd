@@ -9,8 +9,8 @@ use openusd::Result;
 use openusd::usd::{SchemaBase, SchemaKind};
 use openusd::{tf, usd};
 
-use super::ConnectableAPI;
 use super::tokens;
+use super::{ConnectableAPI, Input, Output};
 
 /// How the prims of one schema take part in a shading network (C++
 /// `UsdShadeConnectableAPIBehavior`). A prim has the behavior a
@@ -24,6 +24,93 @@ pub trait Behavior: Send + Sync + fmt::Debug {
     /// Whether the prim's connections stay within the container that holds
     /// it.
     fn requires_encapsulation(&self) -> bool;
+
+    /// Whether `input`, an input on a prim of this behavior, may connect to
+    /// `source`, or the rule that refuses it (C++
+    /// `CanConnectInputToSource`). By default, the rules of a
+    /// [`NodeKind::Basic`] node.
+    fn can_connect_input(
+        &self,
+        context: &ConnectableContext,
+        input: &Input,
+        source: &usd::Attribute,
+    ) -> Result<Result<(), Refusal>> {
+        rules::input(context, input, source, NodeKind::Basic, self.requires_encapsulation())
+    }
+
+    /// Whether `output`, an output on a prim of this behavior, may connect to
+    /// `source`, or the rule that refuses it (C++
+    /// `CanConnectOutputToSource`). By default, the rules of a
+    /// [`NodeKind::Basic`] node.
+    fn can_connect_output(
+        &self,
+        _context: &ConnectableContext,
+        output: &Output,
+        source: &usd::Attribute,
+    ) -> Result<Result<(), Refusal>> {
+        rules::output(output, source, NodeKind::Basic, self.requires_encapsulation())
+    }
+}
+
+/// Which connection rules a node follows (C++ `ConnectableNodeTypes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// A node connected within the container that holds it (C++
+    /// `BasicNodes`): a NodeGraph, a Shader.
+    Basic,
+    /// A container whose inputs are fed from the nodes it holds, and whose
+    /// outputs pass nothing through (C++ `DerivedContainerNodes`): a
+    /// Material.
+    Container,
+}
+
+/// The rule that refuses a connection: the reasons C++ gives in
+/// `connectableAPIBehavior.cpp:52-293`, and a Shader's refusal of every
+/// output connection (`shader.cpp:123-128`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The input being connected is not defined.
+    InvalidInput,
+    /// The output being connected is not defined.
+    InvalidOutput,
+    /// The source's prim is not on the stage.
+    InvalidSource,
+    /// The source is on another stage than the attribute it would feed. A
+    /// connection names a path on its own stage and cannot reach a source
+    /// elsewhere. C++ compares the paths alone.
+    ForeignSource,
+    /// An input source's prim is not a container.
+    SourceNotContainer,
+    /// An input source's prim is not the parent of the input's prim.
+    SourceNotParent,
+    /// An output source feeds an input of a container node whose prim is not
+    /// a container.
+    InputNotContainer,
+    /// An output source's prim is not a child of the container node whose
+    /// input it feeds.
+    SourceNotChild,
+    /// An output source feeds an input of a basic node whose parent is not a
+    /// container.
+    ParentNotContainer,
+    /// An output source's prim and a basic node's prim have different
+    /// parents.
+    NotSiblings,
+    /// An `interfaceOnly` input's source is an input that is not
+    /// `interfaceOnly`.
+    SourceNotInterfaceOnly,
+    /// An `interfaceOnly` input's source is not an input.
+    SourceNotInput,
+    /// The input's `connectability` is neither `full` nor `interfaceOnly`.
+    UnspecifiedConnectability,
+    /// A container node's output is fed from an input, which would pass a
+    /// value through.
+    Passthrough,
+    /// An output is fed from an input on another prim.
+    PassthroughElsewhere,
+    /// An output source's prim is not a child of the output's prim.
+    OutputSourceNotChild,
+    /// The prim's outputs connect to nothing, as a Shader's do.
+    OutputsNotConnectable,
 }
 
 /// The behavior of each schema that has one, by the identifier of the schema
@@ -152,8 +239,10 @@ impl BehaviorRegistry {
 /// prim it reaches is asked of one registry:
 /// [`value_producing_attributes`](Self::value_producing_attributes),
 /// [`interface_input_consumers`](Self::interface_input_consumers),
-/// [`terminal_source`](Self::terminal_source) and
-/// [`read_preview_surface`](Self::read_preview_surface). The same query on a
+/// [`terminal_source`](Self::terminal_source),
+/// [`read_preview_surface`](Self::read_preview_surface),
+/// [`can_connect_input`](Self::can_connect_input) and
+/// [`can_connect_output`](Self::can_connect_output). The same query on a
 /// shading view runs under [`ConnectableContext::default`].
 #[derive(Debug, Clone)]
 pub struct ConnectableContext {
@@ -189,6 +278,26 @@ impl ConnectableContext {
             .behaviors
             .behavior(prim)?
             .is_some_and(|behavior| behavior.requires_encapsulation()))
+    }
+
+    /// Whether `input` may connect to `source` under the behavior of its
+    /// prim, `false` where the prim has none (C++
+    /// `UsdShadeConnectableAPI::CanConnect`).
+    pub fn can_connect_input(&self, input: &Input, source: &usd::Attribute) -> Result<bool> {
+        let Some(behavior) = self.behaviors.behavior(&input.attribute().prim())? else {
+            return Ok(false);
+        };
+        Ok(behavior.can_connect_input(self, input, source)?.is_ok())
+    }
+
+    /// Whether `output` may connect to `source` under the behavior of its
+    /// prim, `false` where the prim has none (C++
+    /// `UsdShadeConnectableAPI::CanConnect`).
+    pub fn can_connect_output(&self, output: &Output, source: &usd::Attribute) -> Result<bool> {
+        let Some(behavior) = self.behaviors.behavior(&output.attribute().prim())? else {
+            return Ok(false);
+        };
+        Ok(behavior.can_connect_output(self, output, source)?.is_ok())
     }
 }
 
@@ -235,11 +344,15 @@ impl ConnectableAPI {
 }
 
 /// The behavior of a built-in schema of this family: what is fixed for every
-/// prim of the schema.
+/// prim of the schema, and the rules its inputs and outputs connect by.
 #[derive(Debug)]
 struct BuiltIn {
     container: bool,
     encapsulation: bool,
+    /// The rules the prim's inputs and outputs follow.
+    kind: NodeKind,
+    /// Whether outputs connect at all.
+    outputs: bool,
 }
 
 impl Behavior for BuiltIn {
@@ -250,24 +363,198 @@ impl Behavior for BuiltIn {
     fn requires_encapsulation(&self) -> bool {
         self.encapsulation
     }
+
+    fn can_connect_input(
+        &self,
+        context: &ConnectableContext,
+        input: &Input,
+        source: &usd::Attribute,
+    ) -> Result<Result<(), Refusal>> {
+        rules::input(context, input, source, self.kind, self.encapsulation)
+    }
+
+    fn can_connect_output(
+        &self,
+        _context: &ConnectableContext,
+        output: &Output,
+        source: &usd::Attribute,
+    ) -> Result<Result<(), Refusal>> {
+        match self.outputs {
+            true => rules::output(output, source, self.kind, self.encapsulation),
+            false => Ok(Err(Refusal::OutputsNotConnectable)),
+        }
+    }
 }
 
 /// Add the behavior of each `UsdShade` schema that has one: NodeGraph
 /// (`nodeGraph.cpp:360-385`), Material (`material.cpp:725-756`) and Shader
 /// (`shader.cpp:120-138`).
 pub(crate) fn register_behaviors(registry: &mut BehaviorRegistry) {
-    let container = || BuiltIn {
+    let node_graph = BuiltIn {
         container: true,
         encapsulation: true,
+        kind: NodeKind::Basic,
+        outputs: true,
+    };
+    let material = BuiltIn {
+        container: true,
+        encapsulation: true,
+        kind: NodeKind::Container,
+        outputs: true,
     };
     let shader = BuiltIn {
         container: false,
         encapsulation: true,
+        kind: NodeKind::Basic,
+        outputs: false,
     };
     registry
-        .register(tokens::NODE_GRAPH, container())
-        .register(tokens::MATERIAL, container())
+        .register(tokens::NODE_GRAPH, node_graph)
+        .register(tokens::MATERIAL, material)
         .register(tokens::SHADER, shader);
+}
+
+/// The connection rules a [`Behavior`] answers by (C++
+/// `_CanConnectInputToSource` and `_CanConnectOutputToSource`), for a
+/// behavior of a site's own to reuse with its [`NodeKind`].
+pub mod rules {
+    use openusd::Result;
+    use openusd::{sdf, tf, usd};
+
+    use super::super::tokens::{CONNECTABILITY, FULL, INPUTS, INTERFACE_ONLY};
+    use super::super::{Input, Output};
+    use super::{ConnectableContext, NodeKind, Refusal};
+
+    /// Whether `input` may connect to `source` under the rules of a `kind`
+    /// node, its containers asked of `context`, encapsulated where
+    /// `encapsulation` holds (`connectableAPIBehavior.cpp:52-221`).
+    ///
+    /// The input's `connectability` is read as authored: empty or
+    /// unauthored is `full`, and any token other than `full` or
+    /// `interfaceOnly` refuses every source.
+    pub fn input(
+        context: &ConnectableContext,
+        input: &Input,
+        source: &usd::Attribute,
+        kind: NodeKind,
+        encapsulation: bool,
+    ) -> Result<Result<(), Refusal>> {
+        if !input.attribute().is_defined()? {
+            return Ok(Err(Refusal::InvalidInput));
+        }
+        let source_prim = source.prim();
+        if !source_prim.is_valid()? {
+            return Ok(Err(Refusal::InvalidSource));
+        }
+        if source.stage() != input.attribute().stage() {
+            return Ok(Err(Refusal::ForeignSource));
+        }
+        let interface_only = match connectability(input.attribute())?.as_deref().unwrap_or_default() {
+            "" | FULL => false,
+            INTERFACE_ONLY => true,
+            _ => return Ok(Err(Refusal::UnspecifiedConnectability)),
+        };
+        let source_is_input = is_input(source)?;
+        if interface_only {
+            if !source_is_input {
+                return Ok(Err(Refusal::SourceNotInput));
+            }
+            if connectability(source)?.as_deref() != Some(INTERFACE_ONLY) {
+                return Ok(Err(Refusal::SourceNotInterfaceOnly));
+            }
+        }
+        if !encapsulation {
+            return Ok(Ok(()));
+        }
+
+        let input_prim = input.attribute().prim();
+        if source_is_input {
+            // An input source is an interface input of the container just
+            // above the input's prim.
+            if !context.is_container(&source_prim)? {
+                return Ok(Err(Refusal::SourceNotContainer));
+            }
+            if input_prim.path().parent().as_ref() != Some(source_prim.path()) {
+                return Ok(Err(Refusal::SourceNotParent));
+            }
+            return Ok(Ok(()));
+        }
+        // An output source is a sibling's within the container holding a
+        // basic node, or a child's of a container node.
+        match kind {
+            NodeKind::Container => {
+                if !context.is_container(&input_prim)? {
+                    return Ok(Err(Refusal::InputNotContainer));
+                }
+                if source_prim.path().parent().as_ref() != Some(input_prim.path()) {
+                    return Ok(Err(Refusal::SourceNotChild));
+                }
+            }
+            NodeKind::Basic => {
+                let Some(parent) = input_prim.parent() else {
+                    return Ok(Err(Refusal::ParentNotContainer));
+                };
+                if !context.is_container(&parent)? {
+                    return Ok(Err(Refusal::ParentNotContainer));
+                }
+                if input_prim.path().parent() != source_prim.path().parent() {
+                    return Ok(Err(Refusal::NotSiblings));
+                }
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    /// Whether `output` may connect to `source` under the rules of a `kind`
+    /// node, encapsulated where `encapsulation` holds
+    /// (`connectableAPIBehavior.cpp:225-293`).
+    pub fn output(
+        output: &Output,
+        source: &usd::Attribute,
+        kind: NodeKind,
+        encapsulation: bool,
+    ) -> Result<Result<(), Refusal>> {
+        if !output.attribute().is_defined()? {
+            return Ok(Err(Refusal::InvalidOutput));
+        }
+        let source_prim = source.prim();
+        if !source_prim.is_valid()? {
+            return Ok(Err(Refusal::InvalidSource));
+        }
+        if source.stage() != output.attribute().stage() {
+            return Ok(Err(Refusal::ForeignSource));
+        }
+        let output_prim = output.attribute().prim();
+        if is_input(source)? {
+            // An input feeds an output only as a passthrough on one prim.
+            if kind == NodeKind::Container {
+                return Ok(Err(Refusal::Passthrough));
+            }
+            if source_prim.path() != output_prim.path() {
+                return Ok(Err(Refusal::PassthroughElsewhere));
+            }
+            return Ok(Ok(()));
+        }
+        if encapsulation && source_prim.path().parent().as_ref() != Some(output_prim.path()) {
+            return Ok(Err(Refusal::OutputSourceNotChild));
+        }
+        Ok(Ok(()))
+    }
+
+    /// Whether `attribute` is a defined input (C++ `UsdShadeInput::IsInput`).
+    fn is_input(attribute: &usd::Attribute) -> Result<bool> {
+        Ok(attribute.name().starts_with(INPUTS) && attribute.is_defined()?)
+    }
+
+    /// The `connectability` token `attribute` composes, as authored: the
+    /// rules refuse a token that names neither rule, which the typed
+    /// [`Input::connectability`] has no value for. A value of another type
+    /// is no token, and reads as `full` (C++ `GetMetadata` failing on it).
+    fn connectability(attribute: &usd::Attribute) -> Result<Option<tf::Token>> {
+        Ok(attribute
+            .metadata::<sdf::Value>(CONNECTABILITY)?
+            .and_then(sdf::Value::try_as_token))
+    }
 }
 
 #[cfg(test)]
@@ -279,7 +566,7 @@ mod tests {
 
     use crate::SchemaError;
     use crate::geom::boundable::tests::stage_with;
-    use crate::shade::{Connectable, Input, NodeGraph, Output, ProducerFilter, Shader};
+    use crate::shade::{Connectability, Connectable, Input, Material, NodeGraph, Output, ProducerFilter, Shader};
 
     /// A family of a typed schema with a typed child, an abstract type, a
     /// type with a built-in API schema, a type an API schema auto-applies
@@ -423,15 +710,17 @@ mod tests {
         Ok(())
     }
 
-    /// A context where `TestTyped` is a container that keeps no
-    /// encapsulation.
-    fn custom_context() -> ConnectableContext {
+    /// A context where `TestTyped` is a basic container, encapsulated where
+    /// `encapsulation` holds.
+    fn custom_context(encapsulation: bool) -> ConnectableContext {
         let mut behaviors = crate::connectable_registry().clone();
         behaviors.register(
             "TestTyped",
             BuiltIn {
                 container: true,
-                encapsulation: false,
+                encapsulation,
+                kind: NodeKind::Basic,
+                outputs: true,
             },
         );
         ConnectableContext::new(behaviors)
@@ -454,7 +743,7 @@ mod tests {
     #[test]
     fn custom_container_context() -> Result<(), SchemaError> {
         let stage = stage_with(FAMILY)?;
-        let custom = custom_context();
+        let custom = custom_context(false);
         let default = ConnectableContext::default();
 
         // A shader output routed out through the custom container's output.
@@ -487,6 +776,13 @@ mod tests {
             [box_gain.path().clone()]
         );
         assert!(consumer_paths(&default, &graph, &gain, false)?.is_empty());
+
+        // The custom prim's input connects from anywhere, as no encapsulation
+        // asks; under the default context it is not connectable at all.
+        let far = Shader::define(&stage, "/Far/Away")?.create_output("out", "float")?;
+        let box_in = Input::new(stage.prim("/Box")?.create_attribute("inputs:in", "float")?);
+        assert!(custom.can_connect_input(&box_in, far.attribute())?);
+        assert!(!default.can_connect_input(&box_in, far.attribute())?);
         Ok(())
     }
 
@@ -505,7 +801,7 @@ mod tests {
             .connect_to(&nested_x)?;
 
         assert_eq!(
-            consumer_paths(&custom_context(), &outer, &x, true)?,
+            consumer_paths(&custom_context(false), &outer, &x, true)?,
             [box_x.path().clone()]
         );
         // With no consumer of its own, the nested input is kept as resolved.
@@ -519,6 +815,210 @@ mod tests {
     fn missing_not_connectable() -> Result<(), SchemaError> {
         let stage = stage_with(FAMILY)?;
         assert!(ConnectableAPI::from_prim(stage.prim("/Missing")?)?.is_none());
+        Ok(())
+    }
+
+    /// The rule `context` refuses `input` connecting to `source` by.
+    fn input_refusal(context: &ConnectableContext, input: &Input, source: &usd::Attribute) -> Result<Option<Refusal>> {
+        let behavior = context.behaviors().behavior(&input.attribute().prim())?;
+        let behavior = behavior.expect("the input's prim has a behavior");
+        Ok(behavior.can_connect_input(context, input, source)?.err())
+    }
+
+    /// The rule `context` refuses `output` connecting to `source` by.
+    fn output_refusal(
+        context: &ConnectableContext,
+        output: &Output,
+        source: &usd::Attribute,
+    ) -> Result<Option<Refusal>> {
+        let behavior = context.behaviors().behavior(&output.attribute().prim())?;
+        let behavior = behavior.expect("the output's prim has a behavior");
+        Ok(behavior.can_connect_output(context, output, source)?.err())
+    }
+
+    /// A source on another stage is refused, whatever its path: a NodeGraph
+    /// output does not pass through an input at its own path elsewhere, nor
+    /// a shader input take a sibling's output there.
+    #[test]
+    fn foreign_source_refused() -> Result<(), SchemaError> {
+        let context = ConnectableContext::default();
+        let stages = [crate::tests::stage("one.usda")?, crate::tests::stage("two.usda")?];
+        let [here, there] = stages.each_ref().map(|stage| -> Result<_, SchemaError> {
+            let graph = NodeGraph::define(stage, "/G")?;
+            let input = graph.create_input("in", "float")?;
+            let output = graph.create_output("out", "float")?;
+            let shader_in = Shader::define(stage, "/G/S")?.create_input("in", "float")?;
+            let sibling_out = Shader::define(stage, "/G/T")?.create_output("out", "float")?;
+            Ok((input, output, shader_in, sibling_out))
+        });
+        let (here, there) = (here?, there?);
+
+        assert_eq!(output_refusal(&context, &here.1, here.0.attribute())?, None);
+        assert_eq!(
+            output_refusal(&context, &here.1, there.0.attribute())?,
+            Some(Refusal::ForeignSource)
+        );
+        assert_eq!(input_refusal(&context, &here.2, here.3.attribute())?, None);
+        assert_eq!(
+            input_refusal(&context, &here.2, there.3.attribute())?,
+            Some(Refusal::ForeignSource)
+        );
+        Ok(())
+    }
+
+    /// An input whose name the stage refuses is connectable to nothing, as
+    /// an invalid C++ input is.
+    #[test]
+    fn invalid_input_refused() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let shader = Shader::define(&stage, "/S")?;
+        let source = shader.create_output("out", "float")?;
+        assert!(!shader.input("not a name").can_connect(&source)?);
+        Ok(())
+    }
+
+    /// Each rule of `connectableAPIBehavior.cpp` refuses a connection that
+    /// breaks it alone.
+    #[test]
+    fn refusal_per_rule() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let context = ConnectableContext::default();
+        let material = Material::define(&stage, "/M")?;
+        let m_in = material.create_input("in", "float")?;
+        let m_out = material.create_output("out", "float")?;
+        let graph = NodeGraph::define(&stage, "/M/G")?;
+        let g_in = graph.create_input("in", "float")?;
+        let g_out = graph.create_output("out", "float")?;
+        let nested = Shader::define(&stage, "/M/G/S")?;
+        let nested_in = nested.create_input("in", "float")?;
+        let nested_out = nested.create_output("out", "float")?;
+        let sibling = Shader::define(&stage, "/M/S2")?;
+        let sibling_in = sibling.create_input("in", "float")?;
+        let sibling_out = sibling.create_output("out", "float")?;
+        let root = Shader::define(&stage, "/Root")?.create_input("in", "float")?;
+        let missing_source = stage.attribute("/Nowhere.outputs:out")?;
+
+        let refused = |input: &Input, source: &usd::Attribute| input_refusal(&context, input, source);
+        assert_eq!(
+            refused(&sibling.input("missing"), sibling_out.attribute())?,
+            Some(Refusal::InvalidInput)
+        );
+        assert_eq!(refused(&sibling_in, &missing_source)?, Some(Refusal::InvalidSource));
+        assert_eq!(
+            refused(&sibling_in, nested_in.attribute())?,
+            Some(Refusal::SourceNotContainer)
+        );
+        assert_eq!(refused(&nested_in, m_in.attribute())?, Some(Refusal::SourceNotParent));
+        assert_eq!(refused(&m_in, nested_out.attribute())?, Some(Refusal::SourceNotChild));
+        assert_eq!(
+            refused(&root, sibling_out.attribute())?,
+            Some(Refusal::ParentNotContainer)
+        );
+        assert_eq!(
+            refused(&sibling_in, nested_out.attribute())?,
+            Some(Refusal::NotSiblings)
+        );
+        let container_rules = rules::input(&context, &sibling_in, nested_out.attribute(), NodeKind::Container, true)?;
+        assert_eq!(container_rules, Err(Refusal::InputNotContainer));
+
+        let g_in = g_in.set_connectability(Connectability::InterfaceOnly)?;
+        assert_eq!(refused(&g_in, m_in.attribute())?, Some(Refusal::SourceNotInterfaceOnly));
+        assert_eq!(refused(&g_in, sibling_out.attribute())?, Some(Refusal::SourceNotInput));
+        let bogus = Input::new(
+            sibling_in
+                .attribute()
+                .clone()
+                .set_metadata(tokens::CONNECTABILITY, tf::Token::from("bogus"))?,
+        );
+        assert_eq!(
+            refused(&bogus, sibling_out.attribute())?,
+            Some(Refusal::UnspecifiedConnectability)
+        );
+
+        assert_eq!(
+            output_refusal(&context, &graph.output("missing"), nested_out.attribute())?,
+            Some(Refusal::InvalidOutput)
+        );
+        assert_eq!(
+            output_refusal(&context, &g_out, &missing_source)?,
+            Some(Refusal::InvalidSource)
+        );
+        assert_eq!(
+            output_refusal(&context, &m_out, m_in.attribute())?,
+            Some(Refusal::Passthrough)
+        );
+        assert_eq!(
+            output_refusal(&context, &g_out, m_in.attribute())?,
+            Some(Refusal::PassthroughElsewhere)
+        );
+        assert_eq!(
+            output_refusal(&context, &g_out, sibling_out.attribute())?,
+            Some(Refusal::OutputSourceNotChild)
+        );
+        assert_eq!(
+            output_refusal(&context, &nested_out, sibling_out.attribute())?,
+            Some(Refusal::OutputsNotConnectable)
+        );
+        Ok(())
+    }
+
+    /// An `interfaceOnly` input on a prim whose behavior keeps no
+    /// encapsulation connects to an `interfaceOnly` input in another
+    /// container; with encapsulation the same pair is refused, as a `full`
+    /// source is.
+    #[test]
+    fn interface_only_unencapsulated() -> Result<(), SchemaError> {
+        let stage = stage_with(FAMILY)?;
+        let interface_only = Connectability::InterfaceOnly;
+        let source = NodeGraph::define(&stage, "/A")?
+            .create_input("x", "float")?
+            .set_connectability(interface_only)?;
+        NodeGraph::define(&stage, "/B")?;
+        stage.define_prim("/B/Box")?.set_type_name("TestTyped")?;
+        let input = Input::new(stage.prim("/B/Box")?.create_attribute("inputs:x", "float")?)
+            .set_connectability(interface_only)?;
+
+        assert_eq!(input_refusal(&custom_context(false), &input, source.attribute())?, None);
+        assert_eq!(
+            input_refusal(&custom_context(true), &input, source.attribute())?,
+            Some(Refusal::SourceNotParent)
+        );
+        let full = source.clear_connectability()?;
+        assert_eq!(
+            input_refusal(&custom_context(false), &input, full.attribute())?,
+            Some(Refusal::SourceNotInterfaceOnly)
+        );
+        Ok(())
+    }
+
+    /// An input whose `connectability` names neither rule connects to
+    /// nothing.
+    #[test]
+    fn unspecified_connectability() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let material = Material::define(&stage, "/M")?;
+        let gain = material.create_input("gain", "float")?;
+        let input = Shader::define(&stage, "/M/S")?.create_input("gain", "float")?;
+        assert!(input.can_connect(gain.attribute())?);
+        let input = Input::new(
+            input
+                .into_attribute()
+                .set_metadata(tokens::CONNECTABILITY, tf::Token::from("sometimes"))?,
+        );
+        assert!(!input.can_connect(gain.attribute())?);
+        Ok(())
+    }
+
+    /// `connect_to` authors a connection `can_connect` refuses, as C++
+    /// `ConnectToSource` does.
+    #[test]
+    fn connect_to_unchecked() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let output = Shader::define(&stage, "/A")?.create_output("out", "float")?;
+        let input = Shader::define(&stage, "/B")?.create_input("in", "float")?;
+        assert!(!input.can_connect(output.attribute())?);
+        let input = input.connect_to(&output)?;
+        assert_eq!(input.attribute().connections()?, [output.path().clone()]);
         Ok(())
     }
 }

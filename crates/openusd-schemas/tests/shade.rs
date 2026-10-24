@@ -488,3 +488,94 @@ fn has_connectable_api() -> Result<()> {
     assert!(shade::ConnectableAPI::from_prim(sphere)?.is_none());
     Ok(())
 }
+
+/// `testUsdShadeConnectability.py:test_Basic`: every `CanConnect` it asks.
+#[test]
+fn connectability_basic() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let full = Connectability::Full;
+    let interface_only = Connectability::InterfaceOnly;
+    let material = Material::define(&stage, "/Material")?;
+    let node_graph = NodeGraph::define(&stage, "/Material/NodeGraph")?;
+    let shader = Shader::define(&stage, "/Material/Shader")?;
+    let nested_shader = Shader::define(&stage, "/Material/NodeGraph/NestedShader")?;
+    let nested_shader2 = Shader::define(&stage, "/Material/NodeGraph2/NestedShader")?;
+
+    let float_interface = material.create_input("floatInput", "float")?;
+    let float_mat_out = material.create_output("fOut", "float")?;
+    // A Material, a derived container, passes nothing through.
+    assert!(!float_mat_out.can_connect(float_interface.attribute())?);
+    // A Material input does not connect to an attribute on itself.
+    let x = stage.prim("/Material")?.create_attribute("x", "double")?;
+    assert!(!float_interface.can_connect(&x)?);
+
+    let color_interface = material
+        .create_input("colorInput", "color3f")?
+        .set_connectability(interface_only)?;
+    let color_mat_out = material.create_output("colorOutput", "color3f")?;
+
+    // Shader inputs are full, and connect to their container's inputs.
+    let shader_float = shader.create_input("shaderFloat", "float")?;
+    let shader_color = shader.create_input("shaderColor", "color3f")?;
+    assert!(shader_color.can_connect(color_interface.attribute())?);
+    assert!(shader_float.can_connect(float_interface.attribute())?);
+
+    let shader_out_color = shader.create_output("color", "color3f")?;
+    let shader_out_float = shader.create_output("fOut", "float")?;
+    let node_graph_float = node_graph.create_input("nodeGraphFlIn", "float")?;
+
+    // Shader outputs connect to nothing.
+    assert!(!shader_out_float.can_connect(float_interface.attribute())?);
+    assert!(!shader_out_float.can_connect(shader_float.attribute())?);
+    assert!(!shader_out_float.can_connect(node_graph_float.attribute())?);
+
+    // A Material input connects to an output of a shader it holds.
+    let float_interface = float_interface.set_connectability(full)?;
+    let color_interface = color_interface.set_connectability(full)?;
+    assert!(float_interface.can_connect(shader_out_float.attribute())?);
+    assert!(color_interface.can_connect(shader_out_color.attribute())?);
+
+    // An input connects to its container's input.
+    assert!(node_graph_float.can_connect(float_interface.attribute())?);
+
+    // An interfaceOnly NodeGraph input does not connect to an output; a full
+    // one does.
+    let node_graph_float = node_graph_float.set_connectability(interface_only)?;
+    assert!(!node_graph_float.can_connect(shader_out_float.attribute())?);
+    let node_graph_float = node_graph_float.set_connectability(full)?;
+    assert!(node_graph_float.can_connect(shader_out_float.attribute())?);
+
+    let node_graph_color = node_graph
+        .create_input("nodeGraphColor", "color3f")?
+        .set_connectability(interface_only)?;
+    assert!(!node_graph_color.can_connect(shader_out_color.attribute())?);
+    assert!(!node_graph_color.can_connect(color_mat_out.attribute())?);
+    // Nor to a full input, nor, by encapsulation, to an interfaceOnly one on
+    // a shader.
+    assert!(!node_graph_color.can_connect(shader_color.attribute())?);
+    let shader_color = shader_color.set_connectability(interface_only)?;
+    assert!(!node_graph_color.can_connect(shader_color.attribute())?);
+
+    // A nested shader input does not reach an interface beyond its nearest
+    // container, whatever the interface's connectability.
+    let float_interface = float_interface.set_connectability(full)?;
+    let nested_float = nested_shader
+        .create_input("nestedShaderFloat", "float")?
+        .set_connectability(interface_only)?;
+    assert!(!nested_float.can_connect(float_interface.attribute())?);
+    let float_interface = float_interface.set_connectability(interface_only)?;
+    assert!(!nested_float.can_connect(float_interface.attribute())?);
+
+    // A NodeGraph input does not connect to its own child's output, full or
+    // interfaceOnly.
+    let nested_out = nested_shader.create_output("fOut", "float")?;
+    let node_graph_float = node_graph_float.set_connectability(full)?;
+    assert!(!node_graph_float.can_connect(nested_out.attribute())?);
+    let node_graph_float = node_graph_float.set_connectability(interface_only)?;
+    assert!(!node_graph_float.can_connect(nested_out.attribute())?);
+
+    // A shader input does not reach into another NodeGraph.
+    let nested2_float = nested_shader2.create_input("nestedShaderFloat", "float")?;
+    assert!(!nested2_float.can_connect(node_graph_float.attribute())?);
+    Ok(())
+}

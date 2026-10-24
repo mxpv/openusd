@@ -1,10 +1,11 @@
 //! Typed view over a UsdShade `outputs:` attribute.
 
+use openusd::Result;
 use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
 use super::tokens::OUTPUTS;
-use super::{ConnectionTarget, ShadingAttribute};
+use super::{ConnectableContext, ConnectionTarget, ShadingAttribute};
 
 /// A UsdShade output backed by an `outputs:<base>` USD attribute
 /// (C++ `UsdShadeOutput`).
@@ -19,6 +20,15 @@ pub struct Output {
 }
 
 impl_shading_attribute!(Output, OUTPUTS);
+
+impl Output {
+    /// Whether this output may connect to `source` under the behavior of
+    /// its prim (C++ `UsdShadeConnectableAPI::CanConnect`). An
+    /// [`Input`](super::Input) or an [`Output`] passes as its attribute.
+    pub fn can_connect(&self, source: &usd::Attribute) -> Result<bool> {
+        ConnectableContext::default().can_connect_output(self, source)
+    }
+}
 
 impl From<Output> for ShadingAttribute {
     fn from(output: Output) -> Self {

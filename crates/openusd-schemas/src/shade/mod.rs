@@ -23,7 +23,10 @@
 //! [`Behavior`], which a [`BehaviorRegistry`] finds for its type and API
 //! schemas; [`ConnectableAPI::from_prim`] views any such prim, and every query
 //! that asks whether a prim is a container runs under a
-//! [`ConnectableContext`]. [`Input`] and [`Output`] are typed views over the
+//! [`ConnectableContext`]. A behavior also decides which connections its
+//! prim's attributes may take, which [`Input::can_connect`] and
+//! [`Output::can_connect`] ask, refusing by a [`Refusal`] of the
+//! [`rules`]. [`Input`] and [`Output`] are typed views over the
 //! underlying [`Attribute`](openusd::usd::Attribute). Connections remain core
 //! attribute `connectionPaths`, available as raw composed paths through
 //! [`Attribute::connections`](openusd::usd::Attribute::connections).
@@ -97,7 +100,7 @@ mod preview;
 mod traits;
 mod utils;
 
-pub use behavior::{Behavior, BehaviorRegistry, ConnectableContext};
+pub use behavior::{Behavior, BehaviorRegistry, ConnectableContext, NodeKind, Refusal, rules};
 pub use binding::{
     BindingCache, CollectionBinding, DirectBinding, MATERIAL_PURPOSES, ResolvedBinding, binding_strength,
     set_binding_strength,
@@ -134,8 +137,9 @@ macro_rules! impl_shading_attribute {
     ($ty:ident, $prefix:expr) => {
         impl $ty {
             /// Wrap `attribute` when its name carries this view's namespace
-            /// prefix (C++ `UsdShadeInput::IsInput` /
-            /// `UsdShadeOutput::IsOutput`).
+            /// prefix, the name test of C++ `UsdShadeInput::IsInput` /
+            /// `UsdShadeOutput::IsOutput`, which also ask that the attribute
+            /// is defined.
             pub fn from_attribute(attribute: $crate::openusd::usd::Attribute) -> Option<Self> {
                 let namespaced = attribute.name().starts_with($prefix);
                 namespaced.then_some(Self { attribute })
@@ -199,6 +203,8 @@ macro_rules! impl_shading_attribute {
             /// creates the attribute it targets, and a path that identifies
             /// none reads back through
             /// [`invalid_paths`](crate::shade::ConnectedSources::invalid_paths).
+            /// The connection is authored whatever `can_connect` would
+            /// answer, as C++ `ConnectToSource` authors it.
             pub fn connect_to(
                 self,
                 source: &impl $crate::shade::ConnectionTarget,
