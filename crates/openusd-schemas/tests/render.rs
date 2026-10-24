@@ -1,6 +1,8 @@
 //! Integration tests for the `UsdRender` schema views and the computed
 //! render spec, against a hand-authored fixture scene.
 
+use std::fs;
+
 use openusd::Result;
 use openusd::gf;
 
@@ -9,15 +11,17 @@ use openusd::tf::Token;
 use openusd::usd::{CollectionAPI, SchemaBase, Stage};
 use openusd_schemas::render::{
     AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema,
-    SettingsSchema, SourceType, Var, VarSchema, render_spec,
+    SettingsSchema, SourceType, Var, VarSchema, namespaced_settings, render_spec,
 };
+
+mod common;
 
 const FIXTURE: &str = "fixtures/usdRender_scene.usda";
 
-fn open() -> Result<Stage> {
+fn open(path: &str) -> Result<Stage> {
     Stage::builder()
         .schema_registry(openusd_schemas::schema_registry())
-        .open(FIXTURE)
+        .open(path)
 }
 
 /// A `renderSettingsPrimPath` authored in the session layer overrides the
@@ -34,7 +38,7 @@ fn session_layer_overrides_settings_path() -> Result<()> {
 
 #[test]
 fn reads_render_settings() -> Result<()> {
-    let stage = open()?;
+    let stage = open(FIXTURE)?;
     let s = Settings::get(&stage, "/Render/settings")?.expect("Settings");
     assert_eq!(
         s.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
@@ -62,7 +66,7 @@ fn reads_render_settings() -> Result<()> {
 
 #[test]
 fn reads_products_and_vars() -> Result<()> {
-    let stage = open()?;
+    let stage = open(FIXTURE)?;
     let p = Product::get(&stage, "/Render/products/beauty")?.expect("Product");
     assert_eq!(p.product_type()?, Some(ProductType::Raster));
     assert_eq!(p.product_name_attr().get::<Token>()?.as_deref(), Some("beauty.exr"));
@@ -85,7 +89,7 @@ fn reads_products_and_vars() -> Result<()> {
 
 #[test]
 fn resolves_stage_settings_path() -> Result<()> {
-    let stage = open()?;
+    let stage = open(FIXTURE)?;
     let path = Settings::stage_settings_path(&stage)?.expect("renderSettingsPrimPath");
     assert_eq!(path.as_str(), "/Render/settings");
     Ok(())
@@ -93,7 +97,7 @@ fn resolves_stage_settings_path() -> Result<()> {
 
 #[test]
 fn computes_render_spec_end_to_end() -> Result<()> {
-    let stage = open()?;
+    let stage = open(FIXTURE)?;
     let spec = render_spec(&stage, &sdf::path("/Render/settings")?, &["ri"])?.expect("RenderSpec");
 
     // One product, two vars (color + alpha), referenced by index.
@@ -109,12 +113,61 @@ fn computes_render_spec_end_to_end() -> Result<()> {
     assert!((p.aperture_size[0] - 48.0).abs() < 1e-3);
     assert!((p.aperture_size[1] - 24.0).abs() < 1e-3);
 
-    // The `ri:` delegate setting rides along on the settings level.
-    assert_eq!(spec.namespaced_settings.len(), 1);
-    assert_eq!(spec.namespaced_settings[0].0, "ri:hider:maxsamples");
+    // The `ri:` delegate setting rides along on the settings level, beside
+    // every relationship the settings author.
+    let names: Vec<&str> = spec.namespaced_settings.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["camera", "products", "ri:hider:maxsamples"]);
+    assert_eq!(
+        spec.namespaced_settings[0].1,
+        Value::PathVec(vec![sdf::path("/World/Camera")?])
+    );
 
     // Purposes carried from the settings.
     assert_eq!(spec.included_purposes, vec!["default", "render"]);
+    Ok(())
+}
+
+/// A relationship is gathered whatever its namespace and the namespaces
+/// asked for, where the attributes beside it are filtered.
+#[test]
+fn rels_unfiltered() -> Result<()> {
+    let stage = open("fixtures/usdRender_integrator.usda")?;
+    let settings = namespaced_settings(&stage, &sdf::path("/Render/RenderSettings")?, &["other"])?;
+    assert_eq!(
+        settings,
+        vec![(
+            "ri:integrator".to_string(),
+            Value::PathVec(vec![sdf::path("/Render/DirectLightingIntegrator")?])
+        )]
+    );
+    Ok(())
+}
+
+/// A namespaced `asset` setting reads its path resolved against the layer
+/// that authors it.
+#[test]
+fn asset_value_resolved() -> Result<()> {
+    let (dir, stage) = common::open_files(
+        &[
+            (
+                "scene.usda",
+                "#usda 1.0\ndef RenderSettings \"Settings\"\n{\n    asset ri:texture = @./tex.exr@\n}\n",
+            ),
+            ("tex.exr", ""),
+        ],
+        "scene.usda",
+    )?;
+    let settings = namespaced_settings(&stage, &sdf::path("/Settings")?, &[])?;
+    assert_eq!(settings.len(), 1);
+    let (name, value) = settings.into_iter().next().expect("one setting");
+    assert_eq!(name, "ri:texture");
+    let asset = value.try_as_asset_path().expect("an asset value");
+    assert_eq!(asset.asset_path(), "./tex.exr");
+    let resolved = asset.resolved_path().expect("a resolved path");
+    assert_eq!(
+        fs::canonicalize(resolved)?,
+        fs::canonicalize(dir.path().join("tex.exr"))?
+    );
     Ok(())
 }
 

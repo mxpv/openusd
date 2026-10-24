@@ -5,13 +5,13 @@
 //! are resolved (settings, then authored product overrides), the
 //! aspect-ratio conform policy is applied against the bound camera's
 //! aperture, and the products' `orderedVars` are de-duplicated into one
-//! global var list referenced by per-product indices. Render-delegate
-//! `namespace:`-prefixed settings are gathered per level (settings,
-//! product, var) into `namespacedSettings`.
+//! global var list referenced by per-product indices. Each level (settings,
+//! product, var) carries the render-delegate settings
+//! [`namespaced_settings`] gathers on its prim.
 
 use std::collections::HashMap;
 
-use openusd::sdf::{self, FieldKey, Path, Value};
+use openusd::sdf::{self, Path, Value};
 use openusd::usd::{Attribute, Stage};
 use openusd::{Result, gf, tf};
 
@@ -34,9 +34,7 @@ use crate::geom::{self, CameraSchema};
 /// `Camera`, and a var target that is not a `Var`, are left out and recorded
 /// in [`RenderSpec::diagnostics`].
 ///
-/// `namespaces` filters the gathered `namespacedSettings` (render-delegate
-/// `namespace:`-prefixed opinions) by top-level namespace; an empty slice
-/// gathers every namespace.
+/// `namespaces` is passed to [`namespaced_settings`] at each level.
 pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> Result<Option<RenderSpec>> {
     let Some(settings) = Settings::get(stage, settings_prim)? else {
         return Ok(None);
@@ -155,34 +153,47 @@ impl ResolvedBase {
     }
 }
 
-/// Gather the `namespace:`-prefixed render-delegate settings authored on
-/// `prim` (spec — `_ReadNamespacedSettings`). `namespaces` filters by
-/// top-level namespace; an empty slice gathers every namespace.
+/// The settings authored on `prim`, sorted by name (C++
+/// `UsdRenderComputeNamespacedSettings`).
 ///
-/// Unnamespaced attributes (the schema attrs like `resolution`) are
-/// skipped. The settings-driven-by-a-node-graph case (`outputs:`-connected
-/// values) is left as a TODO until UsdShade's value-producer resolution is
-/// available; only plain authored namespaced attributes are gathered here.
+/// An authored attribute whose name has a namespace contributes its value at
+/// the default time, under its full name. A non-empty `namespaces` admits only
+/// the attributes whose outermost namespace it lists. An attribute that reads
+/// no value, such as a blocked one with no schema fallback, is left out, and
+/// so is an `outputs:` attribute.
+///
+/// Every authored relationship contributes its targets as a
+/// [`Value::PathVec`], whatever its namespace and `namespaces`, as C++
+/// gathers them. The schema's own relationships, such as `camera`, are among
+/// them.
 pub fn namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
+    let prim = stage.prim(prim)?;
     let mut out = Vec::new();
-    for name in stage.prim(prim.clone())?.authored_property_names()? {
-        // TODO(shade): `outputs:`-connected settings are driven by a node
-        // graph; resolving their value producer needs UsdShade.
+    // TODO(perf): `authored_attributes` and `authored_relationships` each
+    // compose the prim's property kinds; one authored-property pass split by
+    // kind would serve both.
+    for attr in prim.authored_attributes()? {
+        let name = attr.name();
+        // TODO(shade): an `outputs:` setting is driven by the node graph it
+        // connects to, and reads the producers that
+        // `shade::ConnectableContext::value_producing_attributes` finds.
         if name.starts_with("outputs:") {
             continue;
         }
         let Some((namespace, _)) = name.split_once(':') else {
-            continue; // unnamespaced — not a delegate setting
+            continue;
         };
         if !namespaces.is_empty() && !namespaces.contains(&namespace) {
             continue;
         }
-        if let Some(value) = stage.field::<Value>(prim.append_property(&name)?, FieldKey::Default)? {
-            out.push((String::from(name), value));
+        if let Some(value) = attr.get::<Value>()? {
+            out.push((name.to_string(), value));
         }
     }
-    // `prim_properties` order isn't guaranteed stable across backends/layers;
-    // sort by setting name for deterministic output.
+    for rel in prim.authored_relationships()? {
+        out.push((rel.name().to_string(), Value::PathVec(rel.targets()?)));
+    }
+    // Sorted by name, the order of the C++ `VtDictionary`.
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
@@ -249,7 +260,6 @@ mod tests {
     use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
-    use openusd::usd::SchemaBase;
 
     /// A `Camera` at `path`, with a 10×10 aperture.
     fn camera(stage: &Stage, path: &str) -> Result<geom::Camera> {
@@ -585,30 +595,51 @@ mod tests {
         Ok(())
     }
 
-    /// `namespace:`-prefixed delegate settings are gathered (filtered by the
-    /// requested namespace); the unnamespaced schema attrs are not.
+    /// The names of the settings gathered on `/S` under `namespaces`.
+    fn setting_names(stage: &Stage, namespaces: &[&str]) -> Result<Vec<String>> {
+        Ok(namespaced_settings(stage, &sdf::path("/S")?, namespaces)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
+    }
+
+    /// An `int` attribute `name` on `/S`, set to 1.
+    fn int_attr(stage: &Stage, name: &str) -> Result<Attribute> {
+        Ok(stage
+            .create_attribute(sdf::path("/S")?.append_property(name)?, "int")?
+            .set(sdf::Value::Int(1))?)
+    }
+
     #[test]
-    fn namespaced_settings_filtered() -> Result<()> {
+    fn unnamespaced_skipped() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
-        let settings = Settings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
-        // A render-delegate setting (gathered) and a foreign-namespace one (filtered out).
-        stage
-            .create_attribute(settings.path().append_property("ri:hider:maxsamples")?, "int")?
-            .set(sdf::Value::Int(64))?;
-        stage
-            .create_attribute(settings.path().append_property("karma:foo")?, "int")?
-            .set(sdf::Value::Int(1))?;
+        stage.define_prim("/S")?;
+        int_attr(&stage, "plain")?;
+        int_attr(&stage, "ri:a")?;
+        assert_eq!(setting_names(&stage, &[])?, ["ri:a"]);
+        Ok(())
+    }
 
-        let spec = render_spec(&stage, &sdf::path("/Render/Settings")?, &["ri"])?.expect("RenderSpec");
-        // Only the `ri:` setting is gathered; `karma:` filtered, `resolution` unnamespaced.
-        assert_eq!(spec.namespaced_settings.len(), 1);
-        assert_eq!(spec.namespaced_settings[0].0, "ri:hider:maxsamples");
-        assert_eq!(spec.namespaced_settings[0].1, sdf::Value::Int(64));
+    /// A namespace is matched whole, and only the outermost one.
+    #[test]
+    fn namespace_exact_match() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/S")?;
+        for name in ["ri:a", "rix:a", "other:ri:a"] {
+            int_attr(&stage, name)?;
+        }
+        assert_eq!(setting_names(&stage, &["ri"])?, ["ri:a"]);
+        Ok(())
+    }
 
-        // An empty namespace filter gathers both delegate settings.
-        let all = compute(&stage)?;
-        assert_eq!(all.namespaced_settings.len(), 2);
+    /// A blocked attribute no schema declares reads no value, and is left out.
+    #[test]
+    fn blocked_setting_omitted() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/S")?;
+        int_attr(&stage, "ri:x")?.block()?;
+        int_attr(&stage, "ri:y")?;
+        assert_eq!(setting_names(&stage, &[])?, ["ri:y"]);
         Ok(())
     }
 }

@@ -46,7 +46,9 @@ pub struct Product {
     /// Indices into [`RenderSpec::render_vars`] for this product's
     /// `orderedVars`.
     pub render_var_indices: Vec<usize>,
-    /// `namespace:`-prefixed render-delegate settings gathered on the product.
+    /// The settings
+    /// [`namespaced_settings`](super::namespaced_settings) gathers on the
+    /// product.
     pub namespaced_settings: Vec<(String, Value)>,
 }
 
@@ -61,7 +63,8 @@ pub struct Var {
     pub source_name: String,
     /// `sourceType`.
     pub source_type: SourceType,
-    /// `namespace:`-prefixed render-delegate settings gathered on the var.
+    /// The settings
+    /// [`namespaced_settings`](super::namespaced_settings) gathers on the var.
     pub namespaced_settings: Vec<(String, Value)>,
 }
 
@@ -77,7 +80,9 @@ pub struct RenderSpec {
     pub included_purposes: Vec<tf::Token>,
     /// `materialBindingPurposes` from the settings.
     pub material_binding_purposes: Vec<tf::Token>,
-    /// `namespace:`-prefixed render-delegate settings gathered on the settings.
+    /// The settings
+    /// [`namespaced_settings`](super::namespaced_settings) gathers on the
+    /// settings.
     pub namespaced_settings: Vec<(String, Value)>,
     /// What the computation skipped, and why.
     pub diagnostics: Vec<SpecDiagnostic>,

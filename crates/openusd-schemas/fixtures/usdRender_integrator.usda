@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    doc = """The render settings of OpenUSD's
+    usdImaging/bin/testusdview/testenv/testUsdviewIntegratorEdits/test.usda,
+    which name their integrator through a namespaced relationship."""
+)
+
+def Scope "Render"
+{
+    def RenderSettings "RenderSettings"
+    {
+        rel ri:integrator = </Render/DirectLightingIntegrator>
+        bool ri:hider:jitter = 0
+        float ri:Ri:PixelVariance = 0.0
+        int ri:hider:minsamples = 32
+        int ri:hider:maxsamples = 32
+    }
+
+    def PxrDirectLighting "DirectLightingIntegrator"
+    {
+        token outputs:result
+    }
+}
