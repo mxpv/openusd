@@ -843,7 +843,7 @@ class "Held" (
     fn documents_the_declaration() {
         let text = accessors();
         assert!(text.contains("The radius."), "{text}");
-        assert!(text.contains("Declared `double radius = 1.0`."), "{text}");
+        assert!(text.contains("Declared `double radius = 1`."), "{text}");
         assert!(
             text.contains("Declared `uniform token mode = \"a\"`. One of `a`, `b`."),
             "{text}"

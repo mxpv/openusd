@@ -90,7 +90,7 @@ pub trait CrateSchema: ::openusd::usd::Typed {
     }
     /// How much the crate holds.
     ///
-    /// Declared `double volume = 1.0`.
+    /// Declared `double volume = 1`.
     fn volume_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::VOLUME)
     }
@@ -124,7 +124,7 @@ pub trait CrateSchema: ::openusd::usd::Typed {
     }
     /// How heavy the thing is.
     ///
-    /// Declared `double weight = 1.0`.
+    /// Declared `double weight = 1`.
     fn weight_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::WEIGHT)
     }
@@ -324,7 +324,7 @@ impl BadgeAPI {
     }
     /// How heavy the thing is.
     ///
-    /// Declared `double weight = 1.0`.
+    /// Declared `double weight = 1`.
     pub fn weight_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(tokens::WEIGHT)
     }

@@ -258,7 +258,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
 pub trait ShapeSchema: ::openusd::usd::Typed {
     /// The bounds, in the shape's own space.
     ///
-    /// Declared `double3 extent = (1.0, 1.0, 1.0)`.
+    /// Declared `double3 extent = (1, 1, 1)`.
     fn extent_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::EXTENT)
     }
@@ -399,7 +399,7 @@ impl ::openusd::usd::Typed for Shape {}
 pub trait BallSchema: ShapeSchema {
     /// The radius.
     ///
-    /// Declared `double radius = 1.0`.
+    /// Declared `double radius = 1`.
     fn radius_attr(&self) -> ::openusd::usd::Attribute {
         self.prim().attribute(tokens::RADIUS)
     }
@@ -832,7 +832,7 @@ impl SlotAPI {
     }
     /// Where the slot sits, relative to the prim.
     ///
-    /// Declared `double3 slot:__INSTANCE_NAME__:offset = (0.0, 0.0, 0.0)`.
+    /// Declared `double3 slot:__INSTANCE_NAME__:offset = (0, 0, 0)`.
     pub fn slot_offset_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(
             ::openusd::usd::SchemaRegistry::make_name_instance(
@@ -1023,7 +1023,7 @@ impl RelationshipMetadata for ::openusd::usd::Relationship {
 pub trait StageMetadata {
     /// The `tinyUnits` metadata field, declared `double`.
     ///
-    /// Where no layer authors it, the stage reads `1.0`.
+    /// Where no layer authors it, the stage reads `1`.
     fn tiny_units(&self) -> ::openusd::Result<::std::option::Option<f64>>;
     /// Authors the field on the edit target, which must be the
     /// stage's root or session layer.

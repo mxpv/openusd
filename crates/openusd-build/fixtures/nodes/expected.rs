@@ -195,7 +195,7 @@ impl TinyReaderFloat2 {
     ) -> ::openusd::Result<::std::option::Option<::std::string::String>> {
         self.varname_input().attribute().get::<::std::string::String>()
     }
-    /// Declared `float2 inputs:in = (0.0, 0.0)`.
+    /// Declared `float2 inputs:in = (0, 0)`.
     pub fn in_input(&self) -> crate::shade::Input {
         <crate::shade::Shader as crate::shade::Connectable>::input(&self.0, tokens::IN_)
     }

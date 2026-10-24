@@ -491,8 +491,8 @@ def "I" (
 
             let text = layer.export_to_string()?;
             for path in [
-                "@./moved/a.usda@ (offset = 1.0",
-                "@./moved/b.usda@ (offset = 3.0",
+                "@./moved/a.usda@ (offset = 1",
+                "@./moved/b.usda@ (offset = 3",
                 "@./moved/meta.png@",
                 "@./moved/clip.usda@",
                 "@./moved/manifest.usda@",
@@ -567,9 +567,9 @@ def "B" (
             };
             modify_asset_paths(&mut layer, modify, keep_empty)?;
             let text = layer.export_to_string()?;
-            assert!(text.contains("subLayers = [@./a.usda@ (offset = 1.0"), "{text}");
+            assert!(text.contains("subLayers = [@./a.usda@ (offset = 1"), "{text}");
             assert!(text.contains("string note = \"kept\""), "{text}");
-            assert!(text.contains("2.0: @./keep.png@"), "{text}");
+            assert!(text.contains("2: @./keep.png@"), "{text}");
             assert!(!text.contains("drop"), "{text}");
             assert!(!text.contains("nested"), "{text}");
             assert!(!text.contains("references"), "{text}");

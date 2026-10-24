@@ -37,6 +37,7 @@ serde = { workspace = true, optional = true }
 strum.workspace = true
 thiserror.workspace = true
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
+zmij = "1.0.23"
 
 # The access control a replaced file keeps on Windows, which only the Win32
 # security API reaches.

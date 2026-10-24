@@ -398,6 +398,8 @@ Key external dependencies:
 - `windows-sys` (Windows only) - The Win32 security API, through which a
   replaced layer file keeps its access control list
 - `zip` - USDZ archive reading
+- `zmij` - The shortest digits of a float or double, chosen as C++
+  double-conversion chooses them, behind the text writer's numbers
 - `serde` (optional, `serde` feature) - Serialization support
 
 Domain schemas live in the separate `openusd-schemas` crate, one feature per

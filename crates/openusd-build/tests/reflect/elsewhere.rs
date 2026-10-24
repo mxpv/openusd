@@ -113,7 +113,7 @@ impl ThingAPI {
     }
     /// How heavy the thing is.
     ///
-    /// Declared `double weight = 1.0`.
+    /// Declared `double weight = 1`.
     pub fn weight_attr(&self) -> ::openusd::usd::Attribute {
         self.attribute(tokens::WEIGHT)
     }
