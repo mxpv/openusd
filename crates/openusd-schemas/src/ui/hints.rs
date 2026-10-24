@@ -2,18 +2,20 @@
 //! and the core fields it supersedes.
 
 use openusd::Result;
-use openusd::sdf;
 use openusd::usd::{self, StageAuthoringError};
+use openusd::{sdf, tf};
 
 use hint_keys::{
     DISPLAY_GROUP, DISPLAY_GROUPS_EXPANDED, DISPLAY_GROUPS_SHOWN_IF, DISPLAY_NAME, HIDDEN, SHOWN_IF, UI_HINTS,
+    VALUE_LABELS, VALUE_LABELS_ORDER,
 };
 
 use crate::SchemaError;
 
 /// The UI hints of a prim, attribute or relationship, read from and written
-/// to its `uiHints` dictionary (C++ `UsdUIObjectHints`,
-/// `UsdUIPropertyHints`).
+/// to its `uiHints` dictionary (C++ `UsdUIObjectHints`, with
+/// `UsdUIPropertyHints`, `UsdUIPrimHints` and `UsdUIAttributeHints` for each
+/// kind of object).
 ///
 /// Each hint is a key of the dictionary. A hint the dictionary holds with a
 /// value of another type reads as absent, as C++ `GetMetadataByDictKey`
@@ -229,7 +231,7 @@ impl Hints<usd::Prim> {
     /// `group` extends the dictionary's key path, and a `:` in it nests (C++
     /// `_MakeKeyPath`).
     pub fn group_shown_if(&self, group: &str) -> Result<Option<String>> {
-        self.hint(&shown_if_path(group), sdf::Value::try_as_string)
+        self.hint(&key_path(DISPLAY_GROUPS_SHOWN_IF, group), sdf::Value::try_as_string)
     }
 
     /// Author the expression that decides whether the display group `group`
@@ -237,13 +239,68 @@ impl Hints<usd::Prim> {
     /// reads (C++ `UsdUIPrimHints::SetDisplayGroupShownIf`). The other
     /// entries are left as they are.
     pub fn set_group_shown_if(self, group: &str, expr: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_hint(&shown_if_path(group), sdf::Value::String(expr.into()))
+        self.set_hint(
+            &key_path(DISPLAY_GROUPS_SHOWN_IF, group),
+            sdf::Value::String(expr.into()),
+        )
     }
 }
 
-/// The key path of `group`'s entry in `displayGroupsShownIf`.
-fn shown_if_path(group: &str) -> String {
-    format!("{DISPLAY_GROUPS_SHOWN_IF}:{group}")
+impl Hints<usd::Attribute> {
+    /// The named values the attribute offers, keyed by label, as the
+    /// dictionary holds them whatever their types, and empty where it is not
+    /// authored (C++ `UsdUIAttributeHints::GetValueLabels`).
+    pub fn value_labels(&self) -> Result<sdf::Dictionary> {
+        Ok(self
+            .hint(VALUE_LABELS, sdf::Value::try_as_dictionary)?
+            .unwrap_or_default())
+    }
+
+    /// Author the named values the attribute offers, replacing the edit
+    /// target's dictionary (C++ `UsdUIAttributeHints::SetValueLabels`). The
+    /// values are authored as given, whatever the attribute's type.
+    pub fn set_value_labels(self, labels: sdf::Dictionary) -> Result<Self, StageAuthoringError> {
+        self.set_hint(VALUE_LABELS, sdf::Value::Dictionary(labels))
+    }
+
+    /// The order the value labels are shown in, empty where it is not
+    /// authored (C++ `UsdUIAttributeHints::GetValueLabelsOrder`).
+    pub fn value_labels_order(&self) -> Result<Vec<tf::Token>> {
+        Ok(self
+            .hint(VALUE_LABELS_ORDER, sdf::Value::try_as_token_vec)?
+            .unwrap_or_default())
+    }
+
+    /// Author the order the value labels are shown in (C++
+    /// `UsdUIAttributeHints::SetValueLabelsOrder`).
+    pub fn set_value_labels_order(
+        self,
+        order: impl IntoIterator<Item = impl Into<tf::Token>>,
+    ) -> Result<Self, StageAuthoringError> {
+        self.set_hint(VALUE_LABELS_ORDER, sdf::Value::token_vec(order))
+    }
+
+    /// Author the value labelled `label` as the attribute's default value
+    /// (C++ `UsdUIAttributeHints::ApplyValueLabel`). Returns `false` and
+    /// authors nothing when no value has that label. It borrows the hints,
+    /// so one handle applies label after label.
+    ///
+    /// `label` extends the dictionary's key path, and a `:` in it nests. A
+    /// value whose type differs from the attribute's fails as
+    /// [`usd::Attribute::set`] does, where C++ answers `false`.
+    pub fn apply_value_label(&self, label: &str) -> Result<bool, SchemaError> {
+        let Some(value) = self.hint(&key_path(VALUE_LABELS, label), Some)? else {
+            return Ok(false);
+        };
+        self.object.clone().set(value)?;
+        Ok(true)
+    }
+}
+
+/// The key path of `entry` in the hint dictionary `key` (C++
+/// `UsdUIObjectHints::_MakeKeyPath`).
+fn key_path(key: &str, entry: &str) -> String {
+    format!("{key}:{entry}")
 }
 
 /// The keys of the `uiHints` dictionary (C++ `UsdUIHintKeys`).

@@ -8,7 +8,7 @@ use openusd::usd::{self, Object, Property, SchemaBase, Stage};
 use openusd_schemas::SchemaError;
 
 use openusd::sdf;
-use openusd::tf::Token;
+use openusd::tf;
 use openusd_schemas::ui::{
     Backdrop, BackdropSchema, ExpansionState, Hints, NodeGraphNodeAPI, SceneGraphPrimAPI, hint_keys,
 };
@@ -54,6 +54,16 @@ fn check_prim(hints: &Hints<usd::Prim>, expanded: &sdf::Dictionary, shown_if: &s
     Ok(())
 }
 
+/// Asserts the attribute tier of `hints`.
+fn check_attribute(hints: &Hints<usd::Attribute>, labels: &sdf::Dictionary, order: &[&str]) -> Result<()> {
+    assert_eq!(&hints.value_labels()?, labels);
+    assert_eq!(
+        hints.value_labels_order()?,
+        order.iter().map(|&s| tf::Token::from(s)).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
 /// A dictionary of `entries`.
 fn dict<const N: usize>(entries: [(&str, sdf::Value); N]) -> sdf::Dictionary {
     entries
@@ -74,6 +84,7 @@ fn hints_fallbacks() -> Result<()> {
     let attr = Hints::new(stage.attribute("/HintlessPrim.hintlessAttribute")?);
     check_object(&attr, None, false)?;
     check_property(&attr, None, None)?;
+    check_attribute(&attr, &sdf::Dictionary::default(), &[])?;
     Ok(())
 }
 
@@ -186,8 +197,8 @@ fn ui_from_fixture() -> Result<()> {
         .open(FIXTURE)?;
 
     let sg = SceneGraphPrimAPI::get(&stage, "/Mat/Surface")?.expect("SceneGraphPrimAPI");
-    assert_eq!(sg.display_name_attr().get::<Token>()?.as_deref(), Some("Surface"));
-    assert_eq!(sg.display_group_attr().get::<Token>()?.as_deref(), Some("Shading"));
+    assert_eq!(sg.display_name_attr().get::<tf::Token>()?.as_deref(), Some("Surface"));
+    assert_eq!(sg.display_group_attr().get::<tf::Token>()?.as_deref(), Some("Shading"));
 
     let node = NodeGraphNodeAPI::get(&stage, "/Mat/Surface")?.expect("NodeGraphNodeAPI");
     assert_eq!(node.pos_attr().get::<[f32; 2]>()?, Some([12.0, 34.0]));
@@ -199,7 +210,7 @@ fn ui_from_fixture() -> Result<()> {
 
     let backdrop = Backdrop::get(&stage, "/Mat/Note")?.expect("Backdrop");
     assert_eq!(
-        backdrop.description_attr().get::<Token>()?.as_deref(),
+        backdrop.description_attr().get::<tf::Token>()?.as_deref(),
         Some("lighting nodes")
     );
 
@@ -224,7 +235,10 @@ fn backdrop_roundtrip() -> Result<()> {
         .set(sdf::Value::token("lighting nodes"))?;
 
     let b = Backdrop::get(&stage, "/Mat/Note")?.expect("Backdrop");
-    assert_eq!(b.description_attr().get::<Token>()?.as_deref(), Some("lighting nodes"));
+    assert_eq!(
+        b.description_attr().get::<tf::Token>()?.as_deref(),
+        Some("lighting nodes")
+    );
     assert_eq!(Backdrop::KIND, openusd::usd::SchemaKind::ConcreteTyped);
     Ok(())
 }
@@ -264,8 +278,11 @@ fn scene_graph_prim_roundtrip() -> Result<()> {
     sg.create_display_group_attr()?.set(sdf::Value::token("Characters"))?;
 
     let p = SceneGraphPrimAPI::get(&stage, "/World/Mesh")?.expect("SceneGraphPrimAPI");
-    assert_eq!(p.display_name_attr().get::<Token>()?.as_deref(), Some("Hero Mesh"));
-    assert_eq!(p.display_group_attr().get::<Token>()?.as_deref(), Some("Characters"));
+    assert_eq!(p.display_name_attr().get::<tf::Token>()?.as_deref(), Some("Hero Mesh"));
+    assert_eq!(
+        p.display_group_attr().get::<tf::Token>()?.as_deref(),
+        Some("Characters")
+    );
 
     // Unapplied prim â†’ None.
     stage.define_prim("/Bare")?.set_type_name("Scope")?;
@@ -441,5 +458,88 @@ fn group_shown_sibling() -> Result<()> {
         hints.groups_shown_if()?,
         dict([("bad", sdf::Value::Int(5)), ("good", sdf::Value::from("x == 1"))])
     );
+    Ok(())
+}
+
+/// `testUsdUIHints.py:test_AttributeHintsFromAsset`.
+#[test]
+fn attribute_hints_asset() -> Result<()> {
+    let stage = hints_stage()?;
+    let hints = Hints::new(stage.attribute("/HintsPrim.attribute")?);
+    check_attribute(
+        &hints,
+        &dict([
+            ("low", sdf::Value::Int(1)),
+            ("med", sdf::Value::Int(2)),
+            ("high", sdf::Value::Int(3)),
+        ]),
+        &["low", "med", "high"],
+    )?;
+    check_property(&hints, Some("a group"), Some("x == 2"))?;
+    check_object(&hints, Some("an attr"), true)?;
+    Ok(())
+}
+
+/// `testUsdUIHints.py:test_AttributeHintsSetters`.
+#[test]
+fn attribute_hints_setters() -> Result<()> {
+    let stage = memory()?;
+    let attr = stage
+        .define_prim("/test_AttributeHintsSetters")?
+        .attribute_builder("newAttribute", "int")
+        .build()?;
+    let hints = Hints::new(attr);
+    check_attribute(&hints, &sdf::Dictionary::default(), &[])?;
+
+    let labels = dict([("round", sdf::Value::Int(1)), ("square", sdf::Value::Int(2))]);
+    let hints = hints.set_value_labels(labels.clone())?;
+    check_attribute(&hints, &labels, &[])?;
+
+    let hints = hints.set_value_labels_order(["square", "round"])?;
+    check_attribute(&hints, &labels, &["square", "round"])?;
+    Ok(())
+}
+
+/// `testUsdUIHints.py:test_AuthorValueLabels`: each label authors its value,
+/// on an `int` attribute and on a `token[]` one, and a label no value has
+/// authors nothing.
+#[test]
+fn apply_value_labels() -> Result<(), SchemaError> {
+    let stage = hints_stage()?;
+    for (path, initial) in [
+        ("/HintsPrim.attribute", sdf::Value::Int(1)),
+        ("/HintsPrim.tokenArrayAttr", sdf::Value::TokenVec(Vec::new())),
+    ] {
+        let hints = Hints::new(stage.attribute(path)?);
+        assert_eq!(hints.object().get::<sdf::Value>()?, Some(initial), "{path}");
+        for (label, value) in &hints.value_labels()? {
+            assert!(hints.apply_value_label(label)?, "{path} {label}");
+            assert_eq!(
+                hints.object().get::<sdf::Value>()?.as_ref(),
+                Some(value),
+                "{path} {label}"
+            );
+        }
+
+        let current = hints.object().get::<sdf::Value>()?;
+        assert!(!hints.apply_value_label("non-existent")?);
+        assert_eq!(hints.object().get::<sdf::Value>()?, current);
+    }
+    Ok(())
+}
+
+/// A label whose value has another type than the attribute's is refused,
+/// and the value stays as it was.
+#[test]
+fn value_label_mismatch() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let attr = stage
+        .define_prim("/P")?
+        .attribute_builder("count", "int")
+        .set(3)
+        .build()?;
+    let hints = Hints::new(attr).set_value_labels(dict([("bad", sdf::Value::from("three"))]))?;
+    assert!(hints.apply_value_label("bad").is_err());
+    assert_eq!(hints.object().get::<i32>()?, Some(3));
     Ok(())
 }
