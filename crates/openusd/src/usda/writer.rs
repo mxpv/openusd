@@ -18,6 +18,7 @@ use std::{
     collections::HashMap,
     fmt::Write as FmtWrite,
     io::{self, Write},
+    iter,
     ops::{Deref, DerefMut},
 };
 
@@ -96,6 +97,13 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// `line` at the current indent, ended by a newline.
+    fn write_line(&mut self, line: &str) -> Result<(), FormatError> {
+        self.write_indent()?;
+        writeln!(self.out, "{line}")?;
+        Ok(())
+    }
+
     // ---------- top-level walk ----------
 
     fn emit_layer(&mut self, data: &dyn AbstractData) -> Result<(), FormatError> {
@@ -106,7 +114,8 @@ impl Emitter<'_> {
 
         // Layer metadata: every field except primChildren is metadata.
         // subLayerOffsets is merged into subLayers at emit time.
-        let meta_fields: Vec<String> = if has_root {
+        // In byte order, as C++ `SdfUsdaFileFormat` sorts them.
+        let mut meta_fields: Vec<String> = if has_root {
             data.list_fields(&root)
                 .unwrap_or_default()
                 .into_iter()
@@ -115,6 +124,7 @@ impl Emitter<'_> {
         } else {
             Vec::new()
         };
+        meta_fields.sort();
 
         if !meta_fields.is_empty() {
             writeln!(self.out, "(")?;
@@ -149,6 +159,7 @@ impl Emitter<'_> {
             let child_path = root.append_path(name.as_str())?;
             self.emit_prim(data, &child_path, name)?;
         }
+        writeln!(self.out)?;
 
         Ok(())
     }
@@ -199,31 +210,7 @@ impl Emitter<'_> {
         self.write_indent()?;
         writeln!(self.out, "{{")?;
         self.indent += 1;
-
-        self.emit_body_reorders(data, path)?;
-
-        // Properties
-        let props = children(data, path, ChildrenKey::PropertyChildren);
-        for name in &props {
-            let prop_path = path.append_property(name)?;
-            self.emit_property(data, &prop_path, name)?;
-        }
-
-        // Variant sets
-        if let Some(Value::TokenVec(vset_names)) = get_value(data, path, ChildrenKey::VariantSetChildren.as_str()) {
-            for vset in &vset_names {
-                let vset_path = path.append_variant_selection(vset, "")?;
-                self.emit_variant_set(data, &vset_path, vset.as_str())?;
-            }
-        }
-
-        // Child prims
-        let children = children(data, path, ChildrenKey::PrimChildren);
-        for name in &children {
-            let child_path = path.append_path(name.as_str())?;
-            self.emit_prim(data, &child_path, name)?;
-        }
-
+        self.emit_prim_body(data, path)?;
         self.indent -= 1;
         self.write_indent()?;
         writeln!(self.out, "}}")?;
@@ -231,15 +218,64 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A prim's or variant's body, laid out as C++ `Sdf_WritePrimBody` lays
+    /// it out: reorder statements, the properties sorted by name and then
+    /// type, a blank line before the child prims and between them, then the
+    /// variant sets.
+    fn emit_prim_body(&mut self, data: &dyn AbstractData, path: &Path) -> Result<(), FormatError> {
+        self.emit_body_reorders(data, path)?;
+
+        let mut props = children(data, path, ChildrenKey::PropertyChildren)
+            .into_iter()
+            .map(|name| Ok((path.append_property(&name)?, name)))
+            .collect::<Result<Vec<_>, FormatError>>()?;
+        props.sort_by(|(a_path, a), (b_path, b)| {
+            sdf::element_cmp(a.as_str(), b.as_str()).then_with(|| {
+                let kind = |p: &Path| data.spec_type(p).map(|t| t as u32);
+                kind(a_path).cmp(&kind(b_path))
+            })
+        });
+        for (prop_path, name) in &props {
+            self.emit_property(data, prop_path, name)?;
+        }
+
+        let children = children(data, path, ChildrenKey::PrimChildren);
+        if !props.is_empty() && !children.is_empty() {
+            writeln!(self.out)?;
+        }
+        for (i, name) in children.iter().enumerate() {
+            if i > 0 {
+                writeln!(self.out)?;
+            }
+            let child_path = path.append_path(name.as_str())?;
+            self.emit_prim(data, &child_path, name)?;
+        }
+
+        if let Some(Value::TokenVec(vset_names)) = get_value(data, path, ChildrenKey::VariantSetChildren.as_str()) {
+            for vset in &vset_names {
+                let vset_path = path.append_variant_selection(vset, "")?;
+                self.emit_variant_set(data, &vset_path, vset.as_str())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Emit `reorder nameChildren / properties` statements (if authored) at
     /// the top of a prim or variant body. The grammar only accepts these
     /// inside `{...}`, not in the metadata block.
+    ///
+    /// As C++ `Sdf_WritePrimNamespaceReorders` writes them: properties first,
+    /// each only when it orders more than one name.
     fn emit_body_reorders(&mut self, data: &dyn AbstractData, path: &Path) -> Result<(), FormatError> {
-        if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PrimOrder.as_str()) {
-            self.emit_reorder("nameChildren", &v)?;
-        }
-        if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PropertyOrder.as_str()) {
+        if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PropertyOrder.as_str())
+            && v.len() > 1
+        {
             self.emit_reorder("properties", &v)?;
+        }
+        if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PrimOrder.as_str())
+            && v.len() > 1
+        {
+            self.emit_reorder("nameChildren", &v)?;
         }
         Ok(())
     }
@@ -638,22 +674,10 @@ impl Emitter<'_> {
 
         writeln!(self.out, " {{")?;
         self.indent += 1;
-
-        self.emit_body_reorders(data, path)?;
-
-        let props = children(data, path, ChildrenKey::PropertyChildren);
-        for prop in &props {
-            let prop_path = path.append_property(prop)?;
-            self.emit_property(data, &prop_path, prop)?;
-        }
-
-        let children = children(data, path, ChildrenKey::PrimChildren);
-        for child in &children {
-            let child_path = path.append_path(child.as_str())?;
-            self.emit_prim(data, &child_path, child)?;
-        }
-
+        self.emit_prim_body(data, path)?;
         self.indent -= 1;
+        // C++ `Sdf_WriteVariant` closes a variant after a blank line.
+        writeln!(self.out)?;
         self.write_indent()?;
         writeln!(self.out, "}}")?;
         Ok(())
@@ -671,24 +695,21 @@ impl Emitter<'_> {
             _ => Vec::new(),
         };
 
+        // One per line, as C++ `SdfUsdaFileFormat` writes them.
         self.write_indent()?;
-        self.out.write_all(b"subLayers = [")?;
+        writeln!(self.out, "subLayers = [")?;
+        self.indent += 1;
         for (i, path) in sublayers.iter().enumerate() {
-            if i > 0 {
-                self.out.write_all(b", ")?;
-            }
             let mut buf = String::new();
             write_asset_path(&mut buf, path)?;
-            self.out.write_all(buf.as_bytes())?;
-
             if let Some(offset) = offsets.get(i) {
-                let mut buf = String::new();
                 write_arc_metadata(&mut buf, offset, &HashMap::new())?;
-                self.out.write_all(buf.as_bytes())?;
             }
+            buf.push_str(if i + 1 < sublayers.len() { "," } else { "" });
+            self.write_line(&buf)?;
         }
-        self.out.write_all(b"]")?;
-        writeln!(self.out)?;
+        self.indent -= 1;
+        self.write_line("]")?;
         Ok(())
     }
 
@@ -1386,26 +1407,41 @@ fn is_bare_dict_key(k: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
-/// Writes `text` as a double-quoted USDA string, escaping what the delimiter and
-/// the line-oriented grammar cannot carry.
+/// Writes `text` as a USDA string, quoted as C++ `Sdf_FileIOUtility::Quote`
+/// quotes it: in double quotes, or single quotes when it holds a double quote
+/// and no single one; in triple quotes, with its newlines as they are, when it
+/// holds a newline; with the quote, a backslash, `\r` and `\t` escaped, and
+/// any other ASCII character outside the printable range as `\xNN`.
 ///
 /// The reader expands escapes (C++ `TfEscapeStringReplaceChar`), so a backslash
 /// must be doubled or it would read back as whatever it precedes — a Windows
 /// path would return with `\t` as a tab. Escaping also means one delimiter
 /// always suffices, so no string is unquotable.
 fn write_quoted(s: &mut String, text: &str) -> Result<(), FormatError> {
-    s.push('"');
+    let quote = if text.contains('"') && !text.contains('\'') {
+        '\''
+    } else {
+        '"'
+    };
+    let triple = text.contains('\n');
+    let quotes = if triple { 3 } else { 1 };
+    s.extend(iter::repeat_n(quote, quotes));
     for c in text.chars() {
         match c {
-            '"' => s.push_str("\\\""),
-            '\\' => s.push_str("\\\\"),
+            '\n' if triple => s.push('\n'),
             '\n' => s.push_str("\\n"),
             '\r' => s.push_str("\\r"),
             '\t' => s.push_str("\\t"),
+            '\\' => s.push_str("\\\\"),
+            c if c == quote => {
+                s.push('\\');
+                s.push(c);
+            }
+            c if c.is_ascii() && !(' '..='~').contains(&c) => write!(s, "\\x{:02x}", c as u8)?,
             other => s.push(other),
         }
     }
-    s.push('"');
+    s.extend(iter::repeat_n(quote, quotes));
     Ok(())
 }
 
@@ -1451,10 +1487,14 @@ fn write_arc_metadata(
     custom_data: &HashMap<String, Value>,
 ) -> Result<(), FormatError> {
     let mut parts = Vec::new();
-    if !offset.is_identity() {
+    // Each part only when it differs, as C++ `WriteLayerOffset` writes them.
+    if offset.offset != 0.0 {
         let mut part = String::from("offset = ");
         tf::stringify_float(&mut part, offset.offset);
-        part.push_str("; scale = ");
+        parts.push(part);
+    }
+    if offset.scale != 1.0 {
+        let mut part = String::from("scale = ");
         tf::stringify_float(&mut part, offset.scale);
         parts.push(part);
     }
@@ -1849,7 +1889,7 @@ def "Mesh"
     fn writes_empty_layer() {
         let data = Data::new();
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
-        assert_eq!(text, "#usda 1.0\n");
+        assert_eq!(text, "#usda 1.0\n\n");
     }
 
     #[test]
@@ -2131,6 +2171,104 @@ def Shader "Mapping"
         assert!(!emitted.contains("double u\n"), "{emitted}");
         assert!(emitted.contains("    float s.spline = {\n"), "{emitted}");
         assert!(!emitted.contains("float s\n"), "{emitted}");
+    }
+
+    /// A hand-written layer is written as OpenUSD 26.11 writes it
+    /// (`Sdf.Layer.OpenAsAnonymous(source).ExportToString()`), byte for byte:
+    /// layer metadata sorted, one sublayer per line, properties sorted by name,
+    /// a reorder statement only when it orders more than one name, blank lines
+    /// around child prims, a variant closed after a blank line, strings quoted
+    /// as C++ quotes them, and a blank line at the end.
+    #[test]
+    fn layout_as_cpp() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+(
+    upAxis = "Y"
+    subLayers = [@a.usda@, @b.usda@ (offset = 2)]
+    defaultPrim = "Root"
+)
+
+def "Root" (
+    prepend variantSets = "look"
+)
+{
+    string quoted = "say \"hi\""
+    string lines = "one\ntwo"
+    string tab = "a\tb\x01"
+    int b = 2
+    int a = 1
+    reorder properties = ["b", "a"]
+
+    def "First"
+    {
+    }
+
+    def "Second"
+    {
+        int x = 1
+        reorder properties = ["x"]
+        reorder nameChildren = ["Only"]
+
+        def "Only"
+        {
+        }
+    }
+
+    variantSet "look" = {
+        "red" {
+            int c = 3
+        }
+    }
+}
+"#;
+        let written = r#"#usda 1.0
+(
+    defaultPrim = "Root"
+    subLayers = [
+        @a.usda@,
+        @b.usda@ (offset = 2)
+    ]
+    upAxis = "Y"
+)
+
+def "Root" (
+    prepend variantSets = "look"
+)
+{
+    reorder properties = ["b", "a"]
+    int a = 1
+    int b = 2
+    string lines = """one
+two"""
+    string quoted = 'say "hi"'
+    string tab = "a\tb\x01"
+
+    def "First"
+    {
+    }
+
+    def "Second"
+    {
+        int x = 1
+
+        def "Only"
+        {
+        }
+    }
+    variantSet "look" = {
+        "red" {
+            int c = 3
+
+        }
+    }
+}
+
+"#;
+        let parsed = Parser::new(source).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
     }
 
     /// Numbers, bools and matrices as OpenUSD 26.11 writes them: the layer
