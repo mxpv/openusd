@@ -1527,13 +1527,13 @@ pub(crate) mod tests {
     }
 
     /// Builds a single-layer stack from in-memory `root.usd` data.
-    fn one_layer_stack(root: Box<dyn sdf::AbstractData>) -> LayerGraph {
+    fn one_layer_stack(root: sdf::LayerData) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root)];
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
     /// Builds a two-layer stack from in-memory `root.usd` + `ref.usd` data.
-    fn two_layer_stack(root: Box<dyn sdf::AbstractData>, refl: Box<dyn sdf::AbstractData>) -> LayerGraph {
+    fn two_layer_stack(root: sdf::LayerData, refl: sdf::LayerData) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
@@ -2128,7 +2128,7 @@ def \"B\" { custom double y = 2 }
 
     // --- CompositionDiagnostic reporting ---
 
-    fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
+    fn parse_usda(text: &str) -> sdf::LayerData {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         Box::new(sdf::Data::from_specs(data))
     }

@@ -45,6 +45,7 @@ pub use copy::{
     should_copy_children, should_copy_value,
 };
 pub(crate) use copy::{author_spec, is_children_field};
+pub(crate) use data::SharedData;
 pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
@@ -487,8 +488,10 @@ pub type Relocate = (Path, Path);
 /// metadata. Mirrors C++ `SdfRelocates`, a `std::vector<SdfRelocate>`.
 pub type RelocateList = Vec<Relocate>;
 
-/// A boxed layer data source, used throughout the layer stack.
-pub type LayerData = Box<dyn AbstractData>;
+/// A boxed layer data source, used throughout the layer stack. It is `Send`
+/// and `Sync` so that one parse can be shared by the layers of several
+/// threads through an [`ar::CacheHandle`](crate::ar::CacheHandle).
+pub type LayerData = Box<dyn AbstractData + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

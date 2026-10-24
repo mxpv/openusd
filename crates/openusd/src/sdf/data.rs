@@ -3,7 +3,9 @@
 //! Parallels C++ `SdfData`. A flat map from [`Path`] to [`SpecData`] that can
 //! be populated programmatically and then handed to a writer.
 
-use std::{borrow::Cow, collections::HashSet};
+use std::borrow::Cow;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::sdf::{Path, PathMap, SpecData, SpecType, Value};
 
@@ -553,6 +555,13 @@ impl<T: AbstractData> AbstractData for CowData<T> {
         }
     }
 
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        match self.staged(path) {
+            Some(_) => mask_of(fields, |field| self.has_field(path, field)),
+            None => self.base.field_mask(path, fields),
+        }
+    }
+
     fn spec_paths(&self) -> Vec<Path> {
         if self.overlay.is_empty() {
             return self.base.spec_paths();
@@ -641,6 +650,137 @@ impl<T: AbstractData> AbstractData for CowData<T> {
                 }
             }
         }
+    }
+}
+
+/// Layer data parsed once and shared by every layer opened over it, with each
+/// layer's own edits kept private to it.
+///
+/// While the parsed data is shared, a write stages in this layer's overlay
+/// and the shared data stays as it was read. Once this is the only holder
+/// left, the next write flushes the overlay into the data, so a layer that
+/// outlives the [`ar::CacheScope`](crate::ar::CacheScope) it was read under
+/// reads straight from its data again.
+pub(crate) struct SharedData(CowData<Shared>);
+
+/// Parsed layer data held by reference count, the base of a [`SharedData`].
+/// It is written only through the one reference left.
+struct Shared(Arc<dyn AbstractData + Send + Sync>);
+
+impl SharedData {
+    /// Layer data over `base`, which other layers may hold too.
+    pub(crate) fn new(base: Arc<dyn AbstractData + Send + Sync>) -> Self {
+        Self(CowData::new(Shared(base)))
+    }
+
+    /// Flushes the staged edits into the data once no other layer holds it.
+    fn settle(&mut self) {
+        if Arc::get_mut(&mut self.0.base_mut().0).is_some() {
+            self.0.commit();
+        }
+    }
+}
+
+impl AbstractData for SharedData {
+    fn has_spec(&self, path: &Path) -> bool {
+        self.0.has_spec(path)
+    }
+
+    fn has_field(&self, path: &Path, field: &str) -> bool {
+        self.0.has_field(path, field)
+    }
+
+    fn spec_type(&self, path: &Path) -> Option<SpecType> {
+        self.0.spec_type(path)
+    }
+
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        self.0.try_field(path, field)
+    }
+
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
+        self.0.list_fields(path)
+    }
+
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        self.0.field_mask(path, fields)
+    }
+
+    fn spec_paths(&self) -> Vec<Path> {
+        self.0.spec_paths()
+    }
+
+    fn create_spec(&mut self, path: Path, ty: SpecType) {
+        self.0.create_spec(path, ty);
+        self.settle();
+    }
+
+    fn erase_spec(&mut self, path: &Path) {
+        self.0.erase_spec(path);
+        self.settle();
+    }
+
+    fn set_field(&mut self, path: &Path, field: &str, value: Value) {
+        self.0.set_field(path, field, value);
+        self.settle();
+    }
+
+    fn erase_field(&mut self, path: &Path, field: &str) {
+        self.0.erase_field(path, field);
+        self.settle();
+    }
+}
+
+impl Shared {
+    /// The data, for a write [`SharedData::settle`] allows.
+    fn unique(&mut self) -> &mut (dyn AbstractData + Send + Sync) {
+        Arc::get_mut(&mut self.0).expect("shared layer data is written only while unshared")
+    }
+}
+
+impl AbstractData for Shared {
+    fn has_spec(&self, path: &Path) -> bool {
+        self.0.has_spec(path)
+    }
+
+    fn has_field(&self, path: &Path, field: &str) -> bool {
+        self.0.has_field(path, field)
+    }
+
+    fn spec_type(&self, path: &Path) -> Option<SpecType> {
+        self.0.spec_type(path)
+    }
+
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        self.0.try_field(path, field)
+    }
+
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
+        self.0.list_fields(path)
+    }
+
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        self.0.field_mask(path, fields)
+    }
+
+    fn spec_paths(&self) -> Vec<Path> {
+        self.0.spec_paths()
+    }
+
+    fn create_spec(&mut self, path: Path, ty: SpecType) {
+        self.unique().create_spec(path, ty);
+    }
+
+    fn erase_spec(&mut self, path: &Path) {
+        self.unique().erase_spec(path);
+    }
+
+    fn set_field(&mut self, path: &Path, field: &str, value: Value) {
+        self.unique().set_field(path, field, value);
+    }
+
+    fn erase_field(&mut self, path: &Path, field: &str) {
+        self.unique().erase_field(path, field);
     }
 }
 
@@ -853,5 +993,29 @@ mod tests {
         assert_eq!(base.field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
         assert!(!base.has_field(&a, "doc"));
         assert_eq!(base.list_fields(&a).unwrap(), vec!["kind", "custom"]);
+    }
+
+    /// A write to shared data stays in the layer that made it, and lands in
+    /// the data once that layer is the only holder left.
+    #[test]
+    fn shared_writes_private() {
+        let a = path("/A").unwrap();
+        let mut base = Data::new();
+        base.create_spec(a.clone(), SpecType::Prim);
+        let base: Arc<dyn AbstractData + Send + Sync> = Arc::new(base);
+
+        let mut mine = SharedData::new(Arc::clone(&base));
+        let theirs = SharedData::new(base);
+        mine.set_field(&a, "kind", Value::Token("component".into()));
+        assert!(mine.has_field(&a, "kind"));
+        assert!(!theirs.has_field(&a, "kind"));
+        assert!(!mine.0.is_empty(), "staged while shared");
+        assert_eq!(mine.field_mask(&a, &["kind"]), 1);
+
+        drop(theirs);
+        mine.set_field(&a, "custom", Value::Bool(true));
+        assert!(mine.0.is_empty(), "flushed once unshared");
+        assert!(mine.0.base().has_field(&a, "kind"));
+        assert!(mine.0.base().has_field(&a, "custom"));
     }
 }
