@@ -567,7 +567,7 @@ def "B" (
             };
             modify_asset_paths(&mut layer, modify, keep_empty)?;
             let text = layer.export_to_string()?;
-            assert!(text.contains("subLayers = [@./a.usda@ (offset = 1"), "{text}");
+            assert!(text.contains("@./a.usda@ (offset = 1)"), "{text}");
             assert!(text.contains("string note = \"kept\""), "{text}");
             assert!(text.contains("2: @./keep.png@"), "{text}");
             assert!(!text.contains("drop"), "{text}");
