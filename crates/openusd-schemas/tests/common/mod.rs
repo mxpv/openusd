@@ -35,3 +35,17 @@ pub fn from_usda(usda: &str) -> Result<Stage> {
         .schema_registry(openusd_schemas::schema_registry())
         .open(path.to_str().unwrap())
 }
+
+/// A stage opened from `root`, one of `files` (each a name and its `usda`
+/// source) written into a directory kept alive beside it.
+#[allow(dead_code, reason = "only the families whose tests compose several layers call it")]
+pub fn open_files(files: &[(&str, &str)], root: &str) -> Result<(tempfile::TempDir, Stage)> {
+    let dir = tempfile::tempdir()?;
+    for (name, usda) in files {
+        fs::write(dir.path().join(name), usda)?;
+    }
+    let stage = Stage::builder()
+        .schema_registry(openusd_schemas::schema_registry())
+        .open(dir.path().join(root).to_str().expect("utf-8"))?;
+    Ok((dir, stage))
+}

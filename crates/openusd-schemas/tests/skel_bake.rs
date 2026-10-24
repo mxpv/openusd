@@ -1,7 +1,7 @@
 //! Integration tests for baking skinning and blend shapes into plain
 //! geometry (`skel::bake_skinning`, `skel::bake_roots`).
 
-use std::{fs, slice};
+use std::slice;
 
 use openusd::gf::{self, Vec3f};
 use openusd::sdf::{self, Value};
@@ -13,7 +13,7 @@ use openusd_schemas::skel::{
 };
 
 mod common;
-use common::{from_usda, vendor};
+use common::{from_usda, open_files, vendor};
 
 /// A one-joint skeleton under a SkelRoot at `/Root` translated by
 /// `(10, 0, 0)`, posed by the animation `anim` describes, over a mesh at
@@ -117,19 +117,6 @@ fn bindings(root: &Root, predicate: PrimPredicate) -> Result<Vec<Binding>, Schem
 fn bake_into(bindings: &[Binding], layer: &str, options: &BakeOptions) -> Result<(), SchemaError> {
     let paired: Vec<_> = bindings.iter().cloned().map(|binding| (binding, layer)).collect();
     bake_skinning(&paired, options, ..)
-}
-
-/// A stage opened from `root`, one of `files` written into a directory kept
-/// alive beside it.
-fn open_files(files: &[(&str, &str)], root: &str) -> Result<(tempfile::TempDir, Stage), SchemaError> {
-    let dir = tempfile::tempdir().map_err(openusd::Error::from)?;
-    for (name, usda) in files {
-        fs::write(dir.path().join(name), usda).map_err(openusd::Error::from)?;
-    }
-    let stage = Stage::builder()
-        .schema_registry(openusd_schemas::schema_registry())
-        .open(dir.path().join(root).to_str().expect("utf-8"))?;
-    Ok((dir, stage))
 }
 
 fn near(found: &[Vec3f], expected: &[[f32; 3]]) -> bool {

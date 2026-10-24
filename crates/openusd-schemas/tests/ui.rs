@@ -1,8 +1,11 @@
 //! Integration test for the `UsdUI` schema views against a fixture.
 
+mod common;
+
 use openusd::Result;
 use openusd::gf;
-use openusd::usd::{Object, Property, SchemaBase, Stage};
+use openusd::usd::{self, Object, Property, SchemaBase, Stage};
+use openusd_schemas::SchemaError;
 
 use openusd::sdf;
 use openusd::tf::Token;
@@ -34,12 +37,39 @@ fn check_property<O: Property>(hints: &Hints<O>, display_group: Option<&str>, sh
     Ok(())
 }
 
+/// Asserts the prim tier of `hints`: the two dictionaries, each of their
+/// entries read alone, and a group neither holds.
+fn check_prim(hints: &Hints<usd::Prim>, expanded: &sdf::Dictionary, shown_if: &sdf::Dictionary) -> Result<()> {
+    assert_eq!(&hints.groups_expanded()?, expanded);
+    for (group, value) in expanded.iter() {
+        assert_eq!(hints.group_expanded(group)?, value.try_as_bool_ref() == Some(&true));
+    }
+    assert!(!hints.group_expanded("non-existent")?);
+
+    assert_eq!(&hints.groups_shown_if()?, shown_if);
+    for (group, value) in shown_if.iter() {
+        assert_eq!(hints.group_shown_if(group)?.as_ref(), value.try_as_string_ref());
+    }
+    assert_eq!(hints.group_shown_if("non-existent")?, None);
+    Ok(())
+}
+
+/// A dictionary of `entries`.
+fn dict<const N: usize>(entries: [(&str, sdf::Value); N]) -> sdf::Dictionary {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect()
+}
+
 /// `testUsdUIHints.py:test_Fallbacks`: an object with no hints reads each
 /// hint's fallback.
 #[test]
 fn hints_fallbacks() -> Result<()> {
     let stage = hints_stage()?;
-    check_object(&Hints::new(stage.prim("/HintlessPrim")?), None, false)?;
+    let prim = Hints::new(stage.prim("/HintlessPrim")?);
+    check_object(&prim, None, false)?;
+    check_prim(&prim, &sdf::Dictionary::default(), &sdf::Dictionary::default())?;
 
     let attr = Hints::new(stage.attribute("/HintlessPrim.hintlessAttribute")?);
     check_object(&attr, None, false)?;
@@ -240,5 +270,176 @@ fn scene_graph_prim_roundtrip() -> Result<()> {
     // Unapplied prim â†’ None.
     stage.define_prim("/Bare")?.set_type_name("Scope")?;
     assert!(SceneGraphPrimAPI::get(&stage, "/Bare")?.is_none());
+    Ok(())
+}
+
+/// `testUsdUIHints.py:test_PrimHintsFromAsset`.
+#[test]
+fn prim_hints_asset() -> Result<()> {
+    let stage = hints_stage()?;
+    let hints = Hints::new(stage.prim("/HintsPrim")?);
+    check_prim(
+        &hints,
+        &dict([
+            ("a group", sdf::Value::Bool(true)),
+            ("a group:a nested group", sdf::Value::Bool(false)),
+        ]),
+        &dict([("a group", sdf::Value::from("x == 1"))]),
+    )?;
+    check_object(&hints, Some("a prim"), true)?;
+    Ok(())
+}
+
+/// `testUsdUIHints.py:test_PrimHintsSetters`.
+#[test]
+fn prim_hints_setters() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let hints = Hints::new(stage.define_prim("/test_PrimHintsSetters")?);
+    check_prim(&hints, &sdf::Dictionary::default(), &sdf::Dictionary::default())?;
+    assert!(!hints.group_expanded("group:subgroup")?);
+
+    let hints = hints.set_groups_expanded([("group", true), ("group:subgroup", true)])?;
+    let mut expanded = dict([
+        ("group", sdf::Value::Bool(true)),
+        ("group:subgroup", sdf::Value::Bool(true)),
+    ]);
+    check_prim(&hints, &expanded, &sdf::Dictionary::default())?;
+    assert!(!hints.group_expanded("group2")?);
+
+    let hints = hints.set_group_expanded("group2", true)?;
+    expanded.insert("group2".into(), sdf::Value::Bool(true));
+    check_prim(&hints, &expanded, &sdf::Dictionary::default())?;
+
+    let hints = hints.set_groups_shown_if([("group", "x == 1")])?;
+    check_prim(&hints, &expanded, &dict([("group", sdf::Value::from("x == 1"))]))?;
+    assert_eq!(hints.group_shown_if("group2")?, None);
+
+    let hints = hints.set_group_shown_if("group2", "x == 2")?;
+    check_prim(
+        &hints,
+        &expanded,
+        &dict([
+            ("group", sdf::Value::from("x == 1")),
+            ("group2", sdf::Value::from("x == 2")),
+        ]),
+    )?;
+    Ok(())
+}
+
+/// A nested group's expansion is one top-level key of the dictionary.
+#[test]
+fn group_expanded_flat() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let hints = Hints::new(stage.define_prim("/P")?).set_group_expanded("A:B", true)?;
+    assert_eq!(hints.groups_expanded()?, dict([("A:B", sdf::Value::Bool(true))]));
+    assert!(hints.group_expanded("A:B")?);
+    Ok(())
+}
+
+/// A nested group's shown-if expression nests in the dictionary, as the
+/// group extends the key path.
+#[test]
+fn group_shown_nested() -> Result<()> {
+    let stage = memory()?;
+    let hints = Hints::new(stage.define_prim("/P")?).set_group_shown_if("A:B", "x == 1")?;
+    assert_eq!(
+        hints.groups_shown_if()?,
+        dict([("A", sdf::Value::Dictionary(dict([("B", sdf::Value::from("x == 1"))])))])
+    );
+    assert_eq!(hints.group_shown_if("A:B")?.as_deref(), Some("x == 1"));
+    Ok(())
+}
+
+/// An empty group name is an empty key of the expansion dictionary.
+#[test]
+fn group_expanded_empty() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let hints = Hints::new(stage.define_prim("/P")?).set_group_expanded("", true)?;
+    assert_eq!(hints.groups_expanded()?, dict([("", sdf::Value::Bool(true))]));
+    assert!(hints.group_expanded("")?);
+    Ok(())
+}
+
+/// An empty group name ends the key path in an empty component, which is an
+/// empty key of the shown-if dictionary, as `TfStringSplit` keeps it.
+#[test]
+fn group_shown_empty() -> Result<()> {
+    let stage = memory()?;
+    let hints = Hints::new(stage.define_prim("/P")?).set_group_shown_if("", "x == 1")?;
+    assert_eq!(hints.groups_shown_if()?, dict([("", sdf::Value::from("x == 1"))]));
+    assert_eq!(hints.group_shown_if("")?.as_deref(), Some("x == 1"));
+    Ok(())
+}
+
+/// A stage whose root layer, the edit target, sublayers `weak.usda`, which
+/// authors `/P` with the `uiHints` entries `hints` (`usda` source).
+fn weaker_hints_stage(hints: &str) -> Result<(tempfile::TempDir, Stage)> {
+    let weak = format!("#usda 1.0\n\ndef \"P\" (\n    uiHints = {{\n        {hints}\n    }}\n)\n{{\n}}\n");
+    let root = "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n";
+    common::open_files(&[("weak.usda", &weak), ("root.usda", root)], "root.usda")
+}
+
+/// The text of `stage`'s root layer.
+fn root_text(stage: &Stage) -> Result<String> {
+    Ok(stage.root_layer().export_to_string()?)
+}
+
+/// The text of `stage`'s root layer and of the layer it sublayers.
+fn layer_texts(stage: &Stage) -> Result<[String; 2]> {
+    let weak = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| id.ends_with("weak.usda"))
+        .expect("the weak layer is on the stage");
+    let weak = stage.layer(&weak).expect("the weak layer").export_to_string()?;
+    Ok([root_text(stage)?, weak])
+}
+
+/// Setting one group's expansion writes the whole composed dictionary to the
+/// edit target, the entries a weaker layer authors included.
+#[test]
+fn group_expanded_weaker() -> Result<(), SchemaError> {
+    let (_dir, stage) = weaker_hints_stage("dictionary displayGroupsExpanded = { bool old = 1 }")?;
+    assert!(!root_text(&stage)?.contains("old"));
+    let hints = Hints::new(stage.prim("/P")?).set_group_expanded("new", false)?;
+
+    let root = root_text(&stage)?;
+    assert!(root.contains("old") && root.contains("new"), "{root}");
+    assert_eq!(
+        hints.groups_expanded()?,
+        dict([("old", sdf::Value::Bool(true)), ("new", sdf::Value::Bool(false))])
+    );
+    Ok(())
+}
+
+/// A weaker layer's entry of the wrong type refuses the read-modify-write,
+/// and no layer changes.
+#[test]
+fn group_expanded_malformed() -> Result<(), SchemaError> {
+    let (_dir, stage) =
+        weaker_hints_stage("dictionary displayGroupsExpanded = { bool good = 1\n string bad = \"yes\" }")?;
+    let before = layer_texts(&stage)?;
+    let result = Hints::new(stage.prim("/P")?).set_group_expanded("new", true);
+    assert!(
+        matches!(
+            &result,
+            Err(SchemaError::HintEntryType { key: hint_keys::DISPLAY_GROUPS_EXPANDED, entry }) if entry == "bad"
+        ),
+        "{result:?}"
+    );
+    assert_eq!(layer_texts(&stage)?, before);
+    Ok(())
+}
+
+/// Setting one group's shown-if expression writes that key path alone, beside
+/// an entry of another type, which stays as authored.
+#[test]
+fn group_shown_sibling() -> Result<()> {
+    let (_dir, stage) = weaker_hints_stage("dictionary displayGroupsShownIf = { int bad = 5 }")?;
+    let hints = Hints::new(stage.prim("/P")?).set_group_shown_if("good", "x == 1")?;
+    assert_eq!(
+        hints.groups_shown_if()?,
+        dict([("bad", sdf::Value::Int(5)), ("good", sdf::Value::from("x == 1"))])
+    );
     Ok(())
 }

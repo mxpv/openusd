@@ -193,6 +193,16 @@ pub enum SchemaError {
         path: sdf::Path,
     },
 
+    /// A dictionary of UI hints holds an entry whose value is not of the type
+    /// every entry of it takes.
+    #[error("uiHints `{key}` entry {entry:?} holds a value of the wrong type")]
+    HintEntryType {
+        /// The hint the dictionary is.
+        key: &'static str,
+        /// The entry holding the wrong type.
+        entry: String,
+    },
+
     /// A labels query needs a taxonomy to read labels under.
     #[error("Labels query taxonomy must not be empty")]
     EmptyTaxonomy,
