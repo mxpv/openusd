@@ -57,14 +57,9 @@ pub mod spec;
 
 mod compute;
 mod conform;
+mod pass;
 mod settings;
 
 pub use compute::{namespaced_settings, render_spec};
 pub use conform::{ConformedAperture, conform_aperture};
 pub use spec::{RenderSpec, SpecDiagnostic};
-
-// The collections a `RenderPass` carries, each an instance name of
-// `UsdCollectionAPI` rather than a property of the pass.
-pub const COLLECTION_CAMERA_VISIBILITY: &str = "cameraVisibility";
-pub const COLLECTION_PRUNE: &str = "prune";
-pub const COLLECTION_MATTE: &str = "matte";
