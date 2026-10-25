@@ -548,7 +548,12 @@ impl<'a> Parser<'a> {
         }
 
         self.cursor.expect_punctuation('=')?;
-        let value = types::parse_value(&mut self.cursor, &type_name)?;
+        // A path expression default is anchored at the nearest prim, as C++
+        // `_SetDefault` anchors it, so `.//` reads as `/Prim//`, and `.//`
+        // in a variant of `/Prim` reads as `/Prim//` too.
+        let anchor = current_path.nearest_prim_path();
+        let value = types::parse_value(&mut self.cursor, &type_name)?
+            .map_path_expressions(&mut |expression| expression.make_absolute(&anchor));
         let path = current_path.append_property(name)?;
 
         if self.cursor.at_punctuation('(')? {
@@ -930,7 +935,12 @@ impl<'a> Parser<'a> {
 /// Each of `paths` made absolute against the prim `anchor`, as C++ anchors
 /// a target, connection, inherits or specializes path; one left empty, the
 /// empty path included, is dropped where C++ refuses the file.
+///
+/// The anchor is the nearest prim at or above `anchor`, as C++ anchors a
+/// target at `GetPrimPath()`: a target written in a variant of `/P` resolves
+/// against `/P`.
 fn anchored(anchor: &sdf::Path, paths: Vec<sdf::Path>) -> Vec<sdf::Path> {
+    let anchor = anchor.nearest_prim_path();
     paths
         .into_iter()
         .map(|p| anchor.make_absolute(&p))
@@ -3352,5 +3362,58 @@ def "p" {
         let connections = op("/P.c", FieldKey::ConnectionPaths);
         assert_eq!(connections.added_items(), paths(&["/x.y"]));
         assert_eq!(connections.ordered_items(), paths(&["/y.z", "/x.y"]));
+    }
+
+    /// A relative path in a variant is anchored at the nearest prim, as C++
+    /// anchors at `GetPrimPath()`: a property of the variant `/P{v=one}`
+    /// anchors at `/P`; one on the prim `/P{v=one}D` anchors there, where a
+    /// pattern with match components cannot take the variant `/P{v=one}` as
+    /// its prefix and stays relative (`SdfPathPattern::SetPrefix`).
+    #[test]
+    fn variant_paths_anchor() {
+        let text = r#"#usda 1.0
+def "P" (
+    variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "one" {
+            pathExpression m = ".//"
+            rel r = <../Q>
+            add rel s = <Child>
+            float c.connect = <Child.out>
+
+            def "D"
+            {
+                pathExpression n = "..//X"
+            }
+        }
+    }
+}
+"#;
+        let data = Parser::new(text).parse().unwrap();
+        let get = |path: &str, key: &str| data.get(&sdf::path(path).unwrap()).unwrap().get(key).unwrap().clone();
+        let expression = |path: &str| {
+            get(path, FieldKey::Default.as_str())
+                .try_as_path_expression()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(expression("/P{v=one}.m"), "/P//");
+        assert_eq!(expression("/P{v=one}D.n"), "..//X");
+
+        let targets = |path: &str, key: FieldKey| get(path, key.as_str()).try_as_path_list_op().unwrap();
+        assert_eq!(
+            targets("/P{v=one}.r", FieldKey::TargetPaths).explicit_items(),
+            [sdf::path("/Q").unwrap()]
+        );
+        assert_eq!(
+            targets("/P{v=one}.s", FieldKey::TargetPaths).added_items(),
+            [sdf::path("/P/Child").unwrap()]
+        );
+        assert_eq!(
+            targets("/P{v=one}.c", FieldKey::ConnectionPaths).explicit_items(),
+            [sdf::path("/P/Child.out").unwrap()]
+        );
     }
 }
