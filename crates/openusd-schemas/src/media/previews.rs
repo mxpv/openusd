@@ -3,7 +3,7 @@
 
 use openusd::Result;
 use openusd::sdf::{self, Value};
-use openusd::usd::{Object, SchemaBase};
+use openusd::usd::{self, Object, SchemaBase};
 
 use super::AssetPreviewsAPI;
 use super::tokens;
@@ -55,7 +55,44 @@ impl AssetPreviewsAPI {
         let prim = self.0.clear_asset_info_by_key(tokens::PREVIEW_THUMBNAILS_DEFAULT)?;
         Ok(Self(prim))
     }
+
+    /// The previews of the asset at `layer_path`: the API on the default prim
+    /// of the layer (C++ `GetAssetDefaultPreviews(layerPath)`). `None` where
+    /// the layer names no default prim, or the default prim does not have the
+    /// API applied. A layer or stage that fails to open is an error, where C++
+    /// answers no previews.
+    ///
+    /// The view is on a stage of its own, masked to the default prim and its
+    /// ancestors, which the view keeps open. That stage reads the file at
+    /// `layer_path`, and an edit through the view changes that stage's copy of
+    /// the layer.
+    // TODO: the `SdfLayerHandle` overload, and the reuse of an already-open
+    // layer for a path, both need layers shared between stages (C++
+    // `SdfLayer::FindOrOpen`).
+    // TODO(perf): the root layer is read twice, once for its default prim
+    // and once by the stage.
+    pub fn asset_default_previews(layer_path: &str) -> Result<Option<Self>> {
+        let layer = sdf::Layer::open(layer_path)?;
+        let Some(default_prim) = layer
+            .pseudo_root()
+            .and_then(|root| root.default_prim())
+            .and_then(|name| sdf::default_prim_path(&name))
+        else {
+            return Ok(None);
+        };
+        // A child that no prim has keeps the mask to the default prim and its
+        // ancestors, without the prims beneath it.
+        let mask = usd::StagePopulationMask::new([default_prim.append_path(NO_SUCH_PRIM)?])?;
+        let stage = usd::Stage::builder()
+            .schema_registry(crate::schema_registry())
+            .mask(mask)
+            .open(layer_path)?;
+        Self::from_prim(stage.prim(default_prim)?)
+    }
 }
+
+/// A child name no prim has (C++ `__No_Such_Prim__`).
+const NO_SUCH_PRIM: &str = "__No_Such_Prim__";
 
 #[cfg(test)]
 mod tests {
@@ -64,7 +101,6 @@ mod tests {
     use crate::media::{AuralMode, PlaybackMode, SpatialAudio, SpatialAudioSchema};
     use openusd::Result;
     use openusd::sdf;
-    use openusd::usd;
 
     #[test]
     fn spatial_audio_roundtrip() -> Result<()> {
@@ -185,6 +221,69 @@ mod tests {
             previews.prim().asset_info_by_key(tokens::PREVIEW_THUMBNAILS_DEFAULT)?,
             None
         );
+        Ok(())
+    }
+
+    /// An asset holding `/Chair`, with the API and thumbnails applied and a
+    /// child prim beneath it, and `/Bare`, without the API, whose default
+    /// prim is `default_prim`. It is exported to `asset.usda` in a directory
+    /// kept alive beside its path.
+    fn asset(default_prim: Option<&str>) -> Result<(tempfile::TempDir, String)> {
+        let chair = chair()?;
+        let stage = chair.stage().clone();
+        stage.define_prim("/Chair/Seat")?;
+        stage.define_prim("/Bare")?;
+        AssetPreviewsAPI::apply(&chair)?.set_default_thumbnails(&thumbnails("./chair_thumb.jpg"))?;
+        if let Some(name) = default_prim {
+            stage.set_default_prim(name)?;
+        }
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("asset.usda").to_str().expect("utf-8").to_string();
+        stage.root_layer().export(&path)?;
+        Ok((dir, path))
+    }
+
+    #[test]
+    fn asset_default_previews() -> Result<()> {
+        let (_dir, path) = asset(Some("Chair"))?;
+        let previews = AssetPreviewsAPI::asset_default_previews(&path)?.expect("default previews");
+        assert_eq!(previews.path().as_str(), "/Chair");
+        let thumbnails = previews.default_thumbnails()?.expect("thumbnails");
+        assert_eq!(thumbnails.default_image.asset_path(), "./chair_thumb.jpg");
+        Ok(())
+    }
+
+    #[test]
+    fn previews_no_default_prim() -> Result<()> {
+        let (_dir, path) = asset(None)?;
+        assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        Ok(())
+    }
+
+    /// A default prim without the API has no previews, as C++'s view of it
+    /// tests false.
+    #[test]
+    fn previews_without_api() -> Result<()> {
+        let (_dir, path) = asset(Some("Bare"))?;
+        assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        Ok(())
+    }
+
+    /// A default prim the layer does not author has no previews.
+    #[test]
+    fn previews_missing_default_prim() -> Result<()> {
+        let (_dir, path) = asset(Some("Missing"))?;
+        assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        Ok(())
+    }
+
+    /// The view's stage holds the default prim, and not the prims beneath it.
+    #[test]
+    fn previews_masked_children() -> Result<()> {
+        let (_dir, path) = asset(Some("Chair"))?;
+        let previews = AssetPreviewsAPI::asset_default_previews(&path)?.expect("default previews");
+        assert!(previews.prim().is_valid()?);
+        assert!(!previews.stage().prim("/Chair/Seat")?.is_valid()?);
         Ok(())
     }
 }
