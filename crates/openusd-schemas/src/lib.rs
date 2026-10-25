@@ -508,6 +508,16 @@ pub enum SchemaError {
         element_type: &'static str,
     },
 
+    /// A connection source is to be authored, with the type of the attribute
+    /// connecting to it, and that attribute declares none.
+    #[error("connection source {attribute} cannot be created: {consumer} declares no value type")]
+    UntypedConnectionSource {
+        /// The source attribute.
+        attribute: sdf::Path,
+        /// The attribute connecting to it.
+        consumer: sdf::Path,
+    },
+
     /// A skinning query is bound to a skeleton whose joint order, or whose
     /// animation's blend-shape order, differs from the orders the query was
     /// built against.

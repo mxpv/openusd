@@ -8,6 +8,7 @@ use openusd::{pcp, sdf, tf, usd};
 
 use super::tokens::{INPUTS, OUTPUTS};
 use super::{Input, Output};
+use crate::SchemaError;
 
 /// Whether a shading attribute is an `inputs:` or `outputs:` property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,14 +29,27 @@ impl AttributeType {
     }
 }
 
+/// Where a new connection goes among the ones an attribute has (C++
+/// `UsdShadeConnectionModification`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConnectionModification {
+    /// The new connection is the only one.
+    #[default]
+    Replace,
+    /// The new connection is the strongest the edit target prepends.
+    Prepend,
+    /// The new connection is the weakest the edit target appends.
+    Append,
+}
+
 /// A UsdShade attribute a connection may name as its source.
 ///
 /// Only an `inputs:` or `outputs:` attribute is a legal connection source, so
 /// the typed views implement this and a bare
 /// [`usd::Attribute`](openusd::usd::Attribute) does not.
 pub trait ConnectionTarget {
-    /// The full property path a connection should record.
-    fn target_path(&self) -> &sdf::Path;
+    /// The source attribute.
+    fn attribute(&self) -> &usd::Attribute;
 }
 
 /// A typed UsdShade input or output attribute.
@@ -84,8 +98,8 @@ impl ShadingAttribute {
 }
 
 impl ConnectionTarget for ShadingAttribute {
-    fn target_path(&self) -> &sdf::Path {
-        self.path()
+    fn attribute(&self) -> &usd::Attribute {
+        ShadingAttribute::attribute(self)
     }
 }
 
@@ -257,6 +271,27 @@ pub(super) fn authored_inputs(prim: &usd::Prim) -> Result<Vec<Input>> {
         .collect())
 }
 
+/// The path of `source`, which `consumer` is to connect to, defined first
+/// where it is not, with `consumer`'s type and `custom = false` (C++
+/// `_GetOrCreateSourceAttr`). A source no layer or schema defines declares
+/// no type of its own.
+pub(super) fn define_source(source: &usd::Attribute, consumer: &usd::Attribute) -> Result<sdf::Path, SchemaError> {
+    if !source.is_defined()? {
+        let type_name = consumer
+            .type_name()?
+            .ok_or_else(|| SchemaError::UntypedConnectionSource {
+                attribute: source.path().clone(),
+                consumer: consumer.path().clone(),
+            })?;
+        source
+            .prim()
+            .attribute_builder(source.name(), type_name)
+            .custom(false)
+            .build()?;
+    }
+    Ok(source.path().clone())
+}
+
 /// Whether the strongest connection opinion on `attribute` is authored across
 /// a specializes arc, as a base material's is (C++
 /// `IsSourceConnectionFromBaseMaterial`): the node that introduced the spec
@@ -297,7 +332,7 @@ mod tests {
     use openusd::Result;
 
     #[test]
-    fn structured_sources() -> Result<()> {
+    fn structured_sources() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let source = Shader::define(&stage, "/Mat/Source")?;
         let output = source.create_output("rgb", "float3")?;
@@ -317,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn untyped_source_valid() -> Result<()> {
+    fn untyped_source_valid() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let source = stage.override_prim("/Mat/Source")?;
         let source_output = source.create_attribute("outputs:result", "float")?;
@@ -371,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn material_is_container() -> Result<()> {
+    fn material_is_container() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let material = crate::shade::Material::define(&stage, "/Mat")?;
         material.create_input("gain", "float")?;

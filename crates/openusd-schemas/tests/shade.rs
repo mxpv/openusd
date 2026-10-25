@@ -434,7 +434,7 @@ fn node_graph_interface() -> Result<()> {
 }
 
 #[test]
-fn connect_connectability_render_type() -> Result<()> {
+fn connect_connectability_render_type() -> Result<(), SchemaError> {
     let stage = memory()?;
     let tex = NodeGraph::define(&stage, "/Mat/Tex")?;
     tex.create_output("rgb", "float3")?;
@@ -585,5 +585,156 @@ fn connectability_basic() -> Result<(), SchemaError> {
     // A shader input does not reach into another NodeGraph.
     let nested2_float = nested_shader2.create_input("nestedShaderFloat", "float")?;
     assert!(!nested2_float.can_connect(node_graph_float.attribute())?);
+    Ok(())
+}
+
+/// A shader at `/Mat/Consumer` with a `float` input `in`, and shaders at
+/// `/Mat/A`, `/Mat/B` and `/Mat/C` that author nothing.
+fn consumer() -> Result<(usd::Stage, shade::Input)> {
+    let stage = memory()?;
+    let consumer = Shader::define(&stage, "/Mat/Consumer")?;
+    for path in ["/Mat/A", "/Mat/B", "/Mat/C"] {
+        Shader::define(&stage, path)?;
+    }
+    let input = consumer.create_input("in", "float")?;
+    Ok((stage, input))
+}
+
+/// The shader at `path`.
+fn shader(stage: &usd::Stage, path: &str) -> Result<Shader> {
+    Ok(Shader::get(stage, path)?.expect("Shader"))
+}
+
+/// One explicit list of mixed inputs and outputs, which the sources read back
+/// connect again (C++ `testUsdShadeConnectability.py`'s `test_Basic`).
+#[test]
+fn set_connected_sources() -> Result<(), SchemaError> {
+    let (stage, input) = consumer()?;
+    let sources: [shade::ShadingAttribute; 2] = [
+        shader(&stage, "/Mat/A")?.output("out").into(),
+        shader(&stage, "/Mat/B")?.input("value").into(),
+    ];
+    let input = input.set_connected_sources(sources)?;
+    let authored = [sdf::path("/Mat/A.outputs:out")?, sdf::path("/Mat/B.inputs:value")?];
+    assert_eq!(input.connections()?, authored);
+
+    let read_back: Vec<_> = input
+        .connected_sources()?
+        .into_sources()
+        .into_iter()
+        .map(|source| source.attribute())
+        .collect();
+    let input = input.set_connected_sources(read_back)?;
+    assert_eq!(input.connections()?, authored);
+    Ok(())
+}
+
+/// Appending and prepending edit the explicit list in place.
+#[test]
+fn append_prepend_order() -> Result<(), SchemaError> {
+    let (stage, input) = consumer()?;
+    let input = input
+        .connect_to(&shader(&stage, "/Mat/A")?.output("out"))?
+        .connect_to_with(
+            &shader(&stage, "/Mat/B")?.output("out"),
+            shade::ConnectionModification::Append,
+        )?
+        .connect_to_with(
+            &shader(&stage, "/Mat/C")?.output("out"),
+            shade::ConnectionModification::Prepend,
+        )?;
+    assert_eq!(
+        input.connections()?,
+        [
+            sdf::path("/Mat/C.outputs:out")?,
+            sdf::path("/Mat/A.outputs:out")?,
+            sdf::path("/Mat/B.outputs:out")?,
+        ]
+    );
+    Ok(())
+}
+
+/// One source is disconnected, then every source, then the opinion cleared.
+#[test]
+fn disconnect_one_source() -> Result<(), SchemaError> {
+    let (stage, input) = consumer()?;
+    let a = shader(&stage, "/Mat/A")?.output("out");
+    let b = shader(&stage, "/Mat/B")?.output("out");
+    let input = input
+        .connect_to(&a)?
+        .connect_to_with(&b, shade::ConnectionModification::Append)?;
+    assert!(input.disconnect_source(&a)?);
+    assert_eq!(input.connections()?, [sdf::path("/Mat/B.outputs:out")?]);
+    let input = input.disconnect()?;
+    assert!(input.connections()?.is_empty());
+    let input = input.clear_sources()?;
+    assert!(input.connections()?.is_empty());
+    Ok(())
+}
+
+/// Over a weaker layer's connection, a disconnect blocks it and a clear lets
+/// it compose again (C++ `testUsdShadeShaders.py`).
+#[test]
+fn clear_vs_disconnect() -> Result<(), SchemaError> {
+    let (_dir, stage) = common::open_files(
+        &[
+            (
+                "weak.usda",
+                "#usda 1.0\ndef Shader \"Source\" {\n    float outputs:out\n}\n\
+                 def Shader \"Consumer\" {\n    float inputs:in.connect = </Source.outputs:out>\n}\n",
+            ),
+            ("root.usda", "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n"),
+        ],
+        "root.usda",
+    )?;
+    let input = shader(&stage, "/Consumer")?.input("in");
+    assert_eq!(input.connections()?, [sdf::path("/Source.outputs:out")?]);
+    let input = input.disconnect()?;
+    assert!(input.connections()?.is_empty());
+    let input = input.clear_sources()?;
+    assert_eq!(input.connections()?, [sdf::path("/Source.outputs:out")?]);
+    Ok(())
+}
+
+/// An output nothing defines is authored with the consumer's type (C++
+/// `testUsdShadeShaders.py`).
+#[test]
+fn source_created_typed() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let consumer = Shader::define(&stage, "/Mat/Consumer")?;
+    let source = Shader::define(&stage, "/Mat/Source")?.output("colorOut");
+    assert!(!source.attribute().is_defined()?);
+    consumer.create_input("color", "color3f")?.connect_to(&source)?;
+    assert!(source.attribute().is_defined()?);
+    assert_eq!(source.attribute().type_name()?, Some(sdf::ValueTypeName::COLOR3F));
+    assert!(!source.attribute().is_custom()?);
+    Ok(())
+}
+
+/// An input-typed source is authored as an input.
+#[test]
+fn input_source_created() -> Result<(), SchemaError> {
+    let (stage, input) = consumer()?;
+    let source = shader(&stage, "/Mat/A")?.input("floatInput");
+    input.connect_to(&source)?;
+    let created = stage.attribute("/Mat/A.inputs:floatInput")?;
+    assert!(created.is_defined()?);
+    assert_eq!(created.type_name()?, Some(sdf::ValueTypeName::FLOAT));
+    Ok(())
+}
+
+/// A source to author where nothing declares a type is refused.
+#[test]
+fn untyped_source_refused() -> Result<(), SchemaError> {
+    let (stage, _) = consumer()?;
+    let untyped = shader(&stage, "/Mat/Consumer")?.input("untyped");
+    let error = untyped
+        .connect_to(&shader(&stage, "/Mat/A")?.output("out"))
+        .err()
+        .expect("no type to author the source with");
+    assert!(
+        matches!(error, SchemaError::UntypedConnectionSource { .. }),
+        "{error:?}"
+    );
     Ok(())
 }

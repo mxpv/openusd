@@ -2,12 +2,12 @@
 
 use openusd::Result;
 
+use openusd::usd;
 use openusd::usd::{Object, Property};
-use openusd::{sdf, usd};
 
 use super::impl_shading_attribute;
 use super::tokens::{CONNECTABILITY, INPUTS};
-use super::{Connectability, ConnectableContext, ConnectionTarget, ShadingAttribute};
+use super::{Connectability, ConnectableContext, ShadingAttribute};
 
 /// A UsdShade input backed by an `inputs:<base>` USD attribute
 /// (C++ `UsdShadeInput`).
@@ -73,14 +73,9 @@ impl From<Input> for ShadingAttribute {
     }
 }
 
-impl ConnectionTarget for Input {
-    fn target_path(&self) -> &sdf::Path {
-        self.attribute().path()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::SchemaError;
     use openusd::Result;
     use openusd::usd::{Object, Property};
 
@@ -102,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn single_source_queries() -> Result<()> {
+    fn single_source_queries() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let tex = NodeGraph::define(&stage, "/Mat/Tex")?;
         let rgb = tex.create_output("rgb", "float3")?;

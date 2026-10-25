@@ -107,8 +107,8 @@ pub use binding::{
     set_binding_strength,
 };
 pub use connectable::{
-    AttributeType, ConnectedSources, ConnectionSource, ConnectionTarget, ShadingAttribute, base_name,
-    base_name_and_type,
+    AttributeType, ConnectedSources, ConnectionModification, ConnectionSource, ConnectionTarget, ShadingAttribute,
+    base_name, base_name_and_type,
 };
 pub use coord_sys::{CoordSysBinding, CoordSysCache};
 pub use input::Input;
@@ -196,21 +196,59 @@ macro_rules! impl_shading_attribute {
             }
 
             /// Connect this attribute to `source`, replacing existing
-            /// connections (C++ `UsdShadeConnectableAPI::ConnectToSource`).
-            ///
-            /// Only a shading attribute can be named as a source, which is
-            /// what [`ConnectionTarget`](crate::shade::ConnectionTarget)
-            /// admits. It must already exist: authoring a connection never
-            /// creates the attribute it targets, and a path that identifies
-            /// none reads back through
-            /// [`invalid_paths`](crate::shade::ConnectedSources::invalid_paths).
-            /// The connection is authored whatever `can_connect` would
-            /// answer, as C++ `ConnectToSource` authors it.
+            /// connections (C++ `UsdShadeConnectableAPI::ConnectToSource`);
+            /// see [`connect_to_with`](Self::connect_to_with).
             pub fn connect_to(
                 self,
                 source: &impl $crate::shade::ConnectionTarget,
-            ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
-                self.set_connections([source.target_path().clone()])
+            ) -> Result<Self, $crate::SchemaError> {
+                self.connect_to_with(source, $crate::shade::ConnectionModification::Replace)
+            }
+
+            /// Connect this attribute to `source`, placed among its
+            /// connections as `modification` says (C++
+            /// `UsdShadeConnectableAPI::ConnectToSource`).
+            ///
+            /// Only a shading attribute can be named as a source, which is
+            /// what [`ConnectionTarget`](crate::shade::ConnectionTarget)
+            /// admits. A source that is not defined is authored first, with
+            /// this attribute's type (C++ `_GetOrCreateSourceAttr`). The
+            /// connection is authored whatever `can_connect` would answer, as
+            /// C++ `ConnectToSource` authors it.
+            pub fn connect_to_with(
+                self,
+                source: &impl $crate::shade::ConnectionTarget,
+                modification: $crate::shade::ConnectionModification,
+            ) -> Result<Self, $crate::SchemaError> {
+                let path = $crate::shade::connectable::define_source(source.attribute(), &self.attribute)?;
+                let attribute = match modification {
+                    $crate::shade::ConnectionModification::Replace => self.attribute.set_connections([path]),
+                    $crate::shade::ConnectionModification::Prepend => self
+                        .attribute
+                        .add_connection_at(path, $crate::openusd::usd::ListPosition::FrontOfPrepend),
+                    $crate::shade::ConnectionModification::Append => self
+                        .attribute
+                        .add_connection_at(path, $crate::openusd::usd::ListPosition::BackOfAppend),
+                }?;
+                Ok(Self::new(attribute))
+            }
+
+            /// Connect this attribute to `sources` alone, in order (C++
+            /// `UsdShadeConnectableAPI::SetConnectedSources`). A source that
+            /// is not defined is authored first, as
+            /// [`connect_to_with`](Self::connect_to_with) authors it.
+            pub fn set_connected_sources(
+                self,
+                sources: impl IntoIterator<Item: $crate::shade::ConnectionTarget>,
+            ) -> Result<Self, $crate::SchemaError> {
+                let paths = sources
+                    .into_iter()
+                    .map(|source| {
+                        let source = $crate::shade::ConnectionTarget::attribute(&source);
+                        $crate::shade::connectable::define_source(source, &self.attribute)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self.set_connections(paths)?)
             }
 
             /// The first valid connection source, the one a single-connection
@@ -247,14 +285,14 @@ macro_rules! impl_shading_attribute {
             }
 
             /// Remove the connection to `source` (C++ `DisconnectSource` given
-            /// a source): `true` where the composed list held it. The edit
-            /// target records a delete of the path. That delete also removes a
+            /// a source): `true` where an opinion changed. The edit target
+            /// records a delete of the path. That delete also removes a
             /// connection a weaker layer authors.
             pub fn disconnect_source(
                 &self,
                 source: &impl $crate::shade::ConnectionTarget,
             ) -> Result<bool, $crate::openusd::usd::StageAuthoringError> {
-                self.attribute.remove_connection(source.target_path())
+                self.attribute.remove_connection(source.attribute().path())
             }
 
             /// Drop the edit target's connection opinion (C++ `ClearSources`).
@@ -371,6 +409,12 @@ macro_rules! impl_shading_attribute {
             /// hand the same attribute back.
             pub(super) fn new(attribute: $crate::openusd::usd::Attribute) -> Self {
                 Self { attribute }
+            }
+        }
+
+        impl $crate::shade::ConnectionTarget for $ty {
+            fn attribute(&self) -> &$crate::openusd::usd::Attribute {
+                &self.attribute
             }
         }
     };

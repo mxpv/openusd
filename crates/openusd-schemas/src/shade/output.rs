@@ -1,11 +1,11 @@
 //! Typed view over a UsdShade `outputs:` attribute.
 
 use openusd::Result;
-use openusd::{sdf, usd};
+use openusd::usd;
 
 use super::impl_shading_attribute;
 use super::tokens::OUTPUTS;
-use super::{ConnectableContext, ConnectionTarget, ShadingAttribute};
+use super::{ConnectableContext, ShadingAttribute};
 
 /// A UsdShade output backed by an `outputs:<base>` USD attribute
 /// (C++ `UsdShadeOutput`).
@@ -33,11 +33,5 @@ impl Output {
 impl From<Output> for ShadingAttribute {
     fn from(output: Output) -> Self {
         ShadingAttribute::Output(output)
-    }
-}
-
-impl ConnectionTarget for Output {
-    fn target_path(&self) -> &sdf::Path {
-        self.attribute().path()
     }
 }

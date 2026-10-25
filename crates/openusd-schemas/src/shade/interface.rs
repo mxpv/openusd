@@ -267,6 +267,7 @@ fn input_matches(input: &Input, stage: &usd::Stage, path: &sdf::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SchemaError;
 
     use crate::shade::Shader;
     use openusd::Result;
@@ -277,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_consumers() -> Result<()> {
+    fn direct_consumers() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
@@ -298,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn consumer_deduplication() -> Result<()> {
+    fn consumer_deduplication() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
@@ -327,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_bound_lookup() -> Result<()> {
+    fn stage_bound_lookup() -> Result<(), SchemaError> {
         let first_stage = crate::tests::stage("same.usda")?;
         let first_graph = NodeGraph::define(&first_stage, "/Graph")?;
         let first_gain = first_graph.create_input("gain", "float")?;
@@ -345,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn transitive_consumers() -> Result<()> {
+    fn transitive_consumers() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
@@ -369,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn material_transitive() -> Result<()> {
+    fn material_transitive() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
@@ -393,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn material_consumers() -> Result<()> {
+    fn material_consumers() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let material = Material::define(&stage, "/Mat")?;
         let roughness = material.create_input("roughness", "float")?;
@@ -409,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_consumers() -> Result<()> {
+    fn filtered_consumers() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
@@ -443,7 +444,7 @@ mod tests {
     /// Only a prim with a connectable behavior consumes an interface input: a
     /// Shader does, while a typed `Scope` and an untyped prim do not.
     #[test]
-    fn scope_not_interface() -> Result<()> {
+    fn scope_not_interface() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let graph = NodeGraph::define(&stage, "/Graph")?;
         let gain = graph.create_input("gain", "float")?;
@@ -463,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_consumers() -> Result<()> {
+    fn instance_consumers() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let source = NodeGraph::define(&stage, "/Source")?;
         let gain = source.create_input("gain", "float")?;

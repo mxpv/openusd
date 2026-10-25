@@ -536,9 +536,9 @@ impl Attribute {
     }
 
     /// Wire this attribute to a single `source` property, replacing any
-    /// existing connections. The connectable shorthand for
-    /// [`set_connections`](Attribute::set_connections) over one source; mirrors
-    /// C++ `UsdShadeInput` / `UsdShadeOutput::ConnectToSource`. Chains after
+    /// existing connections: [`set_connections`](Attribute::set_connections)
+    /// over one source. It authors no source that is not defined, which C++
+    /// `UsdShadeInput` / `UsdShadeOutput::ConnectToSource` does. Chains after
     /// [`create_attribute`](Prim::create_attribute) / a UsdShade
     /// `create_input` / `create_output`, since the connection is authored on
     /// this (the consuming) property's spec.

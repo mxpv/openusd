@@ -838,7 +838,7 @@ def "Shot"
     /// child material composes the base's shaders, whose connections come
     /// from the base.
     #[test]
-    fn set_clear_base_material() -> Result<()> {
+    fn set_clear_base_material() -> Result<(), SchemaError> {
         let stage = crate::tests::stage("anon.usda")?;
         let parent = Material::define(&stage, "/Materials/Parent")?;
         parent.create_input("floatVal", "float")?;
