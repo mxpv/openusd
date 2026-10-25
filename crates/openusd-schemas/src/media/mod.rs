@@ -9,7 +9,7 @@
 //!   media-specific attributes (`filePath`, `auralMode`, `playbackMode`,
 //!   `startTime` / `endTime`, `mediaOffset`, `gain`).
 //! - [`AssetPreviewsAPI`] (C++ `UsdMediaAssetPreviewsAPI`) — a single-apply API
-//!   schema encoding pre-rendered previews (thumbnails) under a prim's
+//!   schema encoding pre-rendered previews ([`Thumbnails`]) under a prim's
 //!   `assetInfo` metadata.
 //!
 //! # Conventions
@@ -58,3 +58,5 @@
 openusd::include_schema!("usdMedia");
 
 mod previews;
+
+pub use previews::Thumbnails;

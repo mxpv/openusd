@@ -2,62 +2,69 @@
 //! properties of its own.
 
 use openusd::Result;
-use openusd::sdf::Value;
+use openusd::sdf::{self, Value};
 use openusd::usd::{Object, SchemaBase};
 
 use super::AssetPreviewsAPI;
 use super::tokens;
 
-/// The one key in this dictionary that upstream declares no token for: the
-/// thumbnail every asset has unless a caller asks for a named one.
-const DEFAULT: &str = "default";
-
-impl AssetPreviewsAPI {
-    /// The asset's default preview thumbnail image path, read from
-    /// `assetInfo.previews.thumbnails.default.defaultImage`, or `None` when no
-    /// preview is authored. C++ `UsdMediaAssetPreviewsAPI::GetDefaultThumbnails`.
-    pub fn default_thumbnail(&self) -> Result<Option<String>> {
-        let image = self.prim().asset_info_by_key(&default_image_path())?;
-        Ok(image.as_ref().and_then(Value::as_str).map(str::to_owned))
-    }
-
-    /// Author the default thumbnail image path under the prim's `assetInfo`
-    /// (`previews.thumbnails.default.defaultImage`) (C++ `SetDefaultThumbnails`).
-    ///
-    /// Only the `previews` sub-tree is merged into the edit target's own
-    /// `assetInfo` opinion; other `assetInfo` keys (whether authored locally or
-    /// on weaker layers) are left to compose, so the thumbnail does not flatten
-    /// them into the edit target.
-    pub fn set_default_thumbnail(self, image: impl Into<String>) -> Result<Self> {
-        let image = Value::AssetPath(image.into().into());
-        let prim = self
-            .stage()
-            .override_prim(self.path().clone())?
-            .set_asset_info_by_key(&default_image_path(), image)?;
-        Ok(Self(prim))
-    }
+/// The default thumbnail images of an asset, the dictionary at
+/// `assetInfo["previews:thumbnails:default"]` (C++
+/// `UsdMediaAssetPreviewsAPI::Thumbnails`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Thumbnails {
+    /// `defaultImage`: the image that stands for the asset.
+    pub default_image: sdf::AssetPath,
 }
 
-/// The `assetInfo` key path of the default thumbnail's image.
-fn default_image_path() -> String {
-    format!(
-        "{}:{}:{DEFAULT}:{}",
-        tokens::PREVIEWS,
-        tokens::THUMBNAILS,
-        tokens::DEFAULT_IMAGE
-    )
+impl AssetPreviewsAPI {
+    /// The prim's default thumbnails (C++ `GetDefaultThumbnails`). `None`
+    /// unless the prim has the API applied, the value at
+    /// `previews:thumbnails:default` is a dictionary, and its `defaultImage`
+    /// is an asset path.
+    pub fn default_thumbnails(&self) -> Result<Option<Thumbnails>> {
+        if !self.prim().has_api_schema(tokens::ASSET_PREVIEWS_API)? {
+            return Ok(None);
+        }
+        let thumbnails = self.prim().asset_info_by_key(tokens::PREVIEW_THUMBNAILS_DEFAULT)?;
+        Ok(thumbnails
+            .and_then(Value::try_as_dictionary)
+            .and_then(|mut thumbnails| thumbnails.remove(tokens::DEFAULT_IMAGE))
+            .and_then(Value::try_as_asset_path)
+            .map(|default_image| Thumbnails { default_image }))
+    }
+
+    /// Author `thumbnails` as the prim's default thumbnails (C++
+    /// `SetDefaultThumbnails`). The dictionary at `previews:thumbnails:default`
+    /// in the edit target is replaced whole, keys beside `defaultImage`
+    /// included. The prim need not have the API applied, as in C++.
+    pub fn set_default_thumbnails(self, thumbnails: &Thumbnails) -> Result<Self> {
+        let dictionary = sdf::Dictionary::from([(
+            tokens::DEFAULT_IMAGE.to_string(),
+            Value::AssetPath(thumbnails.default_image.clone()),
+        )]);
+        let prim = self
+            .0
+            .set_asset_info_by_key(tokens::PREVIEW_THUMBNAILS_DEFAULT, Value::Dictionary(dictionary))?;
+        Ok(Self(prim))
+    }
+
+    /// Drop the edit target's default thumbnails (C++
+    /// `ClearDefaultThumbnails`).
+    pub fn clear_default_thumbnails(self) -> Result<Self> {
+        let prim = self.0.clear_asset_info_by_key(tokens::PREVIEW_THUMBNAILS_DEFAULT)?;
+        Ok(Self(prim))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use openusd::sdf::FieldKey;
 
     use crate::media::{AuralMode, PlaybackMode, SpatialAudio, SpatialAudioSchema};
     use openusd::Result;
     use openusd::sdf;
+    use openusd::usd;
 
     #[test]
     fn spatial_audio_roundtrip() -> Result<()> {
@@ -95,19 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn asset_previews_roundtrip() -> Result<()> {
-        let stage = crate::tests::stage("anon.usda")?;
-        let chair = stage.define_prim("/Chair")?;
-        chair.clone().set_type_name("Xform")?;
-        AssetPreviewsAPI::apply(&chair)?.set_default_thumbnail("./chair_thumb.jpg")?;
-
-        assert!(stage.prim("/Chair")?.has_api_schema(tokens::ASSET_PREVIEWS_API)?);
-        let previews = AssetPreviewsAPI::get(&stage, "/Chair")?.expect("AssetPreviewsAPI");
-        assert_eq!(previews.default_thumbnail()?.as_deref(), Some("./chair_thumb.jpg"));
-        Ok(())
-    }
-
-    #[test]
     fn get_rejects_unapplied() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         stage.define_prim("/Bare")?.set_type_name("Xform")?;
@@ -115,23 +109,82 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn set_thumbnail_preserves_other_asset_info() -> Result<()> {
-        let stage = crate::tests::stage("anon.usda")?;
-        let mut info = HashMap::new();
-        info.insert("name".to_string(), Value::String("Chair".to_string()));
-        let chair = stage
+    /// An `Xform` at `/Chair` on a stage of its own.
+    fn chair() -> Result<usd::Prim> {
+        Ok(crate::tests::stage("anon.usda")?
             .define_prim("/Chair")?
-            .set_type_name("Xform")?
-            .set_metadata("assetInfo", Value::Dictionary(info.into()))?;
-        AssetPreviewsAPI::apply(&chair)?.set_default_thumbnail("./t.jpg")?;
+            .set_type_name("Xform")?)
+    }
 
-        // The pre-existing `name` entry survives alongside the new previews.
-        let Some(Value::Dictionary(info)) = stage.field::<Value>("/Chair", FieldKey::AssetInfo)? else {
-            panic!("assetInfo");
-        };
-        assert_eq!(info.get("name"), Some(&Value::String("Chair".to_string())));
-        assert!(info.contains_key(tokens::PREVIEWS));
+    /// Thumbnails with `image` as their default image.
+    fn thumbnails(image: &str) -> Thumbnails {
+        Thumbnails {
+            default_image: image.into(),
+        }
+    }
+
+    /// The thumbnails read before the API is applied are none, even once
+    /// authored; after it is applied they read back (C++
+    /// `testUsdMediaAssetPreviewsAPI.py`'s `test_DefaultThumbnails`).
+    #[test]
+    fn thumbnails_need_api() -> Result<()> {
+        let chair = chair()?;
+        let previews = AssetPreviewsAPI::from_prim_unchecked(chair.clone());
+        assert_eq!(previews.default_thumbnails()?, None);
+
+        let previews = previews.set_default_thumbnails(&thumbnails("./chair_thumb.jpg"))?;
+        assert_eq!(previews.default_thumbnails()?, None);
+
+        let previews = AssetPreviewsAPI::apply(&chair)?;
+        assert_eq!(previews.default_thumbnails()?, Some(thumbnails("./chair_thumb.jpg")));
+        Ok(())
+    }
+
+    /// A `defaultImage` that is a string, not an asset path, reads as none.
+    #[test]
+    fn thumbnails_asset_only() -> Result<()> {
+        let chair = chair()?;
+        AssetPreviewsAPI::apply(&chair)?;
+        let key = format!("{}:{}", tokens::PREVIEW_THUMBNAILS_DEFAULT, tokens::DEFAULT_IMAGE);
+        let chair = chair.set_asset_info_by_key(&key, Value::String("./chair_thumb.jpg".into()))?;
+        assert_eq!(AssetPreviewsAPI::from_prim_unchecked(chair).default_thumbnails()?, None);
+        Ok(())
+    }
+
+    /// A set replaces the whole `default` dictionary.
+    #[test]
+    fn set_replaces_dictionary() -> Result<()> {
+        let chair = chair()?;
+        let sibling = format!("{}:sibling", tokens::PREVIEW_THUMBNAILS_DEFAULT);
+        let chair = chair.set_asset_info_by_key(&sibling, Value::Int(1))?;
+        let previews = AssetPreviewsAPI::apply(&chair)?.set_default_thumbnails(&thumbnails("./t.jpg"))?;
+        assert_eq!(previews.prim().asset_info_by_key(&sibling)?, None);
+        assert_eq!(previews.default_thumbnails()?, Some(thumbnails("./t.jpg")));
+        Ok(())
+    }
+
+    /// The thumbnails leave the other `assetInfo` keys alone.
+    #[test]
+    fn set_keeps_other_asset_info() -> Result<()> {
+        let chair = chair()?.set_asset_info_by_key("name", Value::String("Chair".to_string()))?;
+        let previews = AssetPreviewsAPI::apply(&chair)?.set_default_thumbnails(&thumbnails("./t.jpg"))?;
+        assert_eq!(
+            previews.prim().asset_info_by_key("name")?,
+            Some(Value::String("Chair".to_string()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clear_default_thumbnails() -> Result<()> {
+        let chair = chair()?;
+        let previews = AssetPreviewsAPI::apply(&chair)?.set_default_thumbnails(&thumbnails("./t.jpg"))?;
+        let previews = previews.clear_default_thumbnails()?;
+        assert_eq!(previews.default_thumbnails()?, None);
+        assert_eq!(
+            previews.prim().asset_info_by_key(tokens::PREVIEW_THUMBNAILS_DEFAULT)?,
+            None
+        );
         Ok(())
     }
 }

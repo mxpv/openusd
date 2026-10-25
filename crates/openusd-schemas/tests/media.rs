@@ -51,7 +51,8 @@ fn asset_preview_thumbnail_from_fixture() -> Result<()> {
         .schema_registry(openusd_schemas::schema_registry())
         .open(FIXTURE)?;
     let previews = AssetPreviewsAPI::get(&stage, sdf::path("/World/Chair")?)?.expect("AssetPreviewsAPI");
-    assert_eq!(previews.default_thumbnail()?.as_deref(), Some("./chair_thumb.jpg"));
+    let thumbnails = previews.default_thumbnails()?.expect("default thumbnails");
+    assert_eq!(thumbnails.default_image.asset_path(), "./chair_thumb.jpg");
 
     // A prim without the API applied is not wrapped.
     assert!(AssetPreviewsAPI::get(&stage, sdf::path("/World/Ambient")?)?.is_none());
