@@ -993,3 +993,32 @@ fn bake_anonymous_unsaved() -> Result<(), SchemaError> {
     assert!(!authored(&stage, &bake_id, &format!("{BODY}.points")).1.is_empty());
     Ok(())
 }
+
+/// A binding built from some of a skeleton's targets bakes those alone.
+#[test]
+fn bake_filtered_targets() -> Result<(), SchemaError> {
+    let other = r#"def Mesh "Other" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            rel skel:skeleton = </Root/Skel>
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 1]
+            point3f[] points = [(1, 0, 0), (0, 1, 0)]
+            int[] primvars:skel:jointIndices = [0, 0] (interpolation = "vertex", elementSize = 1)
+            float[] primvars:skel:jointWeights = [1, 1] (interpolation = "vertex", elementSize = 1)
+        }"#;
+    let stage = from_usda(&rig("", LIFT, "", other))?;
+    let [binding] = <[Binding; 1]>::try_from(bindings(&root(&stage)?, PrimPredicate::DEFAULT)?).expect("one binding");
+    assert_eq!(binding.skinning_targets().len(), 2);
+    let body: Vec<SkinningQuery> = binding
+        .skinning_targets()
+        .iter()
+        .filter(|query| query.prim().path().as_str() == BODY)
+        .cloned()
+        .collect();
+    let filtered = Binding::new(binding.skeleton().clone(), body)?;
+    bake_into(slice::from_ref(&filtered), &root_layer(&stage), &BakeOptions::default())?;
+
+    assert!(!baked(&stage, "points").1.is_empty());
+    let layer = root_layer(&stage);
+    assert!(authored(&stage, &layer, "/Root/Group/Other.points").1.is_empty());
+    Ok(())
+}

@@ -6,13 +6,16 @@
 //! skinning method when it is asked for them. What it decides at construction
 //! is a snapshot: which properties are bound, the influence interpolation and
 //! element size, and the joint and blend-shape mappers built from
-//! `skel:joints`, `skel:blendShapes` and the bound skeleton's and animation's
-//! orders. After an edit to any of those, build a new query.
+//! `skel:joints`, `skel:blendShapes` and the skeleton and animation orders it
+//! is built with. After an edit to any of those, build a new query.
+
+use std::sync::Arc;
 
 use openusd::usd::{Attribute, Prim, Relationship, TimeCode};
 use openusd::{Result, gf, sdf};
 
 use super::anim_mapper::AnimMapper;
+use super::anim_query::AnimQuery;
 use super::binding::BindingProperties;
 use super::skeleton_query::SkeletonQuery;
 use super::skinning::{Pose, PrimPose, has_shape, joints_extent};
@@ -28,7 +31,8 @@ pub type JointInfluences = (Vec<i32>, Vec<f32>);
 /// One skinnable prim's resolved binding.
 ///
 /// A [`Cache`](super::Cache) builds one for each skinnable prim it populates
-/// ([`Cache::skinning_query`](super::Cache::skinning_query)).
+/// ([`Cache::skinning_query`](super::Cache::skinning_query)), and
+/// [`new`](Self::new) builds one from properties the caller supplies.
 #[derive(Debug, Clone)]
 pub struct SkinningQuery {
     prim: Prim,
@@ -41,8 +45,11 @@ pub struct SkinningQuery {
     /// The interpolation and `elementSize` the joint-influence primvars share,
     /// or `None` when they are not bound consistently.
     influences: Option<(InfluenceInterpolation, usize)>,
-    /// The number of joints of the bound skeleton, zero without one.
-    skeleton_joints: usize,
+    /// The joint order of the skeleton the query was built against.
+    skel_joint_order: Arc<[String]>,
+    /// The blend-shape order of that skeleton's animation the query was built
+    /// against.
+    anim_blend_shape_order: Arc<[String]>,
     /// `skel:joints` and the mapping from the skeleton's joint order onto it,
     /// where `skel:joints` is authored.
     joint_order: Option<(Vec<String>, AnimMapper)>,
@@ -53,39 +60,48 @@ pub struct SkinningQuery {
 
 impl SkinningQuery {
     /// The query over the binding `properties` resolved for `prim` (C++
-    /// `UsdSkelSkinningQuery`'s constructor). `skeleton` is the query of the
-    /// skeleton bound to `prim`, for its joint order and its animation's
-    /// blend-shape order, where that skeleton has one; without it both orders
-    /// are empty, as C++ passes them, so a joint subset maps no joints and
-    /// the blend-shape mapper maps nothing from the animation.
+    /// `UsdSkelSkinningQuery`'s constructor). `skel_joint_order` is the joint
+    /// order of the skeleton bound to `prim`, and `anim_blend_shape_order` the
+    /// blend-shape order of that skeleton's animation. Each is empty where
+    /// there is none: a joint subset then maps no joints, and the blend-shape
+    /// mapper maps nothing from the animation.
     ///
     /// The joint influences count only when both primvars are bound, with
     /// equal positive `elementSize` and equal `constant` or `vertex`
-    /// interpolation.
-    pub(super) fn new(
+    /// interpolation; otherwise the query has none, as C++ builds it.
+    ///
+    /// An error is a failed read of `skel:joints`, `skel:blendShapes` or the
+    /// metadata of an influence primvar.
+    pub fn new(
         prim: Prim,
-        properties: &BindingProperties,
-        skeleton: Option<&SkeletonQuery>,
+        properties: BindingProperties,
+        skel_joint_order: impl Into<Arc<[String]>>,
+        anim_blend_shape_order: impl Into<Arc<[String]>>,
     ) -> Result<Self, SchemaError> {
-        let skeleton_joints = skeleton.map_or(&[][..], SkeletonQuery::joint_order);
-        let anim_blend_shapes = skeleton
-            .and_then(SkeletonQuery::anim_query)
-            .map_or(&[][..], |anim| anim.blend_shape_order());
-        let joint_indices = properties.joint_indices.clone().map(Primvar::new);
-        let joint_weights = properties.joint_weights.clone().map(Primvar::new);
+        let skel_joint_order = skel_joint_order.into();
+        let anim_blend_shape_order = anim_blend_shape_order.into();
+        let joint_indices = properties.joint_indices.map(Primvar::new);
+        let joint_weights = properties.joint_weights.map(Primvar::new);
         Ok(Self {
             prim,
             influences: influences(joint_indices.as_ref(), joint_weights.as_ref())?,
             joint_indices,
             joint_weights,
-            geom_bind_transform: properties.geom_bind_transform.clone(),
-            skinning_method: properties.skinning_method.clone(),
-            blend_shapes: properties.blend_shapes.clone(),
-            blend_shape_targets: properties.blend_shape_targets.clone(),
-            skeleton_joints: skeleton_joints.len(),
-            joint_order: order(properties.joints.as_ref(), skeleton_joints)?,
-            blend_shape_order: order(properties.blend_shapes.as_ref(), anim_blend_shapes)?,
+            geom_bind_transform: properties.geom_bind_transform,
+            skinning_method: properties.skinning_method,
+            joint_order: order(properties.joints.as_ref(), &skel_joint_order)?,
+            blend_shape_order: order(properties.blend_shapes.as_ref(), &anim_blend_shape_order)?,
+            blend_shapes: properties.blend_shapes,
+            blend_shape_targets: properties.blend_shape_targets,
+            skel_joint_order,
+            anim_blend_shape_order,
         })
+    }
+
+    /// Whether the query was built against the [`orders`] of `skeleton`.
+    pub(super) fn built_for(&self, skeleton: Option<&SkeletonQuery>) -> bool {
+        let (joints, shapes) = orders(skeleton);
+        self.skel_joint_order == joints && self.anim_blend_shape_order == shapes
     }
 
     /// The skinned prim.
@@ -448,7 +464,7 @@ impl SkinningQuery {
     /// `skel:joints` the skeleton lacks takes the identity. `None` unless
     /// `pose` holds one transform per skeleton joint.
     fn prim_pose<'a>(&'a self, pose: &'a Pose) -> Option<PrimPose<'a>> {
-        if pose.xforms().len() != self.skeleton_joints {
+        if pose.xforms().len() != self.skel_joint_order.len() {
             return None;
         }
         PrimPose::new(pose, self.joint_order.as_ref().map(|(_, mapper)| mapper))
@@ -458,6 +474,17 @@ impl SkinningQuery {
 /// [`PrimPose::skin_points`] or [`PrimPose::skin_normals`].
 type SkinFn<'a> =
     fn(&PrimPose<'a>, SkinningMethod, &[gf::Vec3f], &[i32], &[f32], usize, gf::Mat4d) -> Option<Vec<gf::Vec3f>>;
+
+/// The joint order of `skeleton` and the blend-shape order of its animation,
+/// shared with them, each empty where there is none: the orders a skinning
+/// query bound to `skeleton` is built against.
+pub(super) fn orders(skeleton: Option<&SkeletonQuery>) -> (Arc<[String]>, Arc<[String]>) {
+    let joints = skeleton.map_or_else(|| Arc::from([]), SkeletonQuery::shared_joint_order);
+    let shapes = skeleton
+        .and_then(SkeletonQuery::anim_query)
+        .map_or_else(|| Arc::from([]), AnimQuery::shared_blend_shape_order);
+    (joints, shapes)
+}
 
 /// The names `attribute` holds, where it is bound and holds them, with the
 /// mapping from `source` onto them.

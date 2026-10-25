@@ -507,6 +507,17 @@ pub enum SchemaError {
         /// The element type token asked for.
         element_type: &'static str,
     },
+
+    /// A skinning query is bound to a skeleton whose joint order, or whose
+    /// animation's blend-shape order, differs from the orders the query was
+    /// built against.
+    #[error("the skinning query of {target} was not built for skeleton {skeleton}")]
+    ForeignSkinningTarget {
+        /// The skinned prim.
+        target: sdf::Path,
+        /// The skeleton it was to be bound to.
+        skeleton: sdf::Path,
+    },
 }
 
 /// The indices of an indexed primvar that reach outside its values.

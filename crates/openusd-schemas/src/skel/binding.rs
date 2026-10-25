@@ -8,6 +8,7 @@ use openusd::{Result, tf};
 
 use super::cache::in_prototype;
 use super::decode::Bound;
+use super::skeleton_query::SkeletonQuery;
 use super::skinning_query::SkinningQuery;
 use super::{BindingAPI, Skeleton, tokens};
 use crate::{SchemaError, geom};
@@ -20,22 +21,30 @@ pub struct Binding {
     pub(super) skinning_targets: Vec<SkinningQuery>,
 }
 
-/// The binding properties in effect at a prim, each the nearest one with an
-/// authored value (C++ `UsdSkel_CacheImpl`'s `_SkinningQueryKey`). The
-/// blend-shape bindings are read on the skinnable prim alone.
-#[derive(Clone, Default)]
-pub(super) struct BindingProperties {
-    pub(super) joint_indices: Option<Attribute>,
-    pub(super) joint_weights: Option<Attribute>,
-    pub(super) skinning_method: Option<Attribute>,
-    pub(super) geom_bind_transform: Option<Attribute>,
-    pub(super) joints: Option<Attribute>,
-    pub(super) blend_shapes: Option<Attribute>,
-    pub(super) blend_shape_targets: Option<Relationship>,
+/// The binding properties a [`SkinningQuery`] is built over: the attribute
+/// arguments of C++ `UsdSkelSkinningQuery`'s constructor as one value.
+#[derive(Debug, Clone, Default)]
+pub struct BindingProperties {
+    /// `primvars:skel:jointIndices`.
+    pub joint_indices: Option<Attribute>,
+    /// `primvars:skel:jointWeights`.
+    pub joint_weights: Option<Attribute>,
+    /// `primvars:skel:skinningMethod`.
+    pub skinning_method: Option<Attribute>,
+    /// `primvars:skel:geomBindTransform`.
+    pub geom_bind_transform: Option<Attribute>,
+    /// `skel:joints`.
+    pub joints: Option<Attribute>,
+    /// `skel:blendShapes`.
+    pub blend_shapes: Option<Attribute>,
+    /// `skel:blendShapeTargets`.
+    pub blend_shape_targets: Option<Relationship>,
 }
 
 /// The skeleton and binding properties a prim passes down to the prims
-/// beneath it.
+/// beneath it, each the nearest one with an authored value (C++
+/// `UsdSkel_CacheImpl`'s `_SkinningQueryKey`). The blend-shape bindings are
+/// read on the skinnable prim alone.
 #[derive(Clone, Default)]
 pub(super) struct Inherited {
     pub(super) skeleton: Option<Skeleton>,
@@ -51,6 +60,32 @@ struct SkelTypes {
 }
 
 impl Binding {
+    /// `skeleton` bound to the prims of `skinning_targets` (C++
+    /// `UsdSkelBinding`'s constructor).
+    ///
+    /// Each target must have been built against the skeleton's joint order and
+    /// its animation's blend-shape order, both empty where the skeleton is
+    /// inactive or its topology invalid, as a [`Cache`](super::Cache) builds
+    /// its targets. A target built for another skeleton would deform wrongly
+    /// under this one, and is refused with
+    /// [`SchemaError::ForeignSkinningTarget`]. C++ trusts the caller.
+    pub fn new(skeleton: Skeleton, skinning_targets: Vec<SkinningQuery>) -> Result<Self, SchemaError> {
+        // TODO(perf): the check needs only the skeleton's joints and its
+        // animation's blend shapes, and builds the whole definition, poses
+        // included; a bake of the binding then builds it again.
+        let query = SkeletonQuery::new(&skeleton)?;
+        if let Some(foreign) = skinning_targets.iter().find(|target| !target.built_for(query.as_ref())) {
+            return Err(SchemaError::ForeignSkinningTarget {
+                target: foreign.prim().path().clone(),
+                skeleton: skeleton.path().clone(),
+            });
+        }
+        Ok(Self {
+            skeleton,
+            skinning_targets,
+        })
+    }
+
     /// The bound skeleton (C++ `GetSkeleton`).
     pub fn skeleton(&self) -> &Skeleton {
         &self.skeleton

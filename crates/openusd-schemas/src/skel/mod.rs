@@ -81,7 +81,7 @@ mod topology;
 pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::AnimQuery;
 pub use bake::{BakeOptions, Deform, bake_roots, bake_skinning};
-pub use binding::{Binding, is_skinnable};
+pub use binding::{Binding, BindingProperties, is_skinnable};
 pub use blend_shape_query::{BlendShapeQuery, SubShapeWeight};
 pub use cache::Cache;
 pub(crate) use extent::register_extents;

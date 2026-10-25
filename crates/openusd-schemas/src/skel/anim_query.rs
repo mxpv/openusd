@@ -19,6 +19,8 @@
 // `openusd::usd::AttributeQuery`s the same way once that type is `Clone`
 // and `Debug`, and answers sample times from its cached source.
 
+use std::sync::Arc;
+
 use openusd::Result;
 
 use openusd::gf;
@@ -34,7 +36,7 @@ use super::{Animation, AnimationSchema};
 pub struct AnimQuery {
     anim: Animation,
     joints: Vec<String>,
-    blend_shapes: Vec<String>,
+    blend_shapes: Arc<[String]>,
 }
 
 impl AnimQuery {
@@ -43,7 +45,11 @@ impl AnimQuery {
     /// neither has empty orders.
     pub fn new(anim: Animation) -> Result<Self> {
         let joints = anim.joint_paths()?;
-        let blend_shapes: Vec<String> = anim.blend_shapes_attr().cast()?.unwrap_or_default();
+        let blend_shapes = anim
+            .blend_shapes_attr()
+            .cast::<Vec<String>>()?
+            .unwrap_or_default()
+            .into();
         Ok(Self {
             anim,
             joints,
@@ -66,6 +72,12 @@ impl AnimQuery {
     /// Blend-shape ordering as authored on the Animation.
     pub fn blend_shape_order(&self) -> &[String] {
         &self.blend_shapes
+    }
+
+    /// [`blend_shape_order`](Self::blend_shape_order), shared with every
+    /// skinning query built against it.
+    pub(super) fn shared_blend_shape_order(&self) -> Arc<[String]> {
+        self.blend_shapes.clone()
     }
 
     /// Whether any of `translations` / `rotations` / `scales` may change

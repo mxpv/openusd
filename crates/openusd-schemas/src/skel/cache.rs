@@ -10,7 +10,7 @@ use openusd::usd::{Prim, PrimPredicate, SchemaBase};
 use super::anim_query::AnimQuery;
 use super::binding::{Binding, Inherited, skeleton_under, walk};
 use super::skeleton_query::{Definition, SkeletonQuery};
-use super::skinning_query::SkinningQuery;
+use super::skinning_query::{SkinningQuery, orders};
 use super::{Animation, BindingAPI, Root, Skeleton};
 use crate::SchemaError;
 
@@ -93,7 +93,9 @@ impl Cache {
                     Some(skeleton) => self.skel_query_entry(skeleton)?,
                     None => None,
                 };
-                let query = SkinningQuery::new(prim.clone(), &inherited.properties, skeleton)?;
+                // The queries of one skeleton share its orders.
+                let (joint_order, blend_shape_order) = orders(skeleton);
+                let query = SkinningQuery::new(prim.clone(), inherited.properties, joint_order, blend_shape_order)?;
                 self.skinning_queries.insert(prim.clone(), query);
                 Ok(None)
             },

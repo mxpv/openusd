@@ -13,9 +13,9 @@ use openusd_schemas::geom::{
     BBoxCache, BoundableExt, BoundableSchema, Extent, Interpolation, Mesh, Primvar, Purpose, XformCache, XformableExt,
 };
 use openusd_schemas::skel::{
-    AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BlendShape, BlendShapeQuery,
-    BlendShapeSchema, Cache, IndexError, NO_PARENT, Pose, Root, Skeleton, SkeletonQuery, SkeletonSchema,
-    SkinningMethod, SkinningQuery, Topology, skinning, validate_indices,
+    AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BindingProperties, BlendShape,
+    BlendShapeQuery, BlendShapeSchema, Cache, IndexError, NO_PARENT, Pose, Root, Skeleton, SkeletonQuery,
+    SkeletonSchema, SkinningMethod, SkinningQuery, Topology, skinning, validate_indices,
 };
 
 mod common;
@@ -2344,5 +2344,169 @@ def Xform "Outside" {
     assert_eq!(found("/R")?.as_deref(), Some("/R"));
     assert_eq!(found("/R/X/Inner/M")?.as_deref(), Some("/R/X/Inner"));
     assert_eq!(found("/Outside")?, None);
+    Ok(())
+}
+
+/// Skeletons the binding tests rebind one mesh's query to: `Skel` binds
+/// `Anim`, `Swapped` lists the same joints in the other order, `Short` has
+/// one joint, `Reshaped` binds an animation with the blend shapes reversed,
+/// and `Twin` repeats `Skel` with an animation of its own in `Skel`'s order.
+const REBIND: &str = r#"#usda 1.0
+def SkelRoot "R" {
+    def SkelAnimation "Anim" {
+        uniform token[] blendShapes = ["a", "b"]
+    }
+    def SkelAnimation "Reversed" {
+        uniform token[] blendShapes = ["b", "a"]
+    }
+    def SkelAnimation "Same" {
+        uniform token[] blendShapes = ["a", "b"]
+    }
+    def Skeleton "Skel" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token[] joints = ["A", "B"]
+        rel skel:animationSource = </R/Anim>
+    }
+    def Skeleton "Swapped" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token[] joints = ["B", "A"]
+        rel skel:animationSource = </R/Anim>
+    }
+    def Skeleton "Short" {
+        uniform token[] joints = ["A"]
+    }
+    def Skeleton "Reshaped" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token[] joints = ["A", "B"]
+        rel skel:animationSource = </R/Reversed>
+    }
+    def Skeleton "Twin" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token[] joints = ["A", "B"]
+        rel skel:animationSource = </R/Same>
+    }
+    def BlendShape "ShapeB" {}
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </R/Skel>
+        int[] primvars:skel:jointIndices = [1] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        uniform token primvars:skel:skinningMethod = "dualQuaternion"
+        matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] skel:joints = ["B"]
+        uniform token[] skel:blendShapes = ["b"]
+        rel skel:blendShapeTargets = </R/ShapeB>
+    }
+}
+"#;
+
+/// The query the cache builds for `/R/M`, bound to `/R/Skel`.
+fn mesh_query(stage: &Stage) -> Result<SkinningQuery, SchemaError> {
+    Ok(skinning_query(stage, "/R", "/R/M")?.expect("a query"))
+}
+
+/// A binding of the skeleton at `skeleton` over `targets`.
+fn bind(stage: &Stage, skeleton: &str, targets: Vec<SkinningQuery>) -> Result<Binding, SchemaError> {
+    Binding::new(Skeleton::get(stage, skeleton)?.expect("Skeleton"), targets)
+}
+
+/// The error a binding of `skeleton` over the mesh's query answers.
+fn foreign_error(stage: &Stage, skeleton: &str) -> Result<SchemaError, SchemaError> {
+    Ok(bind(stage, skeleton, vec![mesh_query(stage)?]).expect_err("a foreign target"))
+}
+
+/// A query built by hand from the binding properties answers as the cache's.
+#[test]
+fn skinning_query_new() -> Result<(), SchemaError> {
+    let stage = from_usda(REBIND)?;
+    let prim = stage.prim("/R/M")?;
+    let binding = BindingAPI::from_prim_unchecked(prim.clone());
+    let properties = BindingProperties {
+        joint_indices: Some(binding.joint_indices_attr()),
+        joint_weights: Some(binding.joint_weights_attr()),
+        skinning_method: Some(binding.skinning_method_attr()),
+        geom_bind_transform: Some(binding.geom_bind_transform_attr()),
+        joints: Some(binding.joints_attr()),
+        blend_shapes: Some(binding.blend_shapes_attr()),
+        blend_shape_targets: Some(binding.blend_shape_targets_rel()),
+    };
+    let skeleton = SkeletonQuery::new(&Skeleton::get(&stage, "/R/Skel")?.expect("Skeleton"))?.expect("valid");
+    let shapes = skeleton.anim_query().expect("an animation").blend_shape_order();
+    let built = SkinningQuery::new(prim, properties, skeleton.joint_order(), shapes)?;
+    let cached = mesh_query(&stage)?;
+
+    let path = |attribute: Option<&Attribute>| attribute.map(|attribute| attribute.path().clone());
+    assert_eq!(
+        path(built.joint_indices_primvar().map(Primvar::attribute)),
+        path(cached.joint_indices_primvar().map(Primvar::attribute))
+    );
+    assert_eq!(
+        path(built.joint_weights_primvar().map(Primvar::attribute)),
+        path(cached.joint_weights_primvar().map(Primvar::attribute))
+    );
+    assert_eq!(
+        path(built.geom_bind_transform_attr()),
+        path(cached.geom_bind_transform_attr())
+    );
+    assert_eq!(path(built.skinning_method_attr()), path(cached.skinning_method_attr()));
+    assert_eq!(path(built.blend_shapes_attr()), path(cached.blend_shapes_attr()));
+    assert_eq!(
+        built.blend_shape_targets_rel().map(|rel| rel.path().clone()),
+        cached.blend_shape_targets_rel().map(|rel| rel.path().clone())
+    );
+    assert!(built.blend_shape_targets_rel().is_some());
+    assert_eq!(built.skinning_method()?, cached.skinning_method()?);
+    assert_eq!(built.has_joint_influences(), cached.has_joint_influences());
+    assert_eq!(built.interpolation(), cached.interpolation());
+    assert_eq!(built.influences_per_component(), cached.influences_per_component());
+    assert_eq!(built.joint_order(), cached.joint_order());
+    assert_eq!(built.joint_mapper(), cached.joint_mapper());
+    assert_eq!(built.blend_shape_order(), cached.blend_shape_order());
+    assert_eq!(built.blend_shape_mapper(), cached.blend_shape_mapper());
+    assert!(built.has_blend_shapes() && cached.has_blend_shapes());
+    Ok(())
+}
+
+/// A query built for one skeleton is refused for another with the same joint
+/// count in another order.
+#[test]
+fn binding_foreign_order() -> Result<(), SchemaError> {
+    let stage = from_usda(REBIND)?;
+    let error = foreign_error(&stage, "/R/Swapped")?;
+    assert!(
+        matches!(&error, SchemaError::ForeignSkinningTarget { target, skeleton }
+            if target.as_str() == "/R/M" && skeleton.as_str() == "/R/Swapped"),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+/// A query built for one skeleton is refused for one with fewer joints.
+#[test]
+fn binding_foreign_count() -> Result<(), SchemaError> {
+    let stage = from_usda(REBIND)?;
+    assert!(matches!(
+        foreign_error(&stage, "/R/Short")?,
+        SchemaError::ForeignSkinningTarget { .. }
+    ));
+    Ok(())
+}
+
+/// Identical joints bound to an animation ordering its blend shapes the
+/// other way are another skeleton too.
+#[test]
+fn binding_foreign_shapes() -> Result<(), SchemaError> {
+    let stage = from_usda(REBIND)?;
+    assert!(matches!(
+        foreign_error(&stage, "/R/Reshaped")?,
+        SchemaError::ForeignSkinningTarget { .. }
+    ));
+    Ok(())
+}
+
+/// Equal orders are enough: a separately authored skeleton that matches is
+/// accepted, and so is the skeleton the query was built for.
+#[test]
+fn binding_same_orders() -> Result<(), SchemaError> {
+    let stage = from_usda(REBIND)?;
+    let twin = bind(&stage, "/R/Twin", vec![mesh_query(&stage)?])?;
+    assert_eq!(twin.skeleton().path().as_str(), "/R/Twin");
+    assert_eq!(twin.skinning_targets().len(), 1);
+    bind(&stage, "/R/Skel", vec![mesh_query(&stage)?])?;
     Ok(())
 }

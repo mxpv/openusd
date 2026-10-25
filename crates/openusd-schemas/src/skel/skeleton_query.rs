@@ -10,6 +10,7 @@
 
 use std::cell::OnceCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use openusd::Result;
 use openusd::gf;
@@ -47,7 +48,7 @@ pub struct SkeletonQuery {
 /// same skeleton, shares them.
 #[derive(Debug)]
 pub(super) struct Definition {
-    joints: Vec<String>,
+    joints: Arc<[String]>,
     topology: Topology,
     /// The bind pose, where `bindTransforms` holds one entry per joint.
     bind: Option<BindPose>,
@@ -116,6 +117,12 @@ impl SkeletonQuery {
     /// The skeleton's path-encoded joint order.
     pub fn joint_order(&self) -> &[String] {
         &self.definition.joints
+    }
+
+    /// [`joint_order`](Self::joint_order), shared with every skinning query
+    /// built against it.
+    pub(super) fn shared_joint_order(&self) -> Arc<[String]> {
+        self.definition.joints.clone()
     }
 
     /// The joint topology the joint order encodes.
@@ -314,7 +321,7 @@ impl Definition {
         });
         let rest = per_joint(skeleton.rest_transforms()?);
         Ok(Some(Self {
-            joints,
+            joints: joints.into(),
             topology,
             bind,
             rest,
