@@ -2,6 +2,7 @@
 //! properties of its own.
 
 use openusd::Result;
+use openusd::ar;
 use openusd::sdf::{self, Value};
 use openusd::usd::{self, Object, SchemaBase};
 
@@ -56,23 +57,28 @@ impl AssetPreviewsAPI {
         Ok(Self(prim))
     }
 
-    /// The previews of the asset at `layer_path`: the API on the default prim
-    /// of the layer (C++ `GetAssetDefaultPreviews(layerPath)`). `None` where
-    /// the layer names no default prim, or the default prim does not have the
-    /// API applied. A layer or stage that fails to open is an error, where C++
-    /// answers no previews.
+    /// The previews of the asset at `layer_path`, the
+    /// [`layer_default_previews`](Self::layer_default_previews) of the layer
+    /// read from it (C++ `GetAssetDefaultPreviews(layerPath)`). A layer that
+    /// fails to open is an error, where C++ answers no previews.
+    // TODO: C++ reuses a layer already open at `layer_path`, which needs
+    // layers shared between stages (C++ `SdfLayer::FindOrOpen`).
+    pub fn asset_default_previews(layer_path: &str) -> Result<Option<Self>> {
+        // One cache scope spans the read and the stage open, so a package is
+        // opened once.
+        let _scope = ar::CacheScope::begin();
+        Self::layer_default_previews(sdf::Layer::open(layer_path)?)
+    }
+
+    /// The previews of the asset `layer` holds: the API on its default prim
+    /// (C++ `GetAssetDefaultPreviews(layer)`). `None` where the layer names no
+    /// default prim, or the default prim does not have the API applied. A
+    /// stage that fails to open is an error, where C++ answers no previews.
     ///
     /// The view is on a stage of its own, masked to the default prim and its
-    /// ancestors, which the view keeps open. That stage reads the file at
-    /// `layer_path`, and an edit through the view changes that stage's copy of
-    /// the layer.
-    // TODO: the `SdfLayerHandle` overload, and the reuse of an already-open
-    // layer for a path, both need layers shared between stages (C++
-    // `SdfLayer::FindOrOpen`).
-    // TODO(perf): the root layer is read twice, once for its default prim
-    // and once by the stage.
-    pub fn asset_default_previews(layer_path: &str) -> Result<Option<Self>> {
-        let layer = sdf::Layer::open(layer_path)?;
+    /// ancestors, which the view keeps open. `layer` moves into that stage, and
+    /// an edit through the view changes it there.
+    pub fn layer_default_previews(layer: sdf::Layer) -> Result<Option<Self>> {
         let Some(default_prim) = layer
             .pseudo_root()
             .and_then(|root| root.default_prim())
@@ -86,7 +92,7 @@ impl AssetPreviewsAPI {
         let stage = usd::Stage::builder()
             .schema_registry(crate::schema_registry())
             .mask(mask)
-            .open(layer_path)?;
+            .open_layer(layer)?;
         Self::from_prim(stage.prim(default_prim)?)
     }
 }
@@ -257,6 +263,17 @@ mod tests {
     fn previews_no_default_prim() -> Result<()> {
         let (_dir, path) = asset(None)?;
         assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        Ok(())
+    }
+
+    /// A layer already read answers through its unsaved default prim.
+    #[test]
+    fn layer_default_previews() -> Result<()> {
+        let (_dir, path) = asset(None)?;
+        let mut layer = sdf::Layer::open(&path)?;
+        layer.edit(|e| e.set_default_prim("Chair"))?;
+        let previews = AssetPreviewsAPI::layer_default_previews(layer)?.expect("default previews");
+        assert_eq!(previews.path().as_str(), "/Chair");
         Ok(())
     }
 

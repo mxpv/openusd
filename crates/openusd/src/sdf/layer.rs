@@ -175,6 +175,17 @@ impl Layer {
         layer
     }
 
+    /// The layer as a read root: its identifier, the location its paths anchor
+    /// against, and its data. Its sinks and resolver are dropped.
+    pub(crate) fn into_prepared(self) -> sdf::PreparedLayer {
+        let resolved = ar::ResolvedPath::new(self.real_path());
+        sdf::PreparedLayer {
+            identifier: self.identifier,
+            resolved,
+            data: self.data.into_inner(),
+        }
+    }
+
     /// Shared constructor backing [`new`](Self::new) and
     /// [`new_resolved`](Self::new_resolved).
     fn build(identifier: String, real_path: Option<String>, data: LayerData) -> Self {

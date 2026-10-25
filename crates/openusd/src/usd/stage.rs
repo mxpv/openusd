@@ -4052,6 +4052,26 @@ impl StageBuilder {
         // One cache scope spans the open. A packaged root is opened once for
         // its default-layer lookup, its probes and its entry reads.
         let _scope = ar::CacheScope::begin();
+        let root = self.registry.prepare_root(root_path, None)?;
+        self.open_prepared(root)
+    }
+
+    /// Opens a stage whose root is `layer`, a layer already read (C++
+    /// `UsdStage::Open(SdfLayerHandle)`). The layer's data is the stage's root
+    /// as it stands, unsaved edits included, and its sublayers open through
+    /// the builder's registry, as [`open`](Self::open)'s do.
+    ///
+    /// The root keeps the layer's identifier as given. The stage takes
+    /// ownership of the layer: its sinks do not carry over, and the stage reads
+    /// and saves it through the builder's registry.
+    pub fn open_layer(self, layer: sdf::Layer) -> Result<Stage> {
+        let _scope = ar::CacheScope::begin();
+        self.open_prepared(layer.into_prepared())
+    }
+
+    /// Opens a stage over `root`, a root layer already read, with the session
+    /// layer the builder names.
+    fn open_prepared(self, root: sdf::PreparedLayer) -> Result<Stage> {
         // The stage root stack is one layer stack whose single expression-variable
         // context (C++ `PcpExpressionVariables`) — the root layer's own variables
         // overlaid by the session root's own — resolves the `${VAR}` sublayers of
@@ -4060,7 +4080,6 @@ impl StageBuilder {
         // a variable authored on the stage root layer (and a root sublayer one on the
         // session), and composition later resolves each `${VAR}` sublayer to the same
         // layer this collection opened.
-        let root = self.registry.prepare_root(root_path, None)?;
         let session = self.prepare_session()?;
         let root_stack_vars = self.root_stack_expression_variables(&root, session.as_ref())?;
         let session = session
@@ -4091,22 +4110,7 @@ impl StageBuilder {
     /// stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     /// ```
     pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage> {
-        let identifier = identifier.into();
-        // The anonymous root layer authors no `expressionVariables`, so the root
-        // stack context reduces to the session root's own — which
-        // `open_prepared_stack` composes from the empty ancestor anyway.
-        let session = self
-            .prepare_session()?
-            .map(|session| self.collect_layers(session, &HashMap::new()))
-            .transpose()?
-            .unwrap_or_default();
-        let session_layer_count = session.layers.len();
-        let layers: Vec<sdf::Layer> = session
-            .layers
-            .into_iter()
-            .chain(std::iter::once(sdf::Layer::new_anonymous(identifier)))
-            .collect();
-        Ok(self.make_stage(layers, session_layer_count, session.diagnostics))
+        self.open_layer(sdf::Layer::new_anonymous(identifier.into()))
     }
 
     /// The configured session layer read ahead of its stack, or `None` when
@@ -4156,15 +4160,15 @@ impl StageBuilder {
     }
 
     /// Whether the builder's requested mutes name `identifier`, each spelling
-    /// canonicalized against the root layer at `root` the way the graph's
+    /// canonicalized against `root`, the root layer's anchor, the way the graph's
     /// muted set is (C++ `Pcp_MutedLayers::_GetCanonicalLayerId`): resolved
     /// to the identifier its layer interns under. Any spelling of one layer
     /// therefore matches. Lets collection test an interned identifier for
     /// muting before the graph exists.
-    fn mutes(&self, root: &ar::ResolvedPath, identifier: &str) -> bool {
+    fn mutes(&self, root: Option<&ar::ResolvedPath>, identifier: &str) -> bool {
         self.muted
             .iter()
-            .any(|m| self.registry.create_identifier(m, Some(root)) == identifier)
+            .any(|m| self.registry.create_identifier(m, root) == identifier)
     }
 
     /// The stage root stack's single expression-variable context (C++
@@ -4180,7 +4184,7 @@ impl StageBuilder {
     ) -> Result<HashMap<String, sdf::Value>> {
         let mut vars = sdf::expr::read_variables(root.data.as_ref())?.into_owned();
         if let Some(session) = session
-            && !self.mutes(&root.resolved, &session.identifier)
+            && !self.mutes(root.anchor(), &session.identifier)
         {
             let session_own = sdf::expr::read_variables(session.data.as_ref())?.into_owned();
             sdf::expr::compose_over(&mut vars, &session_own);
@@ -4188,10 +4192,9 @@ impl StageBuilder {
         Ok(vars)
     }
 
-    /// Assemble a [`Stage`] from already-collected layers. Shared
-    /// construction tail for [`StageBuilder::open`] and
-    /// [`StageBuilder::in_memory`]; any new `Stage` field must be wired in
-    /// here once. Crate-visible so tests can assemble a multi-layer stage
+    /// Assemble a [`Stage`] from already-collected layers: the construction
+    /// tail every open of the builder ends in. Any new `Stage` field must be
+    /// wired in here once. Crate-visible so tests can assemble a multi-layer stage
     /// (references, sublayers) from hand-built [`sdf::Layer`]s.
     pub(crate) fn make_stage(
         self,

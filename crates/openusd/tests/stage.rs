@@ -246,6 +246,68 @@ fn internal_target_root_diagnostic() -> Result<()> {
     Ok(())
 }
 
+/// A stage opened on a layer already read composes it as it stands, an
+/// unsaved edit included, with the sublayers it names.
+#[test]
+fn open_layer_unsaved() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"FromSub\" {}\n")?;
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"Saved\" {}\n",
+    )?;
+    let mut layer = sdf::Layer::open(root.to_str().unwrap())?;
+    layer.edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/Unsaved", sdf::Specifier::Def, "")?;
+        Ok(())
+    })?;
+    let identifier = layer.identifier().to_string();
+
+    let stage = Stage::builder().open_layer(layer)?;
+    assert_eq!(stage.root_layer().identifier(), identifier);
+    for path in ["/Saved", "/Unsaved", "/FromSub"] {
+        assert!(stage.prim(path)?.is_valid()?, "{path}");
+    }
+    Ok(())
+}
+
+/// A stage opened on an anonymous layer opens the sublayer it names by an
+/// absolute path, which resolves without an anchor.
+#[test]
+fn open_layer_anonymous() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let sub = dir.path().join("sub.usda");
+    fs::write(&sub, "#usda 1.0\ndef \"FromSub\" {}\n")?;
+    let mut layer = sdf::Layer::new_anonymous("root.usda");
+    let sub = sub.to_str().unwrap().to_string();
+    layer.edit(|e| {
+        e.pseudo_root_mut()?.set_sublayers([sub]);
+        Ok(())
+    })?;
+
+    let stage = Stage::builder().open_layer(layer)?;
+    assert!(stage.root_layer().is_anonymous());
+    assert!(stage.prim("/FromSub")?.is_valid()?);
+    Ok(())
+}
+
+/// A stage opened on a layer under a mask holds what the mask admits.
+#[test]
+fn open_layer_masked() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\ndef \"A\" {\n    def \"Child\" {}\n}\ndef \"B\" {}\n")?;
+    let layer = sdf::Layer::open(root.to_str().unwrap())?;
+    let stage = Stage::builder()
+        .mask(usd::StagePopulationMask::new(["/A/__No_Such_Prim__"])?)
+        .open_layer(layer)?;
+    assert!(stage.prim("/A")?.is_valid()?);
+    assert!(!stage.prim("/A/Child")?.is_valid()?);
+    assert!(!stage.prim("/B")?.is_valid()?);
+    Ok(())
+}
+
 #[test]
 fn missing_sublayer_retained() -> Result<()> {
     let dir = tempfile::tempdir()?;

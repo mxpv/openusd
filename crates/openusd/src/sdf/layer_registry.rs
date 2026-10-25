@@ -161,6 +161,15 @@ pub(crate) struct PreparedLayer {
     pub data: sdf::LayerData,
 }
 
+impl PreparedLayer {
+    /// The location the layer's relative paths anchor against, or `None` for
+    /// an anonymous layer, which has none (C++
+    /// `SdfComputeAssetPathRelativeToLayer`).
+    pub(crate) fn anchor(&self) -> Option<&ar::ResolvedPath> {
+        (!sdf::Layer::is_anonymous_identifier(&self.identifier)).then_some(&self.resolved)
+    }
+}
+
 /// The registry as the resolver it fronts. An identifier passes the
 /// registry's own rules (`create_identifier`, `in_memory_identifier`,
 /// `is_context_dependent_path`); every other call reaches the resolver as it
@@ -615,6 +624,7 @@ impl LayerRegistry {
         visited: &mut HashSet<String>,
         layers: &mut Vec<sdf::Layer>,
     ) -> Result<(), LoadError> {
+        let anchor = layer.anchor().cloned();
         let PreparedLayer {
             identifier,
             resolved,
@@ -679,7 +689,7 @@ impl LayerRegistry {
                 sub_path
             };
 
-            let sub_id = self.create_identifier(&sub_asset, Some(&resolved));
+            let sub_id = self.create_identifier(&sub_asset, anchor.as_ref());
             // A sublayer already opened this pass is skipped. One already in the
             // graph is skipped too — except in a reload pass, where it is re-walked
             // to reach the `${VAR}` sublayers the new context now resolves below it
