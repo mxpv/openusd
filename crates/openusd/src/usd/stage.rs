@@ -4317,6 +4317,39 @@ pub(crate) mod tests {
         Stage::builder().in_memory("anon.usda")
     }
 
+    /// Stages opened through clones of one resolver under a held cache scope
+    /// read each shared file once, and each keeps its edits to itself.
+    #[test]
+    fn scope_shares_layers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        let shared = dir.path().join("shared.usda");
+        fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./shared.usda@]\n)\n")?;
+        fs::write(&shared, "#usda 1.0\ndef \"Read\"\n{\n}\n")?;
+        let resolver = ar::DefaultResolver::new();
+        let open = || {
+            Stage::builder()
+                .resolver(resolver.clone())
+                .open(root.to_str().expect("utf-8 path"))
+        };
+
+        let _scope = ar::CacheScope::begin();
+        let first = open()?;
+        // Rewritten with its timestamp kept, the file reads as it was only
+        // when the second stage shares the first one's read.
+        let modified = fs::metadata(&shared)?.modified()?;
+        fs::write(&shared, "#usda 1.0\ndef \"Rewritten\"\n{\n}\n")?;
+        fs::File::options().write(true).open(&shared)?.set_modified(modified)?;
+        let second = open()?;
+        assert!(second.prim("/Read")?.is_defined()?);
+        assert!(!second.prim("/Rewritten")?.is_valid()?);
+
+        first.define_prim("/Mine")?;
+        assert!(first.prim("/Mine")?.is_defined()?);
+        assert!(!second.prim("/Mine")?.is_valid()?);
+        Ok(())
+    }
+
     /// A stage whose `/Child` references `</R>` in `ref.usda`, with the edit
     /// target set to that arc: `root` is authored before `/Child` in the root
     /// layer, `referenced` inside `/R`. Hands back `/Child` and the target.

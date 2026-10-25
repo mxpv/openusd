@@ -489,9 +489,16 @@ pub trait Resolver {
         AssetInfo::default()
     }
 
-    /// Returns the modification timestamp of a resolved asset.
+    /// Returns the modification timestamp of a resolved asset. A packaged
+    /// asset (`pkg.usdz[root.usda]`) changes with its outermost package, so
+    /// it reports the package file's.
     fn modification_timestamp(&self, _asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
-        fs::metadata(&**resolved_path).and_then(|m| m.modified()).ok()
+        let path = resolved_path.to_string_lossy();
+        let file = match split_package_relative_path_outer(&path) {
+            Some((package, _)) => PathBuf::from(package),
+            None => resolved_path.to_path_buf(),
+        };
+        fs::metadata(file).and_then(|m| m.modified()).ok()
     }
 
     /// A stable token identifying this resolver's configuration, used as the
@@ -638,6 +645,11 @@ impl CacheHandle {
 /// A file asset is read into memory unless the resolver was told to map
 /// files ([`map_files`](Self::map_files)), in which case it is served from a
 /// read-only memory mapping and a layer holds no copy of its file.
+///
+/// A clone is the same resolver, [`cache_id`](Resolver::cache_id)
+/// included, so stages opened through clones of one resolver under one
+/// [`CacheScope`] share what it read.
+#[derive(Clone)]
 pub struct DefaultResolver {
     search_paths: Vec<PathBuf>,
     /// This resolver's [`cache_id`](Resolver::cache_id).

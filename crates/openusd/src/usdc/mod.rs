@@ -390,7 +390,7 @@ fn field_name(file: &CrateFile, token_index: usize) -> &str {
 }
 
 /// Read `usdc` data from a file on disk.
-pub fn read_file(path: impl AsRef<Path>) -> crate::Result<Box<dyn sdf::AbstractData>> {
+pub fn read_file(path: impl AsRef<Path>) -> crate::Result<sdf::LayerData> {
     let path = path.as_ref();
     let bytes = fs::read(path)
         .map_err(|error| io::Error::new(error.kind(), format!("unable to open {}: {error}", path.display())))?;

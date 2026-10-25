@@ -78,7 +78,7 @@ impl Archive {
     }
 
     /// Opens the first (root) layer from the archive.
-    pub fn read_first_layer(&mut self) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
+    pub fn read_first_layer(&mut self) -> Result<sdf::LayerData, ArchiveError> {
         let name = self.first_layer_name()?.ok_or(ArchiveError::NoDefaultLayer)?;
         self.read(&name)
     }
@@ -161,7 +161,7 @@ impl Archive {
 
     /// Read either a USDA or USDC file from the archive. A nested `.usdz`
     /// entry reads that package's default (first) layer.
-    pub fn read(&mut self, file_path: &str) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
+    pub fn read(&mut self, file_path: &str) -> Result<sdf::LayerData, ArchiveError> {
         let bytes = self.entry(file_path)?;
 
         if file_path.ends_with(".usdz") {

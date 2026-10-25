@@ -5,9 +5,10 @@
 //! ([`find_by_extension`](LayerRegistry::find_by_extension) /
 //! [`find_by_id`](LayerRegistry::find_by_id)) to the
 //! [`FileFormat`](super::FileFormat) claiming each layer's extension. It is the
-//! Rust seam for C++ `Sdf_LayerRegistry` and `SdfFileFormat::FindByExtension`:
-//! a future `find_or_open` cache (the registry will own loaded layers and dedup
-//! them) and custom format registration grow here.
+//! Rust seam for C++ `Sdf_LayerRegistry` and `SdfFileFormat::FindByExtension`.
+//! Under an [`ar::CacheScope`] it parses each file once and shares the parsed
+//! data among the layers opened over it; custom format registration grows
+//! here too.
 //!
 //! References and payloads are not followed here. Composition opens each
 //! reference/payload target layer on demand when it reaches the arc (see
@@ -20,6 +21,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use crate::ar;
@@ -142,9 +144,11 @@ impl From<LoadError> for crate::Error {
 /// demand through it. The resolver is private: every path that resolves and
 /// reads a layer is a method here, and the registry stands in as the
 /// [`ar::Resolver`] it fronts where one is asked for, with the identifier
-/// rules below applied. This is the Rust analog of C++ `Sdf_LayerRegistry`;
-/// it will grow a ref-counted loaded-layer cache (`find_or_open` dedup) and
-/// custom format registration.
+/// rules below applied. This is the Rust analog of C++ `Sdf_LayerRegistry`.
+///
+/// TODO: custom format registration, and handing out one shared
+/// [`sdf::Layer`] per identifier (C++ `SdfLayer::FindOrOpen`) rather than
+/// one layer per open over shared parsed data.
 pub struct LayerRegistry {
     resolver: Rc<dyn ar::Resolver>,
 }
@@ -159,6 +163,28 @@ pub(crate) struct PreparedLayer {
     pub resolved: ar::ResolvedPath,
     /// The layer's data.
     pub data: sdf::LayerData,
+}
+
+/// Parsed layer data as [`LayerCache`] keeps it, shared by every layer
+/// opened over it.
+type SharedLayerData = Arc<dyn sdf::AbstractData + Send + Sync>;
+
+/// The layers [`LayerRegistry::load`] has parsed under an
+/// [`ar::CacheScope`], by the file each was read from.
+#[derive(Default)]
+struct LayerCache(Mutex<HashMap<LayerKey, SharedLayerData>>);
+
+/// What a [`LayerCache`] entry was read from: the file, the resolver that
+/// read it, and the file's modification timestamp then.
+#[derive(PartialEq, Eq, Hash)]
+struct LayerKey {
+    /// The [`cache_id`](ar::Resolver::cache_id) of the resolver.
+    resolver: u64,
+    /// The location the layer resolved to.
+    resolved: ar::ResolvedPath,
+    /// The location's modification timestamp, `None` when the resolver
+    /// reports none.
+    modified: Option<SystemTime>,
 }
 
 /// The registry as the resolver it fronts. An identifier passes the
@@ -389,13 +415,14 @@ impl LayerRegistry {
     /// the relative asset paths the layer authors, and it is not always the
     /// identifier: a package resolves to its package-relative default layer.
     /// [`open_layer`](Self::open_layer) builds the [`sdf::Layer`] that keeps
-    /// it.
+    /// it. The read goes through [`load`](Self::load), so a layer already
+    /// read under the open cache scope is not read again.
     pub(crate) fn open(&self, identifier: &str) -> Result<Option<PreparedLayer>, LoadError> {
         let _scope = ar::CacheScope::begin();
         let Some(resolved) = self.resolve_layer(identifier) else {
             return Ok(None);
         };
-        let data = self.read(&resolved)?;
+        let data = self.load(identifier, &resolved)?;
         Ok(Some(PreparedLayer {
             identifier: identifier.to_owned(),
             resolved,
@@ -591,6 +618,40 @@ impl LayerRegistry {
             .read(self.resolver.as_ref(), resolved)?)
     }
 
+    /// Reads the layer `identifier` resolved to at `resolved`, once per
+    /// [`ar::CacheScope`]: a scope open on the calling thread, or one sharing
+    /// its [`CacheHandle`](ar::CacheHandle), keeps what this reads, and a
+    /// later load of the same file through the same resolver shares the
+    /// parsed data. Each layer built over it keeps its edits to itself. A file
+    /// whose [modification timestamp](ar::Resolver::modification_timestamp)
+    /// has changed since is read again, and a resolver without a
+    /// [`cache_id`](ar::Resolver::cache_id) reads every time.
+    ///
+    /// TODO(rayon): the read runs outside the cache's lock, so threads
+    /// sharing the cache that load one layer together each parse it and the
+    /// first to finish is kept. A per-key slot, as the `usdz` package cache
+    /// has, would let the later ones wait for the first.
+    fn load(&self, identifier: &str, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
+        let Some(resolver) = self.resolver.cache_id() else {
+            return self.read(resolved);
+        };
+        let key = LayerKey {
+            resolver,
+            modified: self.resolver.modification_timestamp(identifier, resolved),
+            resolved: resolved.clone(),
+        };
+        let scope = ar::CacheScope::begin();
+        let cache = scope.handle().cache::<LayerCache>();
+        let found = tf::lock(&cache.0).get(&key).cloned();
+        let shared = if let Some(found) = found {
+            found
+        } else {
+            let read: SharedLayerData = Arc::from(self.read(resolved)?);
+            Arc::clone(tf::lock(&cache.0).entry(key).or_insert(read))
+        };
+        Ok(Box::new(sdf::SharedData::new(shared)))
+    }
+
     /// Emits an already-read layer and recursively opens its sublayers.
     ///
     /// `layer` is read by the caller (the root in
@@ -706,7 +767,7 @@ impl LayerRegistry {
             // like a missing one — reported at this referencing site and, being a
             // leaf, left out of `visited` (dropping only this layer; the root's read
             // failure propagated from `open_stack`).
-            let sub_data = match self.read(&sub_resolved) {
+            let sub_data = match self.load(&sub_id, &sub_resolved) {
                 Ok(data) => data,
                 Err(reason) => {
                     on_error(Error::UnreadableAsset {
@@ -750,6 +811,11 @@ impl LayerRegistry {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::Cell;
+    use std::fs;
+    use std::path::Path as FsPath;
+    use std::time::Duration;
+
     use super::*;
     use crate::Result;
     use crate::sdf::FileFormatCaps;
@@ -1066,6 +1132,139 @@ pub(crate) mod tests {
             panic!("expected UnresolvedAsset, got {:?}", errors[0]);
         };
         assert!(referencing_layer.contains("sublayer_invalid.usda"));
+        Ok(())
+    }
+
+    /// A filesystem resolver that counts the assets it opens.
+    struct Counting {
+        inner: ar::DefaultResolver,
+        opens: Rc<Cell<usize>>,
+    }
+
+    impl ar::Resolver for Counting {
+        fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+            self.inner.create_identifier(asset_path, anchor)
+        }
+
+        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            self.inner.resolve(asset_path)
+        }
+
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            self.inner.resolve_for_new_asset(asset_path)
+        }
+
+        fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+            self.opens.set(self.opens.get() + 1);
+            self.inner.open_asset(resolved_path)
+        }
+
+        fn cache_id(&self) -> Option<u64> {
+            self.inner.cache_id()
+        }
+    }
+
+    /// A registry over a [`Counting`] resolver, with its open count.
+    fn counting() -> (LayerRegistry, Rc<Cell<usize>>) {
+        let opens = Rc::new(Cell::new(0));
+        let resolver = Counting {
+            inner: ar::DefaultResolver::new(),
+            opens: Rc::clone(&opens),
+        };
+        (LayerRegistry::new(Box::new(resolver)), opens)
+    }
+
+    /// Writes a text layer at `path` defining the one prim `prim`.
+    fn write_layer(path: &FsPath, prim: &str) -> io::Result<()> {
+        fs::write(path, format!("#usda 1.0\n\ndef Xform \"{prim}\"\n{{\n}}\n"))
+    }
+
+    /// Under one cache scope a layer is read once, and each layer opened over
+    /// the shared read keeps its edits to itself.
+    #[test]
+    fn scope_shares_parse() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("shared.usda");
+        write_layer(&path, "World")?;
+        let (registry, opens) = counting();
+        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+
+        let _scope = ar::CacheScope::begin();
+        let mut first = registry.open_layer(&identifier)?.expect("resolves");
+        let second = registry.open_layer(&identifier)?.expect("resolves");
+        assert_eq!(opens.get(), 1, "the second open shares the first read");
+
+        first.edit(|l| {
+            sdf::PrimSpec::new(l.data_mut(), "/Mine", sdf::Specifier::Def, "Xform")?;
+            Ok(())
+        })?;
+        assert!(first.prim("/Mine")?.is_some());
+        assert!(second.prim("/Mine")?.is_none(), "an edit stays in its layer");
+        assert!(second.prim("/World")?.is_some());
+        Ok(())
+    }
+
+    /// Without a scope held across them, each open reads the layer.
+    #[test]
+    fn no_scope_rereads() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("alone.usda");
+        write_layer(&path, "World")?;
+        let (registry, opens) = counting();
+        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+
+        registry.open_layer(&identifier)?.expect("resolves");
+        registry.open_layer(&identifier)?.expect("resolves");
+        assert_eq!(opens.get(), 2);
+        Ok(())
+    }
+
+    /// A file changed since the scope read it is read again.
+    #[test]
+    fn modified_rereads() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("changing.usda");
+        write_layer(&path, "Before")?;
+        let (registry, opens) = counting();
+        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+
+        let _scope = ar::CacheScope::begin();
+        let before = registry.open_layer(&identifier)?.expect("resolves");
+        write_layer(&path, "After")?;
+        let modified = fs::metadata(&path)?.modified()? + Duration::from_secs(1);
+        fs::File::options().write(true).open(&path)?.set_modified(modified)?;
+
+        let after = registry.open_layer(&identifier)?.expect("resolves");
+        assert_eq!(opens.get(), 2);
+        assert!(before.prim("/Before")?.is_some());
+        assert!(after.prim("/After")?.is_some());
+        Ok(())
+    }
+
+    /// A layer that outlives the scope it was read under writes its staged
+    /// and later edits into its own data.
+    #[test]
+    fn outlives_scope() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("kept.usda");
+        write_layer(&path, "World")?;
+        let registry = registry();
+        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+
+        let scope = ar::CacheScope::begin();
+        let mut layer = registry.open_layer(&identifier)?.expect("resolves");
+        layer.edit(|l| {
+            sdf::PrimSpec::new(l.data_mut(), "/During", sdf::Specifier::Def, "Xform")?;
+            Ok(())
+        })?;
+        drop(scope);
+        layer.edit(|l| {
+            sdf::PrimSpec::new(l.data_mut(), "/After", sdf::Specifier::Def, "Xform")?;
+            Ok(())
+        })?;
+        for prim in ["/World", "/During", "/After"] {
+            assert!(layer.prim(prim)?.is_some(), "{prim} is kept");
+        }
         Ok(())
     }
 }
