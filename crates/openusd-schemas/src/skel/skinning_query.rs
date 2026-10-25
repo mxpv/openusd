@@ -2,12 +2,12 @@
 //! `UsdSkelSkinningQuery`).
 //!
 //! The query holds the binding properties the prim resolves, inherited or its
-//! own, and reads the joint influences and the geom bind transform at
-//! whatever time it is asked for. What it decides at construction is a
-//! snapshot: which properties are bound, the skinning method, the influence
-//! interpolation and element size, and the joint and blend-shape mappers
-//! built from `skel:joints`, `skel:blendShapes` and the bound skeleton's and
-//! animation's orders. After an edit to any of those, build a new query.
+//! own, and reads the joint influences, the geom bind transform and the
+//! skinning method when it is asked for them. What it decides at construction
+//! is a snapshot: which properties are bound, the influence interpolation and
+//! element size, and the joint and blend-shape mappers built from
+//! `skel:joints`, `skel:blendShapes` and the bound skeleton's and animation's
+//! orders. After an edit to any of those, build a new query.
 
 use openusd::usd::{Attribute, Prim, Relationship, TimeCode};
 use openusd::{Result, gf, sdf};
@@ -35,10 +35,9 @@ pub struct SkinningQuery {
     joint_indices: Option<Primvar>,
     joint_weights: Option<Primvar>,
     geom_bind_transform: Option<Attribute>,
+    skinning_method: Option<Attribute>,
+    blend_shapes: Option<Attribute>,
     blend_shape_targets: Option<Relationship>,
-    /// The skinning method, or `None` for a token that names no method this
-    /// crate knows.
-    skinning_method: Option<SkinningMethod>,
     /// The interpolation and `elementSize` the joint-influence primvars share,
     /// or `None` when they are not bound consistently.
     influences: Option<(InfluenceInterpolation, usize)>,
@@ -46,10 +45,10 @@ pub struct SkinningQuery {
     skeleton_joints: usize,
     /// `skel:joints` and the mapping from the skeleton's joint order onto it,
     /// where `skel:joints` is authored.
-    joints: Option<(Vec<String>, AnimMapper)>,
+    joint_order: Option<(Vec<String>, AnimMapper)>,
     /// `skel:blendShapes` and the mapping from the animation's blend-shape
     /// order onto it, where `skel:blendShapes` is authored.
-    blend_shapes: Option<(Vec<String>, AnimMapper)>,
+    blend_shape_order: Option<(Vec<String>, AnimMapper)>,
 }
 
 impl SkinningQuery {
@@ -62,8 +61,7 @@ impl SkinningQuery {
     ///
     /// The joint influences count only when both primvars are bound, with
     /// equal positive `elementSize` and equal `constant` or `vertex`
-    /// interpolation. The skinning method is read once, at the default time,
-    /// as C++ reads it.
+    /// interpolation.
     pub(super) fn new(
         prim: Prim,
         properties: &BindingProperties,
@@ -81,11 +79,12 @@ impl SkinningQuery {
             joint_indices,
             joint_weights,
             geom_bind_transform: properties.geom_bind_transform.clone(),
+            skinning_method: properties.skinning_method.clone(),
+            blend_shapes: properties.blend_shapes.clone(),
             blend_shape_targets: properties.blend_shape_targets.clone(),
-            skinning_method: skinning_method(properties.skinning_method.as_ref())?,
             skeleton_joints: skeleton_joints.len(),
-            joints: order(properties.joints.as_ref(), skeleton_joints)?,
-            blend_shapes: order(properties.blend_shapes.as_ref(), anim_blend_shapes)?,
+            joint_order: order(properties.joints.as_ref(), skeleton_joints)?,
+            blend_shape_order: order(properties.blend_shapes.as_ref(), anim_blend_shapes)?,
         })
     }
 
@@ -103,7 +102,7 @@ impl SkinningQuery {
     /// `true` when the prim binds blend shapes: `skel:blendShapes` and
     /// `skel:blendShapeTargets` are both authored (C++ `HasBlendShapes`).
     pub fn has_blend_shapes(&self) -> bool {
-        self.blend_shapes.is_some() && self.blend_shape_targets.is_some()
+        self.blend_shape_order.is_some() && self.blend_shape_targets.is_some()
     }
 
     /// The interpolation of the joint influences: `constant` where they are
@@ -130,13 +129,55 @@ impl SkinningQuery {
         self.influences.map_or(1, |(_, element_size)| element_size)
     }
 
-    /// The skinning method `primvars:skel:skinningMethod` names (C++
-    /// `GetSkinningMethod`). An unauthored method, or a value that is not a
-    /// token, is `classicLinear`, as C++ falls back. `None` for a token that
-    /// names no method this crate knows, for which the skinning methods
-    /// answer `None`.
-    pub fn skinning_method(&self) -> Option<SkinningMethod> {
-        self.skinning_method
+    /// The skinning method `primvars:skel:skinningMethod` names at the default
+    /// time (C++ `GetSkinningMethod`). An unbound method, or a value that is
+    /// not a token, is `classicLinear`, as C++ falls back. `None` for a token
+    /// that names no method, for which the skinning methods answer `None`.
+    pub fn skinning_method(&self) -> Result<Option<SkinningMethod>> {
+        let value = self
+            .skinning_method
+            .as_ref()
+            .map(Attribute::get::<sdf::Value>)
+            .transpose()?;
+        Ok(match value.flatten() {
+            Some(sdf::Value::Token(token)) => SkinningMethod::from_token(token),
+            _ => Some(SkinningMethod::ClassicLinear),
+        })
+    }
+
+    /// The `primvars:skel:jointIndices` primvar the query is bound through:
+    /// the prim's own or inherited, and under an instance proxy its prim in
+    /// the prototype's (C++ `GetJointIndicesPrimvar`).
+    pub fn joint_indices_primvar(&self) -> Option<&Primvar> {
+        self.joint_indices.as_ref()
+    }
+
+    /// The `primvars:skel:jointWeights` primvar the query is bound through:
+    /// the prim's own or inherited, and under an instance proxy its prim in
+    /// the prototype's (C++ `GetJointWeightsPrimvar`).
+    pub fn joint_weights_primvar(&self) -> Option<&Primvar> {
+        self.joint_weights.as_ref()
+    }
+
+    /// The `primvars:skel:geomBindTransform` attribute the query is bound
+    /// through: the prim's own or inherited, and under an instance proxy its
+    /// prim in the prototype's (C++ `GetGeomBindTransformAttr`).
+    pub fn geom_bind_transform_attr(&self) -> Option<&Attribute> {
+        self.geom_bind_transform.as_ref()
+    }
+
+    /// The `primvars:skel:skinningMethod` attribute the query is bound
+    /// through, the prim's own or inherited (C++ `GetSkinningMethodAttr`).
+    pub fn skinning_method_attr(&self) -> Option<&Attribute> {
+        self.skinning_method.as_ref()
+    }
+
+    /// The `skel:blendShapes` attribute the prim authors, its prim in the
+    /// prototype's under an instance proxy, whether or not its value decodes
+    /// (C++ `GetBlendShapesAttr`). [`has_blend_shapes`](Self::has_blend_shapes)
+    /// answers whether the prim binds blend shapes.
+    pub fn blend_shapes_attr(&self) -> Option<&Attribute> {
+        self.blend_shapes.as_ref()
     }
 
     /// The geom bind transform at `time`, `None` being the default time, and
@@ -156,18 +197,18 @@ impl SkinningQuery {
 
     /// `skel:joints`, where it is authored (C++ `GetJointOrder`).
     pub fn joint_order(&self) -> Option<&[String]> {
-        self.joints.as_ref().map(|(names, _)| names.as_slice())
+        self.joint_order.as_ref().map(|(names, _)| names.as_slice())
     }
 
     /// The mapping from the skeleton's joint order onto `skel:joints`, where
     /// `skel:joints` is authored (C++ `GetJointMapper`).
     pub fn joint_mapper(&self) -> Option<&AnimMapper> {
-        self.joints.as_ref().map(|(_, mapper)| mapper)
+        self.joint_order.as_ref().map(|(_, mapper)| mapper)
     }
 
     /// `skel:blendShapes`, where it is authored (C++ `GetBlendShapeOrder`).
     pub fn blend_shape_order(&self) -> Option<&[String]> {
-        self.blend_shapes.as_ref().map(|(names, _)| names.as_slice())
+        self.blend_shape_order.as_ref().map(|(names, _)| names.as_slice())
     }
 
     /// The mapping from the bound animation's blend-shape order onto
@@ -175,12 +216,13 @@ impl SkinningQuery {
     /// `GetBlendShapeMapper`). It remaps the animation's weights into the
     /// order of `skel:blendShapeTargets`.
     pub fn blend_shape_mapper(&self) -> Option<&AnimMapper> {
-        self.blend_shapes.as_ref().map(|(_, mapper)| mapper)
+        self.blend_shape_order.as_ref().map(|(_, mapper)| mapper)
     }
 
-    /// `skel:blendShapeTargets`, where it authors targets on the prim (C++
+    /// `skel:blendShapeTargets`, where it authors targets on the prim, its
+    /// prim in the prototype's under an instance proxy (C++
     /// `GetBlendShapeTargetsRel`).
-    pub fn blend_shape_targets(&self) -> Option<&Relationship> {
+    pub fn blend_shape_targets_rel(&self) -> Option<&Relationship> {
         self.blend_shape_targets.as_ref()
     }
 
@@ -301,7 +343,7 @@ impl SkinningQuery {
         face_vertex_indices: &[i32],
         time: impl Into<Option<TimeCode>>,
     ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
-        let (Some(method), Some(pose)) = (self.skinning_method, self.prim_pose(pose)) else {
+        let (Some(method), Some(pose)) = (self.skinning_method()?, self.prim_pose(pose)) else {
             return Ok(None);
         };
         if self.is_rigidly_deformed() {
@@ -342,7 +384,7 @@ impl SkinningQuery {
             return Ok(None);
         }
         let time = time.into();
-        let (Some(method), Some(pose)) = (self.skinning_method, self.prim_pose(pose)) else {
+        let (Some(method), Some(pose)) = (self.skinning_method()?, self.prim_pose(pose)) else {
             return Ok(None);
         };
         let Some((indices, weights)) = self.joint_influences(time)? else {
@@ -385,7 +427,7 @@ impl SkinningQuery {
         elements: &[gf::Vec3f],
         time: Option<TimeCode>,
     ) -> Result<Option<Vec<gf::Vec3f>>, SchemaError> {
-        let (Some(method), Some(pose)) = (self.skinning_method, self.prim_pose(pose)) else {
+        let (Some(method), Some(pose)) = (self.skinning_method()?, self.prim_pose(pose)) else {
             return Ok(None);
         };
         let Some((indices, weights)) = self.varying_joint_influences(elements.len(), time)? else {
@@ -409,24 +451,13 @@ impl SkinningQuery {
         if pose.xforms().len() != self.skeleton_joints {
             return None;
         }
-        PrimPose::new(pose, self.joints.as_ref().map(|(_, mapper)| mapper))
+        PrimPose::new(pose, self.joint_order.as_ref().map(|(_, mapper)| mapper))
     }
 }
 
 /// [`PrimPose::skin_points`] or [`PrimPose::skin_normals`].
 type SkinFn<'a> =
     fn(&PrimPose<'a>, SkinningMethod, &[gf::Vec3f], &[i32], &[f32], usize, gf::Mat4d) -> Option<Vec<gf::Vec3f>>;
-
-/// The skinning method `attribute` names, `classicLinear` where it is unbound
-/// or holds no token, and `None` for a token that names no method.
-fn skinning_method(attribute: Option<&Attribute>) -> Result<Option<SkinningMethod>> {
-    Ok(
-        match attribute.map(Attribute::get::<sdf::Value>).transpose()?.flatten() {
-            Some(sdf::Value::Token(token)) => SkinningMethod::from_token(token),
-            _ => Some(SkinningMethod::ClassicLinear),
-        },
-    )
-}
 
 /// The names `attribute` holds, where it is bound and holds them, with the
 /// mapping from `source` onto them.

@@ -6,6 +6,7 @@
 use openusd::usd::{Attribute, Prim, PrimPredicate, Relationship};
 use openusd::{Result, tf};
 
+use super::cache::in_prototype;
 use super::decode::Bound;
 use super::skinning_query::SkinningQuery;
 use super::{BindingAPI, Skeleton, tokens};
@@ -66,18 +67,24 @@ impl Inherited {
     /// The bindings in effect at `prim`: these, with each binding `prim`
     /// authors through [`BindingAPI`] taking precedence. Only a `skinnable`
     /// prim takes its blend-shape bindings.
+    ///
+    /// On an instance proxy, the joint influences, the geom bind transform,
+    /// `skel:joints` and the blend-shape bindings are its prim in the
+    /// prototype's (C++ `_GetAttrInPrototype` and `_GetRelInPrototype`).
+    /// `skel:skeleton` and `skel:skinningMethod` are the proxy's.
     pub(super) fn under(mut self, prim: &Prim, skinnable: bool) -> Result<Self> {
         let Some(binding) = BindingAPI::from_prim(prim.clone())? else {
             return Ok(self);
         };
         self.skeleton = skeleton_under(Some(&binding), self.skeleton.take())?;
+        let shared = BindingAPI::from_prim_unchecked(in_prototype(prim)?);
         let properties = &mut self.properties;
         let attributes = [
-            (&mut properties.joint_indices, binding.joint_indices_attr()),
-            (&mut properties.joint_weights, binding.joint_weights_attr()),
+            (&mut properties.joint_indices, shared.joint_indices_attr()),
+            (&mut properties.joint_weights, shared.joint_weights_attr()),
             (&mut properties.skinning_method, binding.skinning_method_attr()),
-            (&mut properties.geom_bind_transform, binding.geom_bind_transform_attr()),
-            (&mut properties.joints, binding.joints_attr()),
+            (&mut properties.geom_bind_transform, shared.geom_bind_transform_attr()),
+            (&mut properties.joints, shared.joints_attr()),
         ];
         for (slot, attribute) in attributes {
             if attribute.has_authored_value()? {
@@ -85,11 +92,11 @@ impl Inherited {
             }
         }
         if skinnable {
-            let blend_shapes = binding.blend_shapes_attr();
+            let blend_shapes = shared.blend_shapes_attr();
             if blend_shapes.has_authored_value()? {
                 properties.blend_shapes = Some(blend_shapes);
             }
-            let targets = binding.blend_shape_targets_rel();
+            let targets = shared.blend_shape_targets_rel();
             if targets.has_authored_targets()? {
                 properties.blend_shape_targets = Some(targets);
             }

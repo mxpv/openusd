@@ -73,10 +73,9 @@ impl Cache {
     /// skeleton and binding properties authored nearest to it through
     /// [`BindingAPI`], on itself or on an ancestor at or below `root`; the
     /// blend-shape bindings are read on the skinnable prim alone. A skinnable
-    /// prim gets a query whether or not a skeleton is bound to it. The
-    /// binding properties of an instance proxy are read through the proxy,
-    /// which answers its prototype's values; C++ reads them on the prototype's
-    /// prim.
+    /// prim gets a query whether or not a skeleton is bound to it. An instance
+    /// proxy's binding properties are its prototype prim's, all but the
+    /// skinning method, which stays the proxy's, as in C++.
     pub fn populate(&mut self, root: &Root, predicate: PrimPredicate) -> Result<(), SchemaError> {
         walk(
             root.prim(),
@@ -254,7 +253,7 @@ impl Cache {
 
 /// The prim in the prototype that `prim` stands in for, where it is an
 /// instance proxy, and `prim` itself otherwise.
-fn in_prototype(prim: &Prim) -> Result<Prim> {
+pub(super) fn in_prototype(prim: &Prim) -> Result<Prim> {
     Ok(prim.prim_in_prototype()?.unwrap_or_else(|| prim.clone()))
 }
 

@@ -10,7 +10,7 @@ use openusd::sdf::{self, Value};
 use openusd::usd::{Attribute, PrimPredicate, SchemaBase, Stage, TimeCode};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
-    BBoxCache, BoundableExt, BoundableSchema, Extent, Interpolation, Mesh, Purpose, XformCache, XformableExt,
+    BBoxCache, BoundableExt, BoundableSchema, Extent, Interpolation, Mesh, Primvar, Purpose, XformCache, XformableExt,
 };
 use openusd_schemas::skel::{
     AnimMapper, AnimQuery, Animation, AnimationSchema, Binding, BindingAPI, BlendShape, BlendShapeQuery,
@@ -260,7 +260,7 @@ fn skinning_query_remaps_subset() -> Result<(), SchemaError> {
     // skel:joints subset = ["Root/Hip", "Root/Hip/Knee"] — two mesh-effective
     // joints out of the skeleton's three.
     assert_eq!(query.joint_order().map(<[_]>::len), Some(2));
-    assert_eq!(query.skinning_method(), Some(SkinningMethod::ClassicLinear));
+    assert_eq!(query.skinning_method()?, Some(SkinningMethod::ClassicLinear));
     assert_eq!(query.blend_shape_order(), Some(&["smile".to_string()][..]));
     assert!(query.has_blend_shapes());
 
@@ -1253,14 +1253,14 @@ def SkelRoot "R" {
     let xforms = Pose::from(vec![Mat4d::IDENTITY; 2]);
     let points = [Vec3f::default()];
     let bogus = skinning_query(&stage, "/R", "/R/Bogus")?.expect("Bogus query");
-    assert_eq!(bogus.skinning_method(), None);
+    assert_eq!(bogus.skinning_method()?, None);
     assert!(bogus.has_joint_influences());
     assert!(bogus.skinned_points(&xforms, &points, None)?.is_none());
     assert!(bogus.skinned_normals(&xforms, &points, None)?.is_none());
     assert!(bogus.skinned_transform(&xforms, None)?.is_none());
 
     let dual = skinning_query(&stage, "/R", "/R/Dual")?.expect("Dual query");
-    assert_eq!(dual.skinning_method(), Some(SkinningMethod::DualQuaternion));
+    assert_eq!(dual.skinning_method()?, Some(SkinningMethod::DualQuaternion));
     let twist = Pose::from(vec![Mat4d::IDENTITY, Mat4d::rotation_x(FRAC_PI_2)]);
     let eighth = Mat4d::rotation_x(FRAC_PI_4);
     let skinned = dual
@@ -1270,6 +1270,152 @@ def SkelRoot "R" {
     assert!((gf::Vec3d::from(skinned[0]) - expected).length() < 1e-6, "{skinned:?}");
     let xform = dual.skinned_transform(&twist, None)?.expect("rigid influences");
     assert!(xform.is_close(eighth, 1e-6), "{xform:?}");
+    Ok(())
+}
+
+/// The prim path of `attribute`, where it is bound.
+fn owner(attribute: Option<&Attribute>) -> Option<String> {
+    attribute.map(|attribute| attribute.path().prim_path().to_string())
+}
+
+/// A query hands back the binding properties it was built from, each on the
+/// prim that authors it (C++ `testUsdSkelCache.py`'s
+/// `test_InheritedSkeletonBinding`).
+#[test]
+fn inherited_attr_paths() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Skeleton "Skel" {}
+def SkelRoot "R" {
+    def Scope "Scope" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Skel>
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        uniform token[] skel:blendShapes = ["ignored"]
+        def Mesh "Inherit" {}
+        def Mesh "Override" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+            uniform token[] skel:blendShapes = ["shape"]
+        }
+    }
+}
+"#,
+    )?;
+    let cache = populated(&stage, "/R")?;
+    let query = |path: &str| -> Result<SkinningQuery> {
+        Ok(cache.skinning_query(&stage.prim(path)?).expect("a query").clone())
+    };
+
+    let inherit = query("/R/Scope/Inherit")?;
+    assert_eq!(
+        owner(inherit.joint_indices_primvar().map(Primvar::attribute)),
+        Some("/R/Scope".to_string())
+    );
+    assert_eq!(
+        owner(inherit.joint_weights_primvar().map(Primvar::attribute)),
+        Some("/R/Scope".to_string())
+    );
+    assert!(inherit.blend_shapes_attr().is_none());
+    assert!(inherit.blend_shape_targets_rel().is_none());
+    assert!(inherit.geom_bind_transform_attr().is_none());
+    assert!(inherit.skinning_method_attr().is_none());
+
+    let overridden = query("/R/Scope/Override")?;
+    assert_eq!(
+        owner(overridden.joint_indices_primvar().map(Primvar::attribute)),
+        Some("/R/Scope/Override".to_string())
+    );
+    assert_eq!(
+        owner(overridden.joint_weights_primvar().map(Primvar::attribute)),
+        Some("/R/Scope".to_string())
+    );
+    assert_eq!(
+        owner(overridden.blend_shapes_attr()),
+        Some("/R/Scope/Override".to_string())
+    );
+    Ok(())
+}
+
+/// Under an instance proxy the binding properties are the prototype prim's,
+/// all but the skinning method, which stays the proxy's (C++
+/// `testUsdSkelCache.py`'s `test_InstancedSkeletonBinding`).
+#[test]
+fn instanced_attr_paths() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def Skeleton "Skel" {}
+def Scope "Model" (instanceable = true) {
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+        float[] primvars:skel:jointWeights = [1] (interpolation = "constant")
+        uniform token primvars:skel:skinningMethod = "dualQuaternion"
+    }
+}
+def SkelRoot "R" {
+    def Scope "Instance" (prepend references = </Model> prepend apiSchemas = ["SkelBindingAPI"]) {
+        rel skel:skeleton = </Skel>
+    }
+}
+"#,
+    )?;
+    let query = skinning_query(&stage, "/R", "/R/Instance/M")?.expect("a query");
+    let indices = query.joint_indices_primvar().expect("bound joint indices");
+    let prototype = stage
+        .prim("/R/Instance/M")?
+        .prim_in_prototype()?
+        .expect("an instance proxy");
+    assert_eq!(indices.attribute().path().prim_path(), *prototype.path());
+    assert_eq!(owner(query.skinning_method_attr()), Some("/R/Instance/M".to_string()));
+    assert_eq!(query.skinning_method()?, Some(SkinningMethod::DualQuaternion));
+    Ok(())
+}
+
+/// Unauthored, the method has no attribute and reads `classicLinear`;
+/// authored, it reads back (C++ `testUsdSkelSkinningQuery.py`).
+#[test]
+fn skinning_method_attr() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Mesh "Plain" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        int[] primvars:skel:jointIndices = [0] (interpolation = "constant")
+    }
+    def Mesh "Dual" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token primvars:skel:skinningMethod = "dualQuaternion"
+    }
+}
+"#,
+    )?;
+    let plain = skinning_query(&stage, "/R", "/R/Plain")?.expect("Plain query");
+    assert!(plain.skinning_method_attr().is_none());
+    assert_eq!(plain.skinning_method()?, Some(SkinningMethod::ClassicLinear));
+    let dual = skinning_query(&stage, "/R", "/R/Dual")?.expect("Dual query");
+    assert_eq!(owner(dual.skinning_method_attr()), Some("/R/Dual".to_string()));
+    assert_eq!(dual.skinning_method()?, Some(SkinningMethod::DualQuaternion));
+    Ok(())
+}
+
+/// The method is read on each call, so an edit after the cache is populated
+/// shows.
+#[test]
+fn skinning_method_live() -> Result<(), SchemaError> {
+    let stage = from_usda(
+        r#"#usda 1.0
+def SkelRoot "R" {
+    def Mesh "M" (prepend apiSchemas = ["SkelBindingAPI"]) {
+        uniform token primvars:skel:skinningMethod = "classicLinear"
+    }
+}
+"#,
+    )?;
+    let query = skinning_query(&stage, "/R", "/R/M")?.expect("a query");
+    assert_eq!(query.skinning_method()?, Some(SkinningMethod::ClassicLinear));
+    query
+        .skinning_method_attr()
+        .expect("a bound method")
+        .clone()
+        .set(Value::token("dualQuaternion"))?;
+    assert_eq!(query.skinning_method()?, Some(SkinningMethod::DualQuaternion));
     Ok(())
 }
 
@@ -1389,7 +1535,7 @@ def SkelRoot "R" {
     assert!(query.blend_shape_mapper().is_some_and(AnimMapper::is_null));
     assert!(query.joint_mapper().is_some_and(AnimMapper::is_null));
     assert_eq!(
-        query.blend_shape_targets().map(|rel| rel.targets()).transpose()?,
+        query.blend_shape_targets_rel().map(|rel| rel.targets()).transpose()?,
         Some(vec![sdf::path("/R/Smile")?])
     );
     Ok(())
