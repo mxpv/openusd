@@ -85,10 +85,17 @@ impl PathPattern {
     }
 
     /// Replaces the prefix with an owned, already-validated [`Path`] (parse
-    /// text with [`Path::new`]). When components exist the prefix must stay a
-    /// prim-or-root path; with none, a property path also sets the property
-    /// flag (mirroring what folding a literal property produces).
+    /// text with [`Path::new`]), as C++ `SdfPathPattern::SetPrefix` does:
+    /// with match components the prefix must be the absolute root or a prim
+    /// path; with none, a prim-property path also does, and sets the
+    /// property flag (mirroring what folding a literal property produces).
+    /// Any other prefix, such as the variant selection `/P{v=one}`, is
+    /// ignored and the pattern is left as it was.
     pub fn set_prefix(&mut self, prefix: Path) {
+        let root_or_prim = prefix.is_abs_root() || prefix.is_prim();
+        if !(root_or_prim || (self.components.is_empty() && prefix.is_prim_property())) {
+            return;
+        }
         if self.components.is_empty() {
             self.is_property = prefix.is_property();
         }
@@ -368,5 +375,24 @@ mod tests {
         assert!(PathPattern::nothing().is_nothing());
         assert!(!PathPattern::everything().is_nothing());
         assert_eq!(PathPattern::nothing().to_string(), "");
+    }
+
+    /// The prefixes C++ `SdfPathPattern::SetPrefix` takes and ignores, as
+    /// OpenUSD 26.11 answers for each: with no match components, a
+    /// prim-property path, one in a variant included, but no target path or
+    /// variant selection; with components, no property path.
+    #[test]
+    fn set_prefix_refusals() {
+        for taken in ["/P.a", "/P{v=one}.a"] {
+            let pattern = build(taken, &[]);
+            assert_eq!(pattern.prefix().as_str(), taken);
+            assert!(pattern.is_property(), "{taken}");
+        }
+        for ignored in ["/P.r[/T]", "/P{v=one}"] {
+            assert!(build(ignored, &[]).prefix().is_empty(), "{ignored}");
+        }
+        let mut stretch = build(".", &[""]);
+        stretch.set_prefix(Path::new("/P.a").unwrap());
+        assert_eq!(stretch.prefix().as_str(), ".");
     }
 }

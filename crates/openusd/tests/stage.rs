@@ -7587,6 +7587,43 @@ fn sublayer_stack(dir: &FsPath, bodies: &[impl AsRef<str>]) -> Result<Stage> {
     Stage::open(dir.join("layer0.usda").to_str().expect("utf-8 path"))
 }
 
+/// A relative expression a `string` spells in a variant anchors at the prim
+/// that holds the variant set, as one authored on the prim itself does.
+#[test]
+fn variant_expression_anchors_at_prim() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let layer = dir.path().join("layer.usda");
+    fs::write(
+        &layer,
+        r#"#usda 1.0
+def "P" (
+    variants = {
+        string v = "a"
+    }
+    prepend variantSets = "v"
+)
+{
+    uniform pathExpression m = "/x// %_"
+    variantSet "v" = {
+        "a" {
+            uniform string m = ".//"
+        }
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(layer.to_str().expect("utf-8 path"))?;
+
+    assert_eq!(
+        stage
+            .attribute("/P.m")?
+            .get::<sdf::PathExpression>()?
+            .map(|expr| expr.to_string()),
+        Some("/x// /P//".to_string())
+    );
+    Ok(())
+}
+
 /// A path expression composed from weaker opinions names every one it drew
 /// on, strongest first, each with the node and spec it came from.
 #[test]

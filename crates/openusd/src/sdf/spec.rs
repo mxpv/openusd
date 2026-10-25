@@ -1134,7 +1134,7 @@ where
     fn coerce_for_declared(&self, value: sdf::Value) -> Result<sdf::Value, sdf::AuthoringError> {
         let declared = self.declared_type()?.ok_or(sdf::ValueTypeError::Empty)?;
         let value = if value.holds_path_expressions() {
-            let prim_path = self.path().prim_path();
+            let prim_path = self.path().nearest_prim_path();
             value.map_path_expressions(&mut |expr| expr.make_absolute(&prim_path))
         } else {
             value
@@ -2076,6 +2076,31 @@ pub(crate) mod tests {
         let default = field_of(&data, &path, sdf::FieldKey::Default).expect("default authored");
         let expr = default.try_as_path_expression().expect("a path expression");
         assert_eq!(expr.to_string(), "/A/Child");
+    }
+
+    /// A default authored on an attribute in a variant anchors at the prim
+    /// past the selection, as OpenUSD 26.11 anchors `.//` set as the
+    /// default of `/P{v=one}.m`: `/P//`.
+    #[test]
+    fn variant_expression_anchored() {
+        let path = sdf::path("/P{v=one}.m").expect("valid path");
+        let mut data = Data::new();
+        AttributeSpec::new(
+            &mut data,
+            path.clone(),
+            "pathExpression",
+            sdf::Variability::Varying,
+            false,
+        )
+        .expect("attribute spec");
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        attr.set_default(sdf::Value::PathExpression(sdf::PathExpression::parse(".//")))
+            .expect("a path expression fits");
+        let default = field_of(&data, &path, sdf::FieldKey::Default).expect("default authored");
+        assert_eq!(
+            default.try_as_path_expression().expect("a path expression").to_string(),
+            "/P//"
+        );
     }
 
     #[test]
