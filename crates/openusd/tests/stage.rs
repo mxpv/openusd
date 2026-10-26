@@ -4902,6 +4902,54 @@ fn property_write_unselected_variant() -> Result<()> {
     Ok(())
 }
 
+/// A prim write under a variant edit target authors inside the variant.
+#[test]
+fn edit_under_variant_target() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let mat = stage.define_prim("/Mat")?;
+    let root = stage.edit_target().layer_identifier().to_string();
+    stage.set_edit_target(EditTarget::for_local_direct_variant(root, "/Mat{v=a}")?)?;
+    mat.set_kind("component")?;
+
+    let layer = stage.root_layer();
+    let variant = layer.prim("/Mat{v=a}")?.expect("the variant spec");
+    assert_eq!(variant.kind().as_deref(), Some("component"));
+    assert_eq!(layer.prim("/Mat")?.expect("the prim spec").kind(), None);
+    Ok(())
+}
+
+/// Over a weaker layer's selection, a cleared selection lets it compose and
+/// a blocked one hides it.
+#[test]
+fn variant_selection_states() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        "#usda 1.0\ndef \"Mat\" (\n    variants = {\n        string v = \"a\"\n    }\n    prepend variantSets = \"v\"\n) {\n    \
+         variantSet \"v\" = {\n        \"a\" {}\n        \"b\" {}\n    }\n}\n",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let root_id = stage.root_layer().identifier().to_string();
+    let selection = || -> Result<Vec<(String, String)>> { stage.prim("/Mat")?.variant_sets().selections() };
+    let author = |f: fn(&mut sdf::PrimSpecMut<'_>) -> Result<(), sdf::AuthoringError>| -> Result<()> {
+        stage.layer_mut(&root_id).expect("the root layer is live").edit(|e| {
+            f(&mut sdf::PrimSpec::over(e.data_mut(), "/Mat")?)?;
+            Ok(())
+        })?;
+        Ok(())
+    };
+
+    author(|spec| spec.set_variant_selection("v", "b"))?;
+    assert_eq!(selection()?, [("v".to_string(), "b".to_string())]);
+    author(|spec| spec.clear_variant_selection("v"))?;
+    assert_eq!(selection()?, [("v".to_string(), "a".to_string())]);
+    author(|spec| spec.block_variant_selection("v"))?;
+    assert!(selection()?.is_empty());
+    Ok(())
+}
+
 /// A move onto a path below an inactive prim sees the stage, where nothing
 /// occupies the destination, though a reference composes a prim there. The
 /// move is authored, and reactivating the parent composes the moved spec over
@@ -12333,10 +12381,7 @@ fn listener_info_under_variant_target() -> Result<()> {
             sdf::FieldKey::VariantSetNames.as_str(),
             sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
         );
-        prim.set(
-            sdf::FieldKey::VariantSelection.as_str(),
-            sdf::Value::VariantSelectionMap(HashMap::from([("set".to_string(), "sel".to_string())])),
-        );
+        prim.set_variant_selection("set", "sel")?;
         Ok(())
     })?;
 

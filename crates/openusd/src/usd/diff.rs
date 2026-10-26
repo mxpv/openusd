@@ -469,8 +469,7 @@ fn apply_edit(
             // kind from the destination path), so the correspondence counts
             // as a kind match here.
             let kind_matches = |existing: sdf::SpecType| {
-                let prim_like = |kind: sdf::SpecType| matches!(kind, sdf::SpecType::Prim | sdf::SpecType::Variant);
-                existing == *spec_type || (prim_like(existing) && prim_like(*spec_type))
+                existing == *spec_type || (existing.is_prim_or_variant() && spec_type.is_prim_or_variant())
             };
             match layer.data().spec_type(dst) {
                 // The recorded fields are the created spec's whole state:

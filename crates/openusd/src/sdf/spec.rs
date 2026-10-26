@@ -67,6 +67,14 @@ pub enum SpecType {
     VariantSet = 11,
 }
 
+impl SpecType {
+    /// Whether a spec of this type is viewed as a prim spec: a prim or a
+    /// variant, which C++ `Sdf_SpecType` casts to `SdfPrimSpec`.
+    pub fn is_prim_or_variant(self) -> bool {
+        matches!(self, SpecType::Prim | SpecType::Variant)
+    }
+}
+
 /// Implements `Debug` for a spec-handle newtype by delegating to its inner
 /// handle, so the data reference it holds is not required to be `Debug`.
 macro_rules! impl_spec_debug {
@@ -357,17 +365,19 @@ pub type PrimSpecMut<'a> = PrimSpec<'a, &'a mut dyn sdf::AbstractData>;
 
 impl<'a> PrimSpecRef<'a> {
     /// Returns a read-only view of the prim spec at `path`, or `None` if no
-    /// prim spec exists there.
+    /// prim spec exists there. A variant spec (`/Prim{set=sel}`) is viewed as
+    /// a prim spec too, as C++ `SdfVariantSpec::GetPrimSpec` views it.
     pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
-        matches!(data.spec_type(&path), Some(sdf::SpecType::Prim)).then(|| Self(Spec::wrap(data, path)))
+        holds_prim(data, &path).then(|| Self(Spec::wrap(data, path)))
     }
 }
 
 impl<'a> PrimSpecMut<'a> {
     /// Returns a mutable view of the prim spec at `path`, or `None` if no prim
-    /// spec exists there.
+    /// spec exists there. A variant spec is viewed as one too, as
+    /// [`PrimSpecRef::get`] views it.
     pub(crate) fn get(data: &'a mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
-        matches!(data.spec_type(&path), Some(sdf::SpecType::Prim)).then(|| Self(Spec::wrap(data, path)))
+        holds_prim(data, &path).then(|| Self(Spec::wrap(data, path)))
     }
 
     /// Create or upgrade the prim spec at `path` with `specifier` and
@@ -400,11 +410,17 @@ impl<'a> PrimSpecMut<'a> {
     /// Ensure an `over` prim spec exists at `path`, creating it and any missing
     /// ancestors as `over` while leaving existing `def`/`class` specs unchanged.
     /// Mirrors C++ `SdfCreatePrimInLayer` / `UsdStage::OverridePrim`.
+    ///
+    /// A variant-selection leaf (`/Prim{set=sel}`) names the variant spec,
+    /// which is created with its variant set and viewed as a prim spec, as C++
+    /// `SdfCreatePrimInLayer` authors inside a variant. No `specifier` is
+    /// authored on it. The pseudo-root, a property path and a bare
+    /// variant-set path (`/Prim{set=}`) are
+    /// [`InvalidPath`](sdf::AuthoringError::InvalidPath).
     pub fn over(data: &'a mut dyn sdf::AbstractData, path: impl sdf::IntoPath) -> Result<Self, sdf::AuthoringError> {
         let path = sdf::try_into_path(path)?;
-        require_prim_leaf(&path)?;
         ensure_prim_chain(data, &path)?;
-        Ok(Self::get(data, path).expect("ensure_prim_chain created a prim spec"))
+        Ok(Self::get(data, path).expect("ensure_prim_chain created a prim or variant spec"))
     }
 }
 
@@ -456,6 +472,19 @@ where
     pub fn api_schemas(&self) -> Option<sdf::TokenListOp> {
         self.get(sdf::FieldKey::ApiSchemas)
     }
+
+    /// The variant selections the spec authors, by variant set (C++
+    /// `SdfPrimSpec::GetVariantSelections`). An empty selection is a blocked
+    /// one; a set the spec says nothing about has no entry.
+    pub fn variant_selections(&self) -> HashMap<String, String> {
+        self.get(sdf::FieldKey::VariantSelection).unwrap_or_default()
+    }
+
+    /// The authored `variantSetNames` list op (C++
+    /// `SdfPrimSpec::GetVariantSetNameList`).
+    pub fn variant_set_names(&self) -> Option<sdf::StringListOp> {
+        self.get(sdf::FieldKey::VariantSetNames)
+    }
 }
 
 impl<'a, B> PrimSpec<'a, B>
@@ -477,6 +506,82 @@ where
     /// Set the `specifier` field.
     pub fn set_specifier(&mut self, specifier: sdf::Specifier) {
         self.set(sdf::FieldKey::Specifier.as_str(), sdf::Value::Specifier(specifier));
+    }
+
+    /// Select `selection` in variant set `set` (C++
+    /// `SdfPrimSpec::SetVariantSelection`). Both must be valid variant names.
+    /// The empty name is [`sdf::AuthoringError::EmptyVariantSelection`], where
+    /// C++ erases the entry: a blocked selection is
+    /// [`block_variant_selection`](Self::block_variant_selection)'s, and no
+    /// selection [`clear_variant_selection`](Self::clear_variant_selection)'s.
+    pub fn set_variant_selection(&mut self, set: &str, selection: &str) -> Result<(), sdf::AuthoringError> {
+        if selection.is_empty() {
+            return Err(sdf::AuthoringError::EmptyVariantSelection {
+                prim: self.path().clone(),
+                set: set.to_string(),
+            });
+        }
+        self.path().append_variant_selection(set, selection)?;
+        self.edit_variant_selections(|selections| {
+            selections.insert(set.to_string(), selection.to_string()).as_deref() != Some(selection)
+        })
+    }
+
+    /// Drop the selection of variant set `set`, so a weaker one composes (C++
+    /// `SdfPrimSpec::SetVariantSelection(set, "")`).
+    pub fn clear_variant_selection(&mut self, set: &str) -> Result<(), sdf::AuthoringError> {
+        self.edit_variant_selections(|selections| selections.remove(set).is_some())
+    }
+
+    /// Select no variant of `set`, a valid variant set name, hiding the
+    /// selections weaker layers author (C++
+    /// `SdfPrimSpec::BlockVariantSelection`).
+    pub fn block_variant_selection(&mut self, set: &str) -> Result<(), sdf::AuthoringError> {
+        self.path().append_variant_selection(set, "")?;
+        self.edit_variant_selections(|selections| {
+            selections.insert(set.to_string(), String::new()).as_deref() != Some("")
+        })
+    }
+
+    /// Create the spec of variant set `name` under this prim, listing it in
+    /// `variantSetChildren`, and answer whether it was created (C++
+    /// `SdfVariantSetSpec::New`).
+    pub fn add_variant_set(&mut self, name: &str) -> Result<bool, sdf::AuthoringError> {
+        let path = self.path().append_variant_selection(name, "")?;
+        let created = self.0.data.spec_type(&path).is_none();
+        ensure_variant_set(&mut *self.0.data, &path)?;
+        Ok(created)
+    }
+
+    /// Create the spec of variant `name` in variant set `set`, with the set
+    /// itself where it is missing, and answer whether the variant was created
+    /// (C++ `SdfVariantSpec::New`).
+    pub fn add_variant(&mut self, set: &str, name: &str) -> Result<bool, sdf::AuthoringError> {
+        let path = self.path().append_variant_selection(set, name)?;
+        let created = self.0.data.spec_type(&path).is_none();
+        ensure_prim_chain(&mut *self.0.data, &path)?;
+        Ok(created)
+    }
+
+    /// Rewrite the `variantSelection` map through `edit`, which answers whether
+    /// it changed the map, erasing the field once it holds no entry. An edit
+    /// that changes nothing writes nothing.
+    fn edit_variant_selections(
+        &mut self,
+        edit: impl FnOnce(&mut HashMap<String, String>) -> bool,
+    ) -> Result<(), sdf::AuthoringError> {
+        let mut selections: HashMap<String, String> = self
+            .typed_field(sdf::FieldKey::VariantSelection, "VariantSelectionMap")?
+            .unwrap_or_default();
+        if !edit(&mut selections) {
+            return Ok(());
+        }
+        let key = sdf::FieldKey::VariantSelection.as_str();
+        match selections.is_empty() {
+            true => self.erase(key),
+            false => self.set(key, sdf::Value::VariantSelectionMap(selections)),
+        }
+        Ok(())
     }
 
     /// The `inheritPaths` list as it is edited (C++
@@ -1305,8 +1410,9 @@ fn set_or_erase(data: &mut dyn sdf::AbstractData, path: &sdf::Path, key: &str, v
 /// Ensure prim specs exist for every ancestor of `target` and for `target`
 /// itself, creating missing ones as `over`. Updates each parent's
 /// `primChildren` to include the next name along the chain. Idempotent.
-/// `target` must be an absolute, non-root, non-property prim path;
-/// callers should validate via [`require_prim_path`] first.
+/// `target` is an absolute, non-root prim path, or one whose leaf is a
+/// variant selection; the pseudo-root, a property path and a bare variant-set
+/// path (`/Prim{set=}`) are [`sdf::AuthoringError::InvalidPath`].
 ///
 /// Errors with [`sdf::AuthoringError::InvalidPath`] if any ancestor or `target`
 /// path already holds a spec of a non-prim type — stamping `primChildren`
@@ -1314,7 +1420,8 @@ fn set_or_erase(data: &mut dyn sdf::AbstractData, path: &sdf::Path, key: &str, v
 ///
 /// Authoring a `target` that carries `{set=sel}` variant selections also
 /// materializes the variant-set / variant scaffolding along the way, which is
-/// how [`copy`](super::copy) creates a copied variant spec.
+/// how [`copy`](super::copy) creates a copied variant spec. A variant-selection
+/// leaf is created as the variant spec.
 pub(crate) fn ensure_prim_chain(
     data: &mut dyn sdf::AbstractData,
     target: &sdf::Path,
@@ -1676,12 +1783,18 @@ fn require_prim_path(path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
     parse_prim_path(path, |_| {})
 }
 
+/// Whether the spec at `path` is a prim spec or a variant spec, which is viewed
+/// as one.
+fn holds_prim(data: &dyn sdf::AbstractData, path: &sdf::Path) -> bool {
+    data.spec_type(path).is_some_and(sdf::SpecType::is_prim_or_variant)
+}
+
 /// Reject a target whose leaf is a variant selection (e.g. `/Prim{set=sel}`).
 ///
-/// Such a path identifies a variant spec, not a prim, so [`PrimSpec::new`] /
-/// [`PrimSpec::over`] cannot author a `PrimSpec` there. (Properties and children
-/// *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}child` — remain
-/// valid; only the bare variant selection as the leaf is rejected.)
+/// Such a path identifies a variant spec, which carries no specifier, so
+/// [`PrimSpec::new`] cannot author a `def` or `class` there. (Properties and
+/// children *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}child` —
+/// remain valid; only the bare variant selection as the leaf is rejected.)
 fn require_prim_leaf(path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
     if path.is_variant_selection() {
         return Err(sdf::AuthoringError::InvalidPath {
@@ -2245,5 +2358,115 @@ pub(crate) mod tests {
             other => panic!("expected samples, got {other:?}"),
         }
         assert!(attr.erase_time_sample(1.0).expect("the sample goes"));
+    }
+
+    /// A prim spec at `/Mat` in fresh data.
+    fn mat() -> (Data, sdf::Path) {
+        let mut data = Data::new();
+        let path = sdf::path("/Mat").expect("valid path");
+        PrimSpecMut::new(&mut data, path.clone(), sdf::Specifier::Def, "").expect("a prim spec");
+        (data, path)
+    }
+
+    #[test]
+    fn variant_selection_roundtrip() -> Result<(), sdf::AuthoringError> {
+        let (mut data, path) = mat();
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
+        prim.set_variant_selection("look", "wet")?;
+        prim.set_variant_selection("shape", "round")?;
+        assert_eq!(
+            prim.variant_selections(),
+            HashMap::from([
+                ("look".to_string(), "wet".to_string()),
+                ("shape".to_string(), "round".to_string()),
+            ])
+        );
+        assert!(matches!(
+            prim.set_variant_selection("look", ""),
+            Err(sdf::AuthoringError::EmptyVariantSelection { .. })
+        ));
+        // Names no variant path could hold are refused, and nothing changes.
+        assert!(prim.set_variant_selection("bad set", "x").is_err());
+        assert!(prim.block_variant_selection("").is_err());
+        assert_eq!(prim.variant_selections().len(), 2);
+        Ok(())
+    }
+
+    /// No entry, a selection and a blocked selection are three states.
+    #[test]
+    fn variant_selection_states() -> Result<(), sdf::AuthoringError> {
+        let (mut data, path) = mat();
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
+        assert!(prim.variant_selections().is_empty());
+        prim.set_variant_selection("look", "wet")?;
+        prim.block_variant_selection("look")?;
+        assert_eq!(prim.variant_selections().get("look").map(String::as_str), Some(""));
+        prim.clear_variant_selection("look")?;
+        assert!(prim.variant_selections().is_empty());
+        assert!(!prim.has_field(sdf::FieldKey::VariantSelection.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn variant_set_names_listop() {
+        let (mut data, path) = mat();
+        let names = sdf::StringListOp::prepended(["look".to_string()]);
+        data.set_field(
+            &path,
+            sdf::FieldKey::VariantSetNames.as_str(),
+            sdf::Value::StringListOp(names.clone()),
+        );
+        let prim = PrimSpecRef::get(&data as &dyn AbstractData, path).expect("prim spec");
+        assert_eq!(prim.variant_set_names(), Some(names));
+    }
+
+    /// Each add answers whether it created the spec.
+    #[test]
+    fn add_variant_idempotent() -> Result<(), sdf::AuthoringError> {
+        let (mut data, path) = mat();
+        let mut prim = PrimSpecMut::get(&mut data, path.clone()).expect("prim spec");
+        assert!(prim.add_variant_set("look")?);
+        assert!(!prim.add_variant_set("look")?);
+        assert!(prim.add_variant("look", "wet")?);
+        assert!(!prim.add_variant("look", "wet")?);
+        assert!(prim.add_variant("shape", "round")?);
+        let variant = path.append_variant_selection("look", "wet")?;
+        assert_eq!(data.spec_type(&variant), Some(sdf::SpecType::Variant));
+        let set = path.append_variant_selection("shape", "")?;
+        assert_eq!(data.spec_type(&set), Some(sdf::SpecType::VariantSet));
+        Ok(())
+    }
+
+    /// A variant-selection leaf is authored as the variant spec, which takes
+    /// fields but no specifier.
+    #[test]
+    fn over_variant_leaf() -> Result<(), sdf::AuthoringError> {
+        let mut data = Data::new();
+        let variant = sdf::path("/Mat{look=wet}")?;
+        let mut spec = PrimSpecMut::over(&mut data, variant.clone())?;
+        spec.set_kind("component");
+        assert_eq!(data.spec_type(&variant), Some(sdf::SpecType::Variant));
+        assert!(!data.has_field(&variant, sdf::FieldKey::Specifier.as_str()));
+        let spec = PrimSpecRef::get(&data as &dyn AbstractData, variant).expect("a variant spec");
+        assert_eq!(spec.kind().as_deref(), Some("component"));
+        Ok(())
+    }
+
+    #[test]
+    fn over_variant_existing() -> Result<(), sdf::AuthoringError> {
+        let mut data = Data::new();
+        let variant = sdf::path("/Mat{look=wet}")?;
+        PrimSpecMut::over(&mut data, variant.clone())?.set_kind("component");
+        PrimSpecMut::new(&mut data, "/Mat{look=wet}Child", sdf::Specifier::Def, "")?;
+        let spec = PrimSpecMut::over(&mut data, variant)?;
+        assert_eq!(spec.kind().as_deref(), Some("component"));
+        assert_eq!(spec.prim_children(), Some(vec![tf::Token::new("Child")]));
+        Ok(())
+    }
+
+    #[test]
+    fn over_variant_set_refused() {
+        let mut data = Data::new();
+        assert!(PrimSpecMut::over(&mut data, "/Mat{look=}").is_err());
     }
 }

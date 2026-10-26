@@ -628,6 +628,8 @@ impl_try_from_value!(Variability, Variability, "Variability");
 impl_try_from_value!(ReferenceListOp, ReferenceListOp, "ReferenceListOp");
 impl_try_from_value!(PayloadListOp, PayloadListOp, "PayloadListOp");
 impl_try_from_value!(PathListOp, PathListOp, "PathListOp");
+impl_try_from_value!(StringListOp, StringListOp, "StringListOp");
+impl_try_from_value!(HashMap<String, String>, VariantSelectionMap, "VariantSelectionMap");
 
 // gf scalar types — trivially unwrap the matching variant.
 impl_try_from_value!(gf::Vec2f, Vec2f, "gf::Vec2f");

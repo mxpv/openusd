@@ -643,6 +643,18 @@ pub enum AuthoringError {
         /// A short, human-readable reason describing what was expected.
         reason: &'static str,
     },
+
+    /// A variant selection is set to the empty name, which spells a blocked
+    /// selection; [`PrimSpec::block_variant_selection`] authors one.
+    ///
+    /// [`PrimSpec::block_variant_selection`]: super::PrimSpec::block_variant_selection
+    #[error("the selection of variant set {set:?} on {prim} is empty")]
+    EmptyVariantSelection {
+        /// The prim spec.
+        prim: Path,
+        /// The variant set.
+        set: String,
+    },
 }
 
 /// An error from [`Layer::edit`]: the closure's authoring error, or a sink's
@@ -777,8 +789,10 @@ impl Layer {
         identifier.starts_with(ANONYMOUS_PREFIX)
     }
 
-    /// Look up a prim spec at `path`. `Ok(None)` when no spec exists there or
-    /// the spec is not a prim; `Err` when `path` fails to parse.
+    /// Look up the prim spec at `path`. A variant spec (`/Prim{set=sel}`) is
+    /// returned as a prim spec too, one that authors no `specifier`.
+    /// `Ok(None)` when no prim or variant spec exists there; `Err` when `path`
+    /// fails to parse.
     pub fn prim(&self, path: impl IntoPath) -> Result<Option<PrimSpecRef<'_>>, PathParseError> {
         Ok(PrimSpecRef::get(self.data(), try_into_path(path)?))
     }
@@ -2476,11 +2490,10 @@ mod tests {
         Ok(())
     }
 
-    /// A bare variant-selection leaf isn't a prim, so prim authoring rejects it
-    /// (rather than panicking on the `PrimSpecMut` downcast or writing prim
-    /// fields onto the variant spec).
+    /// A variant-selection leaf takes no `def`, which would write a specifier
+    /// onto the variant spec, and an `over` authors the variant spec itself.
     #[test]
-    fn prim_authoring_rejects_variant_leaf() -> Result<()> {
+    fn prim_authoring_variant_leaf() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("variants.usda");
         edit_layer(&mut layer, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/Prim", sdf::Specifier::Def, "Xform").unwrap();
@@ -2494,17 +2507,14 @@ mod tests {
                 .unwrap_err(),
             sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
         ));
-        assert!(matches!(
-            layer
-                .edit(|e| {
-                    sdf::PrimSpec::over(e.data_mut(), "/Prim{set=sel}")?;
-                    Ok(())
-                })
-                .unwrap_err(),
-            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
-        ));
-        // The rejected calls must not have authored a variant spec.
-        assert_eq!(layer.data().spec_type(&sdf::path("/Prim{set=sel}")?), None);
+        // The rejected `def` authored no variant spec.
+        let variant = sdf::path("/Prim{set=sel}")?;
+        assert_eq!(layer.data().spec_type(&variant), None);
+
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::over(e.data_mut(), "/Prim{set=sel}").unwrap();
+        });
+        assert_eq!(layer.data().spec_type(&variant), Some(sdf::SpecType::Variant));
         Ok(())
     }
 

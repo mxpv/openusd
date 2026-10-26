@@ -1644,7 +1644,6 @@ mod tests {
     }
     use std::borrow::Cow;
     use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
     use std::fs;
     use std::path::Path as FsPath;
     use std::rc::Rc;
@@ -4120,10 +4119,7 @@ class Marker "Marker"
                 sdf::FieldKey::VariantSetNames.as_str(),
                 sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
             );
-            prim.set(
-                sdf::FieldKey::VariantSelection.as_str(),
-                sdf::Value::VariantSelectionMap(HashMap::from([("set".to_string(), "sel".to_string())])),
-            );
+            prim.set_variant_selection("set", "sel")?;
             Ok(())
         })?;
         attr.set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;

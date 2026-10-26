@@ -1362,10 +1362,8 @@ impl Prim {
     /// return `self` for chaining. The layer records whatever fields `f`
     /// writes. A prim nothing composes is
     /// [`StageAuthoringError::PrimNotValid`]; a spec of another kind at the
-    /// path is reported by [`sdf::PrimSpec::over`].
-    // TODO: a variant-selection leaf (`/Prim{set=sel}`, the spec path under a
-    // variant edit target) is rejected by `PrimSpec::over`, where C++
-    // `SdfCreatePrimInLayer` authors inside the variant.
+    /// path is reported by [`sdf::PrimSpec::over`]. Under a variant edit
+    /// target the spec is the variant's (`/Prim{set=sel}`).
     pub(super) fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>) -> Result<(), StageAuthoringError>,
