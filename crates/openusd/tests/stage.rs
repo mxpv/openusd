@@ -4950,6 +4950,237 @@ fn variant_selection_states() -> Result<()> {
     Ok(())
 }
 
+/// A stage over `fixture` with an empty session layer, whose identifier it
+/// answers too.
+fn with_session(fixture: &str) -> Result<(tempfile::TempDir, Stage, String)> {
+    let dir = tempfile::tempdir()?;
+    let session = dir.path().join("session.usda");
+    fs::write(&session, "#usda 1.0\n")?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(fixture)?;
+    let session = stage.session_layer().expect("a session layer").identifier().to_string();
+    Ok((dir, stage, session))
+}
+
+/// C++ `testUsdVariants.py`'s `test_VariantSetAPI`.
+#[test]
+fn variant_set_api() -> Result<()> {
+    let (_dir, stage, session) = with_session("fixtures/variants_milk_carton.usda")?;
+    let prim = stage.prim("/MilkCartonA")?;
+    let sets = prim.variant_sets();
+    assert!(sets.contains("modelingVariant")?);
+    let modeling = prim.variant_set("modelingVariant");
+    assert_eq!(modeling.name(), "modelingVariant");
+    assert_eq!(modeling.selection()?.as_deref(), Some("Carton_Opened"));
+    assert_eq!(modeling.names()?, ["ALL_VARIANTS", "Carton_Opened", "Carton_Sealed"]);
+    assert!(sets.contains("shadingComplexity")?);
+    assert!(!sets.contains("localDanglingVariant")?);
+    assert!(!sets.contains("referencedDanglingVariant")?);
+
+    stage.set_edit_target(EditTarget::for_layer(session))?;
+    modeling.set_selection("Carton_Sealed")?;
+    assert_eq!(modeling.selection()?.as_deref(), Some("Carton_Sealed"));
+    modeling.clear_selection()?;
+    assert_eq!(modeling.selection()?.as_deref(), Some("Carton_Opened"));
+    modeling.block_selection()?;
+    assert_eq!(modeling.selection()?, None);
+    Ok(())
+}
+
+/// The variants of a set are gathered from every node of the prim's index,
+/// a referenced site and one under a variant selection included.
+#[test]
+fn variant_names_composed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Lib" {
+    def "Mat" (
+        prepend variantSets = "materialVariant"
+    ) {
+        variantSet "materialVariant" = {
+            "b" {}
+            "c" {}
+        }
+    }
+}
+def "Mat" (
+    prepend references = </Lib/Mat>
+    prepend variantSets = "materialVariant"
+) {
+    variantSet "materialVariant" = {
+        "a" {}
+        "b" {}
+    }
+}
+def "Shapes" (
+    variants = {
+        string shape = "round"
+    }
+    prepend variantSets = "shape"
+) {
+    variantSet "shape" = {
+        "round" {
+            def "Mat" (
+                prepend variantSets = "materialVariant"
+            ) {
+                variantSet "materialVariant" = {
+                    "d" {}
+                }
+            }
+        }
+    }
+}
+def "Round" (
+    prepend references = </Shapes/Mat>
+) {}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let names = |path: &str| stage.prim(path)?.variant_set("materialVariant").names();
+    assert_eq!(names("/Mat")?, ["a", "b", "c"]);
+    assert_eq!(names("/Round")?, ["d"]);
+    assert_eq!(stage.prim("/Mat")?.variant_sets().names()?, ["materialVariant"]);
+    Ok(())
+}
+
+/// A prim authored through a variant's edit target composes at its scene
+/// path, and the variant-selection path names no prim (C++
+/// `testUsdVariants.py`'s `test_VariantSelectionPathAbstraction`).
+#[test]
+fn variant_selection_paths() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let foo = stage.override_prim("/Foo")?;
+    let sets = foo.variant_sets();
+    assert!(sets.names()?.is_empty());
+    let lod = sets.add("LOD", usd::ListPosition::BackOfPrepend)?;
+    assert_eq!(sets.names()?, ["LOD"]);
+    lod.add_variant("High", usd::ListPosition::BackOfPrepend)?;
+    lod.set_selection("High")?;
+    {
+        let _context = stage.edit_context(lod.edit_target(None)?)?;
+        stage.define_prim("/Foo/Foobar")?.set_type_name("Scope")?;
+    }
+    assert!(stage.prim("/Foo/Foobar")?.is_valid()?);
+    assert!(!stage.prim("/Foo{LOD=High}Foobar")?.is_valid()?);
+    Ok(())
+}
+
+/// Variant sets nest inside a variant's edit context (C++
+/// `testUsdVariants.py`'s `test_NestedVariantSets`).
+#[test]
+fn nested_variant_sets() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let foo = stage.define_prim("/Foo")?.set_type_name("Scope")?;
+    let sets = foo.variant_sets();
+    let lod = sets.add("LOD", usd::ListPosition::BackOfPrepend)?;
+    lod.add_variant("High", usd::ListPosition::BackOfPrepend)?;
+    lod.set_selection("High")?;
+    {
+        let _lod = stage.edit_context(lod.edit_target(None)?)?;
+        let costume = sets.add("Costume", usd::ListPosition::BackOfPrepend)?;
+        costume.add_variant("Spooky", usd::ListPosition::BackOfPrepend)?;
+        costume.set_selection("Spooky")?;
+        {
+            let _costume = stage.edit_context(costume.edit_target(None)?)?;
+            stage.define_prim("/Foo/SpookyHat")?.set_type_name("Cone")?;
+        }
+        let stuff = stage.define_prim("/Foo/DetailedStuff")?.set_type_name("Scope")?;
+        let variant = stuff
+            .variant_sets()
+            .add("StuffVariant", usd::ListPosition::BackOfPrepend)?;
+        variant.add_variant("A", usd::ListPosition::BackOfPrepend)?;
+        variant.set_selection("A")?;
+        let _stuff = stage.edit_context(variant.edit_target(None)?)?;
+        stage
+            .define_prim("/Foo/DetailedStuff/StuffA")?
+            .set_type_name("Sphere")?;
+    }
+    assert_eq!(sets.names()?, ["LOD", "Costume"]);
+    assert!(stage.prim("/Foo/SpookyHat")?.is_valid()?);
+    assert!(stage.prim("/Foo/DetailedStuff/StuffA")?.is_valid()?);
+    assert!(
+        stage
+            .root_layer()
+            .prim("/Foo{LOD=High}{Costume=Spooky}SpookyHat")?
+            .is_some()
+    );
+    Ok(())
+}
+
+/// The edit target maps the prim through the current edit target, and uses
+/// the composed selection, a stronger layer's over the target layer's.
+#[test]
+fn variant_edit_target() -> Result<()> {
+    let (_dir, stage, session) = with_session("fixtures/variants_milk_carton.usda")?;
+    let root = stage.root_layer().identifier().to_string();
+    let modeling = stage.prim("/MilkCartonA")?.variant_set("modelingVariant");
+    stage.set_edit_target(EditTarget::for_layer(session))?;
+    modeling.set_selection("Carton_Sealed")?;
+
+    let target = modeling.edit_target(Some(&root))?;
+    assert_eq!(target.layer_identifier(), root);
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/MilkCartonA/Child")?),
+        Some(sdf::path("/MilkCartonA{modelingVariant=Carton_Sealed}Child")?)
+    );
+
+    // Under a variant target the prim maps into that variant first.
+    stage.set_edit_target(EditTarget::for_local_direct_variant(root.clone(), "/MilkCartonA{v=x}")?)?;
+    let target = modeling.edit_target(None)?;
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/MilkCartonA")?),
+        Some(sdf::path("/MilkCartonA{v=x}{modelingVariant=Carton_Sealed}")?)
+    );
+    Ok(())
+}
+
+/// A set a stronger layer deletes from `variantSetNames` is neither named nor
+/// evaluated, its spec and selection notwithstanding.
+#[test]
+fn variant_set_deleted() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("weak.usda"),
+        "#usda 1.0\ndef \"Mat\" (\n    variants = {\n        string v = \"a\"\n    }\n    prepend variantSets = \"v\"\n) {\n    \
+         variantSet \"v\" = {\n        \"a\" {\n            def \"FromA\" {}\n        }\n    }\n}\n",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\nover \"Mat\" (\n    delete variantSets = \"v\"\n) {}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let mat = stage.prim("/Mat")?;
+    assert!(!mat.variant_sets().contains("v")?);
+    assert_eq!(mat.variant_set("v").selection()?, None);
+    assert!(!stage.prim("/Mat/FromA")?.is_valid()?);
+    Ok(())
+}
+
+/// A set selecting no variant has no edit target, and neither has a layer
+/// that is not local.
+#[test]
+fn edit_target_no_selection() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let foo = stage.define_prim("/Foo")?;
+    assert!(matches!(
+        foo.variant_set("none").edit_target(None),
+        Err(StageAuthoringError::NoVariantSelection { .. })
+    ));
+    let lod = foo.variant_sets().add("LOD", usd::ListPosition::BackOfPrepend)?;
+    lod.add_variant("High", usd::ListPosition::BackOfPrepend)?;
+    lod.set_selection("High")?;
+    assert!(matches!(
+        lod.edit_target(Some("missing.usda")),
+        Err(StageAuthoringError::LayerNotFound { .. })
+    ));
+    Ok(())
+}
+
 /// A move onto a path below an inactive prim sees the stage, where nothing
 /// occupies the destination, though a reference composes a prim there. The
 /// move is authored, and reactivating the parent composes the moved spec over
@@ -6867,11 +7098,11 @@ fn edit_context_rejects_bad_target() -> Result<()> {
     Ok(())
 }
 
-/// Authoring the variant-owning prim itself through a variant target maps
-/// to the bare variant selection, which is not a prim — a define that has
-/// to write there must error, not panic.
+/// Defining the variant-owning prim itself through a variant target writes
+/// the variant spec `/Prim{set=sel}` its path maps to, as C++ `DefinePrim`
+/// does through `SdfCreatePrimInLayer`.
 #[test]
-fn define_prim_at_variant_leaf_errors() -> Result<()> {
+fn define_prim_at_variant_leaf() -> Result<()> {
     let stage = in_memory_stage()?;
     let root = stage.edit_target().layer_identifier().to_string();
     stage.define_prim("/Prim")?;
@@ -6879,12 +7110,12 @@ fn define_prim_at_variant_leaf_errors() -> Result<()> {
         root,
         sdf::path("/Prim{set=sel}")?,
     )?)?;
-    // `/Prim` is defined already; a new type makes the define write, and
-    // `/Prim` maps to the variant selection `/Prim{set=sel}`.
-    assert!(matches!(
-        stage.define_typed_prim("/Prim", "Scope"),
-        Err(StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. }))
-    ));
+    // `/Prim` is defined already; a new type makes the define write.
+    stage.define_typed_prim("/Prim", "Scope")?;
+    let layer = stage.root_layer();
+    let variant = layer.prim("/Prim{set=sel}")?.expect("the variant spec");
+    assert_eq!(variant.type_name().as_deref(), Some("Scope"));
+    assert_eq!(variant.specifier(), Some(sdf::Specifier::Def));
     Ok(())
 }
 

@@ -757,6 +757,16 @@ pub enum StageAuthoringError {
         path: sdf::Path,
     },
 
+    /// An edit target is asked of a variant set that selects no variant on
+    /// its prim, so there is no variant to author into.
+    #[error("variant set {set:?} on {prim} selects no variant")]
+    NoVariantSelection {
+        /// The prim.
+        prim: sdf::Path,
+        /// The variant set.
+        set: String,
+    },
+
     /// Stage-level metadata (the time-code range and rates) resolves only from
     /// the root and session layers (session over root), so it can be authored
     /// only when the current edit target is one of them. Mirrors C++
@@ -1529,12 +1539,23 @@ impl Stage {
         self.with_target_layer_at_each(&paths, |layer, mut spec_paths| {
             // An idempotent call (an existing def of that type) records
             // nothing because deriving the change skips the no-op write.
+            // Each spec is created as `over`, then made a `def` (C++
+            // `SdfCreatePrimInLayer` and `SetSpecifier`), so a path a variant
+            // edit target maps to `/Prim{set=sel}` defines the variant spec.
+            let mut def = |path, type_name: &str| -> Result<(), StageAuthoringError> {
+                let mut spec = sdf::PrimSpec::over(layer.data_mut(), path)?;
+                spec.set_specifier(sdf::Specifier::Def);
+                if !type_name.is_empty() {
+                    spec.set_type_name(type_name);
+                }
+                Ok(())
+            };
             let prim = spec_paths.pop().expect("the prim itself");
             for ancestor in spec_paths {
-                sdf::PrimSpec::new(layer.data_mut(), ancestor, sdf::Specifier::Def, String::new())?;
+                def(ancestor, "")?;
             }
             if define {
-                sdf::PrimSpec::new(layer.data_mut(), prim, sdf::Specifier::Def, type_name)?;
+                def(prim, &type_name)?;
             }
             Ok(())
         })?;

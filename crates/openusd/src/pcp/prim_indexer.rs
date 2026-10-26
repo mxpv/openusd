@@ -119,7 +119,7 @@ const EXPRESSED_ARCS: [(TaskKind, &str); 5] = [
     (TaskKind::EvalNodePayloads, FieldKey::Payload.as_str()),
     (TaskKind::EvalNodeInherits, FieldKey::InheritPaths.as_str()),
     (TaskKind::EvalNodeSpecializes, FieldKey::Specializes.as_str()),
-    (TaskKind::EvalNodeVariantSets, ChildrenKey::VariantSetChildren.as_str()),
+    (TaskKind::EvalNodeVariantSets, FieldKey::VariantSetNames.as_str()),
 ];
 
 pub(crate) type BuildResult<T> = Result<T, QueryError>;
@@ -1825,7 +1825,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// `is_ancestral` selects the ancestral task band when the set sits above the
     /// node's own path.
     fn eval_variant_sets_at_site(&mut self, node: NodeId, site_path: &Path, is_ancestral: bool) -> BuildResult<()> {
-        let sets = self.compose_token_children(node, site_path, ChildrenKey::VariantSetChildren)?;
+        let sets = self.compose_variant_sets(node, site_path)?;
         let kind = if is_ancestral {
             TaskKind::EvalNodeAncestralVariantAuthored
         } else {
@@ -3391,11 +3391,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
     }
 
-    /// Unions a node's named children (a `TokenVec` field) at `path` across its
-    /// layer stack, keeping declaration order and dropping duplicates. Used to
-    /// gather a site's variant set names and a set's variant options.
-    fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
-        let mut out: Vec<Token> = Vec::new();
+    /// The variant sets `path` declares across `node`'s layer stack: the
+    /// `variantSetNames` list ops, composed (C++ `PcpComposeSiteVariantSets`).
+    fn compose_variant_sets(&self, node: NodeId, path: &Path) -> BuildResult<Vec<Token>> {
         let n = self.node(node);
         // The layers before the node's first spec hold no field at its own
         // site.
@@ -3403,19 +3401,42 @@ impl<'a, 'f> Indexer<'a, 'f> {
             true => usize::from(n.spec_from()),
             false => 0,
         };
+        let mut ops = Vec::new();
         for &(layer, _) in self.inputs.stack.layer_stack(n.layer_stack_id()).iter().skip(from) {
-            let Some(value) = self.inputs.stack.layer(layer).data().try_field(path, key.as_str())? else {
-                continue;
-            };
-            if let Value::TokenVec(names) = value.into_owned() {
-                for name in names {
-                    if !out.contains(&name) {
-                        out.push(name);
-                    }
-                }
+            let field = self
+                .inputs
+                .stack
+                .layer(layer)
+                .data()
+                .try_field(path, FieldKey::VariantSetNames.as_str())?;
+            if let Some(Ok(op)) = field.map(|value| sdf::StringListOp::try_from(value.into_owned())) {
+                ops.push(op);
             }
         }
-        Ok(out)
+        Ok(sdf::StringListOp::compose_all(&ops)
+            .into_iter()
+            .map(Token::from)
+            .collect())
+    }
+
+    /// Unions a node's named children (a `TokenVec` field) at `path` across its
+    /// layer stack, keeping declaration order and dropping duplicates. Used to
+    /// gather a set's variant options.
+    fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
+        let n = self.node(node);
+        // The layers before the node's first spec hold no field at its own
+        // site.
+        let from = match path == n.path() {
+            true => usize::from(n.spec_from()),
+            false => 0,
+        };
+        Ok(super::compose_site::compose_token_children(
+            self.inputs.stack,
+            n.layer_stack_id(),
+            path,
+            key,
+            from,
+        )?)
     }
 
     /// Borrows the node behind a handle in the graph being grown.

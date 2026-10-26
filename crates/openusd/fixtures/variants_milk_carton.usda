@@ -1,0 +1,57 @@
+#usda 1.0
+(
+    defaultPrim = "MilkCartonA"
+)
+
+def Xform "MilkCartonA" (
+    kind = "prop"
+    variants = {
+        string modelingVariant = "Carton_Opened"
+        string shadingComplexity = "full"
+        string localDanglingVariant = "local"
+    }
+    add variantSets = ["modelingVariant", "shadingComplexity"]
+    references = </VariantSelRef>
+)
+{
+    variantSet "modelingVariant" = {
+        "ALL_VARIANTS" {
+            custom Vec3f[] extentsHint = [(-6.27056, -6.53532, 0), (6.14027, 6.10374, 29.8274)]
+
+        }
+        "Carton_Opened" {
+            custom Vec3f[] extentsHint = [(-6.27056, -6.53532, 0), (6.14027, 6.10374, 29.8274)]
+
+        }
+        "Carton_Sealed" {
+            custom Vec3f[] extentsHint = [(-6.27056, -6.44992, 0), (6.14027, 6.10374, 29.2792)]
+
+        }
+    }
+    variantSet "shadingComplexity" = {
+        "display" {
+
+        }
+        "full" {
+
+        }
+        "modeling" {
+
+        }
+        "none" {
+
+        }
+    }
+}
+
+# Referenced prim with variant selection opinions to test
+# GetAllVariantSelections API
+def "VariantSelRef" (
+    variants = {
+        string modelingVariant = "Carton_Sealed"
+        string shadingComplexity = "none"
+        string referencedDanglingVariant = "ref"
+    }
+)
+{
+}

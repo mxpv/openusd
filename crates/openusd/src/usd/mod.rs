@@ -47,7 +47,7 @@ pub use interp::{InterpolationType, bracketing_time_samples};
 pub use list_edit::{IntoItem, ListEdit, ListItem, ListPosition};
 pub use model_api::KindValidation;
 pub use object::{Object, Property};
-pub use prim::{Prim, PrimIndexRef, PrimRange, VariantSets};
+pub use prim::{Prim, PrimIndexRef, PrimRange, VariantSet, VariantSets};
 pub use prim_definition::{DefProperty, PrimDefinition};
 pub use prim_type_info::{PrimTypeId, PrimTypeInfo};
 pub use relationship::{Relationship, RelationshipBuilder};

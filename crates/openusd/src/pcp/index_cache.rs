@@ -3450,6 +3450,35 @@ impl IndexCache {
         Ok(self.cached(&path).variant_selections())
     }
 
+    /// The variant sets the prim at `path` declares, in composed order (C++
+    /// `UsdVariantSets::GetNames`).
+    pub fn variant_set_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        self.cached(&path).variant_set_names(graph)
+    }
+
+    /// The variants variant set `set` of the prim at `path` holds, sorted
+    /// (C++ `UsdVariantSet::GetVariantNames`).
+    pub fn variant_names(&mut self, graph: &LayerGraph, path: &Path, set: &str) -> Result<Vec<String>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        self.cached(&path).variant_names(graph, set)
+    }
+
+    /// The variant of `set` composition selects for the prim at `path` (C++
+    /// `UsdVariantSet::GetVariantSelection`).
+    pub fn variant_selection(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        set: &str,
+    ) -> Result<Option<String>, QueryError> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        Ok(self.cached(&path).variant_selection(set))
+    }
+
     // ------------------------------------------------------------------
     // Core composition
     // ------------------------------------------------------------------

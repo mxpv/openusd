@@ -34,7 +34,7 @@ that broader spec behavior can be considered fully covered.
 | Core metadata fields (prim spec) | `7.6.2` | :white_check_mark: | `0.1.2` | specifier, primChildren, propertyChildren, references, payload, inherits, specializes, variantSets, variantSelection, etc. |
 | Core metadata fields (attribute spec) | `7.6.3` | :white_check_mark: | `0.1.2` | typeName, default, timeSamples, connectionPaths, variability, custom |
 | Core metadata fields (relationship spec) | `7.6.4` | :white_check_mark: | `0.1.2` | targetPaths, variability, custom |
-| Core metadata fields (variant set/variant spec) | `7.6.5-7` | :white_check_mark: | `main` | `PrimSpec::variant_selections`, `set_variant_selection` / `block_variant_selection`, `add_variant_set` / `add_variant`; `PrimSpec::over` on a variant |
+| Core metadata fields (variant set/variant spec) | `7.6.5-7` | :white_check_mark: | `0.2.0` | `PrimSpec::variant_selections`, `set_variant_selection` / `block_variant_selection`, `add_variant_set` / `add_variant`; `PrimSpec::over` on a variant |
 | Spline specialized type | `7.4.2.4` | :construction: | | A USDA `.spline` block round-trips as a dictionary (`usda::types::parse_spline`)<br>Remaining — typed knots, interpolation and extrapolation; USDC encoding; evaluation during value resolution; authoring |
 | Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | `0.1.2` — parsed from `subLayerOffsets`<br>`0.4.0` — composed through arcs<br>`0.5.0` — applied during value resolution (§12.3.2.1) |
 
@@ -80,7 +80,7 @@ that broader spec behavior can be considered fully covered.
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | Authored through `usd::ListEdit` |
 | Specializes global weakness | `10.4.1` | :white_check_mark: | `0.3.0` | Specializes nodes are copied under the local root (`propagate_node_to_root`, C++ `_PropagateNodeToRoot`); the strength-order DFS then places the globally weak band last |
-| [Variants](https://openusd.org/release/api/class_usd_variant_sets.html) | `10.3.2.5` | :white_check_mark: | `0.2.0` | Including deferred evaluation after R/P |
+| [Variants](https://openusd.org/release/api/class_usd_variant_sets.html) | `10.3.2.5` | :white_check_mark: | `0.2.0` | Including deferred evaluation after R/P; `usd::VariantSets` and `usd::VariantSet` |
 | Variant selection computation | `10.3.2.5.1` | :white_check_mark: | `0.2.0` | Strongest opinion wins, searched strong-to-weak from the strongest mapped node; with no authored selection and no applicable fallback the set stays unselected, as in C++ |
 | Variant fallback map | `10.3.2.5.1` | :white_check_mark: | `0.3.0` | `VariantFallbackMap` via `StageBuilder` |
 | [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | `10.3.2.6` | :white_check_mark: | `0.3.0` | `layerRelocates`, source path resolution, child remapping |

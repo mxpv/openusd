@@ -12,10 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::sdf::expr;
-use crate::sdf::schema::FieldKey;
+use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
+use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
+use super::layer_stack::LayerStackId;
 use super::prim_graph::Node;
 use super::{CompositionDiagnostic, ExpressionContext, LayerGraph, LayerId, QueryError};
 
@@ -136,6 +138,33 @@ where
         |_, _, _| {},
         |_, _| 1.0,
     )
+}
+
+/// The names the `TokenVec` field `key` lists at `path` across the layers of
+/// `stack` from position `from` on, each once, in the order the strongest
+/// layer listing it gives (C++ `PcpComposeSiteVariantSetOptions` reads
+/// `variantChildren` this way).
+pub(super) fn compose_token_children(
+    graph: &LayerGraph,
+    stack: LayerStackId,
+    path: &Path,
+    key: ChildrenKey,
+    from: usize,
+) -> Result<Vec<Token>, sdf::DataError> {
+    let mut out: Vec<Token> = Vec::new();
+    for &(layer, _) in graph.layer_stack(stack).iter().skip(from) {
+        let Some(value) = graph.layer(layer).data().try_field(path, key.as_str())? else {
+            continue;
+        };
+        if let Value::TokenVec(names) = value.into_owned() {
+            for name in names {
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Composes a list-op field across nodes' layer stacks, returning the

@@ -5,11 +5,12 @@
 //! [module-level docs](super) for the full composition overview.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::{iter, mem};
 
-use crate::sdf::schema::FieldKey;
+use super::compose_site::{compose_arc_list_in, compose_token_children};
+use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 
 use super::diagnostics::Diagnostics;
@@ -1208,6 +1209,58 @@ impl PrimIndex {
         let mut out: Vec<(String, String)> = selections.into_iter().collect();
         out.sort();
         out
+    }
+
+    /// The variant sets the index's nodes declare in `variantSetNames`, each
+    /// where the strongest node declaring it lists it (C++
+    /// `UsdVariantSets::GetNames` over `PcpComposeSiteVariantSets`). Every
+    /// node is read, inert ones included, as C++ reads its whole node range.
+    pub(crate) fn variant_set_names(&self, graph: &LayerGraph) -> Result<Vec<String>, QueryError> {
+        let mut names: Vec<String> = Vec::new();
+        for node in self.ordered_nodes() {
+            for name in compose_arc_list_in::<String>(&[node], FieldKey::VariantSetNames, graph)? {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    /// The variants variant set `set` holds across the index, sorted (C++
+    /// `UsdVariantSet::GetVariantNames`): each node at a prim or
+    /// variant-selection site reads `variantChildren` at its own site's set
+    /// across its layer stack (C++ `PcpComposeSiteVariantSetOptions`).
+    pub(crate) fn variant_names(&self, graph: &LayerGraph, set: &str) -> Result<Vec<String>, QueryError> {
+        let mut names = BTreeSet::new();
+        for node in self.ordered_nodes() {
+            let path = node.path();
+            if !path.is_prim() && !path.is_variant_selection() {
+                continue;
+            }
+            let Ok(set_path) = path.append_variant_selection(set, "") else {
+                continue;
+            };
+            let variants =
+                compose_token_children(graph, node.layer_stack_id(), &set_path, ChildrenKey::VariantChildren, 0)?;
+            names.extend(variants.into_iter().map(String::from));
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    /// The variant of `set` the strongest variant arc selects, the selection
+    /// composition made, authored or fallback (C++
+    /// `UsdVariantSet::GetVariantSelection`).
+    pub(crate) fn variant_selection(&self, set: &str) -> Option<String> {
+        self.ordered_nodes()
+            .filter(|node| node.arc() == ArcType::Variant)
+            .find_map(|node| match node.path().last_element()? {
+                sdf::PathElement::Variant {
+                    set: node_set,
+                    selection,
+                } if node_set == set => Some(selection.to_string()),
+                _ => None,
+            })
     }
 }
 

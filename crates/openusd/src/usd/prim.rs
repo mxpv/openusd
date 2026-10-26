@@ -35,8 +35,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    ApplyApiError, Attribute, ComposedStatus, EditTarget, EditTargetArc, LoadPolicy, PrimDefinition, PrimPredicate,
-    PrimStatus, PrimTypeInfo, Relationship, SchemaRegistry, SpecSite, Stage, StageAuthoringError, VersionFilter,
+    ApplyApiError, Attribute, ComposedStatus, EditTarget, EditTargetArc, ListPosition, LoadPolicy, PrimDefinition,
+    PrimPredicate, PrimStatus, PrimTypeInfo, Relationship, SchemaRegistry, SpecSite, Stage, StageAuthoringError,
+    VersionFilter, list_edit,
 };
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
@@ -1353,7 +1354,16 @@ impl Prim {
     /// Returns the variant sets composed onto this prim. Mirrors C++
     /// `UsdPrim::GetVariantSets`.
     pub fn variant_sets(&self) -> VariantSets {
-        VariantSets::new(&self.stage, self.path.clone())
+        VariantSets { prim: self.clone() }
+    }
+
+    /// The variant set `name` of this prim, whether or not the prim declares
+    /// it (C++ `UsdPrim::GetVariantSet`).
+    pub fn variant_set(&self, name: impl Into<String>) -> VariantSet {
+        VariantSet {
+            prim: self.clone(),
+            name: name.into(),
+        }
     }
 
     /// Run `f` on this prim's spec on the edit target's layer — an `over`
@@ -1593,35 +1603,196 @@ impl PrimIndexRef {
 
 /// The variant sets composed onto a prim. Mirrors C++ `UsdVariantSets`,
 /// reached through [`Prim::variant_sets`].
-//
-// TODO: grow this to cover the rest of `UsdVariantSets`
-// (`GetNames` / `HasVariantSet` / `GetVariantSet` / `SetSelection`). Until it
-// carries more than `selections`, the newtype earns its keep
-// only as the C++ API shape; if those methods don't materialize, fold the one
-// query back onto `Prim`.
 #[derive(Clone)]
 pub struct VariantSets {
-    stage: Stage,
-    prim: sdf::Path,
+    prim: Prim,
+}
+
+/// One variant set of a prim, by name. Mirrors C++ `UsdVariantSet`, reached
+/// through [`Prim::variant_set`] and [`VariantSets::get`].
+#[derive(Clone)]
+pub struct VariantSet {
+    prim: Prim,
+    name: String,
 }
 
 impl VariantSets {
-    pub(super) fn new(stage: &Stage, prim: sdf::Path) -> Self {
-        Self {
-            stage: stage.clone(),
-            prim,
-        }
+    /// Returns the variant selections composition made for the prim, as
+    /// `(set, selection)` pairs sorted by set name: authored, fallback, or
+    /// default, one per set that grafted a variant.
+    // TODO: C++ `UsdVariantSets::GetAllVariantSelections` answers the
+    // strongest authored selection of every set over the prim's nodes (C++
+    // `PcpComposeSiteVariantSelections`), dangling ones included, which needs
+    // a per-node selection read in `PrimIndex`.
+    pub fn selections(&self) -> Result<Vec<(String, String)>> {
+        let path = self.prim.path();
+        Ok(self
+            .prim
+            .stage
+            .masked_opinions(path, |g, c| c.variant_selections(g, path))?)
     }
 
-    /// Returns the variant selections composed onto the prim, as `(set,
-    /// selection)` pairs sorted by set name. Mirrors C++
-    /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
-    /// selections — authored, fallback, or default — read from the variant
-    /// selection sites that actually contribute to the prim.
-    pub fn selections(&self) -> Result<Vec<(String, String)>> {
+    /// The variant set `name` of the prim, whether or not the prim declares it
+    /// (C++ `UsdVariantSets::GetVariantSet`).
+    pub fn get(&self, name: impl Into<String>) -> VariantSet {
+        self.prim.variant_set(name)
+    }
+
+    /// Declare variant set `name` on the edit target, at `position` in the
+    /// prim's `variantSetNames`, and create its spec (C++
+    /// `UsdVariantSets::AddVariantSet`).
+    pub fn add(&self, name: impl Into<String>, position: ListPosition) -> Result<VariantSet, StageAuthoringError> {
+        let set = self.get(name);
+        set.declare(position, None)?;
+        Ok(set)
+    }
+
+    /// The variant sets the prim declares, in composed order (C++
+    /// `UsdVariantSets::GetNames`).
+    pub fn names(&self) -> Result<Vec<String>> {
+        let path = self.prim.path();
         Ok(self
+            .prim
             .stage
-            .masked_opinions(&self.prim, |g, c| c.variant_selections(g, &self.prim))?)
+            .masked_opinions(path, |g, c| c.variant_set_names(g, path))?)
+    }
+
+    /// Whether the prim declares variant set `name` (C++
+    /// `UsdVariantSets::HasVariantSet`).
+    pub fn contains(&self, name: &str) -> Result<bool> {
+        Ok(self.names()?.iter().any(|set| set == name))
+    }
+
+    /// Select `selection` in variant set `set` on the edit target (C++
+    /// `UsdVariantSets::SetSelection`).
+    pub fn set_selection(&self, set: impl Into<String>, selection: &str) -> Result<(), StageAuthoringError> {
+        self.get(set).set_selection(selection)
+    }
+}
+
+impl VariantSet {
+    /// The prim the variant set belongs to.
+    pub fn prim(&self) -> &Prim {
+        &self.prim
+    }
+
+    /// The variant set's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Put the set at `position` in the edit target's `variantSetNames`, a set
+    /// listed there already moving to it, and create variant `name`, both on
+    /// the prim's spec there (C++ `UsdVariantSet::AddVariant`).
+    pub fn add_variant(&self, name: &str, position: ListPosition) -> Result<(), StageAuthoringError> {
+        self.declare(position, Some(name))
+    }
+
+    /// The variants the set holds across the prim's composition, sorted (C++
+    /// `UsdVariantSet::GetVariantNames`).
+    pub fn names(&self) -> Result<Vec<String>> {
+        let path = self.prim.path();
+        Ok(self
+            .prim
+            .stage
+            .masked_opinions(path, |g, c| c.variant_names(g, path, &self.name))?)
+    }
+
+    /// The variant composition selects, authored or a fallback, or `None`
+    /// where it selects none (C++ `UsdVariantSet::GetVariantSelection`).
+    pub fn selection(&self) -> Result<Option<String>> {
+        Ok(self.composed_selection()?)
+    }
+
+    /// Select `selection` on the edit target (C++
+    /// `UsdVariantSet::SetVariantSelection`). The empty name is
+    /// [`sdf::AuthoringError::EmptyVariantSelection`], where C++ clears the
+    /// selection: that is [`clear_selection`](Self::clear_selection)'s.
+    pub fn set_selection(&self, selection: &str) -> Result<(), StageAuthoringError> {
+        self.prim
+            .clone()
+            .edit(|spec| Ok(spec.set_variant_selection(&self.name, selection)?))?;
+        Ok(())
+    }
+
+    /// Drop the edit target's selection, so a weaker one composes (C++
+    /// `UsdVariantSet::ClearVariantSelection`).
+    pub fn clear_selection(&self) -> Result<(), StageAuthoringError> {
+        self.prim
+            .clone()
+            .edit(|spec| Ok(spec.clear_variant_selection(&self.name)?))?;
+        Ok(())
+    }
+
+    /// Select no variant on the edit target, hiding weaker selections (C++
+    /// `UsdVariantSet::BlockVariantSelection`).
+    pub fn block_selection(&self) -> Result<(), StageAuthoringError> {
+        self.prim
+            .clone()
+            .edit(|spec| Ok(spec.block_variant_selection(&self.name)?))?;
+        Ok(())
+    }
+
+    /// The edit target that authors inside the selected variant, on `layer`,
+    /// a local layer of the stage, or the current edit target's layer where it
+    /// is `None` (C++ `UsdVariantSet::GetVariantEditTarget`). The prim's path
+    /// maps through the current edit target, as C++ maps it.
+    ///
+    /// A set that selects no variant is
+    /// [`StageAuthoringError::NoVariantSelection`], and a layer that is not
+    /// local [`StageAuthoringError::LayerNotFound`], where C++ answers an
+    /// invalid target.
+    pub fn edit_target(&self, layer: Option<&str>) -> Result<EditTarget, StageAuthoringError> {
+        let Some(selection) = self.composed_selection()? else {
+            return Err(StageAuthoringError::NoVariantSelection {
+                prim: self.prim.path().clone(),
+                set: self.name.clone(),
+            });
+        };
+        let stage = &self.prim.stage;
+        let current = stage.edit_target();
+        let requested = layer.unwrap_or(current.layer_identifier());
+        // The local layer's own identifier, whichever spelling named it.
+        let local = stage
+            .edit_target_for_local_layer(requested)
+            .ok_or_else(|| StageAuthoringError::LayerNotFound {
+                layer: requested.to_string(),
+            })?;
+        let spec =
+            current
+                .map_to_spec_path(self.prim.path())
+                .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
+                    path: self.prim.path().clone(),
+                })?;
+        Ok(EditTarget::for_local_direct_variant(
+            local.layer_identifier(),
+            spec.append_variant_selection(&self.name, &selection)?,
+        )?)
+    }
+
+    /// The variant composition selects, or `None` where it selects none.
+    fn composed_selection(&self) -> Result<Option<String>, pcp::QueryError> {
+        let path = self.prim.path();
+        self.prim
+            .stage
+            .masked_opinions(path, |g, c| c.variant_selection(g, path, &self.name))
+    }
+
+    /// List the set in the edit target's `variantSetNames` at `position` and
+    /// create its spec, with the spec of `variant` in it where one is named
+    /// (C++ `UsdVariantSet::_AddVariantSet`).
+    fn declare(&self, position: ListPosition, variant: Option<&str>) -> Result<(), StageAuthoringError> {
+        self.prim.clone().edit(|spec| {
+            spec.add_variant_set(&self.name)?;
+            spec.edit_list(sdf::FieldKey::VariantSetNames, |names| {
+                list_edit::insert(names, self.name.clone(), position);
+            })?;
+            if let Some(variant) = variant {
+                spec.add_variant(&self.name, variant)?;
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 
