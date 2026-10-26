@@ -2,12 +2,13 @@
 //! hand-authored UsdShade fixture, and a full author → read-back roundtrip on
 //! an in-memory stage.
 
+use std::collections::BTreeMap;
 use std::fs;
 
 use openusd::Result;
 use openusd::{sdf, tf, usd};
 use openusd_schemas::SchemaError;
-use openusd_schemas::geom::FamilyType;
+use openusd_schemas::geom::{self, FamilyType};
 use openusd_schemas::shade::Connectable;
 use openusd_schemas::shade::{
     self, AttributeType, Channel, Connectability, ImplementationSource, Material, MaterialBindingAPI, NodeGraph,
@@ -735,6 +736,227 @@ fn untyped_source_refused() -> Result<(), SchemaError> {
     assert!(
         matches!(error, SchemaError::UntypedConnectionSource { .. }),
         "{error:?}"
+    );
+    Ok(())
+}
+
+/// The bases and variations of C++ `testUsdShadeMaterialAuthoring.py`.
+const BASES: [&str; 3] = ["Hair", "Skin", "Nails"];
+const VARIATIONS: [&str; 2] = ["Wet", "Dry"];
+
+/// A stage holding `/ModelShading` as its default prim, in centimeters with Y
+/// up.
+fn shading_stage() -> Result<(usd::Stage, usd::Prim), SchemaError> {
+    let stage = memory()?;
+    geom::set_stage_up_axis(&stage, geom::UpAxis::Y)?;
+    stage.set_stage_metadata("metersPerUnit", geom::linear_units::CENTIMETERS)?;
+    let root = stage.define_prim("/ModelShading")?;
+    stage.set_default_prim("ModelShading")?;
+    Ok((stage, root))
+}
+
+/// An internal reference to the prim at `path`.
+fn reference(path: &str) -> Result<sdf::Reference> {
+    Ok(sdf::Reference {
+        prim_path: sdf::path(path)?,
+        ..Default::default()
+    })
+}
+
+/// `/ShadingDefs`, an `over` holding a surface and a displacement shader per
+/// base and variation, and per base a material that references them and
+/// connects its terminals to them inside each variation. Answers the
+/// materials.
+fn shading_defs(stage: &usd::Stage) -> Result<Vec<usd::Prim>, SchemaError> {
+    geom::Scope::define(stage, "/ShadingDefs/Shaders")?;
+    geom::Scope::define(stage, "/ShadingDefs/Materials")?;
+    let mut materials = Vec::new();
+    for base in BASES {
+        let path = format!("/ShadingDefs/Materials/{base}Material");
+        let material = Material::define(stage, path.as_str())?;
+        material.references().add(reference("/ShadingDefs/Shaders")?)?;
+        for variation in VARIATIONS {
+            let surface = format!("{base}{variation}Surface");
+            let displacement = format!("{base}{variation}Displacement");
+            Shader::define(stage, format!("/ShadingDefs/Shaders/{surface}").as_str())?
+                .create_output("surface", "token")?;
+            Shader::define(stage, format!("/ShadingDefs/Shaders/{displacement}").as_str())?
+                .create_output("displacement", "token")?;
+
+            let _context = stage.edit_context(material.variant_edit_target(variation, None)?)?;
+            let surface = shader(stage, &format!("{path}/{surface}"))?.output("surface");
+            let displacement = shader(stage, &format!("{path}/{displacement}"))?.output("displacement");
+            material.create_surface_output()?.connect_to(&surface)?;
+            material.create_displacement_output()?.connect_to(&displacement)?;
+        }
+        materials.push(material.into());
+    }
+    stage.prim("/ShadingDefs")?.set_specifier(sdf::Specifier::Over)?;
+    Ok(materials)
+}
+
+/// The hair material's terminals connect to the wet or dry shaders that
+/// `root`'s `materialVariant` selection names.
+fn validate_material_switch(stage: &usd::Stage, root: &usd::Prim) -> Result<(), SchemaError> {
+    let hair = "/ModelShading/Materials/HairMaterial";
+    let material = Material::get(stage, hair)?.expect("HairMaterial");
+    let source = |output: Output| -> Result<sdf::Path, SchemaError> {
+        let sources = output.connected_sources()?.into_sources();
+        Ok(sources.first().expect("a connected source").path().clone())
+    };
+    for variation in ["Wet", "Dry"] {
+        root.variant_sets().set_selection("materialVariant", variation)?;
+        assert_eq!(
+            source(material.surface_output())?,
+            sdf::path(format!("{hair}/Hair{variation}Surface.outputs:surface"))?
+        );
+        assert_eq!(
+            source(material.displacement_output())?,
+            sdf::path(format!("{hair}/Hair{variation}Displacement.outputs:displacement"))?
+        );
+    }
+    Ok(())
+}
+
+/// `layer` holds the specs and field values of the layer at `baseline`, each
+/// `*Children` list in any order.
+fn assert_same_specs(layer: &sdf::Layer, baseline: &str) -> Result<()> {
+    let baseline = sdf::Layer::open(baseline)?;
+    let specs = |data: &dyn sdf::AbstractData| -> Result<Vec<(sdf::Path, BTreeMap<String, sdf::Value>)>> {
+        let mut specs = Vec::new();
+        for path in data.spec_paths() {
+            let mut fields = BTreeMap::new();
+            for name in data.list_fields(&path).expect("a listed spec") {
+                let mut value = data.field(&path, &name).map_err(openusd::Error::from)?.into_owned();
+                if let (true, sdf::Value::TokenVec(children)) = (name.ends_with("Children"), &mut value) {
+                    children.sort();
+                }
+                fields.insert(name, value);
+            }
+            specs.push((path, fields));
+        }
+        Ok(specs)
+    };
+    assert_eq!(specs(layer.data())?, specs(baseline.data())?);
+    Ok(())
+}
+
+/// A master variant on a separate `over`, referenced into the root beside the
+/// shading, authors C++'s layer and switches the materials (C++
+/// `testUsdShadeMaterialAuthoring.py`).
+#[test]
+fn master_variant_tree() -> Result<(), SchemaError> {
+    let (stage, root) = shading_stage()?;
+    let materials = shading_defs(&stage)?;
+    let master = stage.override_prim("/MaterialBindingVariants")?;
+    Material::create_master_variant(&master, &materials, None)?;
+    for target in ["/MaterialBindingVariants", "/ShadingDefs"] {
+        root.references().add(reference(target)?)?;
+    }
+    assert_same_specs(&stage.root_layer(), "fixtures/usdShade_char_shading.usda")?;
+    validate_material_switch(&stage, &root)
+}
+
+/// A master variant on the root, switching the materials it composes through
+/// its reference to the shading.
+#[test]
+fn master_variant_compact() -> Result<(), SchemaError> {
+    let (stage, root) = shading_stage()?;
+    shading_defs(&stage)?;
+    root.references().add(reference("/ShadingDefs")?)?;
+    let materials = BASES
+        .iter()
+        .map(|base| stage.prim(format!("/ModelShading/Materials/{base}Material")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Material::create_master_variant(&root, &materials, None)?;
+    assert_same_specs(&stage.root_layer(), "fixtures/usdShade_char_shading_compact.usda")?;
+    validate_material_switch(&stage, &root)
+}
+
+/// Each check on the master and its materials fails with its own error.
+#[test]
+fn master_variant_errors() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let master = stage.define_prim("/Master")?;
+    let wet = Material::define(&stage, "/Wet")?;
+    wet.variant_edit_target("Wet", None)?;
+    let both = Material::define(&stage, "/Both")?;
+    for variation in VARIATIONS {
+        both.variant_edit_target(variation, None)?;
+    }
+    let plain: usd::Prim = Material::define(&stage, "/Plain")?.into();
+    let other = memory()?;
+    let foreign: usd::Prim = Material::define(&other, "/Wet")?.into();
+    let wet: usd::Prim = wet.into();
+    let both: usd::Prim = both.into();
+
+    let error = |master: &usd::Prim, materials: &[usd::Prim]| {
+        Material::create_master_variant(master, materials, None).expect_err("a refused master variant")
+    };
+    assert!(matches!(error(&master, &[]), SchemaError::NoMaterials { .. }));
+    assert!(matches!(
+        error(&master, &[wet.clone(), foreign]),
+        SchemaError::ForeignStage { .. }
+    ));
+    assert!(matches!(
+        error(&master, &[plain]),
+        SchemaError::NoMaterialVariants { .. }
+    ));
+    assert!(matches!(
+        error(&master, &[wet.clone(), both]),
+        SchemaError::MismatchedMaterialVariants { .. }
+    ));
+    assert!(matches!(
+        error(&stage.prim("/Missing")?, &[wet]),
+        SchemaError::Core(openusd::Error::Authoring(usd::StageAuthoringError::PrimNotValid { .. }))
+    ));
+    assert!(!master.variant_sets().contains("materialVariant")?);
+    Ok(())
+}
+
+/// A material under the master whose variants were authored locally keeps its
+/// own selection over the master's, as in C++, and follows the master once
+/// that selection is cleared.
+#[test]
+fn master_variant_local_material() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let root = stage.define_prim("/Root")?;
+    let material = Material::define(&stage, "/Root/Mat")?;
+    for variation in VARIATIONS {
+        material.variant_edit_target(variation, None)?;
+    }
+    Material::create_master_variant(&root, &[material.clone().into()], None)?;
+    let selected = |master: &str| -> Result<Option<String>, SchemaError> {
+        root.variant_sets().set_selection("materialVariant", master)?;
+        Ok(material.material_variant().selection()?)
+    };
+    assert_eq!(selected("Wet")?.as_deref(), Some("Dry"));
+
+    material.material_variant().clear_selection()?;
+    assert_eq!(selected("Wet")?.as_deref(), Some("Wet"));
+    assert_eq!(selected("Dry")?.as_deref(), Some("Dry"));
+    Ok(())
+}
+
+/// A connection authored inside a material variant creates its missing
+/// source there.
+#[test]
+fn source_created_in_variant() -> Result<(), SchemaError> {
+    let stage = memory()?;
+    let material = Material::define(&stage, "/Mat")?;
+    let source = Shader::define(&stage, "/Mat/Source")?.output("out");
+    {
+        let _context = stage.edit_context(material.variant_edit_target("Wet", None)?)?;
+        material.create_surface_output()?.connect_to(&source)?;
+    }
+    let layer = stage.root_layer();
+    let in_variant = sdf::path("/Mat{materialVariant=Wet}Source.outputs:out")?;
+    assert!(layer.attribute(&in_variant)?.is_some());
+    assert!(layer.attribute("/Mat/Source.outputs:out")?.is_none());
+    drop(layer);
+    assert_eq!(
+        material.surface_output().connections()?,
+        [sdf::path("/Mat/Source.outputs:out")?]
     );
     Ok(())
 }

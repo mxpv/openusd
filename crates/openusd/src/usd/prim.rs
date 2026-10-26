@@ -1290,12 +1290,14 @@ impl Prim {
         Ok(self.stage.has_spec(&self.path)?)
     }
 
-    /// The gate every prim-handle write shares (C++ `UsdPrim` setters on an
-    /// invalid prim): a prim nothing composes cannot take an opinion, so
-    /// authoring through a handle never conjures a prim. A prim the stage will
-    /// not compose but a caller still means to type is defined through
-    /// [`Stage::define_typed_prim`] instead.
-    fn require_valid(&self) -> Result<(), StageAuthoringError> {
+    /// [`StageAuthoringError::PrimNotValid`] unless the prim
+    /// [is valid](Self::is_valid) (C++ `if (!prim)`).
+    ///
+    /// Every prim-handle write passes this gate: a prim nothing composes
+    /// cannot take an opinion, so authoring through a handle never conjures a
+    /// prim. A prim the stage will not compose but a caller still means to type
+    /// is defined through [`Stage::define_typed_prim`].
+    pub fn require_valid(&self) -> Result<(), StageAuthoringError> {
         if self.stage.has_spec(&self.path)? {
             return Ok(());
         }

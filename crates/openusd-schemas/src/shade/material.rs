@@ -7,7 +7,7 @@
 use openusd::Result;
 use openusd::pcp;
 use openusd::sdf;
-use openusd::tf;
+use openusd::{tf, usd};
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -371,6 +371,107 @@ impl Material {
         Ok(Output::new(
             self.attribute_builder(name.as_ref(), "token").custom(false).build()?,
         ))
+    }
+
+    /// The material's `materialVariant` variant set (C++
+    /// `UsdShadeMaterial::GetMaterialVariant`).
+    pub fn material_variant(&self) -> usd::VariantSet {
+        self.variant_set(tokens::MATERIAL_VARIANT)
+    }
+
+    /// The edit target that authors inside variant `variation` of
+    /// `materialVariant`, on `layer` or the current edit target's layer (C++
+    /// `UsdShadeMaterial::GetEditContextForVariant`). The variant is added and
+    /// selected on the current edit target first. That selection stays once
+    /// the variations are authored: set it to the default variant, or clear it
+    /// through [`material_variant`](Self::material_variant) so a
+    /// [master variant](Self::create_master_variant) can select one.
+    ///
+    /// Pass the target to [`usd::Stage::edit_context`] to author through it. A
+    /// failure is an error, where C++ answers the current edit target.
+    pub fn variant_edit_target(&self, variation: &str, layer: Option<&str>) -> Result<usd::EditTarget, SchemaError> {
+        let set = self.material_variant();
+        set.add_variant(variation, usd::ListPosition::BackOfPrepend)?;
+        set.set_selection(variation)?;
+        Ok(set.edit_target(layer)?)
+    }
+
+    /// Give `master` a variant set, `set` or else `materialVariant`, whose
+    /// variants select the same-named `materialVariant` of every one of
+    /// `materials` (C++ `UsdShadeMaterial::CreateMasterMaterialVariant`).
+    ///
+    /// The materials must be valid prims on `master`'s stage, and hold the
+    /// same non-empty set of `materialVariant` variants. Inside each master
+    /// variant a material under `master` takes its selection directly, and one
+    /// elsewhere through an `over` at its path with its root prim replaced by
+    /// `master`. A material's own selection outside the master's variants is
+    /// stronger than the master's. A material whose variants were authored
+    /// locally through [`variant_edit_target`](Self::variant_edit_target)
+    /// follows the master only once that selection is cleared, and this
+    /// function leaves it in place, as C++ does. The master's selection is left on the
+    /// last variant by name, as in C++. Each failed check is an error, where C++ answers `false`. A
+    /// material that stops being valid partway leaves the variants authored
+    /// before it in place, as in C++.
+    pub fn create_master_variant(
+        master: &usd::Prim,
+        materials: &[usd::Prim],
+        set: Option<&str>,
+    ) -> Result<(), SchemaError> {
+        master.require_valid()?;
+        let Some(first) = materials.first() else {
+            return Err(SchemaError::NoMaterials {
+                master: master.path().clone(),
+            });
+        };
+        let variants_of = |material: &usd::Prim| -> Result<Vec<String>, SchemaError> {
+            material.require_valid()?;
+            if material.stage() != master.stage() {
+                return Err(SchemaError::ForeignStage {
+                    material: material.path().clone(),
+                    master: master.path().clone(),
+                });
+            }
+            let names = material.variant_set(tokens::MATERIAL_VARIANT).names()?;
+            if names.is_empty() {
+                return Err(SchemaError::NoMaterialVariants {
+                    material: material.path().clone(),
+                });
+            }
+            Ok(names)
+        };
+        let variants = variants_of(first)?;
+        for material in &materials[1..] {
+            if variants_of(material)? != variants {
+                return Err(SchemaError::MismatchedMaterialVariants {
+                    material: material.path().clone(),
+                    first: first.path().clone(),
+                });
+            }
+        }
+
+        let stage = master.stage();
+        let master_set = master.variant_set(set.unwrap_or(tokens::MATERIAL_VARIANT));
+        for variant in &variants {
+            master_set.add_variant(variant, usd::ListPosition::BackOfPrepend)?;
+            master_set.set_selection(variant)?;
+            let _context = stage.edit_context(master_set.edit_target(None)?)?;
+            for material in materials {
+                // A material may stop being valid once the master's selection switches.
+                material.require_valid()?;
+                let material = if material.path().has_prefix(master.path()) {
+                    material.clone()
+                } else {
+                    let root = material.path().root_prim().expect("a material's path is absolute");
+                    let derived = material
+                        .path()
+                        .replace_prefix(&root, master.path())
+                        .expect("a prim path has its root prim as a prefix");
+                    stage.override_prim(derived)?
+                };
+                material.variant_set(tokens::MATERIAL_VARIANT).set_selection(variant)?;
+            }
+        }
+        Ok(())
     }
 }
 

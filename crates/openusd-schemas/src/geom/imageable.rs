@@ -203,12 +203,7 @@ pub trait ImageableExt: ImageableSchema {
     /// A `proxy` the stage holds no prim for is
     /// [`usd::StageAuthoringError::PrimNotValid`].
     fn set_proxy_prim(&self, proxy: &usd::Prim) -> Result<usd::Relationship> {
-        if !proxy.is_valid()? {
-            return Err(usd::StageAuthoringError::PrimNotValid {
-                path: proxy.path().clone(),
-            }
-            .into());
-        }
+        proxy.require_valid()?;
         Ok(self.proxy_prim_rel_builder().set_targets([proxy.path()]).build()?)
     }
 

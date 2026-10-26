@@ -518,6 +518,40 @@ pub enum SchemaError {
         consumer: sdf::Path,
     },
 
+    /// A master material variant is asked for over no materials.
+    #[error("no materials to give {master} a master material variant over")]
+    NoMaterials {
+        /// The master prim.
+        master: sdf::Path,
+    },
+
+    /// A material is on another stage than the master prim switching it.
+    #[error("material {material} is not on the stage of master prim {master}")]
+    ForeignStage {
+        /// The material.
+        material: sdf::Path,
+        /// The master prim.
+        master: sdf::Path,
+    },
+
+    /// A material a master variant is to switch has no `materialVariant`
+    /// variants.
+    #[error("material {material} has no materialVariant variants")]
+    NoMaterialVariants {
+        /// The material.
+        material: sdf::Path,
+    },
+
+    /// The materials a master variant is to switch differ in their
+    /// `materialVariant` variants.
+    #[error("material {material} has other materialVariant variants than {first}")]
+    MismatchedMaterialVariants {
+        /// The material whose variants differ.
+        material: sdf::Path,
+        /// The first material, whose variants the others are held to.
+        first: sdf::Path,
+    },
+
     /// A skinning query is bound to a skeleton whose joint order, or whose
     /// animation's blend-shape order, differs from the orders the query was
     /// built against.

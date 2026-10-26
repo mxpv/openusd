@@ -715,6 +715,20 @@ impl Path {
         }
     }
 
+    /// Returns the path of this path's root prim, or `None` for the
+    /// pseudo-root, the empty path, and a relative path (C++
+    /// `SdfPath::GetPrefixes()[0]` of an absolute path).
+    ///
+    /// ```text
+    /// "/A/B.attr" -> Some("/A")
+    /// "/A{x=y}B"  -> Some("/A")
+    /// "/"         -> None
+    /// ```
+    pub fn root_prim(&self) -> Option<Path> {
+        let name = self.root_prim_name().filter(|_| self.is_abs())?;
+        Path::abs_root().append_path(name).ok()
+    }
+
     /// Returns the final component name, or `None` for the pseudo-root and empty paths.
     ///
     /// ```text
@@ -1545,6 +1559,18 @@ pub(crate) mod tests {
     /// `paths` spelled out, for an assertion over a list of them.
     pub(crate) fn strings(paths: &[Path]) -> Vec<String> {
         paths.iter().map(ToString::to_string).collect()
+    }
+
+    /// The root prim of a prim, property, or variant path, and none for the
+    /// pseudo-root or a relative path.
+    #[test]
+    fn root_prim_path() -> Result<()> {
+        assert_eq!(Path::new("/A/B.attr")?.root_prim(), Some(Path::new("/A")?));
+        assert_eq!(Path::new("/A{x=y}B")?.root_prim(), Some(Path::new("/A")?));
+        assert_eq!(Path::new("/A")?.root_prim(), Some(Path::new("/A")?));
+        assert_eq!(Path::abs_root().root_prim(), None);
+        assert_eq!(Path::new("A/B")?.root_prim(), None);
+        Ok(())
     }
 
     /// The empty and absolute root paths share one text each, from every

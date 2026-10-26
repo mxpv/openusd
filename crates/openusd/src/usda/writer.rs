@@ -5,6 +5,13 @@
 //! [`usda::parse`](super::parse) must reproduce the original specs
 //! opinion-for-opinion.
 
+// TODO: byte-for-byte parity with C++ `Sdf_WriteLayer` (`fileIO_Common`), so
+// a layer can be compared with a C++ baseline as text. Known divergences: C++
+// orders layer and prim metadata in its own field order, writes a dictionary
+// across lines, separates sibling prims with a blank line, sorts a variant
+// set's variants by name, and omits an attribute's declaration line when it
+// has connections, samples, or a spline but no default, metadata, or `custom`.
+
 use std::hash::Hash;
 use std::path::Path as FsPath;
 use std::{
