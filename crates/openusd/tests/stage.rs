@@ -9900,6 +9900,45 @@ fn query_clip_fallback() -> Result<()> {
     Ok(())
 }
 
+/// A query over clips opens only the clip active at the time it reads: one
+/// that would fail to open, scheduled at another time, is never read.
+#[test]
+fn query_clip_opens_active() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("clipA.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 5.0 }\n}\n",
+    )?;
+    fs::write(dir.path().join("clipB.usda"), "#usda 1.0\ndef !!!")?;
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clipA.usda@, @./clipB.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+    let q = stage.attribute("/Model.size")?.query();
+    assert_eq!(q.get_at::<f32>(usd::TimeCode::new(0.0))?, Some(5.0));
+    assert!(q.get_at::<f32>(usd::TimeCode::new(10.0)).is_err());
+    Ok(())
+}
+
 /// Local time samples beat clips; a clip beats a referenced attribute that
 /// has no local opinion (spec 12.3.4.5).
 #[test]

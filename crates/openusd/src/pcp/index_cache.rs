@@ -655,13 +655,14 @@ impl OpinionResolver for SourceResolver<'_> {
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
         // Participation alone decides: clip values are time-dependent, so the
         // query replays them through `value_at` per time code — whether the set
-        // answers or a stronger composing `default` draws on it.
-        match probe.introspection()? {
-            Some(_) => {
+        // answers or a stronger composing `default` draws on it. It reads the
+        // manifest, and a clip opens when a time it is active at is read.
+        match probe.sources()? {
+            true => {
                 self.source = Some(AttributeValueSource::PerTime);
                 Ok(Step::Stop)
             }
-            None => Ok(Step::Continue),
+            false => Ok(Step::Continue),
         }
     }
 }
