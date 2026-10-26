@@ -92,12 +92,13 @@ impl PathPattern {
     /// Any other prefix, such as the variant selection `/P{v=one}`, is
     /// ignored and the pattern is left as it was.
     pub fn set_prefix(&mut self, prefix: Path) {
-        let root_or_prim = prefix.is_abs_root() || prefix.is_prim();
-        if !(root_or_prim || (self.components.is_empty() && prefix.is_prim_property())) {
-            return;
-        }
         if self.components.is_empty() {
+            if !(prefix.is_abs_root() || prefix.is_prim() || prefix.is_prim_property()) {
+                return;
+            }
             self.is_property = prefix.is_property();
+        } else if !(prefix.is_abs_root() || prefix.is_prim()) {
+            return;
         }
         self.prefix = prefix;
     }

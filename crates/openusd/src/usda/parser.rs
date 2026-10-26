@@ -1,5 +1,5 @@
 use super::error::{Ctx, RawError, bail, ensure};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::sdf::{
@@ -20,7 +20,15 @@ pub struct Parser<'a> {
 
 /// The names a prim or variant body declares: child prims, properties, and
 /// variant sets, in authored order.
-type PrimBodyNames = (Vec<String>, Vec<String>, Vec<String>);
+type PrimBodyNames = (Vec<String>, PropertyNames, Vec<String>);
+
+/// The property names a prim or variant body declares, each once, in the
+/// order it first appears.
+#[derive(Default)]
+struct PropertyNames {
+    order: Vec<tf::Token>,
+    seen: HashSet<tf::Token>,
+}
 
 impl<'a> Parser<'a> {
     pub fn new(data: &'a str) -> Self {
@@ -230,8 +238,6 @@ impl<'a> Parser<'a> {
         parent_children.push(name.to_string());
         let prim_path = current_path.append_path(name.as_ref())?;
 
-        let mut properties = Vec::new();
-
         // Optional metadata block.
         if self.cursor.at_punctuation('(')? {
             self.parse_block('(', ')', |this| {
@@ -240,15 +246,14 @@ impl<'a> Parser<'a> {
             })?;
         }
 
-        let (children, props, variant_sets) = self.read_prim_body(&prim_path, &mut spec, data)?;
+        let (children, properties, variant_sets) = self.read_prim_body(&prim_path, &mut spec, data)?;
         if !children.is_empty() {
             spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(children));
         }
-        properties.extend(props);
 
         spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
-        if !properties.is_empty() {
-            spec.add(ChildrenKey::PropertyChildren, sdf::Value::token_vec(properties));
+        if !properties.order.is_empty() {
+            spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties.order));
         }
         if !variant_sets.is_empty() {
             spec.add(ChildrenKey::VariantSetChildren, sdf::Value::token_vec(variant_sets));
@@ -271,7 +276,7 @@ impl<'a> Parser<'a> {
         data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<PrimBodyNames, RawError> {
         let mut children = Vec::new();
-        let mut properties = Vec::new();
+        let mut properties = PropertyNames::default();
         let mut variant_sets = Vec::new();
 
         self.parse_block('{', '}', |this| {
@@ -381,8 +386,8 @@ impl<'a> Parser<'a> {
             if !children.is_empty() {
                 variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(children));
             }
-            if !properties.is_empty() {
-                variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::token_vec(properties));
+            if !properties.order.is_empty() {
+                variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties.order));
             }
             if !variant_sets.is_empty() {
                 variant_spec.add(ChildrenKey::VariantSetChildren, sdf::Value::token_vec(variant_sets));
@@ -435,7 +440,7 @@ impl<'a> Parser<'a> {
     fn read_attribute(
         &mut self,
         current_path: &sdf::Path,
-        properties: &mut Vec<String>,
+        properties: &mut PropertyNames,
         data: &mut sdf::PathMap<sdf::SpecData>,
         list_op: Option<Token<'a>>,
     ) -> Result<(), RawError> {
@@ -472,42 +477,49 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        // A list op keyword opens an attribute statement only when it lists
+        // connections, as in C++.
+        if let Some(op) = &list_op
+            && !matches!(suffix, Some(Token::Connect))
+        {
+            bail!("{op:?} applies only to relationship targets or attribute connections");
+        }
 
-        // Check for metadata before checking for assignment
-        if self.cursor.at_punctuation('(')? {
+        // Check for metadata before checking for assignment. A suffixed
+        // statement takes none, as in C++.
+        if suffix.is_none() && self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
 
         if matches!(suffix, Some(Token::Connect)) {
-            push_unique(properties, name);
-            if self.cursor.eat_punctuation('=')? {
-                let list_op = match list_op {
-                    Some(op) => Some(op),
-                    None => self.try_list_op()?,
-                };
-                // Connection targets are anchored to the owning prim, like
-                // relationship targets, so a relative path (`<../sibling>`) is
-                // stored absolute.
-                let targets = anchored(
-                    current_path,
-                    self.parse_one_or_list(|c| types::parse_path_reference(c).context("Connection path expected"))
-                        .context("Unable to parse connection targets")?,
-                );
-                let path = current_path.append_property(name)?;
+            properties.push(name);
+            self.cursor.expect_punctuation('=')?;
+            let list_op = match list_op {
+                Some(op) => Some(op),
+                None => self.try_list_op()?,
+            };
+            // Connection targets are anchored to the owning prim, like
+            // relationship targets, so a relative path (`<../sibling>`) is
+            // stored absolute.
+            let targets = anchored(
+                current_path,
+                self.parse_one_or_list(|c| types::parse_path_reference(c).context("Connection path expected"))
+                    .context("Unable to parse connection targets")?,
+            );
+            let path = current_path.append_property(name)?;
 
-                let spec = data
-                    .entry(path)
-                    .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
+            let spec = data
+                .entry(path)
+                .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
 
-                let list_op = apply_list_op(list_op, targets).context("Unable to build connection listOp")?;
-                spec.add_list_op(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
-            }
+            let (ty, list_op) = apply_list_op(list_op, targets).context("Unable to build connection listOp")?;
+            spec.add_list_op(FieldKey::ConnectionPaths, ty, sdf::Value::PathListOp(list_op));
             return Ok(());
         }
 
         if matches!(suffix, Some(Token::TimeSamples)) {
-            push_unique(properties, name);
+            properties.push(name);
             self.cursor.expect_punctuation('=')?;
             let samples = types::parse_time_samples(&mut self.cursor, &type_name)?;
             let path = current_path.append_property(name)?;
@@ -520,7 +532,7 @@ impl<'a> Parser<'a> {
         }
 
         if matches!(suffix, Some(Token::Spline)) {
-            push_unique(properties, name);
+            properties.push(name);
             self.cursor.expect_punctuation('=')?;
             let spline = types::parse_spline(&mut self.cursor)?;
             let path = current_path.append_property(name)?;
@@ -539,7 +551,7 @@ impl<'a> Parser<'a> {
         // Check if there's an assignment
         if !self.cursor.at_punctuation('=')? {
             let path = current_path.append_property(name)?;
-            push_unique(properties, name);
+            properties.push(name);
 
             let mut base = Self::make_attribute_spec(&type_name, custom, variability);
             base.extend_from(spec);
@@ -551,9 +563,11 @@ impl<'a> Parser<'a> {
         // A path expression default is anchored at the nearest prim, as C++
         // `_SetDefault` anchors it, so `.//` reads as `/Prim//`, and `.//`
         // in a variant of `/Prim` reads as `/Prim//` too.
-        let anchor = current_path.nearest_prim_path();
-        let value = types::parse_value(&mut self.cursor, &type_name)?
-            .map_path_expressions(&mut |expression| expression.make_absolute(&anchor));
+        let mut value = types::parse_value(&mut self.cursor, &type_name)?;
+        if value.holds_path_expressions() {
+            let anchor = current_path.nearest_prim_path();
+            value = value.map_path_expressions(&mut |expression| expression.make_absolute(&anchor));
+        }
         let path = current_path.append_property(name)?;
 
         if self.cursor.at_punctuation('(')? {
@@ -561,7 +575,7 @@ impl<'a> Parser<'a> {
                 .context("Unable to parse attribute metadata")?;
         }
 
-        push_unique(properties, name);
+        properties.push(name);
 
         let mut base = Self::make_attribute_spec(&type_name, custom, variability);
         base.extend_from(spec);
@@ -625,7 +639,7 @@ impl<'a> Parser<'a> {
         current_path: &sdf::Path,
         custom: bool,
         variability: sdf::Variability,
-        properties: &mut Vec<String>,
+        properties: &mut PropertyNames,
         data: &mut sdf::PathMap<sdf::SpecData>,
         outer_list_op: Option<Token<'a>>,
     ) -> Result<(), RawError> {
@@ -648,7 +662,7 @@ impl<'a> Parser<'a> {
         }
 
         let path = current_path.append_property(name)?;
-        push_unique(properties, name);
+        properties.push(name);
 
         // Check if there's an assignment
         if !self.cursor.at_punctuation('=')? {
@@ -667,17 +681,17 @@ impl<'a> Parser<'a> {
                 .context("Unable to parse relationship targets")?,
         );
 
-        let list_op = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
+        let (ty, list_op) = apply_list_op(list_op, targets).context("Unable to build relationship targets listOp")?;
 
         if self.cursor.at_punctuation('(')? {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse relationship metadata")?;
         }
 
-        // Each statement's targets join those of the relationship's earlier
-        // statements (`delete rel r = ...` then `add rel r = ...`), as a
-        // connection's do.
-        Self::merge_spec(data, path, spec).add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
+        // Each statement sets its list of targets on those of the
+        // relationship's earlier statements (`delete rel r = ...` then
+        // `add rel r = ...`), as a connection's do.
+        Self::merge_spec(data, path, spec).add_list_op(FieldKey::TargetPaths, ty, sdf::Value::PathListOp(list_op));
         Ok(())
     }
 
@@ -737,27 +751,27 @@ impl<'a> Parser<'a> {
                 let values = self
                     .parse_one_or_list(types::parse_token::<tf::Token>)
                     .context("Unable to parse apiSchemas list")?;
-                let list_op = apply_list_op(list_op, values).context("Unable to build apiSchemas listOp")?;
-                spec.add_list_op("apiSchemas", sdf::Value::TokenListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, values).context("Unable to build apiSchemas listOp")?;
+                spec.add_list_op("apiSchemas", ty, sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
                 let references = self
                     .parse_one_or_list(types::parse_reference)
                     .context("Unable to parse references")?;
-                let list_op = apply_list_op(list_op, references).context("Unable to build references listOp")?;
-                spec.add_list_op(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, references).context("Unable to build references listOp")?;
+                spec.add_list_op(FieldKey::References, ty, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
                 let payloads = self
                     .parse_one_or_list(types::parse_payload)
                     .context("Unable to parse payloads")?;
-                let list_op = apply_list_op(list_op, payloads).context("Unable to build payload listOp")?;
-                spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, payloads).context("Unable to build payload listOp")?;
+                spec.add_list_op(FieldKey::Payload, ty, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
                 let paths = self.parse_arc_paths(anchor, "Inherit")?;
-                let list_op = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
-                spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
+                spec.add_list_op(FieldKey::InheritPaths, ty, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
@@ -796,13 +810,13 @@ impl<'a> Parser<'a> {
                 let values = self
                     .parse_one_or_list(types::parse_token::<String>)
                     .context("Unable to parse variantSets")?;
-                let list_op = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
-                spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::StringListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
+                spec.add_list_op(FieldKey::VariantSetNames, ty, sdf::Value::StringListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
                 let paths = self.parse_arc_paths(anchor, "Specializes")?;
-                let list_op = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
-                spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
+                spec.add_list_op(FieldKey::Specializes, ty, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Instanceable.as_str() => {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
@@ -843,8 +857,8 @@ impl<'a> Parser<'a> {
                 let values = self
                     .parse_one_or_list(|c| Ok(c.expect_string()?.into_owned()))
                     .context("Unable to parse clipSets list")?;
-                let list_op = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
-                spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
+                let (ty, list_op) = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
+                spec.add_list_op(FieldKey::ClipSets, ty, sdf::Value::StringListOp(list_op));
             }
             other => match sdf::registered_field_type(other) {
                 // A registered field none of the productions above claims.
@@ -900,7 +914,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
         };
-        let value = match element.kind() {
+        let (ty, value) = match element.kind() {
             Some(ValueKind::Int) => self.read_list_op(list_op, types::parse_token::<i32>, Value::IntListOp)?,
             Some(ValueKind::Int64) => self.read_list_op(list_op, types::parse_token::<i64>, Value::Int64ListOp)?,
             Some(ValueKind::Uint) => self.read_list_op(list_op, types::parse_token::<u32>, Value::UIntListOp)?,
@@ -914,31 +928,42 @@ impl<'a> Parser<'a> {
             }
             _ => bail!("{name} is declared a list op of an element type the text format has no list for"),
         };
-        spec.add_list_op(name, value);
+        spec.add_list_op(name, ty, value);
         Ok(())
     }
 
     /// Parse `None`, one item or a bracketed list of them, each read by
     /// `parse`, as the list op the `op` keyword names, or an explicit one
-    /// where no keyword was authored, and `wrap` it as a value.
+    /// where no keyword was authored, and `wrap` it as a value beside the
+    /// list it authors.
     fn read_list_op<T: Clone + PartialEq + Hash>(
         &mut self,
         op: Option<Token<'a>>,
         parse: impl FnMut(&mut Cursor<'a>) -> Result<T, RawError>,
         wrap: fn(sdf::ListOp<T>) -> sdf::Value,
-    ) -> Result<sdf::Value, RawError> {
+    ) -> Result<(sdf::ListOpType, sdf::Value), RawError> {
         let items = self.parse_one_or_list(parse)?;
-        Ok(wrap(apply_list_op(op, items)?))
+        let (ty, list_op) = apply_list_op(op, items)?;
+        Ok((ty, wrap(list_op)))
     }
 }
 
-/// Each of `paths` made absolute against the prim `anchor`, as C++ anchors
-/// a target, connection, inherits or specializes path; one left empty, the
-/// empty path included, is dropped where C++ refuses the file.
-///
-/// The anchor is the nearest prim at or above `anchor`, as C++ anchors a
-/// target at `GetPrimPath()`: a target written in a variant of `/P` resolves
-/// against `/P`.
+impl PropertyNames {
+    /// Records `name` unless the body has already declared it.
+    fn push(&mut self, name: &str) {
+        if !self.seen.contains(name) {
+            let name = tf::Token::from(name);
+            self.seen.insert(name.clone());
+            self.order.push(name);
+        }
+    }
+}
+
+/// Each of `paths` made absolute against the nearest prim at or above
+/// `anchor`, as C++ anchors a target, connection, inherits or specializes
+/// path at `GetPrimPath()`, so a target written in a variant of `/P` resolves
+/// against `/P`. One left empty, the empty path included, is dropped where
+/// C++ refuses the file.
 fn anchored(anchor: &sdf::Path, paths: Vec<sdf::Path>) -> Vec<sdf::Path> {
     let anchor = anchor.nearest_prim_path();
     paths
@@ -949,15 +974,16 @@ fn anchored(anchor: &sdf::Path, paths: Vec<sdf::Path>) -> Vec<sdf::Path> {
 }
 
 /// Wrap `items` in the list op the `op` keyword names, or an explicit list when
-/// no keyword was authored.
+/// no keyword was authored, beside the list they fill.
 fn apply_list_op<T: Clone + PartialEq + Hash>(
     op: Option<Token<'_>>,
     items: Vec<T>,
-) -> Result<sdf::ListOp<T>, RawError> {
-    let Some(op) = op else {
-        return Ok(sdf::ListOp::explicit(items));
+) -> Result<(sdf::ListOpType, sdf::ListOp<T>), RawError> {
+    let ty = match op {
+        Some(op) => list_op_type(&op)?,
+        None => sdf::ListOpType::Explicit,
     };
-    Ok(sdf::ListOp::default().with(list_op_type(&op)?, items))
+    Ok((ty, sdf::ListOp::default().with(ty, items)))
 }
 
 /// Store a metadata field no schema declares as the text it was authored
@@ -1024,13 +1050,6 @@ fn list_op_type(op: &Token<'_>) -> Result<sdf::ListOpType, RawError> {
         Token::Reorder => sdf::ListOpType::Ordered,
         other => bail!("Unsupported list op: {other:?}"),
     })
-}
-
-/// Push a string into a Vec if it's not already present.
-fn push_unique(vec: &mut Vec<String>, name: &str) {
-    if !vec.iter().any(|s| s == name) {
-        vec.push(name.to_owned());
-    }
 }
 
 #[cfg(test)]
@@ -3309,15 +3328,21 @@ def "p" {
     /// the others, as C++ records properties in the order they first appear.
     #[test]
     fn suffixed_property_order() {
-        let text = "#usda 1.0\ndef \"p\" {\n    token a = \"x\"\n    float3 b.connect = </q.out>\n    double c.timeSamples = { 1: 2 }\n    float d = 1\n}\n";
-        let data = Parser::new(text).parse().unwrap();
-        let spec = data.get(&sdf::path("/p").unwrap()).unwrap();
-        let names = spec
-            .get(ChildrenKey::PropertyChildren.as_str())
-            .unwrap()
+        let text = "#usda 1.0
+def \"p\" {
+    token a = \"x\"
+    float3 b.connect = </q.out>
+                        double c.timeSamples = { 1: 2 }
+    float d = 1
+}
+";
+        let names = field(text, "/p", ChildrenKey::PropertyChildren.as_str()).unwrap();
+        let names: Vec<&str> = names
             .try_as_token_vec_ref()
-            .unwrap();
-        let names: Vec<&str> = names.iter().map(|t| t.as_str()).collect();
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str())
+            .collect();
         assert_eq!(names, ["a", "b", "c", "d"]);
     }
 
@@ -3325,14 +3350,16 @@ def "p" {
     /// each statement of a connection does.
     #[test]
     fn relationship_list_ops_accumulate() {
-        let text =
-            "#usda 1.0\ndef \"P\" {\n    rel m (doc = \"m\")\n    delete rel m = </k>\n    add rel m = </j>\n}\n";
-        let data = Parser::new(text).parse().unwrap();
-        let spec = data.get(&sdf::path("/P.m").unwrap()).unwrap();
-        let op = spec
-            .get(FieldKey::TargetPaths.as_str())
+        let text = "#usda 1.0
+def \"P\" {
+    rel m (doc = \"m\")
+    delete rel m = </k>
+    add rel m = </j>
+}
+";
+        let op = field(text, "/P.m", FieldKey::TargetPaths.as_str())
             .unwrap()
-            .try_as_path_list_op_ref()
+            .try_as_path_list_op()
             .unwrap();
         assert_eq!(op.deleted_items(), [sdf::path("/k").unwrap()]);
         assert_eq!(op.added_items(), [sdf::path("/j").unwrap()]);
@@ -3343,18 +3370,15 @@ def "p" {
     /// reads from the same text.
     #[test]
     fn reorder_list_ops() {
-        let text = "#usda 1.0\ndef \"P\" {\n    add rel r = </a>\n    reorder rel r = [</b>, </a>]\n    \
-                    add float c.connect = </x.y>\n    reorder float c.connect = [</y.z>, </x.y>]\n}\n";
-        let data = Parser::new(text).parse().unwrap();
-        let op = |path: &str, key: FieldKey| {
-            data.get(&sdf::path(path).unwrap())
-                .unwrap()
-                .get(key.as_str())
-                .unwrap()
-                .clone()
-                .try_as_path_list_op()
-                .unwrap()
-        };
+        let text = "#usda 1.0
+def \"P\" {
+    add rel r = </a>
+    reorder rel r = [</b>, </a>]
+                        add float c.connect = </x.y>
+    reorder float c.connect = [</y.z>, </x.y>]
+}
+";
+        let op = |path: &str, key: FieldKey| field(text, path, key.as_str()).unwrap().try_as_path_list_op().unwrap();
         let paths = |paths: &[&str]| paths.iter().map(|p| sdf::path(p).unwrap()).collect::<Vec<_>>();
         let targets = op("/P.r", FieldKey::TargetPaths);
         assert_eq!(targets.added_items(), paths(&["/a"]));
@@ -3362,6 +3386,57 @@ def "p" {
         let connections = op("/P.c", FieldKey::ConnectionPaths);
         assert_eq!(connections.added_items(), paths(&["/x.y"]));
         assert_eq!(connections.ordered_items(), paths(&["/y.z", "/x.y"]));
+    }
+
+    /// A repeated operator assigned an empty list empties that operator's
+    /// items and leaves the others, as C++ `SdfListOp::SetItems` sets them.
+    #[test]
+    fn empty_list_op_statement() {
+        let text = "#usda 1.0
+def \"P\" (
+    prepend references = </R>
+    prepend references = []
+                        delete references = </D>
+)
+{
+    add rel r = </A>
+    delete rel r = </B>
+                        add rel r = []
+    add float c.connect = </x.y>
+    add float c.connect = []
+}
+";
+        let op = |path: &str, key: FieldKey| field(text, path, key.as_str()).unwrap();
+        let targets = op("/P.r", FieldKey::TargetPaths).try_as_path_list_op().unwrap();
+        assert!(targets.added_items().is_empty());
+        assert_eq!(targets.deleted_items(), [sdf::path("/B").unwrap()]);
+        let connections = op("/P.c", FieldKey::ConnectionPaths).try_as_path_list_op().unwrap();
+        assert!(connections.added_items().is_empty());
+        let references = op("/P", FieldKey::References).try_as_reference_list_op().unwrap();
+        assert!(references.prepended_items().is_empty());
+        assert_eq!(references.deleted_items().len(), 1);
+    }
+
+    /// A list op keyword opens only a target or connection statement, and a
+    /// suffixed statement needs its assignment and takes no metadata, as the
+    /// C++ grammar has it.
+    #[test]
+    fn list_op_statements_rejected() {
+        for body in [
+            "add float x = 1",
+            "reorder token t = \"a\"",
+            "float c.connect",
+            "float c.connect (doc = \"d\") = </x>",
+            "double t.timeSamples (doc = \"d\") = { 1: 2 }",
+        ] {
+            parse_error(&format!(
+                "#usda 1.0
+def \"P\" {{
+    {body}
+}}
+"
+            ));
+        }
     }
 
     /// A relative path in a variant is anchored at the nearest prim, as C++
@@ -3391,10 +3466,9 @@ def "P" (
     }
 }
 "#;
-        let data = Parser::new(text).parse().unwrap();
-        let get = |path: &str, key: &str| data.get(&sdf::path(path).unwrap()).unwrap().get(key).unwrap().clone();
         let expression = |path: &str| {
-            get(path, FieldKey::Default.as_str())
+            field(text, path, FieldKey::Default.as_str())
+                .unwrap()
                 .try_as_path_expression()
                 .unwrap()
                 .to_string()
@@ -3402,7 +3476,8 @@ def "P" (
         assert_eq!(expression("/P{v=one}.m"), "/P//");
         assert_eq!(expression("/P{v=one}D.n"), "..//X");
 
-        let targets = |path: &str, key: FieldKey| get(path, key.as_str()).try_as_path_list_op().unwrap();
+        let targets =
+            |path: &str, key: FieldKey| field(text, path, key.as_str()).unwrap().try_as_path_list_op().unwrap();
         assert_eq!(
             targets("/P{v=one}.r", FieldKey::TargetPaths).explicit_items(),
             [sdf::path("/Q").unwrap()]

@@ -235,6 +235,22 @@ impl<T: Clone + PartialEq + Hash> ListOp<T> {
         self.explicit |= ty == ListOpType::Explicit;
     }
 
+    /// Sets `items`, a statement's authored opinion for the list `ty`
+    /// names, as C++ `SdfListOp::SetItems` does: an empty list empties that
+    /// list, and a change between explicit and edit empties every list
+    /// first (C++ `_SetExplicit`). Every other list stays as it is, so
+    /// successive statements for one field accumulate.
+    pub fn merge_op(&mut self, ty: ListOpType, items: Vec<T>) {
+        let explicit = ty == ListOpType::Explicit;
+        if explicit != self.explicit {
+            *self = Self {
+                explicit,
+                ..Self::default()
+            };
+        }
+        self.set_items(ty, items);
+    }
+
     /// The op with the items of the list `ty` names replaced as
     /// [`set_items`](Self::set_items) replaces them, for an op of several
     /// lists: `ListOp::prepended([1]).with(ListOpType::Deleted, [2])`.
@@ -509,38 +525,6 @@ impl<T: Clone + PartialEq + Hash> ListOp<T> {
                 .collect(),
             ordered_items: self.ordered_items.clone(),
             ..Default::default()
-        }
-    }
-
-    /// Folds `incoming` — a freshly parsed single-operator opinion — into this
-    /// list op so successive `prepend`/`append`/`add`/`delete`/`reorder`
-    /// statements for one field on the same spec accumulate instead of
-    /// overwriting (C++ Sdf builds a single `SdfListOp` per field).
-    ///
-    /// Explicit and composed (operator) forms are mutually exclusive. An
-    /// explicit `incoming` (`field = [...]` or `field = None`) replaces this op
-    /// outright; an operator `incoming` puts the field in composed mode,
-    /// discarding any prior explicit opinion, then sets each operator sublist it
-    /// populates (leaving the other operator sublists intact).
-    pub fn merge_op(&mut self, incoming: ListOp<T>) {
-        if incoming.explicit {
-            *self = incoming;
-            return;
-        }
-        if self.explicit {
-            self.explicit = false;
-            self.explicit_items.clear();
-        }
-        for (slot, items) in [
-            (&mut self.prepended_items, incoming.prepended_items),
-            (&mut self.appended_items, incoming.appended_items),
-            (&mut self.added_items, incoming.added_items),
-            (&mut self.deleted_items, incoming.deleted_items),
-            (&mut self.ordered_items, incoming.ordered_items),
-        ] {
-            if !items.is_empty() {
-                *slot = items;
-            }
         }
     }
 
@@ -972,32 +956,41 @@ mod tests {
     }
 
     /// Successive single-operator opinions on one spec accumulate into distinct
-    /// sublists rather than overwriting.
+    /// lists.
     #[test]
-    fn merge_op_accumulates_operators() {
+    fn merge_op_accumulates() {
         let mut op = ListOp::prepended(vec![1]);
-        op.merge_op(ListOp::appended(vec![2]));
+        op.merge_op(ListOpType::Appended, vec![2]);
         assert_eq!(op.prepended_items, vec![1]);
         assert_eq!(op.appended_items, vec![2]);
+    }
+
+    /// An authored empty list empties its own list only.
+    #[test]
+    fn merge_op_empty_clears() {
+        let mut op = ListOp::added(vec![1]).with(ListOpType::Deleted, vec![2]);
+        op.merge_op(ListOpType::Added, vec![]);
+        assert!(op.added_items.is_empty());
+        assert_eq!(op.deleted_items, vec![2]);
     }
 
     /// An explicit opinion replaces any operator opinions merged before it.
     #[test]
     fn merge_op_explicit_replaces() {
         let mut op = ListOp::prepended(vec![1]);
-        op.merge_op(ListOp::explicit(vec![9]));
+        op.merge_op(ListOpType::Explicit, vec![9]);
         assert!(op.explicit);
         assert_eq!(op.explicit_items, vec![9]);
         assert!(op.prepended_items.is_empty());
     }
 
-    /// An operator opinion after an explicit one switches the field to composed
-    /// mode, discarding the explicit items (`X = [1, 2]; append X = [3]` → only
-    /// the append survives).
+    /// An operator opinion after an explicit one makes the op an edit,
+    /// discarding the explicit items (`X = [1, 2]; append X = [3]` leaves
+    /// only the append).
     #[test]
     fn merge_op_operator_clears_explicit() {
         let mut op = ListOp::explicit(vec![1, 2]);
-        op.merge_op(ListOp::appended(vec![3]));
+        op.merge_op(ListOpType::Appended, vec![3]);
         assert!(!op.explicit);
         assert!(op.explicit_items.is_empty());
         assert_eq!(op.appended_items, vec![3]);
