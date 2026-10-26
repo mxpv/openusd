@@ -9817,6 +9817,44 @@ fn clip_time_samples_gathered() -> Result<()> {
     Ok(())
 }
 
+/// A clip set that sources an attribute and schedules more than one clip
+/// might vary whatever its clips hold, so `might_be_time_varying` answers from
+/// the manifest and the schedule: clips that would fail to open are never
+/// read.
+#[test]
+fn clip_varying_skips_clips() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("clipA.usda"), "#usda 1.0\ndef !!!")?;
+    fs::write(dir.path().join("clipB.usda"), "#usda 1.0\ndef !!!")?;
+    fs::write(
+        dir.path().join("manifest.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clipA.usda@, @./clipB.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+    assert!(stage.attribute("/Model.size")?.might_be_time_varying()?);
+    // Counting the samples does read the clips.
+    assert!(stage.attribute("/Model.size")?.num_time_samples().is_err());
+    Ok(())
+}
+
 /// With `interpolateMissingClipValues`, `time_sample_times` reports the
 /// activation boundary of a declared but empty middle clip, and values
 /// interpolate across it (spec 12.3.4.7).
