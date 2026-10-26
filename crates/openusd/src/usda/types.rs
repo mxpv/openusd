@@ -234,20 +234,39 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
     if cursor.at_punctuation('[')? {
         let values = parse_array_with(cursor, parse_untyped_value)?;
 
-        // Infer the array type from the first element.
-        return Ok(match values.first() {
-            Some(sdf::Value::Double(_)) => sdf::Value::DoubleVec(
-                values
-                    .into_iter()
-                    .map(|v| v.try_as_double().unwrap_or_default())
-                    .collect(),
-            ),
-            Some(sdf::Value::Int64(_)) => sdf::Value::Int64Vec(
+        // An array of numbers is a double array where any of them is
+        // fractional, and an integer array otherwise.
+        let mut fractional = false;
+        let numeric = values.iter().all(|v| match v {
+            sdf::Value::Int64(_) => true,
+            sdf::Value::Double(_) => {
+                fractional = true;
+                true
+            }
+            _ => false,
+        });
+        if numeric && !values.is_empty() {
+            if fractional {
+                return Ok(sdf::Value::DoubleVec(
+                    values
+                        .into_iter()
+                        .map(|v| match v {
+                            sdf::Value::Int64(int) => int as f64,
+                            other => other.try_as_double().unwrap_or_default(),
+                        })
+                        .collect(),
+                ));
+            }
+            return Ok(sdf::Value::Int64Vec(
                 values
                     .into_iter()
                     .map(|v| v.try_as_int_64().unwrap_or_default())
                     .collect(),
-            ),
+            ));
+        }
+
+        // Infer any other array's type from its first element.
+        return Ok(match values.first() {
             Some(sdf::Value::AssetPath(_)) => sdf::Value::AssetPathVec(
                 values
                     .into_iter()
@@ -260,6 +279,8 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<sdf::Value,
                     .map(|v| match v {
                         sdf::Value::String(s) => s,
                         sdf::Value::Token(s) => s.into(),
+                        sdf::Value::Int64(int) => int.to_string(),
+                        sdf::Value::Double(double) => double.to_string(),
                         other => format!("{other:?}"),
                     })
                     .collect(),
@@ -1004,6 +1025,18 @@ mod tests {
         let reference = parse_reference(&mut cursor).unwrap();
         assert!(reference.asset_path.is_empty());
         assert_eq!(reference.prim_path.as_str(), "/Foo");
+    }
+
+    /// An untyped array of numbers is a double array where any element is
+    /// fractional, whichever comes first, and keeps every element.
+    #[test]
+    fn untyped_numbers_promote() {
+        for (text, expected) in [("[1.5, 2]", [1.5, 2.0]), ("[2, 1.5]", [2.0, 1.5])] {
+            let value = parse_untyped_value(&mut Cursor::new(text)).unwrap();
+            assert_eq!(value.try_as_double_vec().expect("a double array"), expected, "{text}");
+        }
+        let value = parse_untyped_value(&mut Cursor::new("[1, 2]")).unwrap();
+        assert_eq!(value.try_as_int_64_vec().expect("an integer array"), [1, 2]);
     }
 
     #[test]
