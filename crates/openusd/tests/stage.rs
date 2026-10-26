@@ -7590,7 +7590,7 @@ fn sublayer_stack(dir: &FsPath, bodies: &[impl AsRef<str>]) -> Result<Stage> {
 /// A relative expression a `string` spells in a variant anchors at the prim
 /// that holds the variant set, as one authored on the prim itself does.
 #[test]
-fn variant_expression_anchors_at_prim() -> Result<()> {
+fn variant_expression_anchored() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let layer = dir.path().join("layer.usda");
     fs::write(

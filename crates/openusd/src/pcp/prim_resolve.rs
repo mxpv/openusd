@@ -141,8 +141,8 @@ impl Composing {
     /// rooted.
     pub(crate) fn fold(&mut self, value: Value, query_path: &Path, map_to_root: &MapFunction) -> Folded {
         // The anchor is built inside the rooting, so only a source that turns
-        // out to hold an expression pays for it. It is the prim with no
-        // variant selection, which `make_absolute` refuses as a prefix.
+        // out to hold an expression pays for it. It is the query's prim with
+        // its variant selections stripped, as map functions carry none.
         self.compose(value, &|expr| {
             PrimIndex::map_expression_to_root(expr, &query_path.prim_path().strip_variant_selections(), map_to_root)
         })
@@ -865,7 +865,7 @@ impl PrimIndex {
     /// meaning at the root and becomes the empty expression.
     fn map_expression_to_root(expr: sdf::PathExpression, anchor: &Path, map: &MapFunction) -> sdf::PathExpression {
         expr.make_absolute(anchor).map_paths(|path| {
-            // An authored path can still carry a variant selection, which map
+            // An authored path can carry a variant selection, which map
             // functions never do.
             let mut absolute = path.clone();
             if absolute.has_variant_selection() {

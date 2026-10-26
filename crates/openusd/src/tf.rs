@@ -3,6 +3,7 @@
 //! [`is_valid_identifier`], the rule a declared name is checked against, and
 //! the crate's own file-replacing writer (C++ `TfSafeOutputFile`).
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::convert::Infallible;
 use std::error;
@@ -77,6 +78,14 @@ impl Deref for Token {
 
 impl AsRef<str> for Token {
     fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// A token borrows as its text. It hashes and compares by that text, so a
+/// set or map keyed by tokens can be searched with a `&str`.
+impl Borrow<str> for Token {
+    fn borrow(&self) -> &str {
         self.as_str()
     }
 }

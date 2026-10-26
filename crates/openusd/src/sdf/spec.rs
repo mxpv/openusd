@@ -126,15 +126,15 @@ impl SpecData {
         }
     }
 
-    /// Adds a list-op field value, folding it into any existing list op of the
-    /// same variant already on the spec so multiple operator statements
-    /// (`prepend`/`append`/`add`/`delete`/`reorder`) for one field accumulate
-    /// rather than overwrite (C++ Sdf stores one `SdfListOp` per field). A
-    /// non-list-op `value`, or one of a different variant, replaces as usual.
+    /// Adds the list-op statement `value`, which authors the list `ty` names,
+    /// to the field `key`: where the field already holds a list op of the
+    /// same kind, that list's items are merged into it through
+    /// [`ListOp::merge_op`](sdf::ListOp::merge_op), so several statements for
+    /// one field accumulate. Otherwise `value` replaces the field.
     // Each arm binds a different `ListOp<T>`, so the textually identical bodies
     // are distinct `merge_op` instantiations and cannot share an arm.
     #[allow(clippy::match_same_arms)]
-    pub fn add_list_op(&mut self, key: impl AsRef<str>, value: sdf::Value) {
+    pub fn add_list_op(&mut self, key: impl AsRef<str>, ty: sdf::ListOpType, value: sdf::Value) {
         let key = key.as_ref();
         let Some(slot) = self.get_mut(key) else {
             self.add(key, value);
@@ -145,16 +145,18 @@ impl SpecData {
             UInt64ListOp, UIntListOp, UnregisteredValueListOp,
         };
         match (slot, value) {
-            (TokenListOp(existing), TokenListOp(incoming)) => existing.merge_op(incoming),
-            (StringListOp(existing), StringListOp(incoming)) => existing.merge_op(incoming),
-            (PathListOp(existing), PathListOp(incoming)) => existing.merge_op(incoming),
-            (ReferenceListOp(existing), ReferenceListOp(incoming)) => existing.merge_op(incoming),
-            (PayloadListOp(existing), PayloadListOp(incoming)) => existing.merge_op(incoming),
-            (IntListOp(existing), IntListOp(incoming)) => existing.merge_op(incoming),
-            (Int64ListOp(existing), Int64ListOp(incoming)) => existing.merge_op(incoming),
-            (UIntListOp(existing), UIntListOp(incoming)) => existing.merge_op(incoming),
-            (UInt64ListOp(existing), UInt64ListOp(incoming)) => existing.merge_op(incoming),
-            (UnregisteredValueListOp(existing), UnregisteredValueListOp(incoming)) => existing.merge_op(incoming),
+            (TokenListOp(existing), TokenListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (StringListOp(existing), StringListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (PathListOp(existing), PathListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (ReferenceListOp(existing), ReferenceListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (PayloadListOp(existing), PayloadListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (IntListOp(existing), IntListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (Int64ListOp(existing), Int64ListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (UIntListOp(existing), UIntListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (UInt64ListOp(existing), UInt64ListOp(incoming)) => existing.merge_op(ty, incoming.into_items(ty)),
+            (UnregisteredValueListOp(existing), UnregisteredValueListOp(incoming)) => {
+                existing.merge_op(ty, incoming.into_items(ty));
+            }
             (slot, value) => *slot = value,
         }
     }
