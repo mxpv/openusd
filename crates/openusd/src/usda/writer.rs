@@ -17,8 +17,8 @@ use std::path::Path as FsPath;
 use std::{
     collections::HashMap,
     fmt::Write as FmtWrite,
-    fs,
     io::{self, Write},
+    ops::{Deref, DerefMut},
 };
 
 use crate::gf;
@@ -35,14 +35,16 @@ impl TextWriter {
     /// Write the layer to a newly allocated `String`.
     pub fn write_to_string(data: &dyn AbstractData) -> Result<String, FormatError> {
         let mut buf = Vec::new();
-        Self::write(data, &mut buf)?;
+        emit(data, &mut buf)?;
         Ok(String::from_utf8(buf).expect("the usda writer emits UTF-8 text"))
     }
 
-    /// Write the layer to a file on disk.
+    /// Write the layer to a file on disk, which it replaces only once the
+    /// whole layer is written.
     pub fn write_to_file(data: &dyn AbstractData, path: impl AsRef<FsPath>) -> Result<(), FormatError> {
-        let text = Self::write_to_string(data)?;
-        fs::write(path, text)?;
+        let mut file = tf::SafeOutputFile::create(path.as_ref())?;
+        Self::write(data, file.file())?;
+        file.persist()?;
         Ok(())
     }
 
@@ -52,23 +54,39 @@ impl TextWriter {
     /// rather than a layer — showing a schema's fallback in documentation, say.
     pub fn value_to_string(value: &sdf::Value) -> Result<String, FormatError> {
         let mut text = String::new();
-        format_value(&mut text, value)?;
+        format_value(&mut ValueText::of(&mut text), value)?;
         Ok(text)
     }
 
-    /// Write the layer to any `io::Write` sink.
+    /// Write the layer to any `io::Write` sink, through a buffer of its own,
+    /// so `out` takes the text in large writes.
     pub fn write<W: Write>(data: &dyn AbstractData, out: &mut W) -> Result<(), FormatError> {
-        let mut emitter = Emitter { out, indent: 0 };
-        emitter.emit_layer(data)
+        let mut out = io::BufWriter::new(out);
+        emit(data, &mut out)?;
+        out.flush()?;
+        Ok(())
     }
 }
 
-struct Emitter<'w, W: Write> {
-    out: &'w mut W,
-    indent: usize,
+/// Writes the layer to `out` as it comes, for a sink that buffers already.
+fn emit(data: &dyn AbstractData, out: &mut dyn Write) -> Result<(), FormatError> {
+    Emitter {
+        out,
+        indent: 0,
+        scratch: String::new(),
+    }
+    .emit_layer(data)
 }
 
-impl<W: Write> Emitter<'_, W> {
+struct Emitter<'w> {
+    out: &'w mut dyn Write,
+    indent: usize,
+    /// The text of the value or item being written, kept from one to the
+    /// next so its storage is allocated once.
+    scratch: String,
+}
+
+impl Emitter<'_> {
     // ---------- layout helpers ----------
 
     fn write_indent(&mut self) -> io::Result<()> {
@@ -468,9 +486,7 @@ impl<W: Write> Emitter<'_, W> {
         };
         if let Some(Value::Dictionary(custom)) = knot_custom.and_then(|m| m.get(&time_key)) {
             buf.push_str("; ");
-            let mut dict_str = String::new();
-            format_dictionary(&mut dict_str, custom)?;
-            buf.push_str(&dict_str);
+            format_dictionary(&mut ValueText::of(&mut buf), custom)?;
         }
 
         buf.push(',');
@@ -862,18 +878,18 @@ impl<W: Write> Emitter<'_, W> {
         if items.is_empty() {
             self.out.write_all(b"None")?;
         } else if items.len() == 1 && !items[0].needs_brackets() {
-            let mut buf = String::new();
-            fmt_item(&mut buf, &items[0])?;
-            self.out.write_all(buf.as_bytes())?;
+            self.scratch.clear();
+            fmt_item(&mut self.scratch, &items[0])?;
+            self.out.write_all(self.scratch.as_bytes())?;
         } else {
             self.out.write_all(b"[")?;
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     self.out.write_all(b", ")?;
                 }
-                let mut buf = String::new();
-                fmt_item(&mut buf, item)?;
-                self.out.write_all(buf.as_bytes())?;
+                self.scratch.clear();
+                fmt_item(&mut self.scratch, item)?;
+                self.out.write_all(self.scratch.as_bytes())?;
             }
             self.out.write_all(b"]")?;
         }
@@ -883,9 +899,13 @@ impl<W: Write> Emitter<'_, W> {
     // ---------- value formatting ----------
 
     fn write_value(&mut self, value: &Value) -> Result<(), FormatError> {
-        let mut buf = String::new();
-        format_value(&mut buf, value)?;
-        self.out.write_all(buf.as_bytes())?;
+        self.scratch.clear();
+        let mut text = ValueText {
+            text: &mut self.scratch,
+            spill: Some(&mut *self.out),
+        };
+        format_value(&mut text, value)?;
+        text.finish()?;
         Ok(())
     }
 
@@ -893,12 +913,12 @@ impl<W: Write> Emitter<'_, W> {
         self.out.write_all(b"{")?;
         writeln!(self.out)?;
         self.indent += 1;
-        let mut key = String::new();
         for (time, value) in samples {
             self.write_indent()?;
-            key.clear();
-            tf::stringify_float(&mut key, *time);
-            write!(self.out, "{key}: ")?;
+            self.scratch.clear();
+            tf::stringify_float(&mut self.scratch, *time);
+            self.scratch.push_str(": ");
+            self.out.write_all(self.scratch.as_bytes())?;
             self.write_value(value)?;
             writeln!(self.out, ",")?;
         }
@@ -909,13 +929,66 @@ impl<W: Write> Emitter<'_, W> {
     }
 }
 
+/// The text of a value as it is formatted. An array hands what it holds to
+/// `spill` between its elements once that reaches [`SPILL`] bytes, so a large
+/// array's text is never held whole; without `spill` the whole value stays
+/// in `text`.
+struct ValueText<'o> {
+    text: &'o mut String,
+    spill: Option<&'o mut dyn Write>,
+}
+
+/// How much of an array's text [`ValueText`] holds before handing it on.
+const SPILL: usize = 1 << 16;
+
+impl<'o> ValueText<'o> {
+    /// Text that keeps the whole value in `text`.
+    fn of(text: &'o mut String) -> Self {
+        Self { text, spill: None }
+    }
+
+    /// Hands what is left to `spill`, the end of a value written to one.
+    fn finish(mut self) -> io::Result<()> {
+        if let Some(out) = self.spill.as_mut() {
+            out.write_all(self.text.as_bytes())?;
+            self.text.clear();
+        }
+        Ok(())
+    }
+
+    /// Hands the text to `spill` where it has reached [`SPILL`] bytes.
+    fn spill(&mut self) -> io::Result<()> {
+        if self.text.len() >= SPILL
+            && let Some(out) = self.spill.as_mut()
+        {
+            out.write_all(self.text.as_bytes())?;
+            self.text.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Deref for ValueText<'_> {
+    type Target = String;
+
+    fn deref(&self) -> &String {
+        self.text
+    }
+}
+
+impl DerefMut for ValueText<'_> {
+    fn deref_mut(&mut self) -> &mut String {
+        self.text
+    }
+}
+
 // ---------- value formatter (string-producing) ----------
 
 // One arm per variant, grouped by value type family so a new variant has an
 // obvious home. Folding together the distinct variants that happen to share
 // a formatter would scatter that grouping.
 #[allow(clippy::match_same_arms)]
-fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
+fn format_value(s: &mut ValueText<'_>, v: &Value) -> Result<(), FormatError> {
     match v {
         // The USDA parser reads the `None` token as `Value::ValueBlock`. Emitting
         // either `Value::None` (absent-opinion marker) or `Value::Value` (expression
@@ -1034,8 +1107,8 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
             write!(s, "<{}>", p.as_str())?;
             Ok(())
         })?,
-        Value::ReferenceListOp(op) => format_inline_listop(s, op, write_reference)?,
-        Value::PayloadListOp(op) => format_inline_listop(s, op, write_payload)?,
+        Value::ReferenceListOp(op) => format_inline_listop(s, op, |s, r| write_reference(s, r))?,
+        Value::PayloadListOp(op) => format_inline_listop(s, op, |s, p| write_payload(s, p))?,
         Value::IntListOp(op) => format_inline_listop(s, op, |s, v| write!(s, "{v}").map_err(Into::into))?,
         Value::Int64ListOp(op) => format_inline_listop(s, op, |s, v| write!(s, "{v}").map_err(Into::into))?,
         Value::UIntListOp(op) => format_inline_listop(s, op, |s, v| write!(s, "{v}").map_err(Into::into))?,
@@ -1114,9 +1187,9 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn format_vec<T, F>(s: &mut String, items: &[T], mut fmt: F) -> Result<(), FormatError>
+fn format_vec<'o, T, F>(s: &mut ValueText<'o>, items: &[T], mut fmt: F) -> Result<(), FormatError>
 where
-    F: FnMut(&mut String, &T) -> Result<(), FormatError>,
+    F: FnMut(&mut ValueText<'o>, &T) -> Result<(), FormatError>,
 {
     s.push('[');
     for (i, item) in items.iter().enumerate() {
@@ -1124,6 +1197,7 @@ where
             s.push_str(", ");
         }
         fmt(s, item)?;
+        s.spill()?;
     }
     s.push(']');
     Ok(())
@@ -1186,10 +1260,10 @@ impl Bracketed for sdf::Reference {
     }
 }
 
-fn format_inline_listop<T, F>(s: &mut String, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
+fn format_inline_listop<'o, T, F>(s: &mut ValueText<'o>, op: &ListOp<T>, fmt_item: F) -> Result<(), FormatError>
 where
     T: Clone + PartialEq + Hash,
-    F: FnMut(&mut String, &T) -> Result<(), FormatError>,
+    F: FnMut(&mut ValueText<'o>, &T) -> Result<(), FormatError>,
 {
     // Only explicit list ops render inline; non-explicit must be broken out by caller.
     if !op.is_explicit() {
@@ -1260,7 +1334,7 @@ fn get_double(dict: &HashMap<String, Value>, key: &str) -> f64 {
     }
 }
 
-fn format_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
+fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
     let mut keys: Vec<&String> = dict.keys().collect();
     keys.sort();
     s.push('{');
@@ -1380,7 +1454,7 @@ fn write_arc_metadata(
     }
     if !custom_data.is_empty() {
         let mut part = String::from("customData = ");
-        format_dictionary(&mut part, custom_data)?;
+        format_dictionary(&mut ValueText::of(&mut part), custom_data)?;
         parts.push(part);
     }
     if !parts.is_empty() {
@@ -1470,7 +1544,11 @@ mod tests {
     fn unregistered_value_is_copied() {
         for literal in ["7", "(1, 2, 3)", "[a, b]", "\"already quoted\""] {
             let mut out = String::new();
-            format_value(&mut out, &Value::UnregisteredValue(literal.to_owned())).expect("writes");
+            format_value(
+                &mut ValueText::of(&mut out),
+                &Value::UnregisteredValue(literal.to_owned()),
+            )
+            .expect("writes");
             assert_eq!(out, literal);
         }
     }
@@ -1482,7 +1560,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit(["1, 2".to_owned()]);
 
         let mut out = String::new();
-        format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
+        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op)).expect("writes");
         assert_eq!(out, "[1, 2]");
     }
 
@@ -1492,7 +1570,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit([]);
 
         let mut out = String::new();
-        format_value(&mut out, &Value::UnregisteredValueListOp(op)).expect("writes");
+        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op)).expect("writes");
         assert_eq!(out, "[]");
     }
 
