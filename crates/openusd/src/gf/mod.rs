@@ -38,6 +38,12 @@
 //! Quaternion layout — `(w, x, y, z)` with `w` the real (scalar) part,
 //! matching `GfQuatf`'s constructor order.
 
+use std::fmt::Write as _;
+use std::io::Write as _;
+use std::{iter, str};
+
+use crate::tf;
+
 mod bbox;
 mod camera;
 mod dual_quat;
@@ -137,4 +143,71 @@ pub fn quatd(w: f64, x: f64, y: f64, z: f64) -> Quatd {
 }
 pub fn quath(w: f16, x: f16, y: f16, z: f16) -> Quath {
     Quath { w, x, y, z }
+}
+
+/// Writes `v` as C++ writes a half, through `std::ostream` at its default
+/// precision: `%g` with six significant digits, in exponent form below 1e-4
+/// (a half is never 1e6 or more), with no zeros ending a fraction.
+pub(crate) fn stringify_half(s: &mut String, v: f16) {
+    let v = v.to_f64();
+    if !v.is_finite() {
+        return tf::stringify_float(s, v);
+    }
+    // `{:.5e}` rounds to the six significant digits `%g` keeps, in both of
+    // its forms, and gives the exponent `%g` chooses the form by.
+    let mut scientific = [0u8; 16];
+    let mut unwritten = &mut scientific[..];
+    write!(unwritten, "{v:.5e}").expect("a half's six digits and exponent fit");
+    let unused = unwritten.len();
+    let scientific = str::from_utf8(&scientific[..scientific.len() - unused]).expect("formatting writes UTF-8");
+    let (mantissa, exponent) = scientific.split_once('e').expect("{:e} writes an exponent");
+    let exponent: i32 = exponent.parse().expect("{:e} writes an integer exponent");
+    let (sign, mantissa) = mantissa.strip_prefix('-').map_or(("", mantissa), |m| ("-", m));
+    s.push_str(sign);
+    let digits = || mantissa.bytes().filter(u8::is_ascii_digit).map(char::from);
+    let n = digits().count() - digits().rev().take_while(|&d| d == '0').count();
+    if (-4..6).contains(&exponent) {
+        if exponent < 0 {
+            s.push_str("0.");
+            s.extend(iter::repeat_n('0', exponent.unsigned_abs() as usize - 1));
+            s.extend(digits().take(n));
+        } else {
+            let point = exponent as usize + 1;
+            tf::push_digits(s, digits().take(n), point);
+            s.extend(iter::repeat_n('0', point.saturating_sub(n)));
+        }
+    } else {
+        tf::push_digits(s, digits().take(n.max(1)), 1);
+        let sign = if exponent < 0 { '-' } else { '+' };
+        write!(s, "e{sign}{:02}", exponent.abs()).expect("writing to a String cannot fail");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Halves as OpenUSD 26.11 writes them in a `half[]`: six significant
+    /// digits, in exponent form below 1e-4.
+    #[test]
+    fn half_layout() {
+        for (v, written) in [
+            (0.5, "0.5"),
+            (1e-3, "0.0010004"),
+            (1e-4, "0.000100017"),
+            (1e-5, "1.00136e-05"),
+            (6e-8, "5.96046e-08"),
+            (65504.0, "65504"),
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (-2.5, "-2.5"),
+            (1.0, "1"),
+            (1234.0, "1234"),
+            (0.333, "0.333008"),
+        ] {
+            let mut text = String::new();
+            stringify_half(&mut text, f16::from_f64(v));
+            assert_eq!(text, written, "{v}");
+        }
+    }
 }

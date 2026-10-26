@@ -7,10 +7,11 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::convert::Infallible;
 use std::error;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::iter;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -394,6 +395,85 @@ pub fn is_valid_identifier(name: &str) -> bool {
         && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
+/// Writes `v`, a float or double, as C++ `TfStringify` writes one: the
+/// shortest digits that read back to it at its own precision
+/// (double-conversion's `ToShortest`, `ToShortestSingle`), the nearest of
+/// those, an exact tie rounded to even, so a float `0.65` writes as `0.65`;
+/// zmij picks the same digits. They are
+/// laid out as double-conversion lays them out with `decimal_in_shortest_low`
+/// -6 and `decimal_in_shortest_high` 15: decimal for exponents from -6 up to
+/// 14, exponent form outside, no `+` on an exponent and no trailing `.0`.
+pub(crate) fn stringify_float<F: zmij::Float + Into<f64>>(s: &mut String, v: F) {
+    let wide: f64 = v.into();
+    if wide.is_nan() {
+        s.push_str("nan");
+        return;
+    }
+    if wide.is_infinite() {
+        s.push_str(if wide > 0.0 { "inf" } else { "-inf" });
+        return;
+    }
+    let mut buffer = zmij::Buffer::new();
+    let printed = buffer.format_finite(v);
+    // zmij writes decimal form for most of the exponents double-conversion
+    // does, and in the same layout but for the `.0` ending a whole number.
+    // Its text is double-conversion's where the exponent is from -6 to 14:
+    // an integer part of 15 digits or fewer, or a fraction whose first
+    // significant digit is among its first six.
+    if !printed.contains('e') {
+        let unsigned = printed.strip_prefix('-').unwrap_or(printed);
+        let in_decimal_range = match unsigned.strip_prefix("0.") {
+            Some(fraction) => fraction.bytes().take_while(|&d| d == b'0').count() < 6,
+            None => unsigned.find('.').unwrap_or(unsigned.len()) <= 15,
+        };
+        if in_decimal_range {
+            s.push_str(printed.strip_suffix(".0").unwrap_or(printed));
+            return;
+        }
+    }
+    let (sign, printed) = printed.strip_prefix('-').map_or(("", printed), |p| ("-", p));
+    s.push_str(sign);
+    let (mantissa, scale) = printed.split_once('e').unwrap_or((printed, "0"));
+    let scale: i32 = scale.parse().expect("zmij writes an integer exponent");
+    let whole = mantissa.split_once('.').map_or(mantissa, |(whole, _)| whole);
+    // The digits zmij printed, read in place. Here they start with a nonzero
+    // one, either the single digit before an exponent's point or a whole
+    // part of 16 digits or more, so the significant ones run to the last
+    // nonzero digit.
+    let printed_digits = || mantissa.bytes().filter(u8::is_ascii_digit);
+    let n = printed_digits().count() - printed_digits().rev().take_while(|&d| d == b'0').count();
+    let digits = || printed_digits().take(n).map(char::from);
+    // Where the decimal point falls after the first significant digit.
+    let decimal_point = whole.len() as i32 + scale;
+    let exponent = decimal_point - 1;
+    if (-6..15).contains(&exponent) {
+        if decimal_point <= 0 {
+            s.push_str("0.");
+            s.extend(iter::repeat_n('0', decimal_point.unsigned_abs() as usize));
+            s.extend(digits());
+        } else if decimal_point as usize >= n {
+            s.extend(digits());
+            s.extend(iter::repeat_n('0', decimal_point as usize - n));
+        } else {
+            push_digits(s, digits(), decimal_point as usize);
+        }
+        return;
+    }
+    push_digits(s, digits(), 1);
+    write!(s, "e{exponent}").expect("writing to a String cannot fail");
+}
+
+/// Writes `digits` with a decimal point before the one at `point`, where any
+/// digit follows it.
+pub(crate) fn push_digits(s: &mut String, digits: impl Iterator<Item = char>, point: usize) {
+    for (i, digit) in digits.enumerate() {
+        if i == point {
+            s.push('.');
+        }
+        s.push(digit);
+    }
+}
+
 /// Locks `mutex`, reading through a poisoned lock, for a lock whose state
 /// is whole after every statement that changes it.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -457,5 +537,75 @@ mod tests {
         let name: &str = "Xform";
         assert!(KIND == name);
         assert!(name == KIND);
+    }
+
+    /// `v` as [`stringify_float`] writes it.
+    fn shortest<F: zmij::Float + Into<f64>>(v: F) -> String {
+        let mut text = String::new();
+        stringify_float(&mut text, v);
+        text
+    }
+
+    /// Values exactly halfway between two shortest spellings, as OpenUSD
+    /// 26.11 wrote them: the tie goes to the even digit.
+    #[test]
+    fn shortest_ties_to_even() {
+        for (bits, written) in [
+            (0x3f83210000000000, "0.009340286254882812"),
+            (0x3fea93d000000000, "0.8305435180664062"),
+            (0x3ff98c0800000000, "1.5966873168945312"),
+            (0x4002bc5400000000, "2.3419570922851562"),
+            (0x4008d22400000000, "3.1026077270507812"),
+            (0x400ee7f400000000, "3.8632583618164062"),
+            (0x4022785200000000, "9.235000610351562"),
+            (0x4025833a00000000, "10.756301879882812"),
+            (0x40288e2200000000, "12.277603149414062"),
+            (0x402b990a00000000, "13.798904418945312"),
+            (0x402ea3f200000000, "15.320205688476562"),
+            (0x4030d0dd00000000, "16.815872192382812"),
+        ] {
+            assert_eq!(shortest(f64::from_bits(bits)), written);
+        }
+        for (bits, written) in [
+            (0x3d340000, "0.043945312"),
+            (0x40a9a000, "5.3007812"),
+            (0x41a65000, "20.789062"),
+            (0x41f79000, "30.945312"),
+            (0x4224a800, "41.164062"),
+            (0x424d4800, "51.320312"),
+            (0x4275e800, "61.476562"),
+            (0x430f4400, "143.26562"),
+            (0x43239400, "163.57812"),
+            (0x4337e400, "183.89062"),
+            (0x434c3400, "204.20312"),
+            (0x43608400, "224.51562"),
+        ] {
+            assert_eq!(shortest(f32::from_bits(bits)), written);
+        }
+    }
+
+    /// Where a number switches between decimal and exponent form, as OpenUSD
+    /// 26.11 writes it.
+    #[test]
+    fn shortest_layout() {
+        for (v, written) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (24.0, "24"),
+            (0.65, "0.65"),
+            (1e14, "100000000000000"),
+            (1e15, "1e15"),
+            (1234567890123456.5, "1.2345678901234565e15"),
+            (123456789012345.0, "123456789012345"),
+            (1e-7, "1e-7"),
+            (1e-6, "0.000001"),
+            (1.5e300, "1.5e300"),
+            (2.5e-300, "2.5e-300"),
+        ] {
+            assert_eq!(shortest(v), written, "{v}");
+        }
+        for (v, written) in [(0.65f32, "0.65"), (1e13f32, "10000000000000"), (1e15f32, "1e15")] {
+            assert_eq!(shortest(v), written, "{v}");
+        }
     }
 }

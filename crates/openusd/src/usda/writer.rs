@@ -21,11 +21,12 @@ use std::{
     io::{self, Write},
 };
 
+use crate::gf;
 use crate::sdf::{
     self, AbstractData, AssetPath, ChildrenKey, FieldKey, FormatError, LayerOffset, ListOp, Path, Payload, Reference,
     SpecType, Specifier, Value, Variability,
 };
-use crate::tf::Token;
+use crate::tf::{self, Token};
 
 /// Emits `usda` text from an [`AbstractData`].
 pub struct TextWriter;
@@ -389,7 +390,7 @@ impl<W: Write> Emitter<'_, W> {
                 };
                 if slope != 0.0 {
                     let mut buf = String::new();
-                    format_float(&mut buf, slope);
+                    tf::stringify_float(&mut buf, slope);
                     writeln!(self.out, "{dir}: {mode} ({buf}),")?;
                 } else {
                     writeln!(self.out, "{dir}: {mode},")?;
@@ -407,17 +408,13 @@ impl<W: Write> Emitter<'_, W> {
         let e = get_double(d, "numPostLoops");
         let g = get_double(d, "valueOffset");
         self.write_indent()?;
-        let mut buf = String::new();
-        buf.push_str("loop: (");
-        format_float(&mut buf, a);
+        // The loop counts are integers, written as C++ `%d` writes them.
+        let mut buf = String::from("loop: (");
+        tf::stringify_float(&mut buf, a);
         buf.push_str(", ");
-        format_float(&mut buf, b);
-        buf.push_str(", ");
-        format_float(&mut buf, c);
-        buf.push_str(", ");
-        format_float(&mut buf, e);
-        buf.push_str(", ");
-        format_float(&mut buf, g);
+        tf::stringify_float(&mut buf, b);
+        write!(buf, ", {}, {}, ", c as i64, e as i64)?;
+        tf::stringify_float(&mut buf, g);
         buf.push(')');
         writeln!(self.out, "{buf},")?;
         Ok(())
@@ -442,33 +439,25 @@ impl<W: Write> Emitter<'_, W> {
 
         self.write_indent()?;
         let mut buf = String::new();
-        format_float(&mut buf, time);
+        tf::stringify_float(&mut buf, time);
         buf.push_str(": ");
         if pre_value != 0.0 {
-            let mut pv = String::new();
-            format_float(&mut pv, pre_value);
-            buf.push_str(&pv);
+            tf::stringify_float(&mut buf, pre_value);
             buf.push_str(" & ");
         }
-        format_float(&mut buf, value);
+        tf::stringify_float(&mut buf, value);
 
         if pre_slope != 0.0 || pre_width != 0.0 {
-            buf.push_str("; pre (");
-            format_float(&mut buf, pre_slope);
-            buf.push_str(", ");
-            format_float(&mut buf, pre_width);
-            buf.push(')');
+            buf.push_str("; pre ");
+            format_tuple_float(&mut buf, &[pre_slope, pre_width])?;
         }
 
         if interp != "held" || post_slope != 0.0 || post_width != 0.0 {
             buf.push_str("; post ");
             buf.push_str(interp);
             if post_slope != 0.0 || post_width != 0.0 {
-                buf.push_str(" (");
-                format_float(&mut buf, post_slope);
-                buf.push_str(", ");
-                format_float(&mut buf, post_width);
-                buf.push(')');
+                buf.push(' ');
+                format_tuple_float(&mut buf, &[post_slope, post_width])?;
             }
         }
 
@@ -904,11 +893,12 @@ impl<W: Write> Emitter<'_, W> {
         self.out.write_all(b"{")?;
         writeln!(self.out)?;
         self.indent += 1;
+        let mut key = String::new();
         for (time, value) in samples {
             self.write_indent()?;
-            let mut t = String::new();
-            format_float(&mut t, *time);
-            write!(self.out, "{t}: ")?;
+            key.clear();
+            tf::stringify_float(&mut key, *time);
+            write!(self.out, "{key}: ")?;
             self.write_value(value)?;
             writeln!(self.out, ",")?;
         }
@@ -961,19 +951,19 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         Value::Uint64(n) => write!(s, "{n}")?,
         Value::Uint64Vec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
 
-        Value::Half(h) => format_half(s, *h),
+        Value::Half(h) => gf::stringify_half(s, *h),
         Value::HalfVec(v) => format_vec(s, v, |s, h| {
-            format_half(s, *h);
+            gf::stringify_half(s, *h);
             Ok(())
         })?,
-        Value::Float(f) => format_float(s, *f),
+        Value::Float(f) => tf::stringify_float(s, *f),
         Value::FloatVec(v) => format_vec(s, v, |s, f| {
-            format_float(s, *f);
+            tf::stringify_float(s, *f);
             Ok(())
         })?,
-        Value::Double(d) => format_float(s, *d),
+        Value::Double(d) => tf::stringify_float(s, *d),
         Value::DoubleVec(v) => format_vec(s, v, |s, d| {
-            format_float(s, *d);
+            tf::stringify_float(s, *d);
             Ok(())
         })?,
 
@@ -994,23 +984,23 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         Value::Vec4hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y, a.z, a.w]))?,
         Value::QuathVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.w, a.x, a.y, a.z]))?,
 
-        Value::Vec2f(a) => format_tuple_f32(s, &[a.x, a.y])?,
-        Value::Vec3f(a) => format_tuple_f32(s, &[a.x, a.y, a.z])?,
-        Value::Vec4f(a) => format_tuple_f32(s, &[a.x, a.y, a.z, a.w])?,
-        Value::Quatf(a) => format_tuple_f32(s, &[a.w, a.x, a.y, a.z])?,
-        Value::Vec2fVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.x, a.y]))?,
-        Value::Vec3fVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.x, a.y, a.z]))?,
-        Value::Vec4fVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.x, a.y, a.z, a.w]))?,
-        Value::QuatfVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.w, a.x, a.y, a.z]))?,
+        Value::Vec2f(a) => format_tuple_float(s, &[a.x, a.y])?,
+        Value::Vec3f(a) => format_tuple_float(s, &[a.x, a.y, a.z])?,
+        Value::Vec4f(a) => format_tuple_float(s, &[a.x, a.y, a.z, a.w])?,
+        Value::Quatf(a) => format_tuple_float(s, &[a.w, a.x, a.y, a.z])?,
+        Value::Vec2fVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y]))?,
+        Value::Vec3fVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z]))?,
+        Value::Vec4fVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z, a.w]))?,
+        Value::QuatfVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.w, a.x, a.y, a.z]))?,
 
-        Value::Vec2d(a) => format_tuple_f64(s, &[a.x, a.y])?,
-        Value::Vec3d(a) => format_tuple_f64(s, &[a.x, a.y, a.z])?,
-        Value::Vec4d(a) => format_tuple_f64(s, &[a.x, a.y, a.z, a.w])?,
-        Value::Quatd(a) => format_tuple_f64(s, &[a.w, a.x, a.y, a.z])?,
-        Value::Vec2dVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.x, a.y]))?,
-        Value::Vec3dVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.x, a.y, a.z]))?,
-        Value::Vec4dVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.x, a.y, a.z, a.w]))?,
-        Value::QuatdVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.w, a.x, a.y, a.z]))?,
+        Value::Vec2d(a) => format_tuple_float(s, &[a.x, a.y])?,
+        Value::Vec3d(a) => format_tuple_float(s, &[a.x, a.y, a.z])?,
+        Value::Vec4d(a) => format_tuple_float(s, &[a.x, a.y, a.z, a.w])?,
+        Value::Quatd(a) => format_tuple_float(s, &[a.w, a.x, a.y, a.z])?,
+        Value::Vec2dVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y]))?,
+        Value::Vec3dVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z]))?,
+        Value::Vec4dVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z, a.w]))?,
+        Value::QuatdVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.w, a.x, a.y, a.z]))?,
 
         Value::Vec2i(a) => format_tuple_int(s, &[a.x, a.y])?,
         Value::Vec3i(a) => format_tuple_int(s, &[a.x, a.y, a.z])?,
@@ -1095,10 +1085,7 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         }
 
         Value::LayerOffsetVec(offsets) => {
-            format_vec(s, offsets, |s, o| {
-                format_layer_offset(s, o);
-                Ok(())
-            })?;
+            format_vec(s, offsets, |s, o| format_tuple_float(s, &[o.offset, o.scale]))?;
         }
 
         Value::ValueVec(v) => format_vec(s, v, format_value)?,
@@ -1112,9 +1099,9 @@ fn format_value(s: &mut String, v: &Value) -> Result<(), FormatError> {
         })?,
         Value::UnregisteredDictionary(dict) => format_dictionary(s, dict)?,
 
-        Value::TimeCode(t) => format_float(s, t.0),
+        Value::TimeCode(t) => tf::stringify_float(s, t.0),
         Value::TimeCodeVec(v) => format_vec(s, v, |s, t| {
-            format_float(s, t.0);
+            tf::stringify_float(s, t.0);
             Ok(())
         })?,
 
@@ -1219,31 +1206,20 @@ fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) ->
         if i > 0 {
             s.push_str(", ");
         }
-        format_half(s, *v);
+        gf::stringify_half(s, *v);
     }
     s.push(')');
     Ok(())
 }
 
-fn format_tuple_f32<const N: usize>(s: &mut String, a: &[f32; N]) -> Result<(), FormatError> {
+/// `values` as a parenthesized, comma-separated tuple: `(1, 0.5, 2)`.
+fn format_tuple_float<F: zmij::Float + Into<f64>>(s: &mut String, values: &[F]) -> Result<(), FormatError> {
     s.push('(');
-    for (i, v) in a.iter().enumerate() {
+    for (i, v) in values.iter().enumerate() {
         if i > 0 {
             s.push_str(", ");
         }
-        format_float(s, *v);
-    }
-    s.push(')');
-    Ok(())
-}
-
-fn format_tuple_f64<const N: usize>(s: &mut String, a: &[f64; N]) -> Result<(), FormatError> {
-    s.push('(');
-    for (i, v) in a.iter().enumerate() {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        format_float(s, *v);
+        tf::stringify_float(s, *v);
     }
     s.push(')');
     Ok(())
@@ -1269,14 +1245,7 @@ fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<(), FormatErro
         if row > 0 {
             s.push_str(", ");
         }
-        s.push('(');
-        for col in 0..dim {
-            if col > 0 {
-                s.push_str(", ");
-            }
-            format_float(s, m[row * dim + col]);
-        }
-        s.push(')');
+        format_tuple_float(s, &m[row * dim..][..dim])?;
     }
     s.push_str(" )");
     Ok(())
@@ -1288,87 +1257,6 @@ fn get_double(dict: &HashMap<String, Value>, key: &str) -> f64 {
     match dict.get(key) {
         Some(Value::Double(v)) => *v,
         _ => 0.0,
-    }
-}
-
-/// A float or double as C++ `TfStringify` writes one: double-conversion's
-/// shortest digits that read back to it at its own precision (`ToShortest`,
-/// `ToShortestSingle`), the nearest of those, an exact tie rounded to even,
-/// so a float `0.65` is not `0.6499999761581421`. zmij picks the same
-/// digits. They are laid out as double-conversion lays them out with
-/// `decimal_in_shortest_low` -6 and `decimal_in_shortest_high` 15: decimal for
-/// exponents from -6 up to 14, exponent form outside, no `+` on an exponent
-/// and no trailing `.0`.
-fn format_float<F: zmij::Float + Into<f64>>(s: &mut String, v: F) {
-    let wide: f64 = v.into();
-    if wide.is_nan() {
-        s.push_str("nan");
-        return;
-    }
-    if wide.is_infinite() {
-        s.push_str(if wide > 0.0 { "inf" } else { "-inf" });
-        return;
-    }
-    let mut buffer = zmij::Buffer::new();
-    let printed = buffer.format(v);
-    let (sign, printed) = printed.strip_prefix('-').map_or(("", printed), |p| ("-", p));
-    s.push_str(sign);
-    let (mantissa, scale) = printed.split_once('e').unwrap_or((printed, "0"));
-    let scale: i32 = scale.parse().expect("zmij writes an integer exponent");
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let all = format!("{whole}{fraction}");
-    let significant = all.trim_start_matches('0');
-    // Where the decimal point falls after the first significant digit; zero
-    // has none, and is written `0`.
-    let decimal_point = whole.len() as i32 + scale - (all.len() - significant.len()) as i32;
-    let digits = significant.trim_end_matches('0');
-    if digits.is_empty() {
-        s.push('0');
-        return;
-    }
-    let exponent = decimal_point - 1;
-    let n = digits.len() as i32;
-    if (-6..15).contains(&exponent) {
-        if decimal_point <= 0 {
-            write!(s, "0.{}{digits}", "0".repeat((-decimal_point) as usize))
-        } else if decimal_point >= n {
-            write!(s, "{digits}{}", "0".repeat((decimal_point - n) as usize))
-        } else {
-            let (whole, fraction) = digits.split_at(decimal_point as usize);
-            write!(s, "{whole}.{fraction}")
-        }
-    } else if n == 1 {
-        write!(s, "{digits}e{exponent}")
-    } else {
-        write!(s, "{}.{}e{exponent}", &digits[..1], &digits[1..])
-    }
-    .expect("writing to a String cannot fail");
-}
-
-/// A half as C++ writes it, through `std::ostream` at its default precision:
-/// `%g` with six significant digits, in exponent form below 1e-4 (a half
-/// is never 1e6 or more).
-fn format_half(s: &mut String, v: crate::gf::f16) {
-    let v = v.to_f64();
-    if !v.is_finite() {
-        return format_float(s, v);
-    }
-    let rounded = format!("{v:.5e}");
-    let (mantissa, exponent) = rounded.split_once('e').expect("{:e} writes an exponent");
-    let exponent: i32 = exponent.parse().expect("{:e} writes an integer exponent");
-    let trim = |s: String| {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_owned()
-        } else {
-            s
-        }
-    };
-    if (-4..6).contains(&exponent) {
-        s.push_str(&trim(format!("{v:.*}", (5 - exponent) as usize)));
-    } else {
-        let sign = if exponent < 0 { '-' } else { '+' };
-        write!(s, "{}e{sign}{:02}", trim(mantissa.to_owned()), exponent.abs())
-            .expect("writing to a String cannot fail");
     }
 }
 
@@ -1416,14 +1304,6 @@ fn is_bare_dict_key(k: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
-}
-
-fn format_layer_offset(s: &mut String, o: &LayerOffset) {
-    s.push('(');
-    format_float(s, o.offset);
-    s.push_str(", ");
-    format_float(s, o.scale);
-    s.push(')');
 }
 
 /// Writes `text` as a double-quoted USDA string, escaping what the delimiter and
@@ -1493,9 +1373,9 @@ fn write_arc_metadata(
     let mut parts = Vec::new();
     if !offset.is_identity() {
         let mut part = String::from("offset = ");
-        format_float(&mut part, offset.offset);
+        tf::stringify_float(&mut part, offset.offset);
         part.push_str("; scale = ");
-        format_float(&mut part, offset.scale);
+        tf::stringify_float(&mut part, offset.scale);
         parts.push(part);
     }
     if !custom_data.is_empty() {
@@ -2174,84 +2054,30 @@ def "P" (
         }
     }
 
-    /// `v` as [`format_float`] writes it.
-    fn shortest<F: zmij::Float + Into<f64>>(v: F) -> String {
-        let mut text = String::new();
-        format_float(&mut text, v);
-        text
-    }
-
-    /// Values exactly halfway between two shortest spellings, as OpenUSD
-    /// 26.11 wrote them: the tie goes to the even digit.
+    /// A whole-number frame reads back as the double C++ registers the field
+    /// as, though it is written without a fraction.
     #[test]
-    fn shortest_ties_to_even() {
-        for (bits, written) in [
-            (0x3f83210000000000, "0.009340286254882812"),
-            (0x3fea93d000000000, "0.8305435180664062"),
-            (0x3ff98c0800000000, "1.5966873168945312"),
-            (0x4002bc5400000000, "2.3419570922851562"),
-            (0x4008d22400000000, "3.1026077270507812"),
-            (0x400ee7f400000000, "3.8632583618164062"),
-            (0x4022785200000000, "9.235000610351562"),
-            (0x4025833a00000000, "10.756301879882812"),
-            (0x40288e2200000000, "12.277603149414062"),
-            (0x402b990a00000000, "13.798904418945312"),
-            (0x402ea3f200000000, "15.320205688476562"),
-            (0x4030d0dd00000000, "16.815872192382812"),
-        ] {
-            assert_eq!(shortest(f64::from_bits(bits)), written);
-        }
-        for (bits, written) in [
-            (0x3d340000, "0.043945312"),
-            (0x40a9a000, "5.3007812"),
-            (0x41a65000, "20.789062"),
-            (0x41f79000, "30.945312"),
-            (0x4224a800, "41.164062"),
-            (0x424d4800, "51.320312"),
-            (0x4275e800, "61.476562"),
-            (0x430f4400, "143.26562"),
-            (0x43239400, "163.57812"),
-            (0x4337e400, "183.89062"),
-            (0x434c3400, "204.20312"),
-            (0x43608400, "224.51562"),
-        ] {
-            assert_eq!(shortest(f32::from_bits(bits)), written);
-        }
-    }
+    fn whole_frame_stays_double() {
+        use crate::usda::parser::Parser;
 
-    /// Where a number switches between decimal and exponent form, as OpenUSD
-    /// 26.11 writes it.
-    #[test]
-    fn shortest_layout() {
-        for (v, written) in [
-            (0.0, "0"),
-            (-0.0, "-0"),
-            (1e15, "1e15"),
-            (123456789012345.0, "123456789012345"),
-            (1e-7, "1e-7"),
-            (1e-6, "0.000001"),
-            (1.5e300, "1.5e300"),
-            (2.5e-300, "2.5e-300"),
-        ] {
-            assert_eq!(shortest(v), written);
-        }
-    }
-
-    /// Halves as OpenUSD 26.11 writes them in a `half[]`: six significant
-    /// digits, in exponent form below 1e-4.
-    #[test]
-    fn half_layout() {
-        for (v, written) in [
-            (0.5, "0.5"),
-            (1e-3, "0.0010004"),
-            (1e-4, "0.000100017"),
-            (1e-5, "1.00136e-05"),
-            (6e-8, "5.96046e-08"),
-            (65504.0, "65504"),
-        ] {
-            let mut text = String::new();
-            format_half(&mut text, crate::gf::f16::from_f64(v));
-            assert_eq!(text, written, "{v}");
-        }
+        let src = "#usda 1.0
+(
+    startFrame = 1.0
+    endFrame = 24.0
+)
+";
+        let parsed = Parser::new(src).parse().unwrap();
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert!(
+            emitted.contains(
+                "startFrame = 1
+"
+            ),
+            "{emitted}"
+        );
+        let reparsed = Parser::new(&emitted).parse().unwrap();
+        let root = reparsed.get(&Path::abs_root()).unwrap();
+        assert_eq!(root.get("startFrame"), Some(&Value::Double(1.0)));
+        assert_eq!(root.get("endFrame"), Some(&Value::Double(24.0)));
     }
 }
