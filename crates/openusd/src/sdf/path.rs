@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
-use std::{cmp, convert::Infallible, fmt, str::FromStr};
+use std::{cmp, convert::Infallible, fmt, iter, str::FromStr};
 
 use rustc_hash::FxBuildHasher;
 
@@ -1042,6 +1042,42 @@ impl Path {
         Ok(Path::from_str_unchecked(&format!("{}{segment}", self.path)))
     }
 
+    /// This path relative to the prim `anchor` (C++
+    /// `SdfPath::MakeRelativePath`): a `..` for each of `anchor`'s elements
+    /// below the prefix the two share, then the rest of this path, or `.` for
+    /// `anchor` itself. A relative path, or one against a relative anchor,
+    /// comes back unchanged.
+    ///
+    /// ```text
+    /// "/A/B".make_relative("/A")     -> "B"
+    /// "/A/C".make_relative("/A/B")   -> "../C"
+    /// "/A.x".make_relative("/A")     -> ".x"
+    /// "/A".make_relative("/A")       -> "."
+    /// ```
+    pub fn make_relative(&self, anchor: &Path) -> Path {
+        if !self.is_abs() || !anchor.is_abs() {
+            return self.clone();
+        }
+        // The shared prefix ends where this path goes on with `/` or `.`,
+        // never inside a variant selection (`/A{v=y}` shares `/A{v=x}`'s `/A`
+        // only up to the selection).
+        let shared = anchor
+            .ancestors()
+            .find(|ancestor| self.has_prefix(ancestor) && !self.as_str()[ancestor.as_str().len()..].starts_with('{'))
+            .unwrap_or_else(Path::abs_root);
+        let ups = anchor.element_count() - shared.element_count();
+        let rest = &self.as_str()[shared.as_str().len()..];
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        let mut pieces: Vec<&str> = iter::repeat_n("..", ups).collect();
+        if !rest.is_empty() {
+            pieces.push(rest);
+        }
+        if pieces.is_empty() {
+            return Path::from_str_unchecked(".");
+        }
+        Path::from_str_unchecked(&pieces.join("/"))
+    }
+
     /// Resolve a relative path against this path as anchor.
     ///
     /// Absolute paths are returned as-is, and the empty path stays empty.
@@ -1067,7 +1103,12 @@ impl Path {
         // the variant-selection boundary is respected (`/A{v=s}B` → `/A{v=s}`),
         // unlike a plain `/` split.
         let mut anchor = self.prim_path();
-        let mut rest = s;
+        // `.` names the anchor itself, and `./` leads into it.
+        let mut rest = match s.strip_prefix("./") {
+            Some(tail) => tail,
+            None if s == "." => "",
+            None => s,
+        };
         while let Some(tail) = rest.strip_prefix("..") {
             anchor = anchor.parent().unwrap_or_else(Path::abs_root);
             rest = tail.strip_prefix('/').unwrap_or(tail);
@@ -1904,6 +1945,31 @@ pub(crate) mod tests {
         }
         // A relational attribute is a property, though not one on a prim.
         assert!(raw("/A.rel[/T].attr").is_property());
+    }
+
+    #[test]
+    fn make_relative() {
+        for (path, anchor, expected) in [
+            ("/A/B", "/A", "B"),
+            ("/A/B/C", "/A", "B/C"),
+            ("/A/C", "/A/B", "../C"),
+            ("/X", "/A/B", "../../X"),
+            ("/A", "/A/B", ".."),
+            ("/A", "/A", "."),
+            ("/A.x", "/A", ".x"),
+            ("B", "/A", "B"),
+            ("/A{v=y}C", "/A{v=x}B", "../../../A{v=y}C"),
+        ] {
+            let relative = raw(path).make_relative(&raw(anchor));
+            if raw(path).is_abs() {
+                assert_eq!(
+                    raw(anchor).make_absolute(&relative),
+                    raw(path),
+                    "{expected} against {anchor}"
+                );
+            }
+            assert_eq!(relative.as_str(), expected, "{path} from {anchor}");
+        }
     }
 
     #[test]

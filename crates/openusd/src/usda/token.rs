@@ -38,12 +38,14 @@ pub enum Token<'source> {
     /// Single-quoted strings
     /// Example: 'hello world' -> hello world
     #[regex(r#"'([^'\\]|\\.)*'"#, |lex| unquote(lex.slice(), 1))]
-    /// Triple-quoted strings
+    /// Triple-quoted strings, where a backslash escapes the character after
+    /// it, a quote included, so `\"` right before the closing quotes stays in
+    /// the string (C++ `TripleQuotedString`).
     /// Example: """multi-line string""" -> multi-line string
-    #[regex(r#""""([^"]|"[^"]|""[^"])*""""#, |lex| unquote(lex.slice(), 3))]
-    /// Triple-single-quoted strings
+    #[regex(r#""""(\\(.|\n)|[^"\\]|"(\\(.|\n)|[^"\\])|""(\\(.|\n)|[^"\\]))*""""#, |lex| unquote(lex.slice(), 3))]
+    /// Triple-single-quoted strings, with escapes as in triple-quoted ones
     /// Example: '''multi-line string''' -> multi-line string
-    #[regex(r"'''([^']|'[^']|''[^'])*'''", |lex| unquote(lex.slice(), 3))]
+    #[regex(r"'''(\\(.|\n)|[^'\\]|'(\\(.|\n)|[^'\\])|''(\\(.|\n)|[^'\\]))*'''", |lex| unquote(lex.slice(), 3))]
     String(Cow<'source, str>),
 
     // Keywords must come before Number to ensure "inf" is matched as a keyword, not an identifier
@@ -797,6 +799,18 @@ mod tests {
             Token::lexer("a // b c").nth(1).is_none(),
             "the comment runs to the end of the file"
         );
+    }
+
+    /// A backslash before a line break stays in a triple-quoted string and
+    /// decodes as the line break, as C++ reads it, where an escape takes any
+    /// character after it.
+    #[test]
+    fn triple_backslash_newline() {
+        for source in ["\"\"\"a\\\nb\"\"\"", "'''a\\\nb'''"] {
+            let mut lexer = Token::lexer(source);
+            assert_eq!(lexer.next(), Some(Ok(Token::String("a\nb".into()))), "{source:?}");
+            assert!(lexer.next().is_none(), "{source:?}");
+        }
     }
 }
 
