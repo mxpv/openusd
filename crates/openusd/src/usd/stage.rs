@@ -2812,9 +2812,8 @@ impl Stage {
         }
         Ok(self
             .schema_registry()
-            .metadata_field(&Token::from(field))
-            .filter(|declared| declared.applies_to().contains(super::MetadataTargets::LAYERS))
-            .and_then(|declared| declared.fallback().cloned()))
+            .stage_metadata_fallback(&Token::from(field))
+            .cloned())
     }
 
     /// Whether the session or root layer authors the pseudo-root metadata

@@ -14,7 +14,7 @@
 //! [`tokens::METERS_PER_UNIT`].
 
 use openusd::Result;
-use openusd::{sdf, usd};
+use openusd::{sdf, tf, usd};
 
 use super::{StageMetadata, tokens};
 
@@ -50,16 +50,27 @@ impl UpAxis {
 sdf::impl_token_value!(UpAxis);
 
 /// The axis `stage` is up along (C++ `UsdGeomGetStageUpAxis`): the `upAxis`
-/// its session or root layer authors, and the fallback the schema registry
-/// holds for the field where neither does, which is what C++
-/// `UsdGeomGetFallbackUpAxis` answers. A registry that declares no `upAxis`
-/// leaves [`UpAxis::Y`].
+/// its session or root layer authors, and [`fallback_up_axis`] of the stage's
+/// schema registry where neither does.
 ///
 /// An authored token that names neither `Y` nor `Z` is an error, where C++
 /// returns the token.
 pub fn stage_up_axis(stage: &usd::Stage) -> Result<UpAxis> {
     match stage.up_axis()? {
         Some(token) => Ok(UpAxis::try_from(sdf::Value::Token(token))?),
+        None => fallback_up_axis(stage.schema_registry()),
+    }
+}
+
+/// The axis a stage that authors no `upAxis` is up along (C++
+/// `UsdGeomGetFallbackUpAxis`): the
+/// [`stage_metadata_fallback`](usd::SchemaRegistry::stage_metadata_fallback)
+/// `registry` holds for `upAxis`, and [`UpAxis::Y`] where it holds none.
+///
+/// A fallback token that names neither `Y` nor `Z` is an error.
+pub fn fallback_up_axis(registry: &usd::SchemaRegistry) -> Result<UpAxis> {
+    match registry.stage_metadata_fallback(&tf::Token::from(tokens::UP_AXIS)) {
+        Some(value) => Ok(UpAxis::try_from(value.clone())?),
         None => Ok(UpAxis::default()),
     }
 }
@@ -139,7 +150,10 @@ mod tests {
 
     use openusd::{sdf, usd};
 
-    use super::{StageMetadata, UpAxis, linear_units, set_stage_up_axis, stage_meters_per_unit, stage_up_axis, tokens};
+    use super::{
+        StageMetadata, UpAxis, fallback_up_axis, linear_units, set_stage_up_axis, stage_meters_per_unit, stage_up_axis,
+        tokens,
+    };
     use crate::SchemaError;
 
     type Result<T = ()> = std::result::Result<T, SchemaError>;
@@ -231,6 +245,36 @@ mod tests {
             ));
         }
         assert_eq!(stage.meters_per_unit()?, Some(linear_units::FEET));
+        Ok(())
+    }
+
+    /// The fallback axis is the registry's `upAxis` fallback for layers, and
+    /// `Y` from a registry that declares none. A stage that authors no axis
+    /// is up along it.
+    #[test]
+    fn fallback_axis() -> Result {
+        let registry = |targets, fallback: fn() -> sdf::Value| {
+            let fields = [usd::MetadataDecl::new(tokens::UP_AXIS, "token")
+                .applies_to(targets)
+                .fallback(fallback)];
+            usd::SchemaRegistry::builder()
+                .register(&usd::SchemaFamily::new("site", &[]).metadata(&fields))
+                .build()
+                .map_err(openusd::Error::from)
+        };
+        let z = registry(usd::MetadataTargets::LAYERS, || sdf::Value::token("Z"))?;
+        assert_eq!(fallback_up_axis(&z)?, UpAxis::Z);
+        let stage = usd::Stage::builder().schema_registry(z).in_memory("z.usda")?;
+        assert_eq!(stage_up_axis(&stage)?, UpAxis::Z);
+
+        let prims_only = registry(usd::MetadataTargets::PRIMS, || sdf::Value::token("Z"))?;
+        assert_eq!(fallback_up_axis(&prims_only)?, UpAxis::Y);
+        let x = registry(usd::MetadataTargets::LAYERS, || sdf::Value::token("X"))?;
+        assert!(fallback_up_axis(&x).is_err());
+
+        assert_eq!(fallback_up_axis(&crate::schema_registry())?, UpAxis::Y);
+        let bare = usd::Stage::builder().in_memory("bare.usda")?;
+        assert_eq!(fallback_up_axis(bare.schema_registry())?, UpAxis::Y);
         Ok(())
     }
 

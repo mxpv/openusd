@@ -501,6 +501,15 @@ impl SchemaRegistry {
         self.metadata.get(name)
     }
 
+    /// The fallback of the stage metadata field `name`: the fallback a
+    /// registered family declares for it where the field applies to layers
+    /// (C++ `SdfSchema::GetFallback` for a layer field).
+    pub fn stage_metadata_fallback(&self, name: &tf::Token) -> Option<&sdf::Value> {
+        self.metadata_field(name)
+            .filter(|declared| declared.applies_to().contains(MetadataTargets::LAYERS))
+            .and_then(MetadataField::fallback)
+    }
+
     /// Every metadata field the registered families declare, in no particular
     /// order.
     pub fn metadata_fields(&self) -> impl Iterator<Item = &MetadataField> {

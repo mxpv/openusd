@@ -441,10 +441,18 @@ impl XformQuery {
     /// The query over `xformable`'s ordered ops.
     pub fn new(xformable: &(impl XformableExt + ?Sized)) -> Result<Self> {
         let (ops, resets_xform_stack) = xformable.ordered_xform_ops()?;
-        Ok(Self {
+        Ok(Self::from_ops(ops, resets_xform_stack))
+    }
+
+    /// The query over `ops`, listed from the least local to the most local,
+    /// on a stack that resets its parent's transform when
+    /// `resets_xform_stack` is set (the op list C++'s static
+    /// `GetLocalTransformation` and `GetTimeSamples` overloads take).
+    pub fn from_ops(ops: Vec<XformOp>, resets_xform_stack: bool) -> Self {
+        Self {
             ops,
             resets_xform_stack,
-        })
+        }
     }
 
     /// The query over `prim` when it is `Xformable`, and the empty
@@ -1148,6 +1156,34 @@ pub(crate) mod tests {
         assert!(!empty.has_ops());
         assert!(!empty.transform_might_have_effect());
         assert_eq!(empty.local_transform(None)?, gf::Mat4d::IDENTITY);
+        Ok(())
+    }
+
+    /// A query over a list of ops answers as the prim's does over the same
+    /// ops, and over a subset of them reads only those.
+    #[test]
+    fn query_from_ops() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
+            .set_rotate_z(90.0)?;
+        stage
+            .attribute("/X.xformOp:rotateZ")?
+            .set_at(45.0_f32, usd::TimeCode::new(2.0))?;
+        let (ops, resets) = x.ordered_xform_ops()?;
+        let query = XformQuery::from_ops(ops.clone(), resets);
+        let time = usd::TimeCode::new(2.0);
+        assert_eq!(query.local_transform(time)?, x.local_transform(time)?);
+        assert_eq!(query.time_samples()?, x.time_samples()?);
+        assert!(!query.resets_xform_stack());
+
+        let translate = XformQuery::from_ops(ops[..1].to_vec(), true);
+        assert_eq!(
+            translate.local_transform(None)?,
+            gf::Mat4d::translation([1.0, 2.0, 3.0])
+        );
+        assert!(translate.time_samples()?.is_empty());
+        assert!(translate.resets_xform_stack());
         Ok(())
     }
 

@@ -1,6 +1,8 @@
 //! A primvar: a `primvars:` attribute read together with the metadata and the
 //! indices that say how its values lie on the geometry (C++ `UsdGeomPrimvar`).
 
+use std::num::NonZeroUsize;
+
 use openusd::usd::Object;
 use openusd::{Error, Result};
 use openusd::{gf, sdf, tf, usd};
@@ -329,13 +331,71 @@ impl Primvar {
             return Ok(None);
         };
         let indices = self.indices_attr();
-        let flattened = match value.array_len() {
-            Some(len) if indices.has_authored_value()? => self.flatten(value, len, &indices, time)?,
-            _ => value,
+        let flattened = match value.array_len().is_some() && indices.has_authored_value()? {
+            true => {
+                let primvar = self.attribute.path();
+                let Some(indices) = indices.get_at::<Vec<i32>>(time)? else {
+                    return Err(SchemaError::PrimvarIndicesMissing {
+                        primvar: primvar.clone(),
+                    });
+                };
+                let element_size = element_stride(primvar, self.element_size()?)?;
+                Self::flatten(value, &indices, element_size).map_err(|error| SchemaError::PrimvarIndexOutOfRange {
+                    primvar: primvar.clone(),
+                    error: Box::new(error),
+                })?
+            }
+            false => value,
         };
         T::try_from(flattened)
             .map(Some)
             .map_err(|error| SchemaError::Core(error.into()))
+    }
+
+    /// `values` with `indices` applied (C++ static `ComputeFlattened`): for
+    /// each index, the `element_size` values it selects, in the order the
+    /// indices list them. A value that is not an attribute array comes back
+    /// as it is.
+    ///
+    /// An index that is negative, or that selects values past the end, is a
+    /// [`PrimvarIndexError`].
+    pub fn flatten(
+        values: sdf::Value,
+        indices: &[i32],
+        element_size: NonZeroUsize,
+    ) -> Result<sdf::Value, PrimvarIndexError> {
+        let Some(len) = values.array_len() else {
+            return Ok(values);
+        };
+        let stride = element_size.get();
+        let mut starts = Vec::with_capacity(indices.len());
+        let mut invalid = 0;
+        let mut first = Vec::new();
+        for (position, &index) in indices.iter().enumerate() {
+            if let Some(start) = element_start(index, stride, len) {
+                if invalid == 0 {
+                    starts.push(start);
+                }
+                continue;
+            }
+            invalid += 1;
+            if first.len() < REPORTED_INDICES {
+                first.push((position, index));
+            }
+        }
+        if invalid > 0 {
+            return Err(PrimvarIndexError {
+                invalid,
+                len,
+                element_size: stride,
+                first,
+            });
+        }
+
+        let positions = starts.into_iter().flat_map(|start| start..start + stride);
+        // Only an attribute array gathers, and no other array is an attribute's
+        // value.
+        Ok(values.gather(positions).unwrap_or(values))
     }
 
     /// The sample times of the primvar's values, and of its indices where it
@@ -447,52 +507,6 @@ impl Primvar {
         Ok(relationship.is_defined()?.then(|| (relationship, type_name.is_array())))
     }
 
-    /// `values`, an array of `len` elements, gathered through the values of
-    /// the primvar's `indices` attribute at `time`.
-    fn flatten(
-        &self,
-        values: sdf::Value,
-        len: usize,
-        indices: &usd::Attribute,
-        time: Option<usd::TimeCode>,
-    ) -> Result<sdf::Value, SchemaError> {
-        let primvar = self.attribute.path();
-        let Some(indices) = indices.get_at::<Vec<i32>>(time)? else {
-            return Err(SchemaError::PrimvarIndicesMissing {
-                primvar: primvar.clone(),
-            });
-        };
-        let stride = element_stride(primvar, self.element_size()?)?;
-
-        let mut starts = Vec::with_capacity(indices.len());
-        let mut invalid = 0;
-        let mut first = Vec::new();
-        for (position, &index) in indices.iter().enumerate() {
-            if let Some(start) = element_start(index, stride, len) {
-                starts.push(start);
-                continue;
-            }
-            invalid += 1;
-            if first.len() < REPORTED_INDICES {
-                first.push((position, index));
-            }
-        }
-        if invalid > 0 {
-            return Err(SchemaError::PrimvarIndexOutOfRange(Box::new(PrimvarIndexError {
-                primvar: primvar.clone(),
-                invalid,
-                len,
-                element_size: stride,
-                first,
-            })));
-        }
-
-        let positions = starts.into_iter().flat_map(|start| start..start + stride);
-        // Only an attribute array gathers, and no other array is an
-        // attribute's value.
-        Ok(values.gather(positions).unwrap_or(values))
-    }
-
     /// That the primvar is array-valued, which is what lets it be indexed.
     fn require_array(&self) -> Result<(), SchemaError> {
         let type_name = super::declared_type(&self.attribute)?;
@@ -547,10 +561,10 @@ const REPORTED_INDICES: usize = 5;
 
 /// How many values one element of the primvar at `primvar` holds, for an
 /// `elementSize` of `element_size`: the size itself, which is at least one.
-pub(super) fn element_stride(primvar: &sdf::Path, element_size: i32) -> Result<usize, SchemaError> {
-    match usize::try_from(element_size) {
-        Ok(stride) if stride >= 1 => Ok(stride),
-        _ => Err(SchemaError::InvalidElementSize {
+pub(super) fn element_stride(primvar: &sdf::Path, element_size: i32) -> Result<NonZeroUsize, SchemaError> {
+    match usize::try_from(element_size).ok().and_then(NonZeroUsize::new) {
+        Some(stride) => Ok(stride),
+        None => Err(SchemaError::InvalidElementSize {
             primvar: primvar.clone(),
             element_size,
         }),
@@ -575,6 +589,7 @@ fn element_start(index: i32, stride: usize, len: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::num::NonZeroUsize;
 
     use openusd::usd::{self, SchemaBase, Stage, TimeCode};
     use openusd::{sdf, tf};
@@ -616,7 +631,7 @@ mod tests {
 
     fn out_of_range(error: SchemaError) -> PrimvarIndexError {
         match error {
-            SchemaError::PrimvarIndexOutOfRange(error) => *error,
+            SchemaError::PrimvarIndexOutOfRange { error, .. } => *error,
             other => panic!("expected out-of-range indices, got {other:?}"),
         }
     }
@@ -989,10 +1004,14 @@ mod tests {
     fn flatten_negative_index() -> Result {
         let primvar = floats(&[1.0, 2.0, 3.0])?;
         primvar.set_indices(vec![0, -1, 2], None)?;
-        let error = out_of_range(flat(&primvar).expect_err("negative index"));
+        let error = flat(&primvar).expect_err("negative index");
+        assert!(matches!(
+            &error,
+            SchemaError::PrimvarIndexOutOfRange { primvar: path, .. } if path == primvar.attribute().path()
+        ));
+        let error = out_of_range(error);
         assert_eq!(error.invalid, 1);
         assert_eq!(error.first, vec![(1, -1)]);
-        assert_eq!(&error.primvar, primvar.attribute().path());
         Ok(())
     }
 
@@ -1004,6 +1023,26 @@ mod tests {
         assert_eq!((error.invalid, error.len), (1, 3));
         assert_eq!(error.first, vec![(1, 3)]);
         Ok(())
+    }
+
+    /// The free form flattens values by element, leaves a single value as it
+    /// is, and reports the indices that reach outside.
+    #[test]
+    fn flatten_free() {
+        let pairs = NonZeroUsize::new(2).expect("two");
+        let values = sdf::Value::IntVec(vec![1, 2, 3, 4]);
+        assert_eq!(
+            Primvar::flatten(values.clone(), &[1, 0, 1], pairs),
+            Ok(sdf::Value::IntVec(vec![3, 4, 1, 2, 3, 4]))
+        );
+        assert_eq!(
+            Primvar::flatten(sdf::Value::Int(7), &[3], pairs),
+            Ok(sdf::Value::Int(7))
+        );
+
+        let error = Primvar::flatten(values, &[0, 2, -1], pairs).expect_err("indices 2 and -1");
+        assert_eq!((error.invalid, error.len, error.element_size), (2, 4, 2));
+        assert_eq!(error.first, vec![(1, 2), (2, -1)]);
     }
 
     /// Every bad index is counted, and the first five are listed.

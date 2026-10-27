@@ -211,7 +211,7 @@ pub use extent::Extent;
 pub use gprim::GprimExt;
 pub use imageable::{ImageableExt, PurposeInfo};
 pub use mesh::MeshTopologyError;
-pub use metrics::{UpAxis, linear_units, set_stage_up_axis, stage_meters_per_unit, stage_up_axis};
+pub use metrics::{UpAxis, fallback_up_axis, linear_units, set_stage_up_axis, stage_meters_per_unit, stage_up_axis};
 pub use point_instancer::{InstanceArrays, MaskApplication, ProtoXformInclusion};
 pub use points::PointBasedExt;
 pub use primvar::{Primvar, PrimvarDeclaration};

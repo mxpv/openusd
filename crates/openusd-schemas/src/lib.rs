@@ -275,8 +275,13 @@ pub enum SchemaError {
     },
 
     /// An indexed primvar whose indices reach outside its values.
-    #[error(transparent)]
-    PrimvarIndexOutOfRange(Box<PrimvarIndexError>),
+    #[error("primvar {primvar} has {error}")]
+    PrimvarIndexOutOfRange {
+        /// The primvar's attribute path.
+        primvar: sdf::Path,
+        /// The indices that reach outside.
+        error: Box<PrimvarIndexError>,
+    },
 
     /// Only a `string` or `string[]` primvar takes an id target.
     #[error("primvar {primvar} of type `{type_name}` takes no id target: only a string or string[] primvar does")]
@@ -567,8 +572,6 @@ pub enum SchemaError {
 /// The indices of an indexed primvar that reach outside its values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimvarIndexError {
-    /// The primvar's attribute path.
-    pub primvar: sdf::Path,
     /// How many of the indices are out of range.
     pub invalid: usize,
     /// How many values the primvar holds.
@@ -584,8 +587,8 @@ impl fmt::Display for PrimvarIndexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "primvar {} has {} indices outside its {} values at element size {}:",
-            self.primvar, self.invalid, self.len, self.element_size
+            "{} indices outside {} values at element size {}:",
+            self.invalid, self.len, self.element_size
         )?;
         for (position, index) in &self.first {
             write!(f, " index {index} at position {position};")?;

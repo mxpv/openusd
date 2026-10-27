@@ -174,9 +174,11 @@ impl XformOpKind {
     }
 
     /// The matrix an op of this kind applies for `value`, inverted when
-    /// `inverse` is set, on the terms [`XformOp::transform`] states. `None`
-    /// when the inverse of a singular `transform` is asked for.
-    pub(super) fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Mat4d> {
+    /// `inverse` is set (C++ static `UsdGeomXformOp::GetOpTransform`), on the
+    /// terms [`XformOp::transform`] states: a value of a type the kind does
+    /// not take gives identity. `None` when the inverse of a singular
+    /// `transform` is asked for.
+    pub fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Mat4d> {
         let sign = if inverse { -1.0 } else { 1.0 };
         // C++ negates the value of an inverted `scaleX` / `scaleY` / `scaleZ`
         // as it does a translate's. The reciprocal is that op's inverse, and
