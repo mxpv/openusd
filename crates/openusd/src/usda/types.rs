@@ -438,10 +438,12 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                 c.expect_punctuation(':')?;
                 let first: f64 = parse_token(c)?;
 
+                // A side with no tangent written has both numbers 0; one
+                // written with one number, as a Hermite one is, has no width.
                 let mut pre_slope = 0.0;
-                let mut pre_width = 0.0;
+                let mut pre_width = Some(0.0);
                 let mut post_slope = 0.0;
-                let mut post_width = 0.0;
+                let mut post_width = Some(0.0);
                 let mut interp_mode = "held".to_owned();
 
                 // `time : value` or `time : preValue & value`
@@ -455,48 +457,42 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawErr
                 // Optional semicolon-separated knot attributes
                 while c.eat_punctuation(';')? {
                     if c.at_punctuation('{')? {
-                        // Per-knot custom data
+                        // Per-knot custom data, keyed by the knot's time as
+                        // text: `14`, `0.5`.
                         let dict = parse_dictionary(c)?;
-                        let time_key = if time.fract() == 0.0 && time.is_finite() {
-                            format!("{}", time as i64)
-                        } else {
-                            format!("{time}")
-                        };
-                        knot_custom_data.insert(time_key, sdf::Value::Dictionary(dict.into()));
+                        knot_custom_data.insert(time.to_string(), sdf::Value::Dictionary(dict.into()));
                         continue;
                     }
 
                     let dir = c.expect_identifier()?;
                     match dir {
-                        "pre" => {
-                            let vals = parse_tuple::<f64, 2>(c)?;
-                            pre_slope = vals[0];
-                            pre_width = vals[1];
-                        }
+                        "pre" => (pre_slope, pre_width) = parse_tangent(c)?,
                         "post" => {
                             // `post mode` or `post mode (slope, width)`
                             let mode = c.expect_identifier()?;
                             interp_mode = mode.to_owned();
                             if c.at_punctuation('(')? {
-                                let vals = parse_tuple::<f64, 2>(c)?;
-                                post_slope = vals[0];
-                                post_width = vals[1];
+                                (post_slope, post_width) = parse_tangent(c)?;
                             }
                         }
                         other => bail!("Unexpected knot attribute: {other}"),
                     }
                 }
 
-                knots.push(sdf::Value::Dictionary(sdf::Dictionary::from([
+                let mut knot = sdf::Dictionary::from([
                     ("time".to_owned(), sdf::Value::Double(time)),
                     ("value".to_owned(), sdf::Value::Double(value)),
                     ("preValue".to_owned(), sdf::Value::Double(pre_value)),
                     ("preTangentSlope".to_owned(), sdf::Value::Double(pre_slope)),
-                    ("preTangentWidth".to_owned(), sdf::Value::Double(pre_width)),
                     ("postTangentSlope".to_owned(), sdf::Value::Double(post_slope)),
-                    ("postTangentWidth".to_owned(), sdf::Value::Double(post_width)),
                     ("nextInterpolationMode".to_owned(), sdf::Value::token(interp_mode)),
-                ])));
+                ]);
+                for (key, width) in [("preTangentWidth", pre_width), ("postTangentWidth", post_width)] {
+                    if let Some(width) = width {
+                        knot.insert(key.to_owned(), sdf::Value::Double(width));
+                    }
+                }
+                knots.push(sdf::Value::Dictionary(knot));
             }
             other => bail!("Unexpected spline token: {other:?}"),
         }
@@ -584,7 +580,14 @@ pub(super) fn parse_payload(cursor: &mut Cursor<'_>) -> Result<sdf::Payload, Raw
 }
 
 /// Parses a relocates dictionary: `{ <source>: <target>, ... }`.
-pub(super) fn parse_relocates(cursor: &mut Cursor<'_>) -> Result<Vec<(sdf::Path, sdf::Path)>, RawError> {
+///
+/// Both paths of a pair are made absolute against `anchor`, the prim or the
+/// layer's root that holds them, as C++ reads them; an empty target stays
+/// empty.
+pub(super) fn parse_relocates(
+    cursor: &mut Cursor<'_>,
+    anchor: &sdf::Path,
+) -> Result<Vec<(sdf::Path, sdf::Path)>, RawError> {
     let mut pairs = Vec::new();
     parse_block(cursor, '{', '}', |c| {
         let src = c.expect_path_ref().context("Expected relocate source path")?;
@@ -597,7 +600,7 @@ pub(super) fn parse_relocates(cursor: &mut Cursor<'_>) -> Result<Vec<(sdf::Path,
         let tgt_path = path_ref_to_path(tgt)?;
         reject_variant_selection_in_path(&src_path, "Relocate source")?;
         reject_variant_selection_in_path(&tgt_path, "Relocate target")?;
-        pairs.push((src_path, tgt_path));
+        pairs.push((anchor.make_absolute(&src_path), anchor.make_absolute(&tgt_path)));
         Ok(())
     })?;
     Ok(pairs)
@@ -661,12 +664,39 @@ pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> R
     Ok(())
 }
 
+/// Parse a knot tangent: two numbers, or the one a Hermite tangent writes
+/// (C++ `_WriteTangent`), which leaves the second `None`.
+fn parse_tangent(cursor: &mut Cursor<'_>) -> Result<(f64, Option<f64>), RawError> {
+    let (mut first, mut second) = (None, None);
+    parse_block(cursor, '(', ')', |c| {
+        let number = parse_token::<f64>(c)?;
+        match (first, second) {
+            (None, _) => first = Some(number),
+            (Some(_), None) => second = Some(number),
+            (Some(_), Some(_)) => bail!("a tangent has at most two numbers"),
+        }
+        Ok(())
+    })?;
+    let first = first.context("a tangent has at least one number")?;
+    Ok((first, second))
+}
+
 /// Parse an extrapolation mode: `mode [(slope)]`.
 fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<sdf::Value, RawError> {
     let mode = cursor.expect_identifier()?;
-    if mode == "none" {
-        return Ok(sdf::Value::ValueBlock);
-    }
+    // The looping modes are two words, `loop repeat`, `loop reset`, and
+    // `loop oscillate`, held as one as the Python reference holds them
+    // (`looprepeat`).
+    let mode = if mode == "loop" {
+        let kind = cursor.expect_identifier()?;
+        ensure!(
+            matches!(kind, "repeat" | "reset" | "oscillate"),
+            "`loop {kind}` is not an extrapolation mode"
+        );
+        format!("loop{kind}")
+    } else {
+        mode.to_owned()
+    };
     let slope = if cursor.at_punctuation('(')? {
         cursor.expect_punctuation('(')?;
         let v = parse_token::<f64>(cursor)?;

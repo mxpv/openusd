@@ -2,7 +2,6 @@
 //! hand-authored UsdShade fixture, and a full author → read-back roundtrip on
 //! an in-memory stage.
 
-use std::collections::BTreeMap;
 use std::fs;
 
 use openusd::Result;
@@ -818,26 +817,11 @@ fn validate_material_switch(stage: &usd::Stage, root: &usd::Prim) -> Result<(), 
     Ok(())
 }
 
-/// `layer` holds the specs and field values of the layer at `baseline`, each
-/// `*Children` list in any order.
-fn assert_same_specs(layer: &sdf::Layer, baseline: &str) -> Result<()> {
-    let baseline = sdf::Layer::open(baseline)?;
-    let specs = |data: &dyn sdf::AbstractData| -> Result<Vec<(sdf::Path, BTreeMap<String, sdf::Value>)>> {
-        let mut specs = Vec::new();
-        for path in data.spec_paths() {
-            let mut fields = BTreeMap::new();
-            for name in data.list_fields(&path).expect("a listed spec") {
-                let mut value = data.field(&path, &name).map_err(openusd::Error::from)?.into_owned();
-                if let (true, sdf::Value::TokenVec(children)) = (name.ends_with("Children"), &mut value) {
-                    children.sort();
-                }
-                fields.insert(name, value);
-            }
-            specs.push((path, fields));
-        }
-        Ok(specs)
-    };
-    assert_eq!(specs(layer.data())?, specs(baseline.data())?);
+/// `layer` written as text is the C++ baseline at `baseline`, byte for byte.
+fn assert_baseline(layer: &sdf::Layer, baseline: &str) -> Result<()> {
+    // A checkout that turns line ends into CRLF still holds the same text.
+    let expected = fs::read_to_string(baseline).expect("baseline").replace("\r\n", "\n");
+    assert_eq!(layer.export_to_string().map_err(openusd::Error::from)?, expected);
     Ok(())
 }
 
@@ -853,7 +837,7 @@ fn master_variant_tree() -> Result<(), SchemaError> {
     for target in ["/MaterialBindingVariants", "/ShadingDefs"] {
         root.references().add(reference(target)?)?;
     }
-    assert_same_specs(&stage.root_layer(), "fixtures/usdShade_char_shading.usda")?;
+    assert_baseline(&stage.root_layer(), "fixtures/usdShade_char_shading.usda")?;
     validate_material_switch(&stage, &root)
 }
 
@@ -869,7 +853,7 @@ fn master_variant_compact() -> Result<(), SchemaError> {
         .map(|base| stage.prim(format!("/ModelShading/Materials/{base}Material")))
         .collect::<Result<Vec<_>, _>>()?;
     Material::create_master_variant(&root, &materials, None)?;
-    assert_same_specs(&stage.root_layer(), "fixtures/usdShade_char_shading_compact.usda")?;
+    assert_baseline(&stage.root_layer(), "fixtures/usdShade_char_shading_compact.usda")?;
     validate_material_switch(&stage, &root)
 }
 

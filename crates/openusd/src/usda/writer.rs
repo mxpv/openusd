@@ -230,8 +230,11 @@ impl Emitter<'_> {
             .unwrap_or(Specifier::Def);
         self.out.write_all(specifier_keyword(specifier).as_bytes())?;
 
+        // The type that stands for any type is written as no type (C++
+        // `Sdf_WritePrimPreamble`).
         if let Some(Value::Token(type_name)) = get_value(data, path, FieldKey::TypeName.as_str())
             && !type_name.is_empty()
+            && type_name.as_str() != sdf::ANY_TYPE
         {
             write!(self.out, " {type_name}")?;
         }
@@ -352,7 +355,7 @@ impl Emitter<'_> {
 
         let default = get_value(data, path, FieldKey::Default.as_str());
         let time_samples = get_value(data, path, FieldKey::TimeSamples.as_str());
-        let spline = get_value(data, path, SPLINE_FIELD);
+        let spline = get_value(data, path, FieldKey::Spline.as_str());
         let connections = get_value(data, path, FieldKey::ConnectionPaths.as_str());
         // Only a list op with an effect writes a connection statement.
         let connections_written = matches!(&connections, Some(Value::PathListOp(op)) if !op.is_empty());
@@ -403,46 +406,72 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Emit a spline dictionary in the native spline grammar. Inverse of
+    /// Emit a spline dictionary in the native spline grammar, laid out as C++
+    /// `Sdf_FileIOUtility::WriteSpline` lays it out. Inverse of
     /// `parser::parse_spline`. The input `dict` has the keys produced there:
     /// `curveType`, `pre/postExtrapolation`, `loopParameters`, `knots`,
     /// `knotCustomData`.
+    //
+    // TODO: the spline dictionary is the AOUSD Python reference's model. It
+    // names a tangent pair `(slope, width)` where C++ reads `(width, slope)`,
+    // has no tangent algorithm (`autoEase`), and stores a `preValue` of 0 for
+    // a single-valued knot. A C++ `TsSpline`-faithful model needs the two
+    // references reconciled. The text keeps each tangent pair in the order it
+    // was read, which C++ reads back unchanged.
     fn write_spline(&mut self, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
-        self.out.write_all(b"{")?;
-        writeln!(self.out)?;
+        self.out.write_all(b"{\n")?;
         self.indent += 1;
 
+        // In time order, as C++ keeps a spline's knots.
+        let mut knots: Vec<&sdf::Dictionary> = match dict.get("knots") {
+            Some(Value::ValueVec(knots)) => knots.iter().filter_map(|knot| knot.try_as_dictionary_ref()).collect(),
+            _ => Vec::new(),
+        };
+        let by_time =
+            |a: &&sdf::Dictionary, b: &&sdf::Dictionary| get_double(a, "time").total_cmp(&get_double(b, "time"));
+        if !knots.is_sorted_by(|a, b| by_time(a, b).is_le()) {
+            knots.sort_by(by_time);
+        }
         let curve_type = match dict.get("curveType") {
             Some(Value::Token(t)) => t.as_str(),
             _ => "bezier",
         };
-        self.write_indent()?;
-        writeln!(self.out, "{curve_type},")?;
-
-        // Extrapolation
-        if let Some(value) = dict.get("preExtrapolation") {
-            self.write_extrapolation("pre", value)?;
+        let hermite = curve_type == "hermite";
+        // A curve segment runs from a knot whose next interpolation is curve
+        // to the knot after it (C++ `TsKnotMap::HasCurveSegments`).
+        let curved = knots
+            .split_last()
+            .is_some_and(|(_, segments)| segments.iter().any(|knot| interpolation(knot) == "curve"));
+        if hermite || curved {
+            self.scratch.clear();
+            self.scratch.push_str(curve_type);
+            self.scratch.push(',');
+            self.write_scratch_line()?;
         }
-        if let Some(value) = dict.get("postExtrapolation") {
-            self.write_extrapolation("post", value)?;
+
+        for (dir, key) in [("pre", "preExtrapolation"), ("post", "postExtrapolation")] {
+            if let Some(Value::Dictionary(extrapolation)) = dict.get(key) {
+                self.write_extrapolation(dir, extrapolation)?;
+            }
         }
 
-        // Loop parameters
-        if let Some(Value::Dictionary(loop_dict)) = dict.get("loopParameters") {
+        let loop_keys = ["protoStart", "protoEnd", "numPreLoops", "numPostLoops", "valueOffset"];
+        if let Some(Value::Dictionary(loop_dict)) = dict.get("loopParameters")
+            && loop_keys.iter().any(|key| get_double(loop_dict, key) != 0.0)
+        {
             self.write_loop(loop_dict)?;
         }
 
-        // Knots
         let knot_custom = match dict.get("knotCustomData") {
             Some(Value::Dictionary(m)) => Some(m),
             _ => None,
         };
-        if let Some(Value::ValueVec(knots)) = dict.get("knots") {
-            for knot in knots {
-                if let Value::Dictionary(knot) = knot {
-                    self.write_knot(knot, knot_custom)?;
-                }
-            }
+        // The first knot has no segment before it, but writes a pre-tangent
+        // as though one were curved.
+        let mut incoming = "curve";
+        for knot in knots {
+            self.write_knot(knot, incoming, hermite, knot_custom)?;
+            incoming = interpolation(knot);
         }
 
         self.indent -= 1;
@@ -451,107 +480,127 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn write_extrapolation(&mut self, dir: &str, value: &Value) -> Result<(), FormatError> {
-        self.write_indent()?;
-        match value {
-            Value::ValueBlock | Value::None => {
-                writeln!(self.out, "{dir}: none,")?;
-            }
-            Value::Dictionary(d) => {
-                let mode = match d.get("mode") {
-                    Some(Value::Token(t)) => t.as_str(),
-                    _ => "none",
-                };
-                let slope = match d.get("slope") {
-                    Some(Value::Double(s)) => *s,
-                    _ => 0.0,
-                };
-                if slope != 0.0 {
-                    let mut buf = String::new();
-                    tf::stringify_float(&mut buf, slope);
-                    writeln!(self.out, "{dir}: {mode} ({buf}),")?;
-                } else {
-                    writeln!(self.out, "{dir}: {mode},")?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn write_loop(&mut self, d: &HashMap<String, Value>) -> Result<(), FormatError> {
-        let a = get_double(d, "protoStart");
-        let b = get_double(d, "protoEnd");
-        let c = get_double(d, "numPreLoops");
-        let e = get_double(d, "numPostLoops");
-        let g = get_double(d, "valueOffset");
-        self.write_indent()?;
-        // The loop counts are integers, written as C++ `%d` writes them.
-        let mut buf = String::from("loop: (");
-        tf::stringify_float(&mut buf, a);
-        buf.push_str(", ");
-        tf::stringify_float(&mut buf, b);
-        write!(buf, ", {}, {}, ", c as i64, e as i64)?;
-        tf::stringify_float(&mut buf, g);
-        buf.push(')');
-        writeln!(self.out, "{buf},")?;
-        Ok(())
-    }
-
-    fn write_knot(
-        &mut self,
-        knot: &HashMap<String, Value>,
-        knot_custom: Option<&sdf::Dictionary>,
-    ) -> Result<(), FormatError> {
-        let time = get_double(knot, "time");
-        let value = get_double(knot, "value");
-        let pre_value = get_double(knot, "preValue");
-        let pre_slope = get_double(knot, "preTangentSlope");
-        let pre_width = get_double(knot, "preTangentWidth");
-        let post_slope = get_double(knot, "postTangentSlope");
-        let post_width = get_double(knot, "postTangentWidth");
-        let interp = match knot.get("nextInterpolationMode") {
+    /// An extrapolation that is not the `held` C++ falls back to, `sloped`
+    /// with its slope in parentheses (C++ `_WriteSplineExtrapolation`).
+    fn write_extrapolation(&mut self, dir: &str, extrapolation: &HashMap<String, Value>) -> Result<(), FormatError> {
+        let mode = match extrapolation.get("mode") {
             Some(Value::Token(t)) => t.as_str(),
             _ => "held",
         };
-
-        self.write_indent()?;
-        let mut buf = String::new();
-        tf::stringify_float(&mut buf, time);
-        buf.push_str(": ");
-        if pre_value != 0.0 {
-            tf::stringify_float(&mut buf, pre_value);
-            buf.push_str(" & ");
+        if mode == "held" {
+            return Ok(());
         }
-        tf::stringify_float(&mut buf, value);
-
-        if pre_slope != 0.0 || pre_width != 0.0 {
-            buf.push_str("; pre ");
-            format_tuple_float(&mut buf, &[pre_slope, pre_width])?;
-        }
-
-        if interp != "held" || post_slope != 0.0 || post_width != 0.0 {
-            buf.push_str("; post ");
-            buf.push_str(interp);
-            if post_slope != 0.0 || post_width != 0.0 {
-                buf.push(' ');
-                format_tuple_float(&mut buf, &[post_slope, post_width])?;
+        let s = &mut self.scratch;
+        s.clear();
+        s.push_str(dir);
+        s.push_str(": ");
+        // A looping mode is held as one word (`looprepeat`) and written as
+        // two (`loop repeat`).
+        match mode.strip_prefix("loop") {
+            Some(kind) => {
+                s.push_str("loop ");
+                s.push_str(kind);
             }
+            None => s.push_str(mode),
         }
+        if mode == "sloped" {
+            s.push('(');
+            tf::stringify_float(s, get_double(extrapolation, "slope"));
+            s.push(')');
+        }
+        s.push(',');
+        self.write_scratch_line()
+    }
 
-        let time_key = if time.fract() == 0.0 && time.is_finite() {
-            format!("{}", time as i64)
-        } else {
-            format!("{time}")
+    /// The inner loop's prototype span, its pre- and post-loop counts, and
+    /// its value offset, as the `loop:` line of C++
+    /// `Sdf_FileIOUtility::WriteSpline` writes them.
+    fn write_loop(&mut self, params: &HashMap<String, Value>) -> Result<(), FormatError> {
+        let s = &mut self.scratch;
+        s.clear();
+        s.push_str("loop: (");
+        tf::stringify_float(s, get_double(params, "protoStart"));
+        s.push_str(", ");
+        tf::stringify_float(s, get_double(params, "protoEnd"));
+        // The loop counts are integers, written as C++ `%d` writes them.
+        write!(
+            s,
+            ", {}, {}, ",
+            get_double(params, "numPreLoops") as i64,
+            get_double(params, "numPostLoops") as i64
+        )?;
+        tf::stringify_float(s, get_double(params, "valueOffset"));
+        s.push_str("),");
+        self.write_scratch_line()
+    }
+
+    /// One knot, as C++ `_SplineKnotWriter` writes it: its time and values,
+    /// its pre-tangent when the segment into it is a curve (`incoming`), its
+    /// post-tangent or next interpolation, and its custom data.
+    fn write_knot(
+        &mut self,
+        knot: &HashMap<String, Value>,
+        incoming: &str,
+        hermite: bool,
+        knot_custom: Option<&sdf::Dictionary>,
+    ) -> Result<(), FormatError> {
+        let time = get_double(knot, "time");
+        let pre_value = get_double(knot, "preValue");
+        // A side's two numbers, the second written where C++ writes one: on a
+        // Bezier spline, and on a Hermite spline only where the layer gave a
+        // non-zero second number (C++ `_WriteTangent` writes a Hermite
+        // tangent's slope alone). A tangent read with one number has none.
+        let side = |slope: &str, width: &str| {
+            let width = match knot.get(width) {
+                Some(Value::Double(width)) if !hermite || *width != 0.0 => Some(*width),
+                _ => None,
+            };
+            (get_double(knot, slope), width)
         };
-        if let Some(Value::Dictionary(custom)) = knot_custom.and_then(|m| m.get(&time_key)) {
-            buf.push_str("; ");
-            format_dictionary(&mut ValueText::of(&mut buf), custom, 0)?;
+        let (pre_slope, pre_width) = side("preTangentSlope", "preTangentWidth");
+        let (post_slope, post_width) = side("postTangentSlope", "postTangentWidth");
+        let authored = |slope: f64, width: Option<f64>| slope != 0.0 || width.is_some_and(|width| width != 0.0);
+        let tangent = |s: &mut String, slope: f64, width: Option<f64>| match width {
+            Some(width) => format_tuple_float(s, &[slope, width]),
+            None => format_tuple_float(s, &[slope]),
+        };
+
+        let s = &mut self.scratch;
+        s.clear();
+        tf::stringify_float(s, time);
+        s.push(':');
+        if pre_value != 0.0 {
+            s.push(' ');
+            tf::stringify_float(s, pre_value);
+            s.push_str(" &");
+        }
+        s.push(' ');
+        tf::stringify_float(s, get_double(knot, "value"));
+        // C++ writes a tangent beside a curve segment. One authored beside
+        // another kind of segment is written too, and C++ reads it back. C++'s
+        // own output never holds such a tangent.
+        if incoming == "curve" || authored(pre_slope, pre_width) {
+            s.push_str("; pre ");
+            tangent(s, pre_slope, pre_width)?;
+        }
+        let next = interpolation(knot);
+        s.push_str("; post ");
+        s.push_str(next);
+        if next == "curve" || authored(post_slope, post_width) {
+            s.push(' ');
+            tangent(s, post_slope, post_width)?;
         }
 
-        buf.push(',');
-        writeln!(self.out, "{buf}")?;
-        Ok(())
+        if let Some(knot_custom) = knot_custom
+            && let Some(Value::Dictionary(custom)) = knot_custom.get(&time.to_string())
+            && !custom.is_empty()
+        {
+            s.push_str("; ");
+            format_inline_dictionary(s, custom)?;
+        }
+
+        s.push(',');
+        self.write_scratch_line()
     }
 
     fn emit_relationship(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
@@ -1446,34 +1495,67 @@ fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>, inden
     for k in &keys {
         let value = &dict[k.as_str()];
         push_indent(s, indent + 1);
-        // A nested dictionary is introduced by the `dictionary` keyword; any
-        // other entry carries the role-blind name of its value's kind, as C++
-        // emits it.
-        let type_name = match value {
-            // A dictionary under an unregistered field is still spelled as
-            // one; only the field around it was unregistered.
-            Value::Dictionary(_) | Value::UnregisteredDictionary(_) => Some(Token::new("dictionary")),
-            other => sdf::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
-        };
-        if let Some(ty) = type_name {
-            s.push_str(ty.as_str());
-            s.push(' ');
-        }
-        // A key is bare only when it is an identifier (C++
-        // `TfIsValidIdentifier`); C++ refuses a bare namespaced key
-        // (`int a:b = 3`) in a dictionary.
-        if tf::is_valid_identifier(k) {
-            s.push_str(k);
-        } else {
-            write_quoted(s, k)?;
-        }
-        s.push_str(" = ");
+        push_entry_head(s, k, value)?;
         format_value(s, value, indent + 1)?;
         s.push('\n');
     }
     push_indent(s, indent);
     s.push('}');
     Ok(())
+}
+
+/// The head of a dictionary entry, `type key = `.
+fn push_entry_head(s: &mut String, key: &str, value: &Value) -> Result<(), FormatError> {
+    // A nested dictionary is introduced by the `dictionary` keyword; any other
+    // entry carries the role-blind name of its value's kind, as C++ emits it.
+    let type_name = match value {
+        // A dictionary under an unregistered field is still spelled as one;
+        // only the field around it was unregistered.
+        Value::Dictionary(_) | Value::UnregisteredDictionary(_) => Some(Token::new("dictionary")),
+        other => sdf::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
+    };
+    if let Some(ty) = type_name {
+        s.push_str(ty.as_str());
+        s.push(' ');
+    }
+    // A key is bare only when it is an identifier (C++ `TfIsValidIdentifier`);
+    // C++ refuses a bare namespaced key (`int a:b = 3`) in a dictionary.
+    if tf::is_valid_identifier(key) {
+        s.push_str(key);
+    } else {
+        write_quoted(s, key)?;
+    }
+    s.push_str(" = ");
+    Ok(())
+}
+
+/// A dictionary on one line, its entries in key order and separated by
+/// semicolons, as C++ `Sdf_FileIOUtility::WriteDictionary` writes one with
+/// `multiLine` off: a spline knot's custom data.
+fn format_inline_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
+    let mut entries: Vec<_> = dict.iter().collect();
+    entries.sort_by_key(|(key, _)| *key);
+    s.push_str("{ ");
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            s.push_str("; ");
+        }
+        push_entry_head(s, key, value)?;
+        match value {
+            Value::Dictionary(nested) | Value::UnregisteredDictionary(nested) => format_inline_dictionary(s, nested)?,
+            value => format_value(&mut ValueText::of(s), value, 0)?,
+        }
+    }
+    s.push_str(" }");
+    Ok(())
+}
+
+/// A spline knot's next interpolation, `held` when it records none.
+fn interpolation(knot: &HashMap<String, Value>) -> &str {
+    match knot.get("nextInterpolationMode") {
+        Some(Value::Token(t)) => t.as_str(),
+        _ => "held",
+    }
 }
 
 fn push_indent(s: &mut String, levels: usize) {
@@ -1626,10 +1708,6 @@ fn children(data: &dyn AbstractData, path: &Path, key: ChildrenKey) -> Vec<Token
 
 // Field classifiers. Match C++ `Sdf_Is{Prim,Attribute,Relationship}MetadataField`.
 
-/// `spline` names the in-memory spline dictionary slot but isn't yet defined
-/// in [`FieldKey`]. Keep it local until promoted into the schema.
-const SPLINE_FIELD: &str = "spline";
-
 const PRIM_STRUCTURAL_FIELDS: &[&str] = &[
     FieldKey::Specifier.as_str(),
     FieldKey::TypeName.as_str(),
@@ -1649,7 +1727,7 @@ const ATTRIBUTE_STRUCTURAL_FIELDS: &[&str] = &[
     FieldKey::TimeSamples.as_str(),
     FieldKey::ConnectionPaths.as_str(),
     ChildrenKey::ConnectionChildren.as_str(),
-    SPLINE_FIELD,
+    FieldKey::Spline.as_str(),
 ];
 
 const RELATIONSHIP_STRUCTURAL_FIELDS: &[&str] = &[
@@ -2006,6 +2084,51 @@ def "Mesh"
                 "{name} round-trips"
             );
         }
+    }
+
+    /// Forms a layer may author that C++ reads into other data, written back
+    /// as C++ writes them (its `testSdfParsing` inputs 139, 176, 184 and 220):
+    /// a layer's relative relocates anchored at the root, an empty sublayer
+    /// list left out, the any-type prim untyped, and a spline's Hermite
+    /// tangents and looping extrapolation.
+    #[test]
+    fn cpp_input_forms() {
+        for (source, expected) in [
+            (
+                "#usda 1.0\n(\n    relocates = {\n        <a/b>: <c/d>\n    }\n)\n",
+                "#usda 1.0\n(\n    relocates = {\n        </a/b>: </c/d>\n    }\n)\n\n",
+            ),
+            ("#usda 1.0\n(\n    subLayers = [\n    ]\n)\n", "#usda 1.0\n\n"),
+            (
+                "#usda 1.0\ndef __AnyType__ \"P\"\n{\n}\n",
+                "#usda 1.0\n\ndef \"P\"\n{\n}\n\n",
+            ),
+            (
+                "#usda 1.0\ndef \"P\"\n{\n    float s.spline = {\n        hermite,\n        post: loop repeat,\n        \
+                 1: 8; pre (0); post curve (4),\n        6: 20; pre (2); post curve (2),\n    }\n}\n",
+                "#usda 1.0\n\ndef \"P\"\n{\n    float s.spline = {\n        hermite,\n        post: loop repeat,\n        \
+                 1: 8; pre (0); post curve (4),\n        6: 20; pre (2); post curve (2),\n    }\n}\n\n",
+            ),
+        ] {
+            let data = usda::parse(source).unwrap_or_else(|e| panic!("{source}: {e:#}"));
+            let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+            assert_eq!(text, expected, "{source}");
+        }
+    }
+
+    /// A Bezier spline keeps what it authors: an explicit `none`
+    /// extrapolation, a tangent whose second number is 0, a tangent on a
+    /// linear segment, and its knots, which come out in time order as C++
+    /// keeps them.
+    #[test]
+    fn spline_kept() {
+        let source = "#usda 1.0\ndef \"P\"\n{\n    double s.spline = {\n        pre: none,\n        \
+                      6: 20; post linear (2, 3),\n        1: 8; pre (1, 0); post curve (4, 5),\n    }\n}\n";
+        let expected = "#usda 1.0\n\ndef \"P\"\n{\n    double s.spline = {\n        bezier,\n        pre: none,\n        \
+                        1: 8; pre (1, 0); post curve (4, 5),\n        6: 20; pre (0, 0); post linear (2, 3),\n    }\n}\n\n";
+        let data = usda::parse(source).expect("parses");
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");
+        assert_eq!(text, expected);
     }
 
     #[test]

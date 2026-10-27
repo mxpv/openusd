@@ -52,6 +52,7 @@ pub enum FieldKey {
     SessionOwner,
     Specializes,
     Specifier,
+    Spline,
     StartTimeCode,
     SubLayers,
     SubLayerOffsets,
@@ -140,6 +141,7 @@ impl FieldKey {
             FieldKey::SessionOwner => "sessionOwner",
             FieldKey::Specializes => "specializes",
             FieldKey::Specifier => "specifier",
+            FieldKey::Spline => "spline",
             FieldKey::StartTimeCode => "startTimeCode",
             FieldKey::SubLayers => "subLayers",
             FieldKey::SubLayerOffsets => "subLayerOffsets",
@@ -296,6 +298,10 @@ impl FieldType {
         .then_some(Self::ListOp(element))
     }
 }
+
+/// The prim type name that stands for any type, which the text format
+/// writes as no type at all (C++ `SdfTokens->AnyTypeToken`).
+pub const ANY_TYPE: &str = "__AnyType__";
 
 /// What the metadata field `name` holds, or `None` where neither [`FieldKey`]
 /// nor any schema declares it.

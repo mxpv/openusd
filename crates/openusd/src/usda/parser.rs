@@ -174,12 +174,16 @@ impl<'a> Parser<'a> {
                     this.cursor.expect_punctuation('=')?;
                     let (sublayers, offsets) =
                         types::parse_sublayers(&mut this.cursor).context("Unable to parse subLayers")?;
-                    root.add(FieldKey::SubLayers, sdf::Value::StringVec(sublayers));
-                    root.add(FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
+                    // An empty list authors nothing, as in C++.
+                    if !sublayers.is_empty() {
+                        root.add(FieldKey::SubLayers, sdf::Value::StringVec(sublayers));
+                        root.add(FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
+                    }
                 }
                 Token::Relocates => {
                     this.cursor.expect_punctuation('=')?;
-                    let pairs = types::parse_relocates(&mut this.cursor).context("Unable to parse relocates")?;
+                    let pairs = types::parse_relocates(&mut this.cursor, &sdf::Path::abs_root())
+                        .context("Unable to parse relocates")?;
                     root.add(FieldKey::LayerRelocates, sdf::Value::Relocates(pairs));
                 }
                 Token::Identifier(name) => {
@@ -540,7 +544,7 @@ impl<'a> Parser<'a> {
             let spec = data
                 .entry(path)
                 .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
-            spec.add("spline", spline);
+            spec.add(FieldKey::Spline, spline);
             return Ok(());
         }
 
@@ -869,13 +873,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Relocates.as_str() => {
                 ensure!(list_op.is_none(), "relocates does not support list ops");
-                // Both paths of a pair are made absolute against the prim,
-                // as C++ reads a prim's relocates.
-                let pairs = types::parse_relocates(&mut self.cursor)
-                    .context("Unable to parse relocates")?
-                    .into_iter()
-                    .map(|(source, target)| (anchor.make_absolute(&source), anchor.make_absolute(&target)))
-                    .collect();
+                let pairs = types::parse_relocates(&mut self.cursor, anchor).context("Unable to parse relocates")?;
                 spec.add(FieldKey::Relocates, sdf::Value::Relocates(pairs));
             }
             "displayName" => {
@@ -3281,7 +3279,7 @@ def "p" { double x.spline = {} }
         let d = data
             .get(&sdf::path("/p.x").unwrap())
             .unwrap()
-            .get("spline")
+            .get(FieldKey::Spline.as_str())
             .unwrap()
             .try_as_dictionary_ref()
             .unwrap();
@@ -3306,7 +3304,7 @@ def "p" {
         let d = data
             .get(&sdf::path("/p.x").unwrap())
             .unwrap()
-            .get("spline")
+            .get(FieldKey::Spline.as_str())
             .unwrap()
             .try_as_dictionary_ref()
             .unwrap();
@@ -3346,7 +3344,7 @@ def "p" {
         let d = data
             .get(&sdf::path("/p.x").unwrap())
             .unwrap()
-            .get("spline")
+            .get(FieldKey::Spline.as_str())
             .unwrap()
             .try_as_dictionary_ref()
             .unwrap();

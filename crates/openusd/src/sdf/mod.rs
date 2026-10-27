@@ -63,8 +63,8 @@ pub use path::{
 pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub use path_table::PathTable;
 pub use schema::{
-    ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, layer_field_type, registered_field_type,
-    schema_field_type,
+    ANY_TYPE, ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, layer_field_type,
+    registered_field_type, schema_field_type,
 };
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,

@@ -166,7 +166,7 @@ that broader spec behavior can be considered fully covered.
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | USDA (text) reading | `16.2` | :white_check_mark: | `0.1.4` | Recursive descent parser with logos tokenizer |
-| USDA (text) writing | `16.2` | :white_check_mark: | `0.4.0` | `usda::TextWriter`; round-trips the compliance suite opinion-for-opinion |
+| USDA (text) writing | `16.2` | :white_check_mark: | `0.4.0` | `usda::TextWriter`; round-trips the compliance suite opinion-for-opinion and writes C++ `testSdfParsing` baselines back byte for byte |
 | USDC (binary) reading | `16.3` | :white_check_mark: | `0.1.1` | Crate format with LZ4/integer compression |
 | USDC (binary) writing | `16.3` | :white_check_mark: | `0.4.0` | `usdc::CrateWriter`; streaming packer with integer compression, LZ4 blocks, DFS path encoder |
 | USDZ (package) reading | `16.4` | :white_check_mark: | `0.2.0` | ZIP-based package reader; a nested `.usdz` entry reads as its default layer |
