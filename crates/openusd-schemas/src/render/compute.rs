@@ -20,8 +20,10 @@ use super::spec::{Product as SpecProduct, RenderSpec, SpecDiagnostic, Var as Spe
 use super::{
     AspectRatioConformPolicy, Product, ProductSchema, Settings, SettingsBaseSchema, SettingsSchema, Var, VarSchema,
 };
+use crate::SchemaError;
 use crate::authored_at;
 use crate::geom::{self, CameraSchema};
+use crate::shade::{self, ConnectableContext, Output, ProducerFilter};
 
 /// Compute the [`RenderSpec`] for the `Settings`
 /// prim at `settings_prim`. Returns `None` when `settings_prim` names no
@@ -34,8 +36,26 @@ use crate::geom::{self, CameraSchema};
 /// `Camera`, and a var target that is not a `Var`, are left out and recorded
 /// in [`RenderSpec::diagnostics`].
 ///
-/// `namespaces` is passed to [`namespaced_settings`] at each level.
-pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> Result<Option<RenderSpec>> {
+/// `namespaces` is passed to [`namespaced_settings`] at each level, which
+/// follows connected outputs under the default [`ConnectableContext`];
+/// [`render_spec_in`] follows them under another.
+pub fn render_spec(
+    stage: &Stage,
+    settings_prim: &Path,
+    namespaces: &[&str],
+) -> Result<Option<RenderSpec>, SchemaError> {
+    render_spec_in(&ConnectableContext::default(), stage, settings_prim, namespaces)
+}
+
+/// The [`RenderSpec`] for the `Settings` prim at `settings_prim`, as
+/// [`render_spec`] computes it, with each connected output followed under
+/// `context`'s behaviors.
+pub fn render_spec_in(
+    context: &ConnectableContext,
+    stage: &Stage,
+    settings_prim: &Path,
+    namespaces: &[&str],
+) -> Result<Option<RenderSpec>, SchemaError> {
     let Some(settings) = Settings::get(stage, settings_prim)? else {
         return Ok(None);
     };
@@ -77,8 +97,15 @@ pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> 
             ],
         );
 
-        let render_var_indices =
-            collect_var_indices(stage, &product, &product_path, &mut spec, &mut var_index, namespaces)?;
+        let render_var_indices = collect_var_indices(
+            context,
+            stage,
+            &product,
+            &product_path,
+            &mut spec,
+            &mut var_index,
+            namespaces,
+        )?;
 
         spec.products.push(SpecProduct {
             product_type: product.product_type()?.unwrap_or_default(),
@@ -92,15 +119,126 @@ pub fn render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> 
             aperture_size: conformed.aperture_size,
             data_window_ndc: base.data_window_ndc,
             render_var_indices,
-            namespaced_settings: namespaced_settings(stage, &product_path, namespaces)?,
+            namespaced_settings: namespaced_settings_in(context, stage, &product_path, namespaces)?,
             render_product_path: product_path,
         });
     }
 
     spec.included_purposes = settings.included_purposes()?.unwrap_or_default();
     spec.material_binding_purposes = settings.material_binding_purposes()?.unwrap_or_default();
-    spec.namespaced_settings = namespaced_settings(stage, settings_prim, namespaces)?;
+    spec.namespaced_settings = namespaced_settings_in(context, stage, settings_prim, namespaces)?;
     Ok(Some(spec))
+}
+
+/// The settings authored on `prim`, sorted by name (C++
+/// `UsdRenderComputeNamespacedSettings`), with connected outputs followed
+/// under the default [`ConnectableContext`]; [`namespaced_settings_in`]
+/// follows them under another.
+///
+/// An authored attribute whose name has a namespace contributes under its
+/// full name; an `outputs:` attribute's namespace is read past its
+/// `outputs:` prefix. A non-empty `namespaces` admits only the attributes
+/// whose outermost namespace it lists.
+///
+/// An output contributes the prim path of each attribute that produces its
+/// value, as a [`Value::PathVec`] in producer order. An unconnected output
+/// with an authored value is its own producer, as C++'s walk answers with
+/// `shaderOutputsOnly` off. A connection chain longer than the producer walk
+/// follows is [`SchemaError::ConnectionDepthExceeded`]. Any other attribute
+/// contributes its value at the default time, and one that reads no value,
+/// such as a blocked one with no schema fallback, is left out.
+///
+/// Every authored relationship contributes its targets as a
+/// [`Value::PathVec`], whatever its namespace and `namespaces`, as C++
+/// gathers them. The schema's own relationships, such as `camera`, are among
+/// them.
+pub fn namespaced_settings(
+    stage: &Stage,
+    prim: &Path,
+    namespaces: &[&str],
+) -> Result<Vec<(String, Value)>, SchemaError> {
+    namespaced_settings_in(&ConnectableContext::default(), stage, prim, namespaces)
+}
+
+/// The settings authored on `prim`, as [`namespaced_settings`] gathers them,
+/// with each connected output followed under `context`'s behaviors.
+pub fn namespaced_settings_in(
+    context: &ConnectableContext,
+    stage: &Stage,
+    prim: &Path,
+    namespaces: &[&str],
+) -> Result<Vec<(String, Value)>, SchemaError> {
+    let (attributes, relationships) = stage.prim(prim)?.authored_properties()?;
+    let mut out = Vec::new();
+    for attr in attributes {
+        let name = attr.name();
+        let base_name = name.strip_prefix(shade::tokens::OUTPUTS);
+        let Some((namespace, _)) = base_name.unwrap_or(name).split_once(':') else {
+            continue;
+        };
+        if !namespaces.is_empty() && !namespaces.contains(&namespace) {
+            continue;
+        }
+        let name = name.to_string();
+        // A connection is stronger than a value authored on the output.
+        if let Some(output) = base_name.and_then(|_| Output::from_attribute(attr.clone())) {
+            let producers = context.value_producing_attributes(output, ProducerFilter::Any)?;
+            if !producers.is_empty() {
+                let paths = producers.iter().map(|producer| producer.path().prim_path()).collect();
+                out.push((name, Value::PathVec(paths)));
+                continue;
+            }
+        }
+        if let Some(value) = attr.get::<Value>()? {
+            out.push((name, value));
+        }
+    }
+    for rel in relationships {
+        out.push((rel.name().to_string(), Value::PathVec(rel.targets()?)));
+    }
+    // Sorted by name, the order of the C++ `VtDictionary`.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// Resolve `product`'s `orderedVars` to indices into `spec.render_vars`,
+/// appending any var not seen before (de-duplication by var path). A target
+/// that isn't a `Var` prim is skipped with a
+/// [`SpecDiagnostic::MissingVar`].
+fn collect_var_indices(
+    context: &ConnectableContext,
+    stage: &Stage,
+    product: &Product,
+    product_path: &Path,
+    spec: &mut RenderSpec,
+    var_index: &mut HashMap<Path, usize>,
+    namespaces: &[&str],
+) -> Result<Vec<usize>, SchemaError> {
+    let mut indices = Vec::new();
+    for var_path in product.ordered_vars_rel().forwarded_targets()? {
+        if let Some(&i) = var_index.get(&var_path) {
+            indices.push(i);
+            continue;
+        }
+        let Some(var) = Var::get(stage, &var_path)? else {
+            spec.diagnostics.push(SpecDiagnostic::MissingVar {
+                product: product_path.clone(),
+                var: var_path,
+            });
+            continue;
+        };
+        let i = spec.render_vars.len();
+        spec.render_vars.push(SpecVar {
+            data_type: var.data_type()?.map(String::from).unwrap_or_default(),
+            source_name: var.source_name()?.unwrap_or_default(),
+            source_type: var.source_type()?.unwrap_or_default(),
+            namespaced_settings: namespaced_settings_in(context, stage, &var_path, namespaces)?,
+            render_var_path: var_path.clone(),
+        });
+        var_index.insert(var_path, i);
+        indices.push(i);
+    }
+    Ok(indices)
 }
 
 /// The camera + framing attributes resolved from a [`SettingsBaseSchema`] view:
@@ -153,90 +291,6 @@ impl ResolvedBase {
     }
 }
 
-/// The settings authored on `prim`, sorted by name (C++
-/// `UsdRenderComputeNamespacedSettings`).
-///
-/// An authored attribute whose name has a namespace contributes its value at
-/// the default time, under its full name. A non-empty `namespaces` admits only
-/// the attributes whose outermost namespace it lists. An attribute that reads
-/// no value, such as a blocked one with no schema fallback, is left out, and
-/// so is an `outputs:` attribute.
-///
-/// Every authored relationship contributes its targets as a
-/// [`Value::PathVec`], whatever its namespace and `namespaces`, as C++
-/// gathers them. The schema's own relationships, such as `camera`, are among
-/// them.
-pub fn namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
-    let prim = stage.prim(prim)?;
-    let mut out = Vec::new();
-    // TODO(perf): `authored_attributes` and `authored_relationships` each
-    // compose the prim's property kinds; one authored-property pass split by
-    // kind would serve both.
-    for attr in prim.authored_attributes()? {
-        let name = attr.name();
-        // TODO(shade): an `outputs:` setting is driven by the node graph it
-        // connects to, and reads the producers that
-        // `shade::ConnectableContext::value_producing_attributes` finds.
-        if name.starts_with("outputs:") {
-            continue;
-        }
-        let Some((namespace, _)) = name.split_once(':') else {
-            continue;
-        };
-        if !namespaces.is_empty() && !namespaces.contains(&namespace) {
-            continue;
-        }
-        if let Some(value) = attr.get::<Value>()? {
-            out.push((name.to_string(), value));
-        }
-    }
-    for rel in prim.authored_relationships()? {
-        out.push((rel.name().to_string(), Value::PathVec(rel.targets()?)));
-    }
-    // Sorted by name, the order of the C++ `VtDictionary`.
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-
-/// Resolve `product`'s `orderedVars` to indices into `spec.render_vars`,
-/// appending any var not seen before (de-duplication by var path). A target
-/// that isn't a `Var` prim is skipped with a
-/// [`SpecDiagnostic::MissingVar`].
-fn collect_var_indices(
-    stage: &Stage,
-    product: &Product,
-    product_path: &Path,
-    spec: &mut RenderSpec,
-    var_index: &mut HashMap<Path, usize>,
-    namespaces: &[&str],
-) -> Result<Vec<usize>> {
-    let mut indices = Vec::new();
-    for var_path in product.ordered_vars_rel().forwarded_targets()? {
-        if let Some(&i) = var_index.get(&var_path) {
-            indices.push(i);
-            continue;
-        }
-        let Some(var) = Var::get(stage, &var_path)? else {
-            spec.diagnostics.push(SpecDiagnostic::MissingVar {
-                product: product_path.clone(),
-                var: var_path,
-            });
-            continue;
-        };
-        let i = spec.render_vars.len();
-        spec.render_vars.push(SpecVar {
-            data_type: var.data_type()?.map(String::from).unwrap_or_default(),
-            source_name: var.source_name()?.unwrap_or_default(),
-            source_type: var.source_type()?.unwrap_or_default(),
-            namespaced_settings: namespaced_settings(stage, &var_path, namespaces)?,
-            render_var_path: var_path.clone(),
-        });
-        var_index.insert(var_path, i);
-        indices.push(i);
-    }
-    Ok(indices)
-}
-
 /// `attr`'s value read as C++ `_Get(attr, val, getDefault)`: with no
 /// `inherited` value the fallback-resolving read, else the authored value
 /// over `inherited`. A value neither reads keeps the type's default, as the
@@ -256,10 +310,12 @@ where
 mod tests {
     use super::*;
     use crate::render::{ProductType, SourceType};
+    use crate::shade::Connectable;
 
-    use openusd::Result;
     use openusd::gf;
     use openusd::sdf;
+
+    type Result<T = ()> = std::result::Result<T, SchemaError>;
 
     /// A `Camera` at `path`, with a 10×10 aperture.
     fn camera(stage: &Stage, path: &str) -> Result<geom::Camera> {
@@ -640,6 +696,91 @@ mod tests {
         int_attr(&stage, "ri:x")?.block()?;
         int_attr(&stage, "ri:y")?;
         assert_eq!(setting_names(&stage, &[])?, ["ri:y"]);
+        Ok(())
+    }
+
+    /// The output view of the attribute `name` on `prim`, of `type_name`.
+    fn output(stage: &Stage, prim: &str, name: &str, type_name: &str) -> Result<Output> {
+        let attr = stage.create_attribute(sdf::path(prim)?.append_property(name)?, type_name)?;
+        Ok(Output::from_attribute(attr).expect("an outputs: attribute"))
+    }
+
+    /// The setting `name` gathered on `/S` under `context`.
+    fn setting(context: &ConnectableContext, stage: &Stage, name: &str) -> Result<Option<Value>> {
+        let settings = namespaced_settings_in(context, stage, &sdf::path("/S")?, &[])?;
+        Ok(settings
+            .into_iter()
+            .find(|(setting, _)| setting == name)
+            .map(|(_, value)| value))
+    }
+
+    /// A connected output gathers the prim of the shader output producing it.
+    #[test]
+    fn connected_output_paths() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/S")?;
+        let filter = crate::shade::Shader::define(&stage, "/Shaders/Filter")?.create_output("out", "token")?;
+        output(&stage, "/S", "outputs:ri:displayFilter", "token")?.connect_to(&filter)?;
+        assert_eq!(
+            setting(&ConnectableContext::default(), &stage, "outputs:ri:displayFilter")?,
+            Some(Value::PathVec(vec![sdf::path("/Shaders/Filter")?]))
+        );
+        Ok(())
+    }
+
+    /// An unconnected output with an authored value is its own producer.
+    #[test]
+    fn authored_output_self() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/S")?;
+        output(&stage, "/S", "outputs:ri:x", "int")?.set(Value::Int(1))?;
+        assert_eq!(
+            setting(&ConnectableContext::default(), &stage, "outputs:ri:x")?,
+            Some(Value::PathVec(vec![sdf::path("/S")?]))
+        );
+        Ok(())
+    }
+
+    /// An output's namespace is read past `outputs:`. `outputs:x` has none.
+    #[test]
+    fn bare_output_skipped() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/S")?;
+        output(&stage, "/S", "outputs:x", "int")?.set(Value::Int(1))?;
+        output(&stage, "/S", "outputs:ri:y", "int")?.set(Value::Int(1))?;
+        assert_eq!(setting_names(&stage, &[])?, ["outputs:ri:y"]);
+        assert_eq!(setting_names(&stage, &["outputs"])?, Vec::<String>::new());
+        Ok(())
+    }
+
+    /// The walk a context runs follows an output through the prims its
+    /// registry makes containers, and stops at them under the default one.
+    #[test]
+    fn output_custom_context() -> Result {
+        use crate::shade::behavior::tests::{FAMILY, custom_context};
+
+        let stage = crate::geom::boundable::tests::stage_with(FAMILY)?;
+        stage.define_prim("/S")?;
+        stage.define_prim("/Box")?.set_type_name("TestTyped")?;
+        let inner = crate::shade::Shader::define(&stage, "/Box/Inner")?.create_output("out", "float")?;
+        let routed = output(&stage, "/Box", "outputs:out", "float")?.connect_to(&inner)?;
+        output(&stage, "/S", "outputs:ri:f", "float")?.connect_to(&routed)?;
+
+        let paths = |prims: &[&str]| -> Result<Option<Value>> {
+            let mut paths = Vec::new();
+            for prim in prims {
+                paths.push(sdf::path(*prim)?);
+            }
+            Ok(Some(Value::PathVec(paths)))
+        };
+        assert_eq!(
+            setting(&custom_context(false), &stage, "outputs:ri:f")?,
+            paths(&["/Box/Inner"])?
+        );
+        assert_eq!(
+            setting(&ConnectableContext::default(), &stage, "outputs:ri:f")?,
+            paths(&["/Box"])?
+        );
         Ok(())
     }
 }

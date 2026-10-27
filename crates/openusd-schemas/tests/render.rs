@@ -9,6 +9,7 @@ use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::tf::Token;
 use openusd::usd::{CollectionAPI, SchemaBase, Stage};
+use openusd_schemas::SchemaError;
 use openusd_schemas::render::{
     AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema,
     SettingsSchema, SourceType, Var, VarSchema, namespaced_settings, render_spec,
@@ -96,7 +97,7 @@ fn resolves_stage_settings_path() -> Result<()> {
 }
 
 #[test]
-fn computes_render_spec_end_to_end() -> Result<()> {
+fn computes_render_spec_end_to_end() -> Result<(), SchemaError> {
     let stage = open(FIXTURE)?;
     let spec = render_spec(&stage, &sdf::path("/Render/settings")?, &["ri"])?.expect("RenderSpec");
 
@@ -130,7 +131,7 @@ fn computes_render_spec_end_to_end() -> Result<()> {
 /// A relationship is gathered whatever its namespace and the namespaces
 /// asked for, where the attributes beside it are filtered.
 #[test]
-fn rels_unfiltered() -> Result<()> {
+fn rels_unfiltered() -> Result<(), SchemaError> {
     let stage = open("fixtures/usdRender_integrator.usda")?;
     let settings = namespaced_settings(&stage, &sdf::path("/Render/RenderSettings")?, &["other"])?;
     assert_eq!(
@@ -146,7 +147,7 @@ fn rels_unfiltered() -> Result<()> {
 /// A namespaced `asset` setting reads its path resolved against the layer
 /// that authors it.
 #[test]
-fn asset_value_resolved() -> Result<()> {
+fn asset_value_resolved() -> Result<(), SchemaError> {
     let (dir, stage) = common::open_files(
         &[
             (
@@ -165,8 +166,8 @@ fn asset_value_resolved() -> Result<()> {
     assert_eq!(asset.asset_path(), "./tex.exr");
     let resolved = asset.resolved_path().expect("a resolved path");
     assert_eq!(
-        fs::canonicalize(resolved)?,
-        fs::canonicalize(dir.path().join("tex.exr"))?
+        fs::canonicalize(resolved).expect("the resolved path exists"),
+        fs::canonicalize(dir.path().join("tex.exr")).expect("the texture exists")
     );
     Ok(())
 }

@@ -24,7 +24,7 @@
 //! | `media`   | `media`   | `UsdMedia`    | asset-preview thumbnails, which live in `assetInfo`; needs `geom` |
 //! | `physics` | `physics` | `UsdPhysics`  | the token enums, a rigid body's mass properties from its colliders, the parser that describes a stage's physics objects to a simulator; needs `geom`, `shade` |
 //! | `proc`    | `proc`    | `UsdProc`     | needs `geom` |
-//! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim; needs `geom` |
+//! | `render`  | `render`  | `UsdRender`   | the computed render spec, aperture conforming, the stage's settings prim; needs `geom`, `shade` |
 //! | `semantics` | `semantics` | `UsdSemantics` | the taxonomies a prim is labelled under, and the labels it carries under one of them over time and down namespace |
 //! | `shade`   | `shade`   | `UsdShade`    | the `Connectable` interface, connection resolution, material terminals, material bindings and their `materialBind` subsets, the `UsdPreviewSurface` reader; needs `geom` |
 //! | `skel`    | `skel`    | `UsdSkel`     | the skinning toolkit: topology, animation mapping, resolvers, pure-math LBS; needs `geom` |

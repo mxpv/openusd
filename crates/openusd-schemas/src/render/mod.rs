@@ -60,6 +60,6 @@ mod conform;
 mod pass;
 mod settings;
 
-pub use compute::{namespaced_settings, render_spec};
+pub use compute::{namespaced_settings, namespaced_settings_in, render_spec, render_spec_in};
 pub use conform::{ConformedAperture, conform_aperture};
 pub use spec::{RenderSpec, SpecDiagnostic};

@@ -560,7 +560,7 @@ pub mod rules {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use openusd::sdf;
@@ -573,7 +573,7 @@ mod tests {
     /// A family of a typed schema with a typed child, an abstract type, a
     /// type with a built-in API schema, a type an API schema auto-applies
     /// to, and three single-apply API schemas.
-    const FAMILY: &[SchemaDecl<'static>] = &[
+    pub(crate) const FAMILY: &[SchemaDecl<'static>] = &[
         SchemaDecl::new("TestTyped", SchemaKind::ConcreteTyped).bases(&["Typed"]),
         SchemaDecl::new("TestChild", SchemaKind::ConcreteTyped).bases(&["TestTyped"]),
         SchemaDecl::new("TestAbstract", SchemaKind::AbstractTyped).bases(&["Typed"]),
@@ -714,7 +714,7 @@ mod tests {
 
     /// A context where `TestTyped` is a basic container, encapsulated where
     /// `encapsulation` holds.
-    fn custom_context(encapsulation: bool) -> ConnectableContext {
+    pub(crate) fn custom_context(encapsulation: bool) -> ConnectableContext {
         let mut behaviors = crate::connectable_registry().clone();
         behaviors.register(
             "TestTyped",

@@ -123,8 +123,8 @@ source of truth for specifics.
   AOUSD core spec. It depends on `openusd`, so the core must never reference it.
   Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`,
   `semantics`, `shade`, `skel`, `ui`, `vol`; `shade` and several others
-  enable `geom`, and `lux` and `physics` enable `shade`). See the table in
-  its `lib.rs`.
+  enable `geom`, and `lux`, `physics` and `render` enable `shade`). See the
+  table in its `lib.rs`.
 
 - **`openusd-build`** - A separate crate (`crates/openusd-build`): the schema
   view generator `openusd-schemas` runs as a build dependency. It loads a schema

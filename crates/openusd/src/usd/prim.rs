@@ -42,7 +42,7 @@ use super::{
 use crate::tf::Token;
 use crate::{Result, pcp, sdf};
 
-/// Which property names [`Prim::properties_of_type`] walks, and whether a
+/// Which property names [`Prim::typed_properties`] walks, and whether a
 /// schema declaration may answer for a name no layer authors.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PropertySource {
@@ -1306,13 +1306,44 @@ impl Prim {
         })
     }
 
+    /// Returns handles to the attributes and to the relationships layers
+    /// author on this prim, each in the order
+    /// [`authored_attributes`](Self::authored_attributes) and
+    /// [`authored_relationships`](Self::authored_relationships) list them,
+    /// from one composition of the prim's properties (C++
+    /// `UsdPrim::GetAuthoredProperties`, split by kind).
+    pub fn authored_properties(&self) -> Result<(Vec<Attribute>, Vec<Relationship>)> {
+        let mut attributes = Vec::new();
+        let mut relationships = Vec::new();
+        for property in self.typed_properties(PropertySource::Authored, "")? {
+            let path = self.property_path(property.name);
+            match property.kind {
+                Some(sdf::SpecType::Attribute) => attributes.push(Attribute::new(&self.stage, path)),
+                Some(sdf::SpecType::Relationship) => relationships.push(Relationship::new(&self.stage, path)),
+                _ => {}
+            }
+        }
+        Ok((attributes, relationships))
+    }
+
     /// The property paths of `source` under `namespace` whose spec type
     /// matches `ty`, in composed order.
+    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
+        Ok(self
+            .typed_properties(source, namespace)?
+            .into_iter()
+            .filter(|property| property.kind == Some(ty))
+            .map(|property| self.property_path(property.name))
+            .collect())
+    }
+
+    /// The property names of `source` under `namespace`, each with the spec
+    /// type it resolves to, in composed order.
     ///
     /// The names and their composed spec types come from one cache query. The
-    /// namespace and the kind narrow the ordered names, so a property keeps
-    /// the place the whole list gave it.
-    fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
+    /// namespace narrows the ordered names, so a property keeps the place the
+    /// whole list gave it.
+    fn typed_properties(&self, source: PropertySource, namespace: &str) -> Result<Vec<TypedName>> {
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
         let declared_kind = |name: &Token| definition.property(name).map(|property| property.spec_type());
@@ -1339,11 +1370,8 @@ impl Prim {
             });
         }
         self.apply_property_order(&mut properties)?;
-        Ok(properties
-            .into_iter()
-            .filter(|property| property.kind == Some(ty) && in_namespace(&property.name, namespace))
-            .map(|property| self.property_path(property.name))
-            .collect())
+        properties.retain(|property| in_namespace(&property.name, namespace));
+        Ok(properties)
     }
 
     /// Property path for `name` under this prim. An invalid name yields the
@@ -1405,7 +1433,7 @@ struct ModelFlags {
 }
 
 /// A property name with the spec type it resolves to, which
-/// [`Prim::properties_of_type`] orders by name.
+/// [`Prim::typed_properties`] orders by name.
 struct TypedName {
     name: Token,
     kind: Option<sdf::SpecType>,
@@ -1879,8 +1907,8 @@ mod tests {
     use crate::tf::Token;
     use crate::usd::stage::tests::stage;
     use crate::usd::{
-        ApplyApiError, Object, PrimPredicate, PrimRange, PrimStatus, SchemaRegistry, Stage, StageAuthoringError,
-        VersionFilter,
+        ApplyApiError, Attribute, Object, PrimPredicate, PrimRange, PrimStatus, Relationship, SchemaRegistry, Stage,
+        StageAuthoringError, VersionFilter,
     };
 
     /// A stage over the shared test schema family, so prim definitions have
@@ -2143,6 +2171,16 @@ mod tests {
         let relationships = prim.authored_relationships()?;
         assert_eq!(relationships.len(), 1);
         assert_eq!(relationships[0].path().as_str(), "/Sun.authoredRel");
+
+        // One pass answers both kinds, in the same order.
+        let (both_attributes, both_relationships) = prim.authored_properties()?;
+        let attribute_paths = |attrs: &[Attribute]| attrs.iter().map(|attr| attr.path().clone()).collect::<Vec<_>>();
+        let relationship_paths = |rels: &[Relationship]| rels.iter().map(|rel| rel.path().clone()).collect::<Vec<_>>();
+        assert_eq!(attribute_paths(&both_attributes), attribute_paths(&attributes));
+        assert_eq!(
+            relationship_paths(&both_relationships),
+            relationship_paths(&relationships)
+        );
         Ok(())
     }
 
