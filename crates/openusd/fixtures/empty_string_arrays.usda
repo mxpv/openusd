@@ -1,0 +1,11 @@
+#usda 1.0
+
+def "Prim"
+{
+    string[] empty_strings = []
+    string[] strings = ["a", "bc"]
+    asset[] empty_assets = []
+    asset[] assets = [@x.png@]
+    pathExpression[] empty_expressions = []
+    pathExpression[] expressions = ["/World/*"]
+}
