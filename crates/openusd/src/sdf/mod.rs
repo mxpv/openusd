@@ -186,6 +186,18 @@ impl LayerOffset {
         self.offset == 0.0 && self.scale == 1.0
     }
 
+    /// Whether this offset and `other` are equal as C++ `SdfLayerOffset`'s
+    /// `operator==` compares them: two valid offsets within 1e-6 of each
+    /// other in both parts, or two invalid ones that are exactly equal.
+    pub fn is_close(&self, other: &LayerOffset) -> bool {
+        const EPSILON: f64 = 1e-6;
+        match (self.is_valid(), other.is_valid()) {
+            (true, true) => (self.offset - other.offset).abs() < EPSILON && (self.scale - other.scale).abs() < EPSILON,
+            (false, false) => self.to_bits() == other.to_bits(),
+            _ => false,
+        }
+    }
+
     /// The `(offset, scale)` pair as exact bit patterns, for hashing it into a
     /// key or comparing two copies of it. An authored NaN offset or scale is
     /// unequal to itself under float equality, yet two offsets that reproduce it

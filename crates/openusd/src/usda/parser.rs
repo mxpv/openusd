@@ -656,11 +656,10 @@ impl<'a> Parser<'a> {
     }
 
     /// `symmetryFunction`'s value, a bare identifier that may be left out
-    /// (C++ `SymmetryFunctionMetadata`), which authors an empty function.
+    /// (C++ `SymmetryFunctionMetadata`'s `opt<Identifier>`), which authors an
+    /// empty function. The function ends at the line, so an empty one never
+    /// takes the next field's name.
     fn read_symmetry_function(&mut self, spec: &mut sdf::SpecData) -> Result<(), RawError> {
-        // The function is optional and ends at the line (C++
-        // `SymmetryFunctionMetadata`'s `opt<Identifier>`), so an empty one
-        // never takes the next field's name.
         let same_line = !self.cursor.source()[self.cursor.consumed_end()..self.cursor.next_offset()].contains('\n');
         let function = match self.cursor.peek()? {
             Some(Token::Identifier(name) | Token::NamespacedIdentifier(name)) if same_line => {
@@ -690,9 +689,13 @@ impl<'a> Parser<'a> {
             spec.add(FieldKey::Custom, sdf::Value::Bool(true));
         }
         // `variability` falls back to varying, so only a uniform relationship —
-        // the plain `rel` spelling — carries the field.
+        // the plain `rel` spelling — carries the field. A later statement's
+        // variability replaces an earlier one's, as in C++, so a `varying`
+        // statement also clears the field a plain one set.
         if variability == sdf::Variability::Uniform {
             spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+        } else if let Some(earlier) = data.get_mut(&current_path.append_property(name)?) {
+            earlier.remove(FieldKey::Variability.as_str());
         }
 
         // Check for metadata before or instead of assignment
@@ -866,7 +869,13 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Relocates.as_str() => {
                 ensure!(list_op.is_none(), "relocates does not support list ops");
-                let pairs = types::parse_relocates(&mut self.cursor).context("Unable to parse relocates")?;
+                // Both paths of a pair are made absolute against the prim,
+                // as C++ reads a prim's relocates.
+                let pairs = types::parse_relocates(&mut self.cursor)
+                    .context("Unable to parse relocates")?
+                    .into_iter()
+                    .map(|(source, target)| (anchor.make_absolute(&source), anchor.make_absolute(&target)))
+                    .collect();
                 spec.add(FieldKey::Relocates, sdf::Value::Relocates(pairs));
             }
             "displayName" => {

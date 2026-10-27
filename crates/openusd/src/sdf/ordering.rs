@@ -67,7 +67,7 @@ pub fn apply_ordering<T: PartialEq<K>, K>(items: &mut Vec<T>, order: &[K]) {
 }
 
 /// Compares two namespace element names by the normative element ordering of
-/// core spec §8.2 (C++ `TfDictionaryLessThan`):
+/// core spec §8.2:
 ///
 /// - `_` sorts before all ASCII letters and digits.
 /// - ASCII digits sort before ASCII letters; a run of digits compares by numeric
@@ -75,6 +75,12 @@ pub fn apply_ordering<T: PartialEq<K>, K>(items: &mut Vec<T>, order: &[K]) {
 /// - ASCII letters compare case-insensitively.
 /// - Every other character (ASCII punctuation and non-ASCII) sorts after ASCII
 ///   letters, by Unicode code point.
+///
+/// This differs from C++ `TfDictionaryLessThan`, which compares such a
+/// character by its byte value, so `:` (0x3A) sorts before the letters there:
+/// C++ orders `xformOp:transform` before `xformOpOrder`, and §8.2 orders it
+/// after; [`tf::dictionary_cmp`](crate::tf::dictionary_cmp) is the C++
+/// order.
 ///
 /// Callers apply this where the spec mandates element ordering — currently the
 /// relocated-in prim children of the composition engine (spec §11.3.1). The base
@@ -285,6 +291,27 @@ mod tests {
                 "foobar",
             ])
         );
+    }
+
+    /// Punctuation sorts after the letters in the spec's element order and
+    /// by byte value, before them, in C++ `TfDictionaryLessThan`'s. The two
+    /// orders differ on purpose: composition follows §8.2, and
+    /// `tf::dictionary_cmp` is the order the text writer matches C++ in.
+    #[test]
+    fn element_cmp_punctuation() {
+        use std::cmp::Ordering::{Greater, Less};
+
+        use crate::tf;
+
+        for (a, b) in [("xformOpOrder", "xformOp:transform"), ("az", "a:b"), ("ab", "a.b")] {
+            assert_eq!(element_cmp(a, b), Less, "spec order: {a} before {b}");
+            assert_eq!(tf::dictionary_cmp(a, b), Greater, "C++ order: {b} before {a}");
+        }
+        // `_` and digits come before the letters in both.
+        for (a, b) in [("a_", "aa"), ("a1", "ab")] {
+            assert_eq!(element_cmp(a, b), Less, "{a} before {b}");
+            assert_eq!(tf::dictionary_cmp(a, b), Less, "{a} before {b}");
+        }
     }
 
     #[test]

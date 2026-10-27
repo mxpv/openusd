@@ -100,7 +100,39 @@ impl Emitter<'_> {
     /// `line` at the current indent, ended by a newline.
     fn write_line(&mut self, line: &str) -> Result<(), FormatError> {
         self.write_indent()?;
-        writeln!(self.out, "{line}")?;
+        self.out.write_all(line.as_bytes())?;
+        self.out.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// The scratch text at the current indent, ended by a newline.
+    fn write_scratch_line(&mut self) -> Result<(), FormatError> {
+        self.write_indent()?;
+        self.out.write_all(self.scratch.as_bytes())?;
+        self.out.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// The parenthesized metadata block after a declaration, one field per
+    /// line one level in, and nothing when `fields` is empty.
+    fn emit_metadata_block(
+        &mut self,
+        data: &dyn AbstractData,
+        path: &Path,
+        fields: &[String],
+    ) -> Result<(), FormatError> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        writeln!(self.out, " (")?;
+        self.indent += 1;
+        for name in fields {
+            let value = data.field(path, name)?;
+            self.emit_metadata_entry(path, name, &value)?;
+        }
+        self.indent -= 1;
+        self.write_indent()?;
+        self.out.write_all(b")")?;
         Ok(())
     }
 
@@ -112,35 +144,38 @@ impl Emitter<'_> {
         let root = Path::abs_root();
         let has_root = data.has_spec(&root);
 
-        // Layer metadata: every field except primChildren is metadata.
-        // subLayerOffsets is merged into subLayers at emit time.
-        // In byte order, as C++ `SdfUsdaFileFormat` sorts them.
+        // Layer metadata, as C++ `SdfUsdaFileFormat` writes the header: every
+        // field but primChildren, with subLayerOffsets merged into subLayers;
+        // the comment first, the fields in byte order, then the relocates. An
+        // empty comment or `doc` and a false `hasOwnedSubLayers` are not
+        // written.
+        let written = |name: &String| {
+            if is_prim_structural_field(name) || name == FieldKey::SubLayerOffsets.as_str() {
+                false
+            } else if name == FieldKey::HasOwnedSubLayers.as_str() {
+                matches!(data.field(&root, name).as_deref(), Ok(Value::Bool(true)))
+            } else if name == FieldKey::Comment.as_str() || name == FieldKey::Documentation.as_str() {
+                !is_empty_string(data, &root, name)
+            } else {
+                true
+            }
+        };
         let mut meta_fields: Vec<String> = if has_root {
             data.list_fields(&root)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|n| !is_prim_structural_field(n) && n != FieldKey::SubLayerOffsets.as_str())
+                .filter(written)
                 .collect()
         } else {
             Vec::new()
         };
-        meta_fields.sort();
-
-        // As C++ `SdfUsdaFileFormat` writes the header: the comment first,
-        // the fields in order, then the relocates. An empty `doc` and a false
-        // `hasOwnedSubLayers` are not written.
-        meta_fields.retain(|name| match get_value(data, &root, name) {
-            Some(Value::String(doc)) if name == FieldKey::Documentation.as_str() => !doc.is_empty(),
-            Some(Value::Bool(owned)) if name == FieldKey::HasOwnedSubLayers.as_str() => owned,
-            _ => true,
-        });
-        let last = |name: &String| {
+        let place = |name: &String| {
             (
                 name != FieldKey::Comment.as_str(),
                 name == FieldKey::LayerRelocates.as_str(),
             )
         };
-        meta_fields.sort_by_key(last);
+        meta_fields.sort_by(|a, b| place(a).cmp(&place(b)).then_with(|| a.cmp(b)));
         if !meta_fields.is_empty() {
             writeln!(self.out, "(")?;
             self.indent += 1;
@@ -149,12 +184,8 @@ impl Emitter<'_> {
                     self.emit_sub_layers(data, &root)?;
                     continue;
                 }
-                if let Some(Value::Relocates(relocates)) = get_value(data, &root, name) {
-                    self.emit_relocates(&relocates)?;
-                    continue;
-                }
                 let value = data.field(&root, name)?;
-                self.emit_metadata_entry(name, &value)?;
+                self.emit_metadata_entry(&root, name, &value)?;
             }
             self.indent -= 1;
             writeln!(self.out, ")")?;
@@ -210,29 +241,14 @@ impl Emitter<'_> {
         write!(self.out, " {quoted}")?;
 
         let meta_fields = metadata_fields(data, path, is_prim_structural_field);
-
-        if !meta_fields.is_empty() {
-            writeln!(self.out, " (")?;
-            self.indent += 1;
-            for name in &meta_fields {
-                let value = data.field(path, name)?;
-                self.emit_metadata_entry(name, &value)?;
-            }
-            self.indent -= 1;
-            self.write_indent()?;
-            self.out.write_all(b")")?;
-        }
+        self.emit_metadata_block(data, path, &meta_fields)?;
 
         writeln!(self.out)?;
-        self.write_indent()?;
-        writeln!(self.out, "{{")?;
+        self.write_line("{")?;
         self.indent += 1;
         self.emit_prim_body(data, path)?;
         self.indent -= 1;
-        self.write_indent()?;
-        writeln!(self.out, "}}")?;
-
-        Ok(())
+        self.write_line("}")
     }
 
     /// A prim's or variant's body, laid out as C++ `Sdf_WritePrimBody` lays
@@ -338,6 +354,8 @@ impl Emitter<'_> {
         let time_samples = get_value(data, path, FieldKey::TimeSamples.as_str());
         let spline = get_value(data, path, SPLINE_FIELD);
         let connections = get_value(data, path, FieldKey::ConnectionPaths.as_str());
+        // Only a list op with an effect writes a connection statement.
+        let connections_written = matches!(&connections, Some(Value::PathListOp(op)) if !op.is_empty());
         let meta_fields = metadata_fields(data, path, is_attribute_structural_field);
 
         // The declaration, which C++ `Sdf_WriteAttribute` writes only when it
@@ -347,7 +365,7 @@ impl Emitter<'_> {
         if !meta_fields.is_empty()
             || default.is_some()
             || custom
-            || (time_samples.is_none() && spline.is_none() && connections.is_none())
+            || (time_samples.is_none() && spline.is_none() && !connections_written)
         {
             self.write_indent()?;
             if custom {
@@ -360,19 +378,7 @@ impl Emitter<'_> {
                 self.write_value(&v)?;
             }
 
-            if !meta_fields.is_empty() {
-                self.out.write_all(b" (")?;
-                writeln!(self.out)?;
-                self.indent += 1;
-                for name in &meta_fields {
-                    let value = data.field(path, name)?;
-                    self.emit_metadata_entry(name, &value)?;
-                }
-                self.indent -= 1;
-                self.write_indent()?;
-                self.out.write_all(b")")?;
-            }
-
+            self.emit_metadata_block(data, path, &meta_fields)?;
             writeln!(self.out)?;
         }
 
@@ -391,7 +397,7 @@ impl Emitter<'_> {
         }
 
         if let Some(Value::PathListOp(op)) = connections {
-            self.emit_connection(name, &op, &format!("{variability}{type_name}"))?;
+            self.emit_targets_statement(&format!("{variability}{type_name} {name}.connect"), &op)?;
         }
 
         Ok(())
@@ -548,11 +554,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn emit_connection(&mut self, attr_name: &str, op: &ListOp<Path>, type_name: &str) -> Result<(), FormatError> {
-        // Emit as `typeName attr.connect = paths` or list-op form.
-        self.emit_targets_statement(&format!("{type_name} {attr_name}.connect"), op)
-    }
-
     fn emit_relationship(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
         let custom = matches!(
             get_value(data, path, FieldKey::Custom.as_str()),
@@ -560,64 +561,44 @@ impl Emitter<'_> {
         );
         let targets = get_value(data, path, FieldKey::TargetPaths.as_str());
         let meta_fields = metadata_fields(data, path, is_relationship_structural_field);
-        let (explicit, list_ops) = match &targets {
-            Some(Value::PathListOp(op)) => (op.is_explicit(), !op.is_empty() && !op.is_explicit()),
-            _ => (false, false),
-        };
+        let list_ops = matches!(&targets, Some(Value::PathListOp(op)) if !op.is_empty() && !op.is_explicit());
 
         // The declaration, which C++ `Sdf_WriteRelationship` writes only when
         // it carries metadata or explicit targets, or nothing else declares
         // the relationship.
-        if meta_fields.is_empty() && !explicit && list_ops && !custom {
-            return self.emit_relationship_list_ops(name, &targets);
-        }
-
-        self.write_indent()?;
-        if custom {
-            self.out.write_all(b"custom ")?;
-        }
-        // A relationship is uniform unless it says otherwise, the reverse of an
-        // attribute, so `varying` is the keyword the text form spells out.
-        if !matches!(
+        // A relationship is uniform unless it says otherwise, the reverse of
+        // an attribute, so `varying` is the keyword the text form spells out,
+        // on every statement as C++ `Sdf_WriteRelationship` writes it.
+        let varying = if matches!(
             get_value(data, path, FieldKey::Variability.as_str()),
             Some(Value::Variability(Variability::Uniform))
         ) {
-            self.out.write_all(b"varying ")?;
-        }
-
-        write!(self.out, "rel {name}")?;
-
-        // Non-explicit list ops for rel targets: emit on a separate line below.
-        if let Some(Value::PathListOp(op)) = &targets
-            && op.is_explicit()
-        {
-            self.out.write_all(b" = ")?;
-            self.write_listop_items(op.explicit_items(), &mut write_path, Items::Terminated)?;
-        }
-
-        if !meta_fields.is_empty() {
-            writeln!(self.out, " (")?;
-            self.indent += 1;
-            for name in &meta_fields {
-                let value = data.field(path, name)?;
-                self.emit_metadata_entry(name, &value)?;
-            }
-            self.indent -= 1;
+            ""
+        } else {
+            "varying "
+        };
+        if !meta_fields.is_empty() || custom || !list_ops {
             self.write_indent()?;
-            self.out.write_all(b")")?;
+            if custom {
+                self.out.write_all(b"custom ")?;
+            }
+            write!(self.out, "{varying}rel {name}")?;
+            if let Some(Value::PathListOp(op)) = &targets
+                && op.is_explicit()
+            {
+                self.out.write_all(b" = ")?;
+                self.write_listop_items(op.explicit_items(), &mut write_path, Items::Terminated)?;
+            }
+            self.emit_metadata_block(data, path, &meta_fields)?;
+            writeln!(self.out)?;
         }
 
-        writeln!(self.out)?;
-        self.emit_relationship_list_ops(name, &targets)
-    }
-
-    /// A relationship's `delete`, `add`, `prepend`, `append` and `reorder`
-    /// target statements.
-    fn emit_relationship_list_ops(&mut self, name: &str, targets: &Option<Value>) -> Result<(), FormatError> {
-        if let Some(Value::PathListOp(op)) = targets
+        // The `delete`, `add`, `prepend`, `append` and `reorder` target
+        // statements.
+        if let Some(Value::PathListOp(op)) = &targets
             && !op.is_explicit()
         {
-            self.emit_targets_statement(&format!("rel {name}"), op)?;
+            self.emit_targets_statement(&format!("{varying}rel {name}"), op)?;
         }
         Ok(())
     }
@@ -632,7 +613,7 @@ impl Emitter<'_> {
         if variant_names.is_empty() {
             return Ok(());
         }
-        variant_names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        variant_names.sort();
 
         self.write_indent()?;
         let mut quoted = String::new();
@@ -659,18 +640,7 @@ impl Emitter<'_> {
         self.out.write_all(quoted.as_bytes())?;
 
         let meta_fields = metadata_fields(data, path, is_prim_structural_field);
-
-        if !meta_fields.is_empty() {
-            writeln!(self.out, " (")?;
-            self.indent += 1;
-            for name in &meta_fields {
-                let value = data.field(path, name)?;
-                self.emit_metadata_entry(name, &value)?;
-            }
-            self.indent -= 1;
-            self.write_indent()?;
-            self.out.write_all(b")")?;
-        }
+        self.emit_metadata_block(data, path, &meta_fields)?;
 
         writeln!(self.out, " {{")?;
         self.indent += 1;
@@ -683,14 +653,17 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A layer's relocates, one pair per line, as C++ `WriteRelocates`
-    /// writes them multi-line (`, ` ends every pair but the last).
-    fn emit_relocates(&mut self, relocates: &[(Path, Path)]) -> Result<(), FormatError> {
-        self.write_line("relocates = {")?;
+    /// A layer's or prim's relocates, one pair per line, as C++
+    /// `_WriteRelocates` writes them in a metadata block (`, ` ends every pair
+    /// but the last).
+    fn emit_relocates(&mut self, keyword: &str, relocates: &[(Path, Path)]) -> Result<(), FormatError> {
+        self.write_indent()?;
+        writeln!(self.out, "{keyword} = {{")?;
         self.indent += 1;
         for (i, (source, target)) in relocates.iter().enumerate() {
             let separator = if i + 1 < relocates.len() { ", " } else { "" };
-            self.write_line(&format!("<{}>: <{}>{separator}", source.as_str(), target.as_str()))?;
+            self.write_indent()?;
+            writeln!(self.out, "<{}>: <{}>{separator}", source.as_str(), target.as_str())?;
         }
         self.indent -= 1;
         self.write_line("}")
@@ -713,13 +686,15 @@ impl Emitter<'_> {
         writeln!(self.out, "subLayers = [")?;
         self.indent += 1;
         for (i, path) in sublayers.iter().enumerate() {
-            let mut buf = String::new();
-            write_asset_path(&mut buf, path)?;
+            self.scratch.clear();
+            write_asset_path(&mut self.scratch, path)?;
             if let Some(offset) = offsets.get(i) {
-                write_layer_offset(&mut buf, offset);
+                write_layer_offset(&mut self.scratch, offset, None);
             }
-            buf.push_str(if i + 1 < sublayers.len() { "," } else { "" });
-            self.write_line(&buf)?;
+            if i + 1 < sublayers.len() {
+                self.scratch.push(',');
+            }
+            self.write_scratch_line()?;
         }
         self.indent -= 1;
         self.write_line("]")?;
@@ -728,7 +703,8 @@ impl Emitter<'_> {
 
     // ---------- metadata entry ----------
 
-    fn emit_metadata_entry(&mut self, name: &str, value: &Value) -> Result<(), FormatError> {
+    /// One metadata field of the spec at `path`.
+    fn emit_metadata_entry(&mut self, path: &Path, name: &str, value: &Value) -> Result<(), FormatError> {
         // "comment" is authored as a bare string in the metadata block, with
         // no keyword. Parser recognises a lone string as the Sdf comment field.
         if name == FieldKey::Comment.as_str()
@@ -757,6 +733,23 @@ impl Emitter<'_> {
         } else {
             name
         };
+
+        // A prim's relocates are relative to the prim and sorted, as C++
+        // `Sdf_WritePrimMetadata` keeps them in an `SdfRelocatesMap`; a
+        // layer's are absolute and in their stored order.
+        if let Value::Relocates(relocates) = value {
+            if name != FieldKey::Relocates.as_str() {
+                return self.emit_relocates(keyword, relocates);
+            }
+            let mut relative: Vec<_> = relocates
+                .iter()
+                .map(|(source, target)| (source.make_relative(path), target.make_relative(path)))
+                .collect();
+            // Sorted by source, each source once with its first target.
+            relative.sort_by(|(a, _), (b, _)| a.cmp(b));
+            relative.dedup_by(|(a, _), (b, _)| a == b);
+            return self.emit_relocates(keyword, &relative);
+        }
 
         // Variant-set names write as a name vector, which brackets only a list
         // of more than one. C++ gives the field its own emitter for this
@@ -959,12 +952,12 @@ impl Emitter<'_> {
             writeln!(self.out, "[")?;
             self.indent += 1;
             for (i, item) in items.iter().enumerate() {
-                let mut line = String::new();
-                fmt_item(&mut line, item)?;
+                self.scratch.clear();
+                fmt_item(&mut self.scratch, item)?;
                 if items_end == Items::Terminated || i + 1 < items.len() {
-                    line.push(',');
+                    self.scratch.push(',');
                 }
-                self.write_line(&line)?;
+                self.write_scratch_line()?;
             }
             self.indent -= 1;
             self.write_indent()?;
@@ -1544,21 +1537,11 @@ fn write_asset_path(s: &mut String, path: &str) -> Result<(), FormatError> {
 fn write_reference(s: &mut String, r: &Reference, indent: usize) -> Result<(), FormatError> {
     write_arc_target(s, &r.asset_path, &r.prim_path)?;
     if r.custom_data.is_empty() {
-        write_layer_offset(s, &r.layer_offset);
+        write_layer_offset(s, &r.layer_offset, None);
         return Ok(());
     }
     s.push_str(" (\n");
-    for (name, value, identity) in [
-        ("offset", r.layer_offset.offset, 0.0),
-        ("scale", r.layer_offset.scale, 1.0),
-    ] {
-        if value != identity {
-            push_indent(s, indent + 1);
-            write!(s, "{name} = ")?;
-            tf::stringify_float(s, value);
-            s.push('\n');
-        }
-    }
+    write_layer_offset(s, &r.layer_offset, Some(indent + 1));
     push_indent(s, indent + 1);
     s.push_str("customData = ");
     format_dictionary(&mut ValueText::of(s), &r.custom_data, indent + 1)?;
@@ -1570,7 +1553,7 @@ fn write_reference(s: &mut String, r: &Reference, indent: usize) -> Result<(), F
 
 fn write_payload(s: &mut String, p: &Payload) -> Result<(), FormatError> {
     write_arc_target(s, &p.asset_path, &p.prim_path)?;
-    write_layer_offset(s, &p.layer_offset);
+    write_layer_offset(s, &p.layer_offset, None);
     Ok(())
 }
 
@@ -1587,22 +1570,36 @@ fn write_arc_target(s: &mut String, asset_path: &str, prim_path: &Path) -> Resul
     Ok(())
 }
 
-/// A sublayer's, reference's or payload's layer offset on one line, each
-/// part only when it differs from the identity (C++ `WriteLayerOffset`).
-fn write_layer_offset(s: &mut String, offset: &LayerOffset) {
-    let mut parts = Vec::new();
-    if offset.offset != 0.0 {
-        let mut part = String::from("offset = ");
-        tf::stringify_float(&mut part, offset.offset);
-        parts.push(part);
+/// A sublayer's, reference's or payload's layer offset, as C++
+/// `WriteLayerOffset` writes it: nothing where it equals the identity as
+/// `SdfLayerOffset` compares them, within 1e-6, and otherwise each part that
+/// is not exactly the identity's. With `multi_line`, the indent to write each
+/// part on a line of its own at; without, the parts go in parentheses after
+/// the asset.
+fn write_layer_offset(s: &mut String, offset: &LayerOffset, multi_line: Option<usize>) {
+    if offset.is_close(&LayerOffset::IDENTITY) {
+        return;
     }
-    if offset.scale != 1.0 {
-        let mut part = String::from("scale = ");
-        tf::stringify_float(&mut part, offset.scale);
-        parts.push(part);
+    let parts = [("offset", offset.offset, 0.0), ("scale", offset.scale, 1.0)];
+    let parts = parts.into_iter().filter(|&(_, value, identity)| value != identity);
+    if multi_line.is_none() {
+        s.push_str(" (");
     }
-    if !parts.is_empty() {
-        s.push_str(&format!(" ({})", parts.join("; ")));
+    for (i, (name, value, _)) in parts.enumerate() {
+        match multi_line {
+            Some(indent) => push_indent(s, indent),
+            None if i > 0 => s.push_str("; "),
+            None => {}
+        }
+        s.push_str(name);
+        s.push_str(" = ");
+        tf::stringify_float(s, value);
+        if multi_line.is_some() {
+            s.push('\n');
+        }
+    }
+    if multi_line.is_none() {
+        s.push(')');
     }
 }
 
@@ -1672,12 +1669,19 @@ fn metadata_fields(data: &dyn AbstractData, path: &Path, structural: fn(&str) ->
         .unwrap_or_default()
         .into_iter()
         .filter(|n| !structural(n))
+        // C++ writes a comment only when it is not empty.
+        .filter(|n| n != FieldKey::Comment.as_str() || !is_empty_string(data, path, n))
         .collect();
     fields.sort_by(|a, b| {
         let comment = |n: &str| n != FieldKey::Comment.as_str();
         comment(a).cmp(&comment(b)).then_with(|| tf::dictionary_cmp(a, b))
     });
     fields
+}
+
+/// Whether the field `name` at `path` holds the empty string.
+fn is_empty_string(data: &dyn AbstractData, path: &Path, name: &str) -> bool {
+    matches!(data.field(path, name).as_deref(), Ok(Value::String(text)) if text.is_empty())
 }
 
 fn is_prim_structural_field(name: &str) -> bool {
@@ -2764,5 +2768,206 @@ def "P" (
         let root = reparsed.get(&Path::abs_root()).unwrap();
         assert_eq!(root.get("startFrame"), Some(&Value::Double(1.0)));
         assert_eq!(root.get("endFrame"), Some(&Value::Double(24.0)));
+    }
+
+    /// Layer offsets, relocates, comments, relationship list ops and strings
+    /// as OpenUSD 26.8 writes them, byte for byte: an offset within 1e-6 of
+    /// the identity left out, a prim's relocates relative and sorted, an empty
+    /// comment left out, `varying` on a list-op statement, and a triple-quoted
+    /// string that ends in an escaped quote.
+    #[test]
+    fn edge_cases_as_cpp() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+(
+    ""
+    subLayers = [
+        @./s.usda@ (offset = 0.0000001),
+        @./t.usda@ (offset = 2; scale = 1.0000001)
+    ]
+)
+
+def "A" (
+    ""
+    relocates = {
+        <Z>: <Y>,
+        </A/B>: </A/C>
+    }
+    prepend references = @./r.usda@ (offset = 0.0000001)
+    prepend payload = @./y.usda@ (scale = 1.0000001)
+)
+{
+    prepend varying rel r = </A/B>
+    string s = """it's
+end\""""
+    float f (
+        ""
+        doc = "d"
+    )
+}
+"#;
+        // C++ ends every relocates pair but the last with `, `, a space
+        // included, which is added here so no line of the literal ends in
+        // whitespace.
+        let written = r#"#usda 1.0
+(
+    subLayers = [
+        @./s.usda@,
+        @./t.usda@ (offset = 2; scale = 1.0000001)
+    ]
+)
+
+def "A" (
+    prepend payload = @./y.usda@
+    prepend references = @./r.usda@
+    relocates = {
+        <B>: <C>,
+        <Z>: <Y>
+    }
+)
+{
+    float f (
+        doc = "d"
+    )
+    prepend varying rel r = </A/B>
+    string s = """it's
+end\""""
+}
+
+"#
+        .replace("<B>: <C>,\n", "<B>: <C>, \n");
+        let parsed = Parser::new(source).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
+        let reparsed = Parser::new(&emitted).parse().expect("the written layer reads back");
+        let s = reparsed
+            .get(&path("/A.s").unwrap())
+            .unwrap()
+            .get(FieldKey::Default.as_str())
+            .unwrap();
+        assert_eq!(s, &Value::String("it's\nend\"".to_owned()));
+    }
+
+    /// An attribute whose connection list edits nothing keeps its
+    /// declaration, since no connection statement declares it.
+    #[test]
+    fn empty_connection_declared() {
+        use crate::usda::parser::Parser;
+
+        let mut parsed = Parser::new("#usda 1.0\ndef \"P\" {\n    float c\n}\n")
+            .parse()
+            .expect("parse");
+        let spec = parsed.get_mut(&path("/P.c").unwrap()).unwrap();
+        spec.add(FieldKey::ConnectionPaths, Value::PathListOp(ListOp::default()));
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert!(emitted.contains("    float c\n"), "{emitted}");
+        let reparsed = Parser::new(&emitted).parse().expect("the written layer reads back");
+        let attr = reparsed.get(&path("/P.c").unwrap()).expect("the attribute survives");
+        assert_eq!(attr.get(FieldKey::TypeName.as_str()), Some(&Value::token("float")));
+    }
+
+    /// Every mix of both quote characters, LF and CRLF line breaks, and a
+    /// trailing quote or backslash comes back as it was written, through the
+    /// string delimiters alone and through a whole layer.
+    #[test]
+    fn string_delimiters_roundtrip() {
+        use crate::usda::parser::Parser;
+
+        let mut texts = Vec::new();
+        for quotes in ["", "'", "\"", "'\"", "\"\"\"", "'''"] {
+            for line_break in ["", "\n", "\r\n"] {
+                for end in ["", "\"", "'", "\\", "\\\"", "\\\n", "\n\""] {
+                    texts.push(format!("a{quotes}b{line_break}c{end}"));
+                    texts.push(format!("{end}{quotes}{line_break}"));
+                }
+            }
+        }
+        for text in &texts {
+            assert_eq!(&write_quoted_and_reparse(text), text, "{text:?}");
+        }
+
+        let mut parsed = Parser::new("#usda 1.0\ndef \"P\" {\n}\n").parse().expect("parse");
+        let mut names = Vec::new();
+        for (i, text) in texts.iter().enumerate() {
+            let name = format!("s{i}");
+            let mut spec = sdf::SpecData::new(SpecType::Attribute);
+            spec.add(FieldKey::TypeName, Value::token("string"));
+            spec.add(FieldKey::Default, Value::String(text.clone()));
+            parsed.insert(path(format!("/P.{name}")).unwrap(), spec);
+            names.push(name);
+        }
+        let prim = parsed.get_mut(&path("/P").unwrap()).unwrap();
+        prim.add(ChildrenKey::PropertyChildren, Value::token_vec(names));
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        let reparsed = Parser::new(&emitted).parse().expect("the written layer reads back");
+        for (i, text) in texts.iter().enumerate() {
+            let attr = reparsed.get(&path(format!("/P.s{i}")).unwrap()).unwrap();
+            assert_eq!(
+                attr.get(FieldKey::Default.as_str()),
+                Some(&Value::String(text.clone())),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A relocated source is written once, with the first target authored
+    /// for it, as OpenUSD 26.8 writes a prim's relocates; a `varying`
+    /// statement after a plain one leaves the relationship varying.
+    #[test]
+    fn relocates_and_variability_as_cpp() {
+        use crate::usda::parser::Parser;
+
+        let source = r#"#usda 1.0
+
+def "A" (
+    relocates = {
+        </A/B>: </A/C>,
+        </A/B>: </A/D>
+    }
+)
+{
+    rel r (
+        doc = "x"
+    )
+    prepend varying rel r = </A>
+}
+"#;
+        let written = r#"#usda 1.0
+
+def "A" (
+    relocates = {
+        <B>: <C>
+    }
+)
+{
+    varying rel r (
+        doc = "x"
+    )
+    prepend varying rel r = </A>
+}
+
+"#;
+        let parsed = Parser::new(source).parse().expect("parse");
+        let emitted = TextWriter::write_to_string(&Data::from_specs(parsed) as &dyn AbstractData).unwrap();
+        assert_eq!(emitted, written);
+    }
+
+    /// A layer with CRLF line endings reads as one with LF, but for a CRLF
+    /// inside a triple-quoted string, which stays in the string as OpenUSD
+    /// 26.8 reads it.
+    #[test]
+    fn crlf_layer_reads() {
+        use crate::usda::parser::Parser;
+
+        let source =
+            "#usda 1.0\r\ndef \"P\"\r\n{\r\n    string s = \"\"\"a\r\nb\"\"\"\r\n    string t = \"c\"\r\n}\r\n";
+        let parsed = Parser::new(source).parse().expect("parse");
+        let default = |name: &str| {
+            let spec = parsed.get(&path(name).unwrap()).unwrap();
+            spec.get(FieldKey::Default.as_str()).cloned()
+        };
+        assert_eq!(default("/P.s"), Some(Value::String("a\r\nb".to_owned())));
+        assert_eq!(default("/P.t"), Some(Value::String("c".to_owned())));
     }
 }
