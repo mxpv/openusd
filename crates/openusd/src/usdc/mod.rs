@@ -1160,6 +1160,33 @@ mod tests {
         Ok(())
     }
 
+    /// OpenUSD writes an empty value array as a zero payload with no data.
+    /// `string[]`, `asset[]` and `pathExpression[]` must honor that like
+    /// other arrays rather than seek to offset 0. The fixture is written by
+    /// OpenUSD.
+    #[test]
+    fn test_read_empty_string_like_arrays() -> Result<()> {
+        let data = read_file("fixtures/empty_string_arrays.usdc")?;
+        let field = |name: &str| -> Result<vt::Value> {
+            Ok(data
+                .field(&sdf::path(format!("/Prim.{name}"))?, "default")?
+                .into_owned())
+        };
+
+        assert_eq!(field("empty_strings")?, vt::Value::StringVec(Vec::new()));
+        assert_eq!(field("strings")?, vt::Value::StringVec(vec!["a".into(), "bc".into()]));
+        assert_eq!(field("empty_assets")?, vt::Value::AssetPathVec(Vec::new()));
+        assert_eq!(field("assets")?, vt::Value::AssetPathVec(vec!["x.png".into()]));
+        assert_eq!(field("empty_expressions")?, vt::Value::PathExpressionVec(Vec::new()));
+        let expressions = field("expressions")?.try_as_path_expression_vec().unwrap();
+        assert_eq!(
+            expressions.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["/World/*"]
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn test_read_ints_i32() -> Result<()> {
         let data = read_file("fixtures/ints.usdc")?;

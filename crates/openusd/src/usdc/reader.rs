@@ -685,8 +685,8 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn resolve_string(&self, string_index: u32) -> Result<String, ReadError> {
-        let token = *indexed(&self.file.strings, string_index as usize, "string")?;
+    fn resolve_string(&self, string_index: usize) -> Result<String, ReadError> {
+        let token = *indexed(&self.file.strings, string_index, "string")?;
         Ok(indexed(&self.file.tokens, token, "token")?.clone())
     }
 
@@ -731,7 +731,7 @@ impl<'a> Decoder<'a> {
         if value.is_inlined() {
             Ok(indexed(&self.file.tokens, index as usize, "token")?.clone())
         } else {
-            self.resolve_string(index)
+            self.resolve_string(index as usize)
         }
     }
 
@@ -892,11 +892,23 @@ impl<'a> Decoder<'a> {
         indices.into_iter().map(|index| lookup(self, index as usize)).collect()
     }
 
+    /// Reads a value array (`VtArray`) of `u32` table indices and maps each
+    /// through `lookup`. Unlike the count-prefixed vectors above, its header
+    /// goes through `unpack_array_len`: an empty array is a zero payload with
+    /// no data, and the count width depends on the crate version.
+    fn read_indexed_array<T>(
+        &mut self,
+        value: ValueRep,
+        lookup: impl Fn(&Self, usize) -> Result<T, ReadError>,
+    ) -> Result<Vec<T>, ReadError> {
+        let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
+        let indices = self.stream.read_vec::<u32>(count)?;
+
+        indices.into_iter().map(|index| lookup(self, index as usize)).collect()
+    }
+
     fn read_string_vec(&mut self) -> Result<Vec<String>, ReadError> {
-        self.read_indexed_vec(|decoder, index| {
-            let token = *indexed(&decoder.file.strings, index, "string")?;
-            Ok(indexed(&decoder.file.tokens, token, "token")?.clone())
-        })
+        self.read_indexed_vec(Self::resolve_string)
     }
 
     fn read_token_vec(&mut self) -> Result<Vec<tf::Token>, ReadError> {
@@ -915,7 +927,7 @@ impl<'a> Decoder<'a> {
 
     fn read_string(&mut self) -> Result<String, ReadError> {
         let index = self.stream.read_pod::<u32>()?;
-        self.resolve_string(index)
+        self.resolve_string(index as usize)
     }
 
     fn read_path(&mut self) -> Result<sdf::Path, ReadError> {
@@ -1140,34 +1152,32 @@ impl<'a> Decoder<'a> {
             }
 
             Type::String if value.is_array() => {
-                self.stream.seek(value.payload())?;
-                vt::Value::StringVec(self.read_string_vec()?)
+                vt::Value::StringVec(self.read_indexed_array(value, Self::resolve_string)?)
             }
 
             Type::String => {
                 corrupt!(!value.is_array());
 
                 let string_index = self.unpack_value::<u32>(value)?;
-                vt::Value::String(self.resolve_string(string_index)?)
+                vt::Value::String(self.resolve_string(string_index as usize)?)
             }
             Type::AssetPath if value.is_array() => {
                 // Asset arrays (`asset[]`, e.g. value-clip `assetPaths`) are
                 // stored like string arrays — string-table indices, not direct
                 // token indices.
-                self.stream.seek(value.payload())?;
-                vt::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
+                vt::Value::AssetPathVec(
+                    self.read_indexed_array(value, Self::resolve_string)?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                )
             }
             Type::AssetPath => vt::Value::AssetPath(self.read_asset_path(value)?.into()),
 
             Type::Token if value.is_array() => {
-                let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-                let indices = self.stream.read_vec::<u32>(count)?;
-                let tokens = indices
-                    .into_iter()
-                    .map(|i| Ok(indexed(&self.file.tokens, i as usize, "token")?.as_str().into()))
-                    .collect::<Result<Vec<_>, ReadError>>()?;
-
-                vt::Value::TokenVec(tokens)
+                vt::Value::TokenVec(self.read_indexed_array(value, |decoder, index| {
+                    Ok(indexed(&decoder.file.tokens, index, "token")?.as_str().into())
+                })?)
             }
             Type::Token => vt::Value::Token(self.read_token(value)?),
 
@@ -1534,9 +1544,8 @@ impl<'a> Decoder<'a> {
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays
                 // (string-table indices), each entry parsed into an expression.
-                self.stream.seek(value.payload())?;
                 vt::Value::PathExpressionVec(
-                    self.read_string_vec()?
+                    self.read_indexed_array(value, Self::resolve_string)?
                         .iter()
                         .map(|text| sdf::PathExpression::parse(text))
                         .collect(),
