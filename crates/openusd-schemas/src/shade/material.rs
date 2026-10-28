@@ -305,7 +305,7 @@ impl Material {
     /// The material the first qualifying specializes arc names, an instance
     /// proxy not yet redirected to its prototype.
     fn arc_base(&self) -> Result<Option<Material>> {
-        let candidates = self.prim_index().with(|index| base_candidates(index))?;
+        let candidates = self.prim_index().with(|index| Material::base_candidates(index))?;
         for path in candidates {
             if let Some(material) = Material::get(self.stage(), &path)? {
                 return Ok(Some(material));
@@ -323,6 +323,32 @@ impl Material {
     /// Whether this material specializes a material (C++ `HasBaseMaterial`).
     pub fn has_base_material(&self) -> Result<bool> {
         Ok(self.arc_base()?.is_some())
+    }
+
+    /// The prims the specializes arcs at the root of `index` name, strongest
+    /// first, one of which may be its base material: the walk of C++
+    /// `FindBaseMaterialPathInPrimIndex`, whose base material is the first of
+    /// them its predicate accepts.
+    ///
+    /// An arc authored under a reference reaches the prim's root twice: as
+    /// the implied arc, whose mapping carries root identity and names a prim
+    /// of this stage, and as the propagated copy of the arc itself, whose
+    /// mapping composes through the reference and names a prim of the
+    /// referenced layer stack. The copy is left out, as C++ skips a node
+    /// whose mapping does not map the absolute root.
+    pub fn base_candidates(index: &pcp::PrimIndex) -> Vec<sdf::Path> {
+        let Some(root) = index.local_root() else {
+            return Vec::new();
+        };
+        index
+            .node(root)
+            .children()
+            .map(|id| index.node(id))
+            .filter(|node| {
+                !node.is_culled() && node.arc() == pcp::ArcType::Specialize && node.map_to_parent().has_root_identity()
+            })
+            .map(|node| node.path().clone())
+            .collect()
     }
 
     /// Author `base` as the one prim this material specializes (C++
@@ -522,29 +548,6 @@ fn checked_context(render_context: &str) -> Result<(), SchemaError> {
         });
     }
     Ok(())
-}
-
-/// The prims the specializes arcs at the root of `index` name, strongest
-/// first, one of which may be its base material (the walk of C++
-/// `FindBaseMaterialPathInPrimIndex`, whose predicate [`Material::get`]
-/// answers once the index is released). An arc authored under a reference
-/// reaches the prim's root twice: as the implied arc, whose mapping carries
-/// root identity and names a prim of this stage, and as the propagated copy
-/// of the arc itself, whose mapping composes through the reference and
-/// names a prim of the referenced layer stack. The copy is left out.
-fn base_candidates(index: &pcp::PrimIndex) -> Vec<sdf::Path> {
-    let Some(root) = index.local_root() else {
-        return Vec::new();
-    };
-    index
-        .node(root)
-        .children()
-        .map(|id| index.node(id))
-        .filter(|node| {
-            !node.is_culled() && node.arc() == pcp::ArcType::Specialize && node.map_to_parent().has_root_identity()
-        })
-        .map(|node| node.path().clone())
-        .collect()
 }
 
 #[cfg(test)]
@@ -932,6 +935,24 @@ def "Shot"
             crate::tests::from_files(&[("library.usda", LIBRARY), ("asset.usda", ASSET)], "asset.usda")?;
         let material = Material::get(&stage, "/Asset/Looks/NotAChildMaterial")?.expect("a Material");
         assert!(material.base_material()?.is_none());
+        Ok(())
+    }
+
+    /// The candidates are every prim the root's specializes arcs name,
+    /// strongest first, whether or not each is a material; the base material
+    /// is the first that is.
+    #[test]
+    fn base_candidates_order() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        stage.define_prim("/Looks/NotMaterial")?.set_type_name("Scope")?;
+        Material::define(&stage, "/Looks/Base")?;
+        let child = Material::define(&stage, "/Looks/Child")?;
+        child.specializes().set(["/Looks/NotMaterial", "/Looks/Base"])?;
+
+        let candidates = child.prim_index().with(|index| Material::base_candidates(index))?;
+        let candidates: Vec<&str> = candidates.iter().map(sdf::Path::as_str).collect();
+        assert_eq!(candidates, ["/Looks/NotMaterial", "/Looks/Base"]);
+        assert_eq!(child.base_material_path()?.expect("a base").as_str(), "/Looks/Base");
         Ok(())
     }
 
