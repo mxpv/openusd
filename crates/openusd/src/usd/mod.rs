@@ -33,7 +33,7 @@ mod timecode;
 
 pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
 pub use authoring::{PrimEdit, StageEdit};
-pub use capture::{ReplayStage, UndoStage};
+pub use capture::{ReplayStage, UndoStage, UndoStep};
 pub use collection::{MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, included_paths};
 pub use collection_expr::{CollectionEvaluator, CollectionSearcher, complete_membership_expression};
 pub use connections::ConnectionGraph;
