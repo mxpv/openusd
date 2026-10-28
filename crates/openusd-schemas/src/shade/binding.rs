@@ -29,8 +29,8 @@ use crate::SchemaError;
 use crate::geom::{ElementType, FamilyType, Imageable, Subset, subset};
 
 use super::tokens::{
-    ALL_PURPOSE, BIND_MATERIAL_AS, FULL, MATERIAL_BIND, MATERIAL_BINDING, MATERIAL_BINDING_COLLECTION, PREVIEW,
-    WEAKER_THAN_DESCENDANTS,
+    ALL_PURPOSE, BIND_MATERIAL_AS, FULL, MATERIAL_BIND, MATERIAL_BINDING, MATERIAL_BINDING_API,
+    MATERIAL_BINDING_COLLECTION, PREVIEW, WEAKER_THAN_DESCENDANTS,
 };
 use super::{BindingStrength, Material, MaterialBindingAPI, RelationshipMetadata};
 
@@ -223,8 +223,8 @@ impl MaterialBindingAPI {
     /// this prim beats the direct binding, and collection bindings are tried in
     /// property order. A collection with no `CollectionAPI` applied on the
     /// stage binds nothing. Bindings count whether or not the schema is applied
-    /// to the prim carrying them, which is the C++ `supportLegacyBindings`
-    /// default.
+    /// to the prim carrying them, the C++ `supportLegacyBindings` default,
+    /// unless `cache` is [`BindingCache::applied_only`].
     ///
     /// The winner is committed by its target path, so the answer stands even
     /// where no `Material` prim is there to read (see [`ResolvedBinding`]).
@@ -234,6 +234,7 @@ impl MaterialBindingAPI {
         let stage = self.stage();
         let queried = self.path();
         let chain: Vec<Prim> = self.prim().ancestors().collect();
+        let applied_only = cache.applied_only;
         let StageCache {
             bindings,
             queries,
@@ -242,7 +243,9 @@ impl MaterialBindingAPI {
         for pass in purpose_passes(purpose) {
             let mut winner: Option<ResolvedBinding> = None;
             for current in &chain {
-                let at = cached(bindings, current.path(), || BindingsAtPrim::gather(current))?;
+                let at = cached(bindings, current.path(), || {
+                    BindingsAtPrim::gather(current, applied_only)
+                })?;
                 // Whether the winner was set at this prim, where a collection
                 // binding outranks the direct one.
                 let mut won_here = false;
@@ -291,17 +294,20 @@ impl MaterialBindingAPI {
         }
     }
 
-    /// Resolve the binding of each of `prims` for `purpose` over one shared
-    /// cache (C++ `ComputeBoundMaterials`), answering in the same order.
+    /// Resolve the binding of each of `prims` for `purpose` over `cache`
+    /// (C++ `ComputeBoundMaterials`), answering in the same order.
     ///
     /// TODO(rayon): each prim resolves independently over the shared cache,
     /// which C++ runs under `WorkParallelForN`; the cache would need to admit
     /// concurrent fills.
-    pub fn resolve_bindings(prims: &[Prim], purpose: &str) -> Result<Vec<Option<ResolvedBinding>>> {
-        let mut cache = BindingCache::default();
+    pub fn resolve_bindings(
+        prims: &[Prim],
+        purpose: &str,
+        cache: &mut BindingCache,
+    ) -> Result<Vec<Option<ResolvedBinding>>> {
         prims
             .iter()
-            .map(|prim| Self::from_prim_unchecked(prim.clone()).resolve_binding(purpose, &mut cache))
+            .map(|prim| Self::from_prim_unchecked(prim.clone()).resolve_binding(purpose, cache))
             .collect()
     }
 
@@ -550,11 +556,32 @@ impl ResolvedBinding {
 /// [`resolve_binding`](MaterialBindingAPI::resolve_binding) computes them
 /// once, for any purpose asked and any stage resolved. Nothing evicts an
 /// entry: start a new cache after editing bindings or collections.
+///
+/// A [`Default`] cache reads the bindings of every prim. One made by
+/// [`applied_only`](Self::applied_only) reads them only where
+/// `MaterialBindingAPI` is applied.
 #[derive(Default)]
 pub struct BindingCache {
     /// Entries are keyed by path, which stages share, so each stage has its
     /// own.
     stages: HashMap<Stage, StageCache>,
+    /// Whether a prim's bindings count only where `MaterialBindingAPI` is
+    /// applied to it.
+    applied_only: bool,
+}
+
+impl BindingCache {
+    /// A cache whose resolutions read the bindings of a prim only where
+    /// `MaterialBindingAPI` is applied to it, built in or authored (C++
+    /// `supportLegacyBindings = false`, `materialBindingAPI.cpp:576-587`).
+    /// The bindings an asset authors without the schema applied, which a
+    /// [`Default`] cache reads, then bind nothing.
+    pub fn applied_only() -> Self {
+        Self {
+            applied_only: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// A [`BindingCache`]'s entries for one stage.
@@ -576,9 +603,14 @@ struct BindingsAtPrim {
 }
 
 impl BindingsAtPrim {
-    fn gather(prim: &Prim) -> Result<Self> {
+    /// The bindings `prim` authors, none where `applied_only` holds and
+    /// `MaterialBindingAPI` is not applied to it.
+    fn gather(prim: &Prim, applied_only: bool) -> Result<Self> {
         let mut direct = Vec::new();
         let mut collections = Vec::new();
+        if applied_only && !prim.has_api_schema(MATERIAL_BINDING_API)? {
+            return Ok(Self { direct, collections });
+        }
         for name in prim.authored_property_names()? {
             if is_collection_binding_name(&name) {
                 collections.extend(CollectionBinding::new(prim.relationship(name))?);
@@ -946,6 +978,32 @@ mod tests {
         resolved.map(|resolved| resolved.material_path().as_str().to_string())
     }
 
+    /// An applied-only cache skips the bindings of a prim without
+    /// `MaterialBindingAPI` applied, where the default cache reads them (C++
+    /// `supportLegacyBindings`).
+    #[test]
+    fn applied_only_bindings() -> Result {
+        let stage = crate::tests::stage("anon.usda")?;
+        materials(&stage, &["/MatA", "/MatB"])?;
+        stage.define_prim("/Set")?.set_type_name("Xform")?;
+        stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
+        MaterialBindingAPI::apply(&stage.prim("/Set")?)?.bind("/MatA")?;
+        // A legacy binding: authored with the schema not applied.
+        MaterialBindingAPI::from_prim_unchecked(stage.prim("/Set/Mesh")?).bind("/MatB")?;
+
+        let mesh = MaterialBindingAPI::from_prim_unchecked(stage.prim("/Set/Mesh")?);
+        let legacy = mesh.resolve_binding("", &mut BindingCache::default())?;
+        assert_eq!(target(legacy), Some("/MatB".to_string()));
+        let applied = mesh.resolve_binding("", &mut BindingCache::applied_only())?;
+        assert_eq!(target(applied), Some("/MatA".to_string()), "the applied ancestor's");
+
+        let prims = [stage.prim("/Set/Mesh")?, stage.prim("/Set")?];
+        let batch = MaterialBindingAPI::resolve_bindings(&prims, "", &mut BindingCache::applied_only())?;
+        let batch: Vec<_> = batch.into_iter().map(target).collect();
+        assert_eq!(batch, [Some("/MatA".to_string()), Some("/MatA".to_string())]);
+        Ok(())
+    }
+
     #[test]
     fn closer_binding_wins() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
@@ -1235,14 +1293,15 @@ def Xform "scene" {
                 .map(|prim| bound(&stage, prim.path().as_str(), purpose))
                 .collect();
             assert_eq!(shared, fresh, "purpose {purpose:?}");
-            let batch: Vec<Option<String>> = MaterialBindingAPI::resolve_bindings(&prims, purpose)?
-                .into_iter()
-                .map(target)
-                .collect();
+            let batch: Vec<Option<String>> =
+                MaterialBindingAPI::resolve_bindings(&prims, purpose, &mut BindingCache::default())?
+                    .into_iter()
+                    .map(target)
+                    .collect();
             assert_eq!(batch, fresh, "purpose {purpose:?}");
         }
         assert_eq!(
-            MaterialBindingAPI::resolve_bindings(&prims, "preview")?
+            MaterialBindingAPI::resolve_bindings(&prims, "preview", &mut BindingCache::default())?
                 .into_iter()
                 .map(target)
                 .collect::<Vec<_>>(),
@@ -1273,10 +1332,11 @@ def Xform "scene" {
             assert_eq!(resolved.material_path().as_str(), material);
             assert!(resolved.rel().stage() == prim.stage());
         }
-        let batch: Vec<Option<String>> = MaterialBindingAPI::resolve_bindings(&prims, "")?
-            .into_iter()
-            .map(target)
-            .collect();
+        let batch: Vec<Option<String>> =
+            MaterialBindingAPI::resolve_bindings(&prims, "", &mut BindingCache::default())?
+                .into_iter()
+                .map(target)
+                .collect();
         assert_eq!(batch, [Some("/MatOne".to_string()), Some("/MatTwo".to_string())]);
         Ok(())
     }
