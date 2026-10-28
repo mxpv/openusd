@@ -103,12 +103,14 @@ impl ConnectionTarget for ShadingAttribute {
     }
 }
 
-/// Information about one valid upstream UsdShade connection source.
+/// Information about one upstream UsdShade connection source.
 ///
-/// This is the Rust counterpart of `UsdShadeConnectionSourceInfo`. A source
-/// path is valid when a namespaced attribute is defined there. Nothing is
-/// asked of the owning prim's type: it may be an untyped `over`, as OpenUSD
-/// permits for connection targets.
+/// This is the Rust counterpart of `UsdShadeConnectionSourceInfo`: an
+/// `inputs:` or `outputs:` property on a prim the stage holds. One that
+/// [`connected_sources`](ShadingAttribute::connected_sources) reads names a
+/// defined attribute, and one [`new`](Self::new) builds may name an
+/// attribute not yet authored. Nothing is asked of the owning prim's type:
+/// it may be an untyped `over`, as OpenUSD permits for connection targets.
 #[derive(Clone)]
 pub struct ConnectionSource {
     source_prim: usd::Prim,
@@ -119,6 +121,45 @@ pub struct ConnectionSource {
 }
 
 impl ConnectionSource {
+    /// The source a connection to `path` names (C++
+    /// `UsdShadeConnectionSourceInfo(stage, sourcePath)`): `path` is a
+    /// property path in the `inputs:` or `outputs:` namespace, on a prim the
+    /// stage holds. `None` otherwise, where C++ builds an info that is not
+    /// `IsValid`. Nothing is asked of the prim's type.
+    ///
+    /// The attribute need not exist yet, and its type name is read where it
+    /// does. Connecting to the source's [`attribute`](Self::attribute) then
+    /// creates a missing one (C++ `ConnectToSource(sourcePath)`).
+    pub fn new(stage: &usd::Stage, path: impl sdf::IntoPath) -> Result<Option<Self>> {
+        Ok(Self::resolve(stage, sdf::try_into_path(path)?)?.map(|(source, _)| source))
+    }
+
+    /// The source a connection to `path` names, and whether its attribute is
+    /// defined. The type name is read only from a defined attribute.
+    fn resolve(stage: &usd::Stage, path: sdf::Path) -> Result<Option<(Self, bool)>> {
+        let Some((prim_path, full_name)) = path.split_property() else {
+            return Ok(None);
+        };
+        let Some((name, source_type)) = base_name_and_type(full_name) else {
+            return Ok(None);
+        };
+        let source_prim = stage.prim(prim_path)?;
+        if !source_prim.is_valid()? {
+            return Ok(None);
+        }
+        let source_name = tf::Token::from(name);
+        let attribute = stage.attribute(path.clone())?;
+        let defined = attribute.is_defined()?;
+        let source = Self {
+            source_prim,
+            source_path: path,
+            source_name,
+            source_type,
+            type_name: if defined { attribute.type_name()? } else { None },
+        };
+        Ok(Some((source, defined)))
+    }
+
     /// The connectable prim that owns the source attribute.
     pub fn prim(&self) -> &usd::Prim {
         &self.source_prim
@@ -197,34 +238,11 @@ impl ConnectedSources {
 pub(super) fn connected_sources(attribute: &usd::Attribute) -> Result<ConnectedSources> {
     let mut result = ConnectedSources::default();
     for source_path in attribute.connections()? {
-        let Some((source_prim_path, full_name)) = source_path.split_property() else {
-            result.invalid_paths.push(source_path);
-            continue;
-        };
-        let Some((source_name, source_type)) = base_name_and_type(full_name) else {
-            result.invalid_paths.push(source_path);
-            continue;
-        };
-        let source_prim = attribute.stage().prim(source_prim_path)?;
-        if !source_prim.is_valid()? {
-            result.invalid_paths.push(source_path);
-            continue;
+        match ConnectionSource::resolve(attribute.stage(), source_path.clone())? {
+            // A connected source also needs its attribute to exist.
+            Some((source, true)) => result.sources.push(source),
+            _ => result.invalid_paths.push(source_path),
         }
-
-        let source_attribute = attribute.stage().attribute(source_path.clone())?;
-        if !source_attribute.is_defined()? {
-            result.invalid_paths.push(source_path);
-            continue;
-        }
-        let source_name = tf::Token::from(source_name);
-
-        result.sources.push(ConnectionSource {
-            source_prim,
-            source_path,
-            source_name,
-            source_type,
-            type_name: source_attribute.type_name()?,
-        });
     }
     Ok(result)
 }
@@ -348,6 +366,32 @@ mod tests {
         assert_eq!(source.full_name(), "outputs:rgb");
         assert_eq!(source.source_type(), AttributeType::Output);
         assert_eq!(source.type_name(), Some(&sdf::ValueTypeName::FLOAT3));
+        Ok(())
+    }
+
+    /// A source built from a path needs a namespaced property on a prim the
+    /// stage holds, and not the attribute itself, which connecting creates
+    /// with the consumer's type (C++ `ConnectToSource(sourcePath)`).
+    #[test]
+    fn source_from_path() -> Result<(), SchemaError> {
+        let stage = crate::tests::stage("anon.usda")?;
+        Shader::define(&stage, "/Mat/Source")?;
+        let sink = Shader::define(&stage, "/Mat/Sink")?;
+
+        let source = ConnectionSource::new(&stage, "/Mat/Source.outputs:out")?.expect("a valid source");
+        assert_eq!(source.name().as_str(), "out");
+        assert_eq!(source.source_type(), AttributeType::Output);
+        assert_eq!(source.type_name(), None, "the attribute does not exist yet");
+
+        let input = sink.create_input("in", "color3f")?.connect_to(&source.attribute())?;
+        let connected = input.connected_sources()?;
+        let created = connected.sources().first().expect("the created source");
+        assert_eq!(created.path().as_str(), "/Mat/Source.outputs:out");
+        assert_eq!(created.type_name(), Some(&sdf::ValueTypeName::COLOR3F));
+
+        for invalid in ["/Mat/Source.out", "/Mat/Missing.outputs:out", "/Mat/Source"] {
+            assert!(ConnectionSource::new(&stage, invalid)?.is_none(), "{invalid}");
+        }
         Ok(())
     }
 
