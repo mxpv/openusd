@@ -12,8 +12,8 @@ use std::ops::Range;
 
 use openusd::Result;
 use openusd::gf;
-use openusd::sdf::Value;
 use openusd::usd::{Prim, SchemaBase};
+use openusd::vt::Value;
 
 use super::inbetween::InbetweenShape;
 use super::skinning::{BlendShapeWeighted, SubShape, apply_blend_shapes, interpolate_run, is_close, sub_shape_run};

@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use openusd::sdf;
 use openusd::usda;
+use openusd::vt;
 
 const ASSETS: &str = concat!(
     env!("CARGO_WORKSPACE_DIR"),
@@ -26,9 +26,9 @@ fn assert_text_format(name: &str) {
     let reader = usda::read_file(&usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
 
     // Build actual output as a sorted map of path → fields.
-    let mut actual: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();
+    let mut actual: BTreeMap<String, BTreeMap<&str, &vt::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
-        let fields: BTreeMap<&str, &sdf::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let fields: BTreeMap<&str, &vt::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
         actual.insert(path.to_string(), fields);
     }
 

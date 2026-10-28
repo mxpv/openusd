@@ -17,8 +17,9 @@
 //!   too and no fixture asserts spline values.
 
 use openusd::Result;
-use openusd::sdf::{Value, path};
+use openusd::sdf::path;
 use openusd::usd;
+use openusd::vt::Value;
 
 const ASSETS: &str = concat!(
     env!("CARGO_WORKSPACE_DIR"),

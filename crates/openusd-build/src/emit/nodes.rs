@@ -161,7 +161,7 @@ fn view(
                 quote! {
                     match self.#accessor().attribute().get::<#ty>()? {
                         ::std::option::Option::Some(value) => ::std::result::Result::Ok(::std::option::Option::Some(value)),
-                        ::std::option::Option::None => <#ty as ::std::convert::TryFrom<::openusd::sdf::Value>>::try_from(#fallback)
+                        ::std::option::Option::None => <#ty as ::std::convert::TryFrom<::openusd::vt::Value>>::try_from(#fallback)
                             .map(::std::option::Option::Some)
                             .map_err(::std::convert::Into::into),
                     }
@@ -224,7 +224,7 @@ fn view(
             /// and views it.
             pub fn define(stage: &::openusd::usd::Stage, path: impl ::openusd::sdf::IntoPath) -> ::openusd::Result<Self> {
                 let shader = #shade::Shader::define(stage, path)?;
-                shader.node_def().create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
+                shader.node_def().create_id_attr()?.set(::openusd::vt::Value::token(Self::ID))?;
                 ::std::result::Result::Ok(Self(shader))
             }
 

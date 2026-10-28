@@ -240,16 +240,17 @@ mod tests {
     use crate::usda::UsdaFileFormat;
     use crate::usdc::UsdcFileFormat;
     use crate::usdz::UsdzFileFormat;
+    use crate::vt;
 
     /// Build a one-prim layer's data for write/read round-tripping.
     fn sample_data() -> sdf::Data {
         let mut data = sdf::Data::new();
         let ps = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
-        ps.add("primChildren", sdf::Value::TokenVec(vec!["Foo".into()]));
+        ps.add("primChildren", vt::Value::TokenVec(vec!["Foo".into()]));
         let foo = sdf::path("/Foo").unwrap();
         let sp = data.create_spec(foo, SpecType::Prim);
-        sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        sp.add("typeName", sdf::Value::Token("Xform".into()));
+        sp.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
+        sp.add("typeName", vt::Value::Token("Xform".into()));
         data
     }
 
@@ -270,7 +271,7 @@ mod tests {
         assert_eq!(read.spec_type(&foo), Some(SpecType::Prim));
         assert_eq!(
             read.field(&foo, "typeName").unwrap().into_owned(),
-            sdf::Value::Token("Xform".into())
+            vt::Value::Token("Xform".into())
         );
     }
 

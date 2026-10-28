@@ -5,7 +5,7 @@
 //! in `Quatf`, `Quatd`, and `Quath` attribute values.
 //!
 //! `From<[T; 4]>` and `From<Quat*> for [T; 4]` bridge to the raw array
-//! representation used by `sdf::Value`.
+//! representation used by `vt::Value`.
 
 use std::ops::Mul;
 

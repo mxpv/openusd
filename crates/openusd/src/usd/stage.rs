@@ -48,7 +48,7 @@ use std::sync::Arc;
 use bitflags::bitflags;
 
 use crate::tf::Token;
-use crate::{Result, ar, pcp, sdf};
+use crate::{Result, ar, pcp, sdf, vt};
 
 use super::composition::{self, PendingEdit, StageComposition};
 
@@ -444,7 +444,7 @@ impl EditTarget {
     /// `%:name` reference keeps its empty path. Any other value passes
     /// through, as does everything through a local or variant target, which
     /// carries the identity offset and mapping.
-    pub fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<sdf::Value>) -> sdf::Value {
+    pub fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<vt::Value>) -> vt::Value {
         let mut value = value.into();
         self.spec_time_offset().apply_to_value(&mut value);
         if !value.holds_path_expressions() {
@@ -1239,7 +1239,7 @@ impl Stage {
     /// Maps a stage value authored on the object at `object_path` to the one
     /// the current edit target authors, borrowing the target rather than
     /// cloning it. See [`EditTarget::map_to_spec_value`].
-    pub(super) fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<sdf::Value>) -> sdf::Value {
+    pub(super) fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<vt::Value>) -> vt::Value {
         self.edit_target.borrow().map_to_spec_value(object_path, value)
     }
 
@@ -1372,7 +1372,7 @@ impl Stage {
         &self,
         scene_path: &sdf::Path,
         key: &str,
-    ) -> Result<Option<sdf::Value>, StageAuthoringError> {
+    ) -> Result<Option<vt::Value>, StageAuthoringError> {
         let value = self.read_target_layer(scene_path, |layer, path| {
             layer
                 .data()
@@ -1802,7 +1802,7 @@ impl Stage {
     /// `UsdStage::GetRootLayer()->SetCustomLayerData()`: the write targets the
     /// root layer regardless of the current [`EditTarget`], pairing with
     /// [`Stage::custom_layer_data`].
-    pub fn set_custom_layer_data(&self, value: impl Into<sdf::Value>) -> Result<(), StageAuthoringError> {
+    pub fn set_custom_layer_data(&self, value: impl Into<vt::Value>) -> Result<(), StageAuthoringError> {
         let value = value.into();
         self.with_root_layer(|layer| {
             layer
@@ -1902,7 +1902,7 @@ impl Stage {
     pub fn set_stage_metadata(
         &self,
         field: &'static str,
-        value: impl Into<sdf::Value>,
+        value: impl Into<vt::Value>,
     ) -> Result<(), StageAuthoringError> {
         super::authoring::check_reserved(sdf::SpecType::PseudoRoot, field)?;
         let declared = match sdf::registered_field_type(field) {
@@ -1949,7 +1949,7 @@ impl Stage {
     /// The dictionary supplies the values `${VAR}` expressions in sublayer asset
     /// paths and reference/payload targets resolve against; replacing it
     /// recomposes every prim whose composition reads the edited layer stack.
-    pub fn set_expression_variables(&self, vars: HashMap<String, sdf::Value>) -> Result<(), StageAuthoringError> {
+    pub fn set_expression_variables(&self, vars: HashMap<String, vt::Value>) -> Result<(), StageAuthoringError> {
         self.with_stage_metadata_layer(|layer| layer.set_expression_variables(vars))
     }
 
@@ -2832,8 +2832,8 @@ impl Stage {
     ///
     /// Distinct from [`Stage::field`] on [`sdf::Path::abs_root`], which reads
     /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
-    /// Returns the raw [`sdf::Value`]; the caller coerces it.
-    pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>> {
+    /// Returns the raw [`vt::Value`]; the caller coerces it.
+    pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<vt::Value>> {
         let field = field.as_ref();
         if let Some(authored) = self.with_cache(|g, _| Ok(g.stage_metadata(field)?))? {
             return Ok(Some(authored));
@@ -2984,7 +2984,7 @@ impl Stage {
         &self,
         attr_path: impl sdf::IntoPath,
         time: Option<f64>,
-        accepts: Option<fn(sdf::ValueKind) -> bool>,
+        accepts: Option<fn(vt::ValueKind) -> bool>,
     ) -> Result<pcp::TimedValue> {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation.get();
@@ -3166,15 +3166,15 @@ impl Stage {
         if type_name.as_str().is_empty() || self.schema_registry.is_concrete_type(type_name) {
             return Ok(None);
         }
-        let Some(sdf::Value::Dictionary(fallbacks)) =
-            self.field::<sdf::Value>(sdf::Path::abs_root(), FALLBACK_PRIM_TYPES)?
+        let Some(vt::Value::Dictionary(fallbacks)) =
+            self.field::<vt::Value>(sdf::Path::abs_root(), FALLBACK_PRIM_TYPES)?
         else {
             return Ok(None);
         };
         let Some(candidates) = fallbacks
             .get(type_name.as_str())
             .cloned()
-            .and_then(sdf::Value::try_as_token_vec)
+            .and_then(vt::Value::try_as_token_vec)
         else {
             return Ok(None);
         };
@@ -3272,21 +3272,21 @@ impl Stage {
     /// reads the root through an empty prim index, and `_GetPrimSpecifierImpl`
     /// answers `def` for it).
     ///
-    /// `None` if no layer provides a value. A [`sdf::Value::ValueBlock`]
+    /// `None` if no layer provides a value. A [`vt::Value::ValueBlock`]
     /// blocks the opinions weaker than it: the composed result is whatever
     /// the stronger opinions alone produce, or `None` when the block is the
     /// strongest opinion.
     ///
-    /// The return type is generic: use `sdf::Value` to get the raw enum, or a
+    /// The return type is generic: use `vt::Value` to get the raw enum, or a
     /// concrete type (e.g. `bool`, `f64`, `String`) to convert automatically
-    /// via [`TryFrom<sdf::Value>`].
+    /// via [`TryFrom<vt::Value>`].
     ///
     /// Accepts both [`sdf::FieldKey`] and `&str` as the field name.
     ///
     /// [`Attribute::get`]: super::Attribute::get
     pub fn field<T>(&self, path: impl sdf::IntoPath, field: impl AsRef<str>) -> Result<Option<T>, pcp::QueryError>
     where
-        T: TryFrom<sdf::Value>,
+        T: TryFrom<vt::Value>,
         T::Error: Into<pcp::QueryError>,
     {
         let path = sdf::try_into_path(path)?;
@@ -3295,7 +3295,7 @@ impl Stage {
         // A prototype root reads no opinions, but is always defined (C++
         // `_GetPrimSpecifierImpl`).
         if raw.is_none() && field == sdf::FieldKey::Specifier.as_str() && self.cache().is_prototype(&path) {
-            raw = Some(sdf::Value::Specifier(sdf::Specifier::Def));
+            raw = Some(vt::Value::Specifier(sdf::Specifier::Def));
         }
         super::decode_value(raw)
     }
@@ -3515,8 +3515,8 @@ impl Stage {
     /// Mirrors C++ `UsdStage::GetRootLayer()->GetCustomLayerData()`: layer
     /// metadata is read from the root layer alone, not composed across the
     /// layer stack.
-    pub fn custom_layer_data(&self) -> Result<Option<sdf::Value>> {
-        Ok(self.field::<sdf::Value>(sdf::Path::abs_root(), sdf::FieldKey::CustomLayerData)?)
+    pub fn custom_layer_data(&self) -> Result<Option<vt::Value>> {
+        Ok(self.field::<vt::Value>(sdf::Path::abs_root(), sdf::FieldKey::CustomLayerData)?)
     }
 
     /// Returns every prototype root (`/__Prototype_N`) this stage's population
@@ -3877,7 +3877,7 @@ impl Stage {
     ///
     /// A value holding no asset paths passes through untouched, so the caller
     /// need only gate on the type when it has its own reason to.
-    pub(crate) fn resolve_schema_asset(&self, source: &Schematics, value: sdf::Value) -> sdf::Value {
+    pub(crate) fn resolve_schema_asset(&self, source: &Schematics, value: vt::Value) -> vt::Value {
         let Some(anchor) = source.resolved_location() else {
             return value;
         };
@@ -4221,7 +4221,7 @@ impl StageBuilder {
     fn collect_layers(
         &self,
         root: sdf::PreparedLayer,
-        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        ancestor_expr_vars: &HashMap<String, vt::Value>,
     ) -> Result<CollectedLayers> {
         let diagnostics = RefCell::new(pcp::Diagnostics::default());
         // `ancestor_expr_vars` are the expression variables the enclosing context
@@ -4265,7 +4265,7 @@ impl StageBuilder {
         &self,
         root: &sdf::PreparedLayer,
         session: Option<&sdf::PreparedLayer>,
-    ) -> Result<HashMap<String, sdf::Value>> {
+    ) -> Result<HashMap<String, vt::Value>> {
         let mut vars = sdf::expr::read_variables(root.data.as_ref())?.into_owned();
         if let Some(session) = session
             && !self.mutes(root.anchor(), &session.identifier)
@@ -4421,7 +4421,7 @@ pub(crate) mod tests {
     }
 
     /// The field `key` as `layer` authors it at `path`, read as `T`.
-    pub(crate) fn authored<T: TryFrom<sdf::Value>>(layer: &sdf::Layer, path: &str, key: sdf::FieldKey) -> Option<T> {
+    pub(crate) fn authored<T: TryFrom<vt::Value>>(layer: &sdf::Layer, path: &str, key: sdf::FieldKey) -> Option<T> {
         let value = layer
             .data()
             .try_field(&sdf::Path::new(path).ok()?, key.as_str())
@@ -4442,7 +4442,7 @@ pub(crate) mod tests {
 
     /// The value of the attribute at `path` at time 0, or `None` when it has
     /// none.
-    pub(crate) fn attribute_value(stage: &Stage, path: &str) -> Option<sdf::Value> {
+    pub(crate) fn attribute_value(stage: &Stage, path: &str) -> Option<vt::Value> {
         stage.attribute(path).unwrap().get_at(usd::TimeCode::new(0.0)).unwrap()
     }
 
@@ -4663,12 +4663,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir()?;
         let path = write_cross_stage_fixture(dir.path())?;
         let stage = Stage::open(&path)?;
-        let x_at_m1 = |stage: &Stage| -> Result<Option<sdf::Value>> {
+        let x_at_m1 = |stage: &Stage| -> Result<Option<vt::Value>> {
             stage
                 .attribute("/M1.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))
         };
-        assert_eq!(x_at_m1(&stage)?, Some(sdf::Value::Double(1.0)), "V=a selects a.usda");
+        assert_eq!(x_at_m1(&stage)?, Some(vt::Value::Double(1.0)), "V=a selects a.usda");
 
         let (t_layer, before) = strand_m1_stack(&stage)?;
 
@@ -4700,12 +4700,12 @@ pub(crate) mod tests {
         assert_ne!(after, before, "the dormant identity resolves a fresh successor");
         assert!(stage.layers().stack_is_live(after));
 
-        stage.attribute("/M1.x")?.set(sdf::Value::Double(7.0))?;
+        stage.attribute("/M1.x")?.set(vt::Value::Double(7.0))?;
         assert_eq!(
             stage
                 .attribute("/M1.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(7.0)),
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(7.0)),
             "the opinion authored through the recomposed target composes"
         );
         Ok(())
@@ -5116,7 +5116,7 @@ pub(crate) mod tests {
         let path = composition_path("active.usda");
         let stage = Stage::open(&path)?;
 
-        let active = stage.field::<sdf::Value>("/World", sdf::FieldKey::Active)?;
+        let active = stage.field::<vt::Value>("/World", sdf::FieldKey::Active)?;
         assert_eq!(active, None);
 
         Ok(())
@@ -5341,7 +5341,7 @@ pub(crate) mod tests {
         edit_layer(&mut layer, |e| {
             sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(value))
+                .set_default(vt::Value::Double(value))
                 .expect("value fits the declared type");
         });
         Ok(layer)
@@ -5371,8 +5371,8 @@ pub(crate) mod tests {
         assert_eq!(
             stage
                 .attribute("/A.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(5.0))
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(5.0))
         );
 
         // Re-insert `mid` by its identifier, passing a fresh empty layer with the
@@ -5387,8 +5387,8 @@ pub(crate) mod tests {
         assert_eq!(
             stage
                 .attribute("/A.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(5.0)),
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(5.0)),
             "the already-loaded mid layer's child edge to leaf must survive re-insertion"
         );
         Ok(())
@@ -5412,7 +5412,7 @@ pub(crate) mod tests {
         stage.attribute("/A.x")?.set_at(2.0, usd::TimeCode::new(30.0))?;
         let layer = stage.layer(&sub_id).expect("sub is loaded");
         let samples = layer.attribute("/A.x")?.expect("spec").time_samples();
-        assert_eq!(samples, Some(vec![(10.0, sdf::Value::Double(2.0))]));
+        assert_eq!(samples, Some(vec![(10.0, vt::Value::Double(2.0))]));
         drop(layer);
         assert_eq!(
             stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(30.0))?,
@@ -5450,8 +5450,8 @@ pub(crate) mod tests {
         assert_eq!(
             stage
                 .attribute("/A.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(5.0)),
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(5.0)),
             "the relative sublayer composes its opinion"
         );
 
@@ -5477,7 +5477,7 @@ pub(crate) mod tests {
         assert_eq!(
             stage
                 .attribute("/A.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
             None,
             "the removed sublayer's opinion is gone"
         );
@@ -5542,14 +5542,14 @@ over "T" {
         // variable) context.
         let _ = stage
             .attribute("/P.x")?
-            .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?;
+            .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?;
         // `/Q` reaches the same target carrying `V=chosen`; the target's `${V}`
         // sublayer must resolve and contribute `chosen.usda`'s opinion.
         assert_eq!(
             stage
                 .attribute("/Q.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(42.0)),
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(42.0)),
             "the later variable-carrying arc seeds the shared target's ${{V}} sublayer",
         );
         Ok(stage)
@@ -5672,8 +5672,8 @@ over "T" {
         assert_eq!(
             stage
                 .attribute("/Q.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(42.0)),
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(42.0)),
             "the variable-carrying arc resolves the `${{V}}` sublayer",
         );
         // `/P` reaches the same target with no variable. Its `${V}` sublayer cannot
@@ -5681,7 +5681,7 @@ over "T" {
         assert_eq!(
             stage
                 .attribute("/P.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
             None,
             "the variable-free arc is isolated from the other arc's context",
         );
@@ -5735,8 +5735,8 @@ def "T" {
         assert_eq!(
             stage
                 .attribute("/A.x")?
-                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(5.0)),
+                .get_at::<vt::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(5.0)),
             "the dot-relative sublayer composes its opinion"
         );
         Ok(())
@@ -5795,7 +5795,7 @@ def "T" {
             pcp::Diagnostics::default(),
         );
         for name in ["purpose", "visibility"] {
-            assert!(stage.prim("/")?.attribute(name).get::<sdf::Value>()?.is_none());
+            assert!(stage.prim("/")?.attribute(name).get::<vt::Value>()?.is_none());
         }
 
         stage.mute_layer("strong.usda");
@@ -5892,7 +5892,7 @@ def "T" {
             let mut pr = e.pseudo_root_mut().unwrap();
             pr.set_expression_variables(HashMap::from([(
                 "CHILD".to_string(),
-                sdf::Value::String("strong".into()),
+                vt::Value::String("strong".into()),
             )]));
             pr.set_sublayers([r#"`"${CHILD}.usda"`"#]);
         });
@@ -5934,7 +5934,7 @@ def "T" {
             let mut pr = e.pseudo_root_mut().unwrap();
             pr.set_expression_variables(HashMap::from([(
                 "CHILD".to_string(),
-                sdf::Value::String("strong".into()),
+                vt::Value::String("strong".into()),
             )]));
             pr.set_sublayers(["mid.usda"]);
         });
@@ -5977,14 +5977,14 @@ def "T" {
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
             let mut pr = e.pseudo_root_mut().unwrap();
-            pr.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("strong".into()))]));
+            pr.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("strong".into()))]));
             pr.set_sublayers([r#"`"${V}.usda"`"#, "weak.usda"]);
         });
         let mut strong = sdf::Layer::new_in_memory("strong.usda");
         edit_layer(&mut strong, |e| {
             sdf::AttributeSpec::new(e.data_mut(), "/A/Child.y", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(5.0))
+                .set_default(vt::Value::Double(5.0))
                 .expect("value fits the declared type");
         });
         let stage = Stage::builder().make_stage(
@@ -6081,7 +6081,7 @@ def "T" {
 
         prim.set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Source")?,
                 ..Default::default()
             }])),
@@ -6206,7 +6206,7 @@ def "T" {
         edit_layer(&mut anon, |e| {
             sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(5.0))
+                .set_default(vt::Value::Double(5.0))
                 .expect("value fits the declared type");
         });
         let anon_id = anon.identifier().to_string();
@@ -6321,7 +6321,7 @@ def \"Sub\" {}
             e.data_mut().set_field(
                 &sdf::path("/P").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
@@ -6333,7 +6333,7 @@ def \"Sub\" {}
             sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
             sdf::AttributeSpec::new(e.data_mut(), "/Target.x", "double", sdf::Variability::Varying, true)
                 .unwrap()
-                .set_default(sdf::Value::Double(5.0))
+                .set_default(vt::Value::Double(5.0))
                 .expect("value fits the declared type");
         });
 
@@ -6364,7 +6364,7 @@ def \"Sub\" {}
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
@@ -6444,7 +6444,7 @@ def \"Sub\" {}
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()
@@ -6486,7 +6486,7 @@ def \"Sub\" {}
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/A").unwrap(),
                     ..Default::default()
@@ -6560,7 +6560,7 @@ def \"Sub\" {}
             e.data_mut().set_field(
                 &sdf::path("/Ref").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/T").unwrap(),
                     ..Default::default()
@@ -6611,9 +6611,9 @@ def \"Sub\" {}
                 e.pseudo_root_mut().unwrap().set_time_codes_per_second(2.0);
                 let mut x =
                     sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true).unwrap();
-                x.set_time_sample(0.0, sdf::Value::Double(0.0))
+                x.set_time_sample(0.0, vt::Value::Double(0.0))
                     .expect("value fits the declared type");
-                x.set_time_sample(20.0, sdf::Value::Double(200.0))
+                x.set_time_sample(20.0, vt::Value::Double(200.0))
                     .expect("value fits the declared type");
             });
             Stage::builder().make_stage(vec![root, sub], 0, pcp::Diagnostics::default())
@@ -6643,7 +6643,7 @@ def \"Sub\" {}
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
             let mut pr = e.pseudo_root_mut().unwrap();
-            pr.set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("a".into()))]));
+            pr.set_expression_variables(HashMap::from([("WHICH".to_string(), vt::Value::String("a".into()))]));
             pr.set_sublayers([r#"`"${WHICH}.usda"`"#]);
         });
         let stage = Stage::builder().make_stage(
@@ -6657,7 +6657,7 @@ def \"Sub\" {}
             Some(1.0),
             "the WHICH-valued sublayer resolves to a.usda"
         );
-        stage.set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("b".into()))]))?;
+        stage.set_expression_variables(HashMap::from([("WHICH".to_string(), vt::Value::String("b".into()))]))?;
         assert_eq!(
             stage.attribute("/A.x")?.get::<f64>()?,
             Some(2.0),
@@ -6676,7 +6676,7 @@ def \"Sub\" {}
         edit_layer(&mut session, |e| {
             e.pseudo_root_mut()
                 .unwrap()
-                .set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("a".into()))]));
+                .set_expression_variables(HashMap::from([("WHICH".to_string(), vt::Value::String("a".into()))]));
         });
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
@@ -6797,7 +6797,7 @@ def \"Sub\" {}
         stage.set_start_time_code(1.0)?;
         assert_eq!(stage.start_time_code(), 1.0);
         stage.set_stage_metadata("comment", "on the root")?;
-        assert_eq!(stage.stage_metadata("comment")?, Some(sdf::Value::from("on the root")));
+        assert_eq!(stage.stage_metadata("comment")?, Some(vt::Value::from("on the root")));
         Ok(())
     }
 
@@ -6846,7 +6846,7 @@ def \"Sub\" {}
             e.data_mut().set_field(
                 &sdf::path("/P").unwrap(),
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "target.usda".into(),
                     prim_path: sdf::path("/Target").unwrap(),
                     ..Default::default()

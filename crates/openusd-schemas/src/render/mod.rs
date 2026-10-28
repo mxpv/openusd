@@ -25,7 +25,7 @@
 //! # Example
 //!
 //! ```
-//! use openusd::gf;
+//! use openusd::{gf, vt};
 //! use openusd::sdf;
 //! use openusd_schemas::render::{self, ProductSchema, SettingsBaseSchema, SettingsSchema};
 //! use openusd::usd::Stage;
@@ -44,7 +44,7 @@
 //!
 //! render::Product::define(&stage, "/Render/Products/beauty").unwrap()
 //!     .create_product_name_attr().unwrap()
-//!     .set(sdf::Value::token("beauty.exr")).unwrap();
+//!     .set(vt::Value::token("beauty.exr")).unwrap();
 //!
 //! let spec = render::render_spec(&stage, &"/Render/Settings".parse().unwrap(), &[]).unwrap()
 //!     .expect("RenderSpec");

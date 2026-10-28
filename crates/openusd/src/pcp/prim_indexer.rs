@@ -95,8 +95,9 @@ use std::collections::{HashMap, HashSet, hash_map};
 use std::mem;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, LayerOffset, Path, Value};
+use crate::sdf::{self, LayerOffset, Path};
 use crate::tf::Token;
+use crate::vt::Value;
 
 use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in, evaluate_expression};
 use super::diagnostics::Diagnostics;

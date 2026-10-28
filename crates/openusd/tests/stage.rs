@@ -18,7 +18,7 @@ use openusd::usd::{
     StageAuthoringError, StagePopulationMask, StageSink,
 };
 use openusd::usdz::ArchiveWriter;
-use openusd::{ar, gf, kind, pcp, sdf, tf, usd};
+use openusd::{ar, gf, kind, pcp, sdf, tf, usd, vt};
 
 /// A [`StageSink`] for tests: holds optional closures for the composed-change and
 /// lifecycle hooks a test cares about, recording into shared state it inspects
@@ -623,8 +623,8 @@ fn lazy_ref_missing_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0)),
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0)),
         "the reference target loads despite its missing sublayer"
     );
     assert!(
@@ -695,8 +695,8 @@ fn failed_load_retried_after_edit() -> Result<()> {
     stage.define_prim("/Trigger")?;
 
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0)),
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(7.0)),
         "the repaired reference composes once the failure is cleared"
     );
     Ok(())
@@ -727,8 +727,8 @@ fn instance_proxy_cold_query() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/World/Inst/Child.x")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(3.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(3.0))
     );
     Ok(())
 }
@@ -757,8 +757,8 @@ fn lazy_ref_inherited_expr_var() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(9.0)),
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(9.0)),
         "the target's `${{V}}` sublayer resolves against the referrer's variable"
     );
     Ok(())
@@ -802,7 +802,7 @@ fn sublayer_expr_var_ignored() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         None,
         "`a` is a sublayer, so its `V` is ignored and `b`'s expression sublayer does not resolve"
     );
@@ -834,8 +834,8 @@ fn cross_ref_expr_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(9.0)),
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(9.0)),
         "the referrer's variable resolves the target's `${{V}}` sublayer"
     );
     Ok(())
@@ -878,17 +878,13 @@ fn dual_context_same_pass() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage
-            .attribute("/M.vx")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0)),
+        stage.attribute("/M.vx")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0)),
         "s1's V=x resolves the target's sublayer under the first arc"
     );
     assert_eq!(
-        stage
-            .attribute("/M.vy")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(2.0)),
+        stage.attribute("/M.vy")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(2.0)),
         "s2's V=y resolves the target's sublayer under the second arc"
     );
     Ok(())
@@ -931,7 +927,7 @@ def "World" (
     stage.layer_mut(&root).expect("the root layer is live").edit(|e| {
         e.set_expression_variables(HashMap::from([(
             "SEL".to_string(),
-            sdf::Value::String("lo".to_string()),
+            vt::Value::String("lo".to_string()),
         )]))
     })?;
 
@@ -981,7 +977,7 @@ fn session_var_edit_loads() -> Result<()> {
     stage.layer_mut(&session_id).expect("session layer is live").edit(|e| {
         e.set_expression_variables(HashMap::from([(
             "WHICH".to_string(),
-            sdf::Value::String("b".to_string()),
+            vt::Value::String("b".to_string()),
         )]))
     })?;
     assert_eq!(
@@ -1026,9 +1022,10 @@ fn target_var_edit_loads() -> Result<()> {
         .into_iter()
         .find(|id| FsPath::new(id).ends_with("t.usda"))
         .expect("t.usda is loaded");
-    stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
-        e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("b".to_string()))]))
-    })?;
+    stage
+        .layer_mut(&target_id)
+        .expect("target layer is live")
+        .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("b".to_string()))])))?;
     assert_eq!(
         stage.attribute("/P.y")?.get::<f64>()?,
         Some(2.0),
@@ -1065,7 +1062,7 @@ def "Other" {
     let notices = capture_notices(&stage);
     stage.set_expression_variables(HashMap::from([(
         "FREE".to_string(),
-        sdf::Value::String("y".to_string()),
+        vt::Value::String("y".to_string()),
     )]))?;
 
     {
@@ -1113,9 +1110,10 @@ fn sublayer_vars_no_notice() -> Result<()> {
 
     let notices = capture_notices(&stage);
     let sub_id = identifier_by_leaf(&stage, "sub.usda");
-    stage.layer_mut(&sub_id).expect("sublayer is live").edit(|e| {
-        e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
-    })?;
+    stage
+        .layer_mut(&sub_id)
+        .expect("sublayer is live")
+        .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".to_string()))])))?;
 
     // Reading drains the pending edit, delivering the composed change notice.
     assert!(
@@ -1179,7 +1177,7 @@ def "P" {
     stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
         e.set_expression_variables(HashMap::from([(
             "NAME".to_string(),
-            sdf::Value::String("b".to_string()),
+            vt::Value::String("b".to_string()),
         )]))
     })?;
 
@@ -1261,7 +1259,7 @@ def "Q" {
         stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
             e.set_expression_variables(HashMap::from([(
                 "NAME".to_string(),
-                sdf::Value::String("b".to_string()),
+                vt::Value::String("b".to_string()),
             )]))
         })?;
         Ok(())
@@ -1328,7 +1326,7 @@ fn session_var_swap_loads() -> Result<()> {
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
     stage.layer_mut(&session_id).expect("session layer is live").edit(|e| {
-        e.set_expression_variables(HashMap::from([("S".to_string(), sdf::Value::String("sb".to_string()))]))
+        e.set_expression_variables(HashMap::from([("S".to_string(), vt::Value::String("sb".to_string()))]))
     })?;
 
     assert_eq!(
@@ -1363,8 +1361,8 @@ fn session_insert_layer() -> Result<()> {
     stage.insert_layer(&session_id, 0, extra, sdf::LayerOffset::IDENTITY)?;
 
     assert_eq!(
-        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0)),
+        stage.attribute("/A.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(7.0)),
         "the inserted session sublayer's opinion composes"
     );
     Ok(())
@@ -1559,7 +1557,7 @@ fn failed_selection_terminates() -> Result<()> {
 
     stage.set_expression_variables(HashMap::from([(
         "WHICH".to_string(),
-        sdf::Value::String("missing".to_string()),
+        vt::Value::String("missing".to_string()),
     )]))?;
     assert_eq!(
         stage.attribute("/W.w")?.get::<f64>()?,
@@ -1585,7 +1583,7 @@ fn failed_selection_terminates() -> Result<()> {
     )?;
     stage.set_expression_variables(HashMap::from([(
         "WHICH".to_string(),
-        sdf::Value::String("late".to_string()),
+        vt::Value::String("late".to_string()),
     )]))?;
     assert_eq!(
         stage.attribute("/L.z")?.get::<f64>()?,
@@ -1696,7 +1694,7 @@ fn same_round_shared_selection() -> Result<()> {
 
     stage.set_expression_variables(HashMap::from([(
         "V".to_string(),
-        sdf::Value::String("shared".to_string()),
+        vt::Value::String("shared".to_string()),
     )]))?;
     assert_eq!(
         stage.attribute("/P1.y")?.get::<f64>()?,
@@ -1934,7 +1932,7 @@ fn expr_failure_reported_once() -> Result<()> {
 
     stage.set_expression_variables(HashMap::from([(
         "WHICH".to_string(),
-        sdf::Value::String("fix.usda".to_string()),
+        vt::Value::String("fix.usda".to_string()),
     )]))?;
     assert_eq!(
         stage.attribute("/F.q")?.get::<f64>()?,
@@ -1983,8 +1981,8 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/P.probe")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Int(7)),
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Int(7)),
         "the sibling layer's opinion composes through the in-package reference"
     );
     Ok(())
@@ -2089,8 +2087,8 @@ fn usdz_subdir_first_layer_anchors() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/P.probe")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Int(9)),
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Int(9)),
         "the sibling under Scenes/ composes through the in-package reference"
     );
     Ok(())
@@ -2114,7 +2112,7 @@ fn asset_value_usdz_is_package_path() -> Result<()> {
     let stage = Stage::open(root.to_str().unwrap())?;
     let value = stage
         .attribute("/P.a")?
-        .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?
+        .get_at::<vt::Value>(usd::TimeCode::new(0.0))?
         .expect("asset value resolves");
     let asset = value.try_as_asset_path().expect("attribute is asset-typed");
     let resolved = asset.resolved_path().expect("asset path is resolved");
@@ -2149,8 +2147,8 @@ fn lazy_ref_corrupt_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0)),
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0)),
         "the target composes despite its corrupt sublayer"
     );
     assert!(
@@ -2265,7 +2263,7 @@ fn mute_alternate_spelling() -> Result<()> {
     let abs = weak.to_str().unwrap();
     // The identifier both spellings resolve to (what muting stores and notifies).
     let canonical = ar::DefaultResolver::new().create_identifier(abs, None);
-    let read_x = || stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0));
+    let read_x = || stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0));
 
     let muted = Rc::new(RefCell::new(Vec::<String>::new()));
     let unmuted = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -2285,7 +2283,7 @@ fn mute_alternate_spelling() -> Result<()> {
 
     assert_eq!(
         read_x()?,
-        Some(sdf::Value::Double(1.0)),
+        Some(vt::Value::Double(1.0)),
         "weak contributes x until muted"
     );
 
@@ -2313,7 +2311,7 @@ fn mute_alternate_spelling() -> Result<()> {
     assert!(stage.muted_layers().is_empty());
     assert_eq!(
         read_x()?,
-        Some(sdf::Value::Double(1.0)),
+        Some(vt::Value::Double(1.0)),
         "the unmuted weak layer contributes again"
     );
 
@@ -2345,7 +2343,7 @@ fn mute_open_dedup() -> Result<()> {
     );
     assert!(stage.is_layer_muted("weak.usda") && stage.is_layer_muted(abs));
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         None,
         "the muted weak layer contributes nothing"
     );
@@ -2371,10 +2369,10 @@ fn mute_nested_sublayer() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     let abs = weak.to_str().unwrap();
-    let read_x = || stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0));
+    let read_x = || stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0));
     assert_eq!(
         read_x()?,
-        Some(sdf::Value::Double(1.0)),
+        Some(vt::Value::Double(1.0)),
         "the nested sublayer contributes x"
     );
 
@@ -2393,7 +2391,7 @@ fn mute_nested_sublayer() -> Result<()> {
     );
     assert_eq!(
         read_x()?,
-        Some(sdf::Value::Double(1.0)),
+        Some(vt::Value::Double(1.0)),
         "the unmuted nested sublayer contributes again"
     );
     Ok(())
@@ -2418,13 +2416,13 @@ fn bad_expr_sublayer_dropped() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/P.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0)),
+        stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0)),
         "the target's own opinion composes despite the bad expression sublayer"
     );
     assert_eq!(
-        stage.attribute("/P.y")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(2.0)),
+        stage.attribute("/P.y")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(2.0)),
         "the valid sublayer still composes"
     );
     assert!(
@@ -3774,8 +3772,8 @@ fn load_and_unload_nested_ancestor_descendant() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/World/A/Deep.x")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(42.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(42.0))
     );
     Ok(())
 }
@@ -4026,20 +4024,20 @@ fn shared_instances_resolve_identically() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A/Child.size")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
     assert_eq!(
         stage
             .attribute("/B/Child.size")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
     assert_eq!(
         stage
             .attribute("/C/Child.size")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(9.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(9.0))
     );
 
     assert_eq!(child_names(&stage, "/A")?, vec!["Child".to_string()]);
@@ -4066,8 +4064,8 @@ fn class_arcs_share_prototype() -> Result<()> {
         assert_eq!(
             stage
                 .attribute(format!("{instance}/Geo.radius"))?
-                .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(1.0)),
+                .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+            Some(vt::Value::Double(1.0)),
             "{instance}"
         );
     }
@@ -4076,10 +4074,10 @@ fn class_arcs_share_prototype() -> Result<()> {
 }
 
 /// Reads `Geo.radius` under `instance` at the default time.
-fn geo_radius(stage: &Stage, instance: &str) -> Result<Option<sdf::Value>> {
+fn geo_radius(stage: &Stage, instance: &str) -> Result<Option<vt::Value>> {
     stage
         .attribute(format!("{instance}/Geo.radius"))?
-        .get_at::<sdf::Value>(usd::TimeCode::new(0.0))
+        .get_at::<vt::Value>(usd::TimeCode::new(0.0))
 }
 
 /// A class that gains its first spec joins the key of the instance inheriting
@@ -4096,16 +4094,16 @@ fn class_spec_rekeys_instance() -> Result<()> {
     stage
         .override_prim("/__class__/C/Geo")?
         .create_attribute("radius", "double")?
-        .set(sdf::Value::Double(7.0))?;
+        .set(vt::Value::Double(7.0))?;
 
     let own = stage.prim("/C")?.prototype()?.expect("an instance");
-    assert_eq!(geo_radius(&stage, "/C")?, Some(sdf::Value::Double(7.0)));
+    assert_eq!(geo_radius(&stage, "/C")?, Some(vt::Value::Double(7.0)));
     for instance in ["/D", "/Set/A", "/Set/B"] {
         let prototype = stage.prim(instance)?.prototype()?.expect("an instance");
         assert_ne!(prototype, own, "{instance}");
         assert_eq!(
             geo_radius(&stage, instance)?,
-            Some(sdf::Value::Double(1.0)),
+            Some(vt::Value::Double(1.0)),
             "{instance}"
         );
     }
@@ -4115,7 +4113,7 @@ fn class_spec_rekeys_instance() -> Result<()> {
     assert!(stage.remove_prim("/__class__/C")?);
     let prototype = stage.prim("/D")?.prototype()?.expect("an instance");
     assert_eq!(stage.prim("/C")?.prototype()?.as_ref(), Some(&prototype));
-    assert_eq!(geo_radius(&stage, "/C")?, Some(sdf::Value::Double(1.0)));
+    assert_eq!(geo_radius(&stage, "/C")?, Some(vt::Value::Double(1.0)));
     assert_eq!(stage.prototypes()?, vec![prototype]);
     Ok(())
 }
@@ -4132,7 +4130,7 @@ fn ancestral_arc_not_instance() -> Result<()> {
     assert_eq!(prim.prototype()?, None);
     assert!(stage.prim("/Set/A/Geo")?.is_valid()?);
     assert!(stage.prim("/Set/A/Local")?.is_valid()?);
-    assert_eq!(geo_radius(&stage, "/Set/A")?, Some(sdf::Value::Double(5.0)));
+    assert_eq!(geo_radius(&stage, "/Set/A")?, Some(vt::Value::Double(5.0)));
     assert!(stage.prototypes()?.is_empty());
     Ok(())
 }
@@ -4189,8 +4187,8 @@ fn prototype_queries() -> Result<()> {
     assert_eq!(
         stage
             .attribute(child.append_property("size")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
     Ok(())
 }
@@ -4381,14 +4379,14 @@ fn rediscovery_on_known_root() -> Result<()> {
     let instance = |path: &str| -> Result<()> {
         stage.define_prim(path)?.set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Proto")?,
                 ..Default::default()
             }])),
         )?;
         stage
             .prim(path)?
-            .set_metadata(sdf::FieldKey::Instanceable.as_str(), sdf::Value::Bool(true))?;
+            .set_metadata(sdf::FieldKey::Instanceable.as_str(), vt::Value::Bool(true))?;
         Ok(())
     };
 
@@ -5233,7 +5231,7 @@ fn malformed_active_fails_reads() -> Result<()> {
         "#usda 1.0\ndef \"P\" {\n    def \"C\" {\n        double y = 2\n    }\n}\n",
     )?;
     let root = stage.root_layer().identifier().to_string();
-    let set_active = |value: sdf::Value| -> Result<()> {
+    let set_active = |value: vt::Value| -> Result<()> {
         stage.layer_mut(&root).expect("root layer").edit(|e| {
             e.data_mut()
                 .set_field(&sdf::path("/P")?, sdf::FieldKey::Active.as_str(), value);
@@ -5243,12 +5241,12 @@ fn malformed_active_fails_reads() -> Result<()> {
     };
     assert_eq!(stage.attribute("/P/C.y")?.get::<f64>()?, Some(2.0));
 
-    set_active(sdf::Value::Int(5))?;
+    set_active(vt::Value::Int(5))?;
     assert!(stage.prim("/P/C")?.is_valid().is_err());
     assert!(stage.attribute("/P/C.y")?.get::<f64>().is_err());
     assert!(stage.prim("/P")?.child_names().is_err());
 
-    set_active(sdf::Value::Bool(true))?;
+    set_active(vt::Value::Bool(true))?;
     assert!(stage.prim("/P/C")?.is_valid()?);
     assert_eq!(stage.attribute("/P/C.y")?.get::<f64>()?, Some(2.0));
     assert_eq!(child_names(&stage, "/P")?, ["C"]);
@@ -5552,8 +5550,8 @@ fn nested_prototype_masked() -> Result<()> {
     assert_eq!(
         stage
             .attribute(nested.append_path("Leaf")?.append_property("v")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(3.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(3.0))
     );
     Ok(())
 }
@@ -5568,14 +5566,14 @@ fn nested_instances() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A/Sub/L.v")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(7.0))
     );
     assert_eq!(
         stage
             .attribute("/B/Sub/L.v")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(7.0))
     );
 
     // The nested prims are instances and share one prototype.
@@ -5595,8 +5593,8 @@ fn nested_instances() -> Result<()> {
     assert_eq!(
         stage
             .attribute(sdf::path(format!("{outer}/Sub/L.v"))?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(7.0))
     );
     Ok(())
 }
@@ -5751,14 +5749,14 @@ fn prototype_root_drops_instance_overrides() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A.shared")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(7.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(7.0))
     );
     assert_eq!(
         stage
             .attribute("/A.rootOnly")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(42.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(42.0))
     );
 
     let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
@@ -5766,7 +5764,7 @@ fn prototype_root_drops_instance_overrides() -> Result<()> {
         assert_eq!(
             stage
                 .attribute(proto.append_property(name)?)?
-                .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+                .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
             None,
             "{name}"
         );
@@ -5806,8 +5804,8 @@ fn descendant_survives_early_query() -> Result<()> {
     assert_eq!(
         stage
             .attribute(child.append_property("size")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
     assert!(stage.prim(child)?.is_in_prototype()?);
     Ok(())
@@ -5827,7 +5825,7 @@ fn unknown_prototype_is_empty() -> Result<()> {
     assert_eq!(
         stage
             .attribute(unknown.append_path("Child")?.append_property("size")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         None
     );
     Ok(())
@@ -5863,15 +5861,15 @@ fn prototype_root_keeps_variant_opinions() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A.picked")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
 
     let proto = stage.prim("/A")?.prototype()?.expect("A is an instance");
     assert_eq!(
         stage
             .attribute(proto.append_property("picked")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         None
     );
     Ok(())
@@ -5932,7 +5930,7 @@ fn prototype_root_empty() -> Result<()> {
     assert_eq!(animated.type_name()?, None);
     assert!(!animated.has_authored_value()?);
     assert!(!animated.resolve_info()?.has_authored_value());
-    assert_eq!(animated.get::<sdf::Value>()?, None);
+    assert_eq!(animated.get::<vt::Value>()?, None);
     assert_eq!(animated.time_samples()?, None);
     assert!(!animated.might_be_time_varying()?);
     assert!(animated.property_stack()?.is_empty());
@@ -6444,20 +6442,20 @@ fn variant_selection_keys_prototype() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A.picked")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0))
     );
     assert_eq!(
         stage
             .attribute("/B.picked")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(2.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(2.0))
     );
     assert_eq!(
         stage
             .attribute("/C.picked")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0))
     );
     Ok(())
 }
@@ -6618,8 +6616,8 @@ fn prototype_visible_under_mask() -> Result<()> {
     assert_eq!(
         stage
             .attribute(child.append_property("size")?)?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
 
     // A prototype with no masked instance stays hidden: /B (and so the
@@ -6644,8 +6642,8 @@ fn nested_instance_in_prototype() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A/Nested/Leaf.v")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(3.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(3.0))
     );
 
     // Inside the prototype namespace, the nested prim is an instance and
@@ -6703,16 +6701,16 @@ fn instance_descendant_ignores_local_override() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/Instance/Child.size")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0))
     );
 
     // Non-instance: the local override wins as usual.
     assert_eq!(
         stage
             .attribute("/NonInstance/Child.size")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(999.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(999.0))
     );
     Ok(())
 }
@@ -6727,8 +6725,8 @@ fn instance_descendant_ignores_local_arc() -> Result<()> {
     assert_eq!(
         stage
             .attribute("/A/Child.v")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(1.0))
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0))
     );
     Ok(())
 }
@@ -6983,7 +6981,7 @@ fn custom_predicate() -> Result<()> {
 /// edit target of every stage here. The attribute setters refuse the value
 /// fields, so a whole-field `timeSamples` block, an empty sample map, or a
 /// malformed field is authored the way a text layer would carry it.
-fn author_raw_field(attr: &usd::Attribute, field: &str, value: sdf::Value) -> Result<()> {
+fn author_raw_field(attr: &usd::Attribute, field: &str, value: vt::Value) -> Result<()> {
     let stage = attr.stage();
     let root_id = stage.root_layer().identifier().to_string();
     stage.layer_mut(&root_id).expect("root layer is live").edit(|e| {
@@ -7126,7 +7124,7 @@ fn inherit_stage() -> Result<Stage> {
     stage.define_prim("/_Class")?;
     stage.define_prim("/Prim")?.set_metadata(
         sdf::FieldKey::InheritPaths.as_str(),
-        sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/_Class")?])),
+        vt::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/_Class")?])),
     )?;
     Ok(stage)
 }
@@ -7227,7 +7225,7 @@ def Scope "P" (
         let _ctx = stage.edit_context(target)?;
         stage
             .create_attribute("/P/Child.extra", "double")?
-            .set(sdf::Value::Double(4.0))?;
+            .set(vt::Value::Double(4.0))?;
     }
     assert_eq!(
         stage.attribute("/P/Child.extra")?.get::<f64>()?,
@@ -7309,7 +7307,7 @@ fn variant_ref_path_error() -> Result<()> {
     stage.define_prim("/Target")?;
     stage.define_prim("/P")?.set_metadata(
         sdf::FieldKey::References.as_str(),
-        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+        vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
             asset_path: String::new(),
             prim_path: sdf::path("/Target{v=a}")?,
             ..Default::default()
@@ -7513,7 +7511,7 @@ fn layer_stack_id_same_inputs() -> Result<()> {
 fn reference_with_offset(stage: &Stage, offset: sdf::LayerOffset) -> Result<()> {
     stage.define_prim("/Prim")?.set_metadata(
         sdf::FieldKey::References.as_str(),
-        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+        vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
             prim_path: sdf::path("/Source")?,
             layer_offset: offset,
             ..Default::default()
@@ -7540,12 +7538,12 @@ fn arc_target_retimes_time_sample() -> Result<()> {
         let _ctx = stage.edit_context(target)?;
         stage
             .attribute("/Prim.x")?
-            .set_at(sdf::Value::Double(42.0), usd::TimeCode::new(15.0))?;
+            .set_at(vt::Value::Double(42.0), usd::TimeCode::new(15.0))?;
     }
 
     // The sample landed at source time 5 in the root layer...
     let samples = stage.attribute("/Source.x")?.time_samples()?.expect("samples");
-    assert_eq!(samples, vec![(5.0, sdf::Value::Double(42.0))]);
+    assert_eq!(samples, vec![(5.0, vt::Value::Double(42.0))]);
     // ...and reads back at stage time 15 through the offset reference.
     assert_eq!(
         stage.attribute("/Prim.x")?.get_at::<f64>(usd::TimeCode::new(15.0))?,
@@ -7564,8 +7562,8 @@ fn time_sample_times_retimed() -> Result<()> {
     stage
         .define_prim("/Source")?
         .create_attribute("x", "double")?
-        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-        .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+        .set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(vt::Value::Double(3.0), usd::TimeCode::new(10.0))?;
     reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 1.0))?;
 
     let attr = stage.attribute("/Prim.x")?;
@@ -7589,43 +7587,43 @@ fn timecode_values_retimed() -> Result<()> {
     let source = stage.define_prim("/Source")?;
     source
         .create_attribute("t", "timecode")?
-        .set(sdf::Value::TimeCode(sdf::TimeCode(5.0)))?;
+        .set(vt::Value::TimeCode(sdf::TimeCode(5.0)))?;
     source
         .create_attribute("many", "timecode[]")?
-        .set(sdf::Value::TimeCodeVec(vec![sdf::TimeCode(5.0), sdf::TimeCode(10.0)]))?;
+        .set(vt::Value::TimeCodeVec(vec![sdf::TimeCode(5.0), sdf::TimeCode(10.0)]))?;
     // A sampled timecode is retimed twice over: the sample's key moves, and so
     // does the time the sample holds.
     source
         .create_attribute("animated", "timecode")?
-        .set_at(sdf::Value::TimeCode(sdf::TimeCode(5.0)), usd::TimeCode::new(0.0))?;
+        .set_at(vt::Value::TimeCode(sdf::TimeCode(5.0)), usd::TimeCode::new(0.0))?;
     // Source time `t` composes to stage time `10 + 2t`.
     reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 2.0))?;
 
-    let scalar = Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)));
-    let array = Some(sdf::Value::TimeCodeVec(vec![sdf::TimeCode(20.0), sdf::TimeCode(30.0)]));
-    assert_eq!(stage.attribute("/Prim.t")?.get::<sdf::Value>()?, scalar);
-    assert_eq!(stage.attribute("/Prim.many")?.get::<sdf::Value>()?, array);
+    let scalar = Some(vt::Value::TimeCode(sdf::TimeCode(20.0)));
+    let array = Some(vt::Value::TimeCodeVec(vec![sdf::TimeCode(20.0), sdf::TimeCode(30.0)]));
+    assert_eq!(stage.attribute("/Prim.t")?.get::<vt::Value>()?, scalar);
+    assert_eq!(stage.attribute("/Prim.many")?.get::<vt::Value>()?, array);
     // A default resolves the same whether or not the read names a time: the
     // timed read takes the local-default shortcut, the untimed one full
     // composition, and the two must not disagree about the time frame.
     let at = usd::TimeCode::new(0.0);
-    assert_eq!(stage.attribute("/Prim.t")?.get_at::<sdf::Value>(at)?, scalar);
-    assert_eq!(stage.attribute("/Prim.many")?.get_at::<sdf::Value>(at)?, array);
-    assert_eq!(stage.attribute_query("/Prim.t")?.get_at::<sdf::Value>(at)?, scalar);
+    assert_eq!(stage.attribute("/Prim.t")?.get_at::<vt::Value>(at)?, scalar);
+    assert_eq!(stage.attribute("/Prim.many")?.get_at::<vt::Value>(at)?, array);
+    assert_eq!(stage.attribute_query("/Prim.t")?.get_at::<vt::Value>(at)?, scalar);
 
     let animated = stage.attribute("/Prim.animated")?;
-    let sampled = Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)));
+    let sampled = Some(vt::Value::TimeCode(sdf::TimeCode(20.0)));
     assert_eq!(animated.time_sample_times()?, vec![10.0]);
-    assert_eq!(animated.get_at::<sdf::Value>(usd::TimeCode::new(10.0))?, sampled);
+    assert_eq!(animated.get_at::<vt::Value>(usd::TimeCode::new(10.0))?, sampled);
     // The whole-map read and the cached query replay agree with the direct one.
     assert_eq!(
         animated.time_samples()?,
-        Some(vec![(10.0, sdf::Value::TimeCode(sdf::TimeCode(20.0)))])
+        Some(vec![(10.0, vt::Value::TimeCode(sdf::TimeCode(20.0)))])
     );
     assert_eq!(
         stage
             .attribute_query("/Prim.animated")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(10.0))?,
+            .get_at::<vt::Value>(usd::TimeCode::new(10.0))?,
         sampled
     );
     Ok(())
@@ -7645,18 +7643,18 @@ fn timecode_authoring_retimed() -> Result<()> {
         let _ctx = stage.edit_context(target)?;
         stage
             .attribute("/Prim.t")?
-            .set(sdf::Value::TimeCode(sdf::TimeCode(20.0)))?;
+            .set(vt::Value::TimeCode(sdf::TimeCode(20.0)))?;
     }
 
     // Stage time 20 inverse-maps to source time 5...
     assert_eq!(
-        stage.attribute("/Source.t")?.get::<sdf::Value>()?,
-        Some(sdf::Value::TimeCode(sdf::TimeCode(5.0)))
+        stage.attribute("/Source.t")?.get::<vt::Value>()?,
+        Some(vt::Value::TimeCode(sdf::TimeCode(5.0)))
     );
     // ...and composition maps it back through the arc.
     assert_eq!(
-        stage.attribute("/Prim.t")?.get::<sdf::Value>()?,
-        Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)))
+        stage.attribute("/Prim.t")?.get::<vt::Value>()?,
+        Some(vt::Value::TimeCode(sdf::TimeCode(20.0)))
     );
     Ok(())
 }
@@ -7727,15 +7725,15 @@ fn default_hides_inherited_samples() -> Result<()> {
     stage
         .override_prim("/C")?
         .create_attribute("x", "double")?
-        .set_at(sdf::Value::Double(2.0), usd::TimeCode::new(0.0))?;
+        .set_at(vt::Value::Double(2.0), usd::TimeCode::new(0.0))?;
     stage
         .define_prim("/A")?
         .set_metadata(
             sdf::FieldKey::InheritPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/C")?])),
+            vt::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/C")?])),
         )?
         .create_attribute("x", "double")?
-        .set(sdf::Value::Double(1.0))?;
+        .set(vt::Value::Double(1.0))?;
 
     assert_eq!(
         stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(0.0))?,
@@ -7752,8 +7750,8 @@ fn proximal_differs_from_default() -> Result<()> {
     stage
         .define_prim("/A")?
         .create_attribute("x", "double")?
-        .set(sdf::Value::Double(1.0))?
-        .set_at(sdf::Value::Double(2.0), usd::TimeCode::new(0.0))?;
+        .set(vt::Value::Double(1.0))?
+        .set_at(vt::Value::Double(2.0), usd::TimeCode::new(0.0))?;
 
     let attr = stage.attribute("/A.x")?;
     // Without a time, the time-varying source is the proximal one; asking about
@@ -7772,7 +7770,7 @@ fn proximal_differs_from_default() -> Result<()> {
 fn resolve_info_reports_block() -> Result<()> {
     let stage = in_memory_stage()?;
     let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
-    attr.clone().set(sdf::Value::Double(1.0))?;
+    attr.clone().set(vt::Value::Double(1.0))?;
     assert!(stage.attribute("/A.x")?.resolve_info()?.has_authored_value());
 
     attr.block()?;
@@ -7794,7 +7792,7 @@ fn spec_site_carries_offset() -> Result<()> {
     stage
         .define_prim("/Source")?
         .create_attribute("x", "double")?
-        .set(sdf::Value::Double(1.0))?;
+        .set(vt::Value::Double(1.0))?;
     reference_with_offset(&stage, sdf::LayerOffset::new(10.0, 2.0))?;
 
     let attr = stage.attribute("/Prim.x")?;
@@ -7816,7 +7814,7 @@ fn resolve_info_names_node() -> Result<()> {
     stage
         .define_prim("/Source")?
         .create_attribute("x", "double")?
-        .set(sdf::Value::Double(1.0))?;
+        .set(vt::Value::Double(1.0))?;
     reference_with_offset(&stage, sdf::LayerOffset::IDENTITY)?;
 
     let info = stage.attribute("/Prim.x")?.resolve_info()?;
@@ -8954,7 +8952,7 @@ fn chain_matches_property_stack() -> Result<()> {
 fn samples_have_no_chain() -> Result<()> {
     let stage = in_memory_stage()?;
     let samples = stage.define_prim("/S")?.create_attribute("x", "double")?;
-    samples.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?;
+    samples.set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?;
 
     let info = stage.attribute("/S.x")?.resolve_info_at(usd::TimeCode::new(0.0))?;
     assert_eq!(info.source(), usd::ResolveInfoSource::TimeSamples);
@@ -9330,7 +9328,7 @@ def \"S\"
 fn blocked_field_is_authored() -> Result<()> {
     let stage = in_memory_stage()?;
     let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
-    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock)?;
 
     let info = stage.attribute("/A.x")?.resolve_info()?;
     assert!(info.has_authored_value_opinion());
@@ -9348,8 +9346,8 @@ fn blocked_samples_fall_through() -> Result<()> {
     let attr = stage
         .define_prim("/A")?
         .create_attribute("x", "double")?
-        .set(sdf::Value::Double(5.0))?;
-    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+        .set(vt::Value::Double(5.0))?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock)?;
 
     let attr = stage.attribute("/A.x")?;
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(5.0));
@@ -9410,7 +9408,7 @@ fn default_time_sees_samples() -> Result<()> {
     stage
         .define_prim("/A")?
         .create_attribute("x", "double")?
-        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?;
+        .set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?;
 
     let info = stage.attribute("/A.x")?.resolve_info_at(None)?;
     assert_eq!(info.source(), usd::ResolveInfoSource::None);
@@ -9428,8 +9426,8 @@ fn mixed_blocks_track_time() -> Result<()> {
     stage
         .define_prim("/A")?
         .create_attribute("x", "double")?
-        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-        .set_at(sdf::Value::ValueBlock, usd::TimeCode::new(10.0))?;
+        .set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(vt::Value::ValueBlock, usd::TimeCode::new(10.0))?;
 
     let attr = stage.attribute("/A.x")?;
     let live = attr.resolve_info_at(usd::TimeCode::new(0.0))?;
@@ -9458,8 +9456,8 @@ fn blocked_values_report_block() -> Result<()> {
     stage
         .define_prim("/A")?
         .create_attribute("x", "double")?
-        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-        .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?
+        .set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(vt::Value::Double(3.0), usd::TimeCode::new(10.0))?
         .block()?;
 
     let attr = stage.attribute("/A.x")?;
@@ -9503,7 +9501,7 @@ def \"A\"
 
     let stage = Stage::open(root.to_str().unwrap())?;
     let attr = stage.create_attribute("/A.x", "double")?;
-    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock)?;
 
     let attr = stage.attribute("/A.x")?;
     assert_eq!(attr.time_samples()?, None);
@@ -9521,11 +9519,11 @@ fn empty_samples_no_source() -> Result<()> {
     let attr = stage
         .define_prim("/B")?
         .create_attribute("y", "double")?
-        .set(sdf::Value::Double(7.0))?;
+        .set(vt::Value::Double(7.0))?;
     author_raw_field(
         &attr,
         sdf::FieldKey::TimeSamples.as_str(),
-        sdf::Value::TimeSamples(vec![]),
+        vt::Value::TimeSamples(vec![]),
     )?;
 
     let attr = stage.attribute("/B.y")?;
@@ -9548,8 +9546,8 @@ fn time_sample_times_masked() -> Result<()> {
     stage.layer_mut(&root_id).expect("root layer is live").edit(|e| {
         sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "")?;
         let mut x = sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?;
-        x.set_time_sample(0.0, sdf::Value::Double(1.0))?;
-        x.set_time_sample(10.0, sdf::Value::Double(3.0))?;
+        x.set_time_sample(0.0, vt::Value::Double(1.0))?;
+        x.set_time_sample(10.0, vt::Value::Double(3.0))?;
         Ok(())
     })?;
     stage.define_prim("/B")?.create_attribute("y", "double")?;
@@ -9640,12 +9638,12 @@ fn value_f64(stage: &Stage, attr: &str, time: f64) -> Option<f64> {
     match stage
         .attribute(attr)
         .unwrap()
-        .get_at::<sdf::Value>(usd::TimeCode::new(time))
+        .get_at::<vt::Value>(usd::TimeCode::new(time))
         .expect("value_at")
     {
-        Some(sdf::Value::Float(v)) => Some(v as f64),
-        Some(sdf::Value::Double(v)) => Some(v),
-        Some(sdf::Value::Int64(v)) => Some(v as f64),
+        Some(vt::Value::Float(v)) => Some(v as f64),
+        Some(vt::Value::Double(v)) => Some(v),
+        Some(vt::Value::Int64(v)) => Some(v as f64),
         _ => None,
     }
 }
@@ -9856,7 +9854,7 @@ fn query_clip_fallback() -> Result<()> {
     let q = attr.query();
     for t in [0.0, 7.0, 10.0, 15.0] {
         assert_eq!(
-            q.get_at::<sdf::Value>(usd::TimeCode::new(t))?,
+            q.get_at::<vt::Value>(usd::TimeCode::new(t))?,
             attr.get_at(usd::TimeCode::new(t))?
         );
     }
@@ -10394,7 +10392,7 @@ fn value_queries_agree() -> Result<()> {
         (
             "plain default",
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?;
+                attr.set(vt::Value::Double(1.0))?;
                 Ok(())
             })?,
             "/A.x",
@@ -10402,8 +10400,8 @@ fn value_queries_agree() -> Result<()> {
         (
             "plain samples",
             authored_shape(|attr| {
-                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+                attr.set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(vt::Value::Double(3.0), usd::TimeCode::new(10.0))?;
                 Ok(())
             })?,
             "/A.x",
@@ -10411,7 +10409,7 @@ fn value_queries_agree() -> Result<()> {
         (
             "blocked default",
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?.set(sdf::Value::ValueBlock)?;
+                attr.set(vt::Value::Double(1.0))?.set(vt::Value::ValueBlock)?;
                 Ok(())
             })?,
             "/A.x",
@@ -10419,8 +10417,8 @@ fn value_queries_agree() -> Result<()> {
         (
             "blocked timeSamples field",
             authored_shape(|attr| {
-                let attr = attr.set(sdf::Value::Double(5.0))?;
-                author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+                let attr = attr.set(vt::Value::Double(5.0))?;
+                author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock)?;
                 Ok(())
             })?,
             "/A.x",
@@ -10428,8 +10426,8 @@ fn value_queries_agree() -> Result<()> {
         (
             "every sample blocked",
             authored_shape(|attr| {
-                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?
+                attr.set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(vt::Value::Double(3.0), usd::TimeCode::new(10.0))?
                     .block()?;
                 Ok(())
             })?,
@@ -10438,8 +10436,8 @@ fn value_queries_agree() -> Result<()> {
         (
             "mixed blocked samples",
             authored_shape(|attr| {
-                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-                    .set_at(sdf::Value::ValueBlock, usd::TimeCode::new(10.0))?;
+                attr.set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(vt::Value::ValueBlock, usd::TimeCode::new(10.0))?;
                 Ok(())
             })?,
             "/A.x",
@@ -10447,11 +10445,11 @@ fn value_queries_agree() -> Result<()> {
         (
             "empty sample map",
             authored_shape(|attr| {
-                let attr = attr.set(sdf::Value::Double(1.0))?;
+                let attr = attr.set(vt::Value::Double(1.0))?;
                 author_raw_field(
                     &attr,
                     sdf::FieldKey::TimeSamples.as_str(),
-                    sdf::Value::TimeSamples(Vec::new()),
+                    vt::Value::TimeSamples(Vec::new()),
                 )?;
                 Ok(())
             })?,
@@ -10512,7 +10510,7 @@ fn assert_queries_agree(stage: &Stage, path: &str, time: f64, case: &str) {
     }
 
     let info = attr.resolve_info_at(at).expect("resolve_info_at");
-    let value = attr.get_at::<sdf::Value>(at).expect("get_at");
+    let value = attr.get_at::<vt::Value>(at).expect("get_at");
     assert_eq!(
         value.is_some(),
         info.source() != usd::ResolveInfoSource::None,
@@ -10545,8 +10543,8 @@ fn assert_queries_agree(stage: &Stage, path: &str, time: f64, case: &str) {
 #[test]
 fn unusable_samples_unauthored() -> Result<()> {
     for field in [
-        sdf::Value::TimeSamples(Vec::new()),
-        sdf::Value::String("not a sample map".into()),
+        vt::Value::TimeSamples(Vec::new()),
+        vt::Value::String("not a sample map".into()),
     ] {
         let stage = in_memory_stage()?;
         let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
@@ -10566,7 +10564,7 @@ fn unusable_samples_unauthored() -> Result<()> {
             assert_eq!(info.source(), usd::ResolveInfoSource::None, "{field:?} at {mode}");
             assert!(!info.value_is_blocked(), "{field:?} at {mode}");
         }
-        assert_eq!(attr.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?, None, "{field:?}");
+        assert_eq!(attr.get_at::<vt::Value>(usd::TimeCode::new(0.0))?, None, "{field:?}");
         assert_eq!(attr.num_time_samples()?, 0, "{field:?}");
     }
     Ok(())
@@ -10579,7 +10577,7 @@ fn unusable_samples_unauthored() -> Result<()> {
 fn blocked_samples_every_mode() -> Result<()> {
     let stage = in_memory_stage()?;
     let attr = stage.define_prim("/A")?.create_attribute("x", "double")?;
-    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+    author_raw_field(&attr, sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock)?;
 
     let attr = stage.attribute("/A.x")?;
     for (mode, info) in [
@@ -10675,7 +10673,7 @@ def \"Model\"
 
     let stage = Stage::open(&root)?;
     let attr = stage.attribute("/Model.size")?;
-    assert_eq!(attr.get_at::<sdf::Value>(usd::TimeCode::new(5.0))?, None);
+    assert_eq!(attr.get_at::<vt::Value>(usd::TimeCode::new(5.0))?, None);
 
     let info = attr.resolve_info()?;
     assert_eq!(info.source(), usd::ResolveInfoSource::None);
@@ -10758,7 +10756,7 @@ fn source_answers_conform() -> Result<()> {
                 authored: true,
             },
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?;
+                attr.set(vt::Value::Double(1.0))?;
                 Ok(())
             })?,
             "/A.x",
@@ -10772,7 +10770,7 @@ fn source_answers_conform() -> Result<()> {
                 authored: true,
             },
             authored_shape(|attr| {
-                attr.set(sdf::Value::Double(1.0))?.set(sdf::Value::ValueBlock)?;
+                attr.set(vt::Value::Double(1.0))?.set(vt::Value::ValueBlock)?;
                 Ok(())
             })?,
             "/A.x",
@@ -10786,8 +10784,8 @@ fn source_answers_conform() -> Result<()> {
                 authored: true,
             },
             authored_shape(|attr| {
-                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+                attr.set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(vt::Value::Double(3.0), usd::TimeCode::new(10.0))?;
                 Ok(())
             })?,
             "/A.x",
@@ -10801,8 +10799,8 @@ fn source_answers_conform() -> Result<()> {
                 authored: true,
             },
             authored_shape(|attr| {
-                attr.set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
-                    .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?
+                attr.set_at(vt::Value::Double(1.0), usd::TimeCode::new(0.0))?
+                    .set_at(vt::Value::Double(3.0), usd::TimeCode::new(10.0))?
                     .block()?;
                 Ok(())
             })?,
@@ -10848,7 +10846,7 @@ fn source_answers_conform() -> Result<()> {
         let attr = stage.attribute(path)?;
         let info = attr.resolve_info_at(at)?;
         assert_eq!(
-            attr.get_at::<sdf::Value>(at)?.is_some(),
+            attr.get_at::<vt::Value>(at)?.is_some(),
             row.reads,
             "{}: the value read",
             row.case
@@ -11207,25 +11205,25 @@ fn clip_added_across_reference() -> Result<()> {
 
 /// A `clips` dictionary naming a single set whose clip carries `Child.size`,
 /// anchored at `prim_path`.
-fn clip_metadata(prim_path: &str) -> sdf::Value {
+fn clip_metadata(prim_path: &str) -> vt::Value {
     let set = HashMap::from([
         (
             "assetPaths".to_string(),
-            sdf::Value::AssetPathVec(vec!["./clip.usda".into()]),
+            vt::Value::AssetPathVec(vec!["./clip.usda".into()]),
         ),
         (
             "manifestAssetPath".to_string(),
-            sdf::Value::AssetPath("./manifest.usda".into()),
+            vt::Value::AssetPath("./manifest.usda".into()),
         ),
-        ("primPath".to_string(), sdf::Value::String(prim_path.to_string())),
+        ("primPath".to_string(), vt::Value::String(prim_path.to_string())),
         (
             "active".to_string(),
-            sdf::Value::Vec2dVec(vec![openusd::gf::vec2d(0.0, 0.0)]),
+            vt::Value::Vec2dVec(vec![openusd::gf::vec2d(0.0, 0.0)]),
         ),
     ]);
-    sdf::Value::Dictionary(sdf::Dictionary::from([(
+    vt::Value::Dictionary(vt::Dictionary::from([(
         "default".to_string(),
-        sdf::Value::Dictionary(set.into()),
+        vt::Value::Dictionary(set.into()),
     )]))
 }
 
@@ -11390,7 +11388,7 @@ fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
     let mut layer = sdf::Layer::new_anonymous(identifier);
     layer.edit(|e| {
         sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
-            .set_default(sdf::Value::Double(value))?;
+            .set_default(vt::Value::Double(value))?;
         Ok(())
     })?;
     Ok(layer)
@@ -11414,8 +11412,8 @@ fn insert_layer_authors_metadata() -> Result<()> {
     stage.insert_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
 
     assert_eq!(
-        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+        stage.attribute("/A.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
     assert_eq!(authored_sublayers(&stage), vec![weak_id]);
     Ok(())
@@ -11431,14 +11429,14 @@ fn remove_layer_clears_metadata() -> Result<()> {
     let weak_id = weak.identifier().to_string();
     stage.insert_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
     assert_eq!(
-        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Double(5.0))
+        stage.attribute("/A.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(5.0))
     );
 
     assert!(stage.remove_layer(&root_id, &weak_id)?, "a sublayer was removed");
 
     assert_eq!(
-        stage.attribute("/A.x")?.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        stage.attribute("/A.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         None,
         "the removed sublayer's opinion is gone"
     );
@@ -11637,19 +11635,19 @@ fn permission_edit_does_not_inert_opinion() -> Result<()> {
     )?;
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(
-        stage.attribute("/Inst.attr")?.get::<sdf::Value>()?,
-        Some(sdf::Value::Double(5.0)),
+        stage.attribute("/Inst.attr")?.get::<vt::Value>()?,
+        Some(vt::Value::Double(5.0)),
         "the inherited opinion contributes before the permission edit",
     );
 
     stage.prim("/Class")?.set_metadata(
         sdf::FieldKey::Permission.as_str(),
-        sdf::Value::Permission(sdf::Permission::Private),
+        vt::Value::Permission(sdf::Permission::Private),
     )?;
 
     assert_eq!(
-        stage.attribute("/Inst.attr")?.get::<sdf::Value>()?,
-        Some(sdf::Value::Double(5.0)),
+        stage.attribute("/Inst.attr")?.get::<vt::Value>()?,
+        Some(vt::Value::Double(5.0)),
         "permission is inert metadata; the inherited opinion still resolves",
     );
     Ok(())
@@ -11742,7 +11740,7 @@ fn target_edit_fans_out_to_dependent() -> Result<()> {
         .set_targets(["/Class/Local"])?;
     stage.define_prim("/Inst")?.set_metadata(
         sdf::FieldKey::InheritPaths.as_str(),
-        sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/Class")?])),
+        vt::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/Class")?])),
     )?;
     stage.define_prim("/Inst/Local")?;
     stage.define_prim("/Inst/Other")?;
@@ -11789,7 +11787,7 @@ def "Inst" (
     assert!(!stage.is_indexed(&sdf::path("/_Class")?), "nothing asked for the class");
 
     let root = stage.root_layer().identifier().to_owned();
-    let reference = sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+    let reference = vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
         prim_path: sdf::path("/Lib")?,
         ..Default::default()
     }]));
@@ -11939,7 +11937,7 @@ fn instance_target_memo_not_stale() -> Result<()> {
     )?;
     let attr = "/Owner.x";
     let target = sdf::path("/Target")?;
-    let drop_inherit = || sdf::Value::PathListOp(sdf::PathListOp::explicit(Vec::<sdf::Path>::new()));
+    let drop_inherit = || vt::Value::PathListOp(sdf::PathListOp::explicit(Vec::<sdf::Path>::new()));
 
     // Stage A: query first (populating any memo). `Target` is an instance of
     // `Class`, so the class connection to it is dropped. Then drop `Target`'s
@@ -12026,13 +12024,13 @@ fn sublayer_stronger_opinion_wins() -> Result<()> {
     // /World/Cube.primvars:displayColor is overridden to blue [(0,0,1)] in
     // the stronger layer, base has red [(1,0,0)].
     let prop_path = sdf::Path::new("/World/Cube")?.append_property("primvars:displayColor")?;
-    let value = stage.attribute(&prop_path)?.get::<sdf::Value>()?;
+    let value = stage.attribute(&prop_path)?.get::<vt::Value>()?;
     assert!(value.is_some(), "displayColor should have a composed value");
 
     // The composed value must come from the stronger layer (blue),
     // not the weaker layer (red). Verify by checking it's not the base red.
     let value = value.unwrap();
-    let base_red = sdf::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0)]);
+    let base_red = vt::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0)]);
     assert_ne!(value, base_red, "stronger layer opinion should win over weaker");
 
     Ok(())
@@ -12085,11 +12083,11 @@ fn inherit_local_opinion_wins() -> Result<()> {
 
     // The local displayColor (red) should win over inherited (green).
     let prop = sdf::Path::new("/World/cubeWithSetColor")?.append_property("primvars:displayColor")?;
-    let value = stage.attribute(&prop)?.get::<sdf::Value>()?;
+    let value = stage.attribute(&prop)?.get::<vt::Value>()?;
     assert!(value.is_some());
 
     // Verify it's the local red, not the inherited green.
-    let green = sdf::Value::Vec3fVec(vec![gf::vec3f(0.0, 0.8, 0.0)]);
+    let green = vt::Value::Vec3fVec(vec![gf::vec3f(0.0, 0.8, 0.0)]);
     assert_ne!(value.unwrap(), green, "local opinion should win over inherited");
 
     Ok(())
@@ -12124,11 +12122,11 @@ fn specialize_local_opinion_wins() -> Result<()> {
     let stage = Stage::open(&path)?;
 
     let prop = sdf::Path::new("/World/cubeScene/specializes")?.append_property("primvars:displayColor")?;
-    let value = stage.attribute(&prop)?.get::<sdf::Value>()?;
+    let value = stage.attribute(&prop)?.get::<vt::Value>()?;
     assert!(value.is_some());
 
     // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
-    let red = sdf::Value::Vec3fVec(vec![gf::vec3f(0.8, 0.0, 0.0)]);
+    let red = vt::Value::Vec3fVec(vec![gf::vec3f(0.8, 0.0, 0.0)]);
     assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
 
     Ok(())
@@ -12389,13 +12387,13 @@ fn custom_layer_data() -> Result<()> {
     let stage = in_memory_stage()?;
     assert!(stage.custom_layer_data()?.is_none());
 
-    let dict = sdf::Value::Dictionary([("tool".to_string(), sdf::Value::String("rs".into()))].into());
+    let dict = vt::Value::Dictionary([("tool".to_string(), vt::Value::String("rs".into()))].into());
     stage.set_custom_layer_data(dict)?;
 
-    let Some(sdf::Value::Dictionary(read)) = stage.custom_layer_data()? else {
+    let Some(vt::Value::Dictionary(read)) = stage.custom_layer_data()? else {
         panic!("customLayerData should resolve to a dictionary");
     };
-    assert_eq!(read.get("tool"), Some(&sdf::Value::String("rs".into())));
+    assert_eq!(read.get("tool"), Some(&vt::Value::String("rs".into())));
     Ok(())
 }
 
@@ -12568,7 +12566,7 @@ def "Model"
     assert_eq!(
         stage
             .attribute("/Model.ghost")?
-            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         None
     );
     Ok(())
@@ -12647,7 +12645,7 @@ fn listener_info_under_variant_target() -> Result<()> {
         let mut prim = e.prim_mut("/Prim")?.expect("the prim spec is on the root layer");
         prim.set(
             sdf::FieldKey::VariantSetNames.as_str(),
-            sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
+            vt::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
         );
         prim.set_variant_selection("set", "sel")?;
         Ok(())
@@ -12959,7 +12957,7 @@ fn vars_edit_reports_prototypes() -> Result<()> {
     stage
         .layer_mut(&model)
         .expect("the referenced layer is live")
-        .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".into()))])))?;
+        .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".into()))])))?;
     // A direct layer edit is queued; the composed notice lands on the next drain.
     stage.prim("/A")?.is_valid()?;
 
@@ -12982,7 +12980,7 @@ fn significant_edit_reports_prototypes() -> Result<()> {
     let notices = capture_notices(&stage);
     stage
         .prim("/A")?
-        .set_metadata(sdf::FieldKey::Instanceable.as_str(), sdf::Value::Bool(false))?;
+        .set_metadata(sdf::FieldKey::Instanceable.as_str(), vt::Value::Bool(false))?;
 
     let reported = &notices.borrow().resynced;
     assert!(reported.contains(&sdf::path("/A")?), "the edited prim: {reported:?}");
@@ -13318,7 +13316,7 @@ def \"P\" {
     stage.layer_mut(&payload_id).expect("payload layer is live").edit(|e| {
         e.attribute_mut("/P.v")?
             .expect("authored attribute")
-            .set_default(sdf::Value::Double(7.0))?;
+            .set_default(vt::Value::Double(7.0))?;
         Ok(())
     })?;
     assert_eq!(

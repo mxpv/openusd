@@ -2,7 +2,7 @@
 //! [`gf::Camera`], and the exposure it scales by.
 
 use openusd::usd::{self, SchemaBase};
-use openusd::{Result, gf, sdf, tf};
+use openusd::{Result, gf, tf, vt};
 
 use super::xformable::StackEdit;
 use super::{Camera, CameraSchema, ImageableExt, Projection};
@@ -118,7 +118,7 @@ impl Camera {
         };
         let range = camera.clipping_range;
         let range = gf::vec2f(range.min(), range.max());
-        let planes = sdf::Value::Vec4fVec(camera.clipping_planes.clone());
+        let planes = vt::Value::Vec4fVec(camera.clipping_planes.clone());
 
         prim.stage().edit(|edit| -> Result<(), SchemaError> {
             stack.apply(edit, prim)?;
@@ -167,8 +167,9 @@ impl Camera {
 
 #[cfg(test)]
 mod tests {
+    use openusd::gf;
     use openusd::usd::{self, SchemaBase};
-    use openusd::{gf, sdf};
+    use openusd::vt;
 
     use crate::SchemaError;
     use crate::geom::xformable::tests::assert_close;
@@ -209,7 +210,7 @@ mod tests {
         let prim = Camera::define(&stage, "/camera")?;
         let matrix = gf::Mat4d::scale([3.0, 3.0, 3.0]);
         prim.make_matrix_xform()?.set(matrix)?;
-        prim.projection_attr().set(sdf::Value::token("orthographic"))?;
+        prim.projection_attr().set(vt::Value::token("orthographic"))?;
         prim.horizontal_aperture_attr().set(5.1_f32)?;
         prim.vertical_aperture_attr().set(2.0_f32)?;
         prim.horizontal_aperture_offset_attr().set(-0.11_f32)?;
@@ -217,7 +218,7 @@ mod tests {
         prim.focal_length_attr().set(28.0_f32)?;
         prim.clipping_range_attr().set(gf::vec2f(5.0, 15.0))?;
         let planes = vec![gf::vec4f(1.0, 2.0, 3.0, 4.0), gf::vec4f(8.0, 7.0, 6.0, 5.0)];
-        prim.clipping_planes_attr().set(sdf::Value::Vec4fVec(planes.clone()))?;
+        prim.clipping_planes_attr().set(vt::Value::Vec4fVec(planes.clone()))?;
         prim.f_stop_attr().set(1.2_f32)?;
         prim.focus_distance_attr().set(300.0_f32)?;
 

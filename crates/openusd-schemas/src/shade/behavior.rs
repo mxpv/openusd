@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use openusd::Result;
 use openusd::usd::{SchemaBase, SchemaKind};
-use openusd::{sdf, tf, usd};
+use openusd::{tf, usd, vt};
 
 use super::tokens;
 use super::{ConnectableAPI, Input, Output};
@@ -470,7 +470,7 @@ fn configured(info: &usd::SchemaInfo) -> Arc<dyn Behavior> {
 
 /// The bool `info`'s plug info holds under `key`, if it holds one.
 fn plug_flag(info: &usd::SchemaInfo, key: &str) -> Option<bool> {
-    info.plug_info().get(key).and_then(sdf::Value::try_as_bool_ref).copied()
+    info.plug_info().get(key).and_then(vt::Value::try_as_bool_ref).copied()
 }
 
 /// Add the behavior of each `UsdShade` schema that has one: NodeGraph
@@ -506,7 +506,7 @@ pub(crate) fn register_behaviors(registry: &mut BehaviorRegistry) {
 /// behavior of a site's own to reuse with its [`NodeKind`].
 pub mod rules {
     use openusd::Result;
-    use openusd::{sdf, tf, usd};
+    use openusd::{tf, usd, vt};
 
     use super::super::tokens::{CONNECTABILITY, FULL, INPUTS, INTERFACE_ONLY};
     use super::super::{Input, Output};
@@ -639,8 +639,8 @@ pub mod rules {
     /// is no token, and reads as `full` (C++ `GetMetadata` failing on it).
     fn connectability(attribute: &usd::Attribute) -> Result<Option<tf::Token>> {
         Ok(attribute
-            .metadata::<sdf::Value>(CONNECTABILITY)?
-            .and_then(sdf::Value::try_as_token))
+            .metadata::<vt::Value>(CONNECTABILITY)?
+            .and_then(vt::Value::try_as_token))
     }
 }
 
@@ -1165,10 +1165,10 @@ pub(crate) mod tests {
             .plug_info(&[Field::string(PROVIDES_BEHAVIOR, "true")]),
         SchemaDecl::new("FalseFlagAPI", SchemaKind::SingleApplyApi)
             .bases(&["APISchemaBase"])
-            .plug_info(&[Field::new(PROVIDES_BEHAVIOR, || sdf::Value::Bool(false))]),
+            .plug_info(&[Field::new(PROVIDES_BEHAVIOR, || vt::Value::Bool(false))]),
         SchemaDecl::new("IntContainerAPI", SchemaKind::SingleApplyApi)
             .bases(&["APISchemaBase"])
-            .plug_info(&[PROVIDES, Field::new(IS_CONTAINER, || sdf::Value::Int(1))]),
+            .plug_info(&[PROVIDES, Field::new(IS_CONTAINER, || vt::Value::Int(1))]),
         SchemaDecl::new("RegisteredAndConfigured", SchemaKind::ConcreteTyped)
             .bases(&["Typed"])
             .plug_info(&[PROVIDES, NO_ENCAPSULATION]),
@@ -1178,10 +1178,10 @@ pub(crate) mod tests {
         SchemaDecl::new("UnderUntyped", SchemaKind::ConcreteTyped).bases(&["UntypedConfigured"]),
     ];
 
-    const PROVIDES: Field<'static> = Field::new(PROVIDES_BEHAVIOR, || sdf::Value::Bool(true));
-    const CONTAINER: Field<'static> = Field::new(IS_CONTAINER, || sdf::Value::Bool(true));
-    const NOT_CONTAINER: Field<'static> = Field::new(IS_CONTAINER, || sdf::Value::Bool(false));
-    const NO_ENCAPSULATION: Field<'static> = Field::new(REQUIRES_ENCAPSULATION, || sdf::Value::Bool(false));
+    const PROVIDES: Field<'static> = Field::new(PROVIDES_BEHAVIOR, || vt::Value::Bool(true));
+    const CONTAINER: Field<'static> = Field::new(IS_CONTAINER, || vt::Value::Bool(true));
+    const NOT_CONTAINER: Field<'static> = Field::new(IS_CONTAINER, || vt::Value::Bool(false));
+    const NO_ENCAPSULATION: Field<'static> = Field::new(REQUIRES_ENCAPSULATION, || vt::Value::Bool(false));
 
     /// The flags of the behavior the default registry finds for the prim at
     /// `path`, `(container, encapsulation)`, or `None` where it has none.
@@ -1345,7 +1345,7 @@ pub(crate) mod tests {
             let info = schemas.schema_info(&tf::Token::from(schema)).expect(schema);
             assert_eq!(
                 info.plug_info().get(PROVIDES_BEHAVIOR),
-                Some(&sdf::Value::Bool(true)),
+                Some(&vt::Value::Bool(true)),
                 "{schema}"
             );
             assert!(crate::connectable_registry().behaviors.contains_key(schema), "{schema}");

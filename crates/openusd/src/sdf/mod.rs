@@ -11,10 +11,10 @@ use bytemuck::{Pod, Zeroable};
 use strum::FromRepr;
 
 use crate::tf::Token;
+use crate::vt::{Dictionary, Value};
 
 mod asset_path;
 mod change;
-mod coerce;
 mod copy;
 mod data;
 pub mod expr;
@@ -28,14 +28,9 @@ mod path_table;
 pub mod schema;
 pub mod sink;
 mod spec;
-pub(crate) mod stream_out;
-mod token_value;
 mod unit;
-mod value;
 mod value_type;
 
-#[doc(inline)]
-pub use crate::impl_token_value;
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
     AssetExpressionFailure, AssetOutcome, evaluate_asset_paths, holds_asset_expression, resolve_asset_paths,
@@ -74,7 +69,6 @@ pub use spec::{
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
 pub use unit::{Unit, UnitCategory};
-pub use value::{CastError, Dictionary, FromValue, FromValueCast, Value, ValueKind};
 pub use value_type::{Dimensions, Role, ValueTypeError, ValueTypeName};
 
 #[repr(i32)]
@@ -503,6 +497,27 @@ pub type RelocateList = Vec<Relocate>;
 
 /// A boxed layer data source, used throughout the layer stack.
 pub type LayerData = Box<dyn AbstractData>;
+
+impl Value {
+    /// Whether this value holds a time coordinate that
+    /// [`LayerOffset::apply_to_value`](LayerOffset::apply_to_value)
+    /// retimes: a `timecode` at any depth — including inside a dictionary or a
+    /// heterogeneous array — or a sample map, whose keys are times whatever the
+    /// samples themselves hold.
+    ///
+    /// The single source of truth for the time-bearing variants, so the
+    /// retiming and the callers that decide whether to pay for it cannot
+    /// disagree. Checking it lets a borrowed value skip the clone a retiming
+    /// would need.
+    pub fn holds_time_codes(&self) -> bool {
+        match self {
+            Value::TimeCode(_) | Value::TimeCodeVec(_) | Value::TimeSamples(_) => true,
+            Value::Dictionary(entries) => entries.values().any(Value::holds_time_codes),
+            Value::ValueVec(values) => values.iter().any(Value::holds_time_codes),
+            _ => false,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

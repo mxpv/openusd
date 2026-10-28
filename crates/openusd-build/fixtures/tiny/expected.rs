@@ -83,7 +83,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Vec3d(
+                                        || ::openusd::vt::Value::Vec3d(
                                             ::openusd::gf::vec3d(1f64, 1f64, 1f64),
                                         ),
                                     ),
@@ -106,7 +106,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Double(1f64),
+                                        || ::openusd::vt::Value::Double(1f64),
                                     ),
                                 ],
                             ),
@@ -125,7 +125,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Vec3d(
+                                        || ::openusd::vt::Value::Vec3d(
                                             ::openusd::gf::vec3d(2f64, 2f64, 2f64),
                                         ),
                                     ),
@@ -148,7 +148,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Double(1f64),
+                                        || ::openusd::vt::Value::Double(1f64),
                                     ),
                                 ],
                             ),
@@ -158,7 +158,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Double(1f64),
+                                        || ::openusd::vt::Value::Double(1f64),
                                     ),
                                 ],
                             ),
@@ -205,7 +205,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Int(0i32),
+                                        || ::openusd::vt::Value::Int(0i32),
                                     ),
                                 ],
                             ),
@@ -218,7 +218,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 &[
                                     ::openusd::usd::Field::new(
                                         "default",
-                                        || ::openusd::sdf::Value::Vec3d(
+                                        || ::openusd::vt::Value::Vec3d(
                                             ::openusd::gf::vec3d(0f64, 0f64, 0f64),
                                         ),
                                     ),
@@ -238,10 +238,10 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 ),
             ::openusd::usd::MetadataDecl::new("tinyRole", "token")
                 .applies_to(::openusd::usd::MetadataTargets::ATTRIBUTES)
-                .fallback(|| ::openusd::sdf::Value::token("plain")),
+                .fallback(|| ::openusd::vt::Value::token("plain")),
             ::openusd::usd::MetadataDecl::new("tinyUnits", "double")
                 .applies_to(::openusd::usd::MetadataTargets::LAYERS)
-                .fallback(|| ::openusd::sdf::Value::Double(1f64)),
+                .fallback(|| ::openusd::vt::Value::Double(1f64)),
         ],
     )
     .kinds(
@@ -903,12 +903,12 @@ pub trait PrimMetadata {
     /// The `tinyHints` metadata field, declared `dictionary`.
     fn tiny_hints(
         &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>>;
+    ) -> ::openusd::Result<::std::option::Option<::openusd::vt::Value>>;
     /// Authors the field on the edit target, and returns the
     /// handle.
     fn set_tiny_hints(
         self,
-        value: ::openusd::sdf::Value,
+        value: ::openusd::vt::Value,
     ) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError>
     where
         Self: ::std::marker::Sized;
@@ -917,12 +917,12 @@ pub trait PrimMetadata {
 impl PrimMetadata for ::openusd::usd::Prim {
     fn tiny_hints(
         &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>> {
-        self.metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
+    ) -> ::openusd::Result<::std::option::Option<::openusd::vt::Value>> {
+        self.metadata::<::openusd::vt::Value>(tokens::TINY_HINTS)
     }
     fn set_tiny_hints(
         self,
-        value: ::openusd::sdf::Value,
+        value: ::openusd::vt::Value,
     ) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError> {
         self.set_metadata(tokens::TINY_HINTS, value)
     }
@@ -935,12 +935,12 @@ pub trait AttributeMetadata {
     /// The `tinyHints` metadata field, declared `dictionary`.
     fn tiny_hints(
         &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>>;
+    ) -> ::openusd::Result<::std::option::Option<::openusd::vt::Value>>;
     /// Authors the field on the edit target, and returns the
     /// handle.
     fn set_tiny_hints(
         self,
-        value: ::openusd::sdf::Value,
+        value: ::openusd::vt::Value,
     ) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError>
     where
         Self: ::std::marker::Sized;
@@ -965,12 +965,12 @@ pub trait AttributeMetadata {
 impl AttributeMetadata for ::openusd::usd::Attribute {
     fn tiny_hints(
         &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>> {
-        self.metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
+    ) -> ::openusd::Result<::std::option::Option<::openusd::vt::Value>> {
+        self.metadata::<::openusd::vt::Value>(tokens::TINY_HINTS)
     }
     fn set_tiny_hints(
         self,
-        value: ::openusd::sdf::Value,
+        value: ::openusd::vt::Value,
     ) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError> {
         self.set_metadata(tokens::TINY_HINTS, value)
     }
@@ -994,12 +994,12 @@ pub trait RelationshipMetadata {
     /// The `tinyHints` metadata field, declared `dictionary`.
     fn tiny_hints(
         &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>>;
+    ) -> ::openusd::Result<::std::option::Option<::openusd::vt::Value>>;
     /// Authors the field on the edit target, and returns the
     /// handle.
     fn set_tiny_hints(
         self,
-        value: ::openusd::sdf::Value,
+        value: ::openusd::vt::Value,
     ) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError>
     where
         Self: ::std::marker::Sized;
@@ -1008,12 +1008,12 @@ pub trait RelationshipMetadata {
 impl RelationshipMetadata for ::openusd::usd::Relationship {
     fn tiny_hints(
         &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::sdf::Value>> {
-        self.metadata::<::openusd::sdf::Value>(tokens::TINY_HINTS)
+    ) -> ::openusd::Result<::std::option::Option<::openusd::vt::Value>> {
+        self.metadata::<::openusd::vt::Value>(tokens::TINY_HINTS)
     }
     fn set_tiny_hints(
         self,
-        value: ::openusd::sdf::Value,
+        value: ::openusd::vt::Value,
     ) -> ::std::result::Result<Self, ::openusd::usd::StageAuthoringError> {
         self.set_metadata(tokens::TINY_HINTS, value)
     }
@@ -1036,7 +1036,7 @@ pub trait StageMetadata {
 impl StageMetadata for ::openusd::usd::Stage {
     fn tiny_units(&self) -> ::openusd::Result<::std::option::Option<f64>> {
         self.stage_metadata(tokens::TINY_UNITS)?
-            .map(<f64 as ::std::convert::TryFrom<::openusd::sdf::Value>>::try_from)
+            .map(<f64 as ::std::convert::TryFrom<::openusd::vt::Value>>::try_from)
             .transpose()
             .map_err(::std::convert::Into::into)
     }

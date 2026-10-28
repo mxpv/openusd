@@ -4,7 +4,7 @@
 //! assertions in `file_formats/tests/test_binary.py` rather than as JSON
 //! baselines (unlike the text suite). These tests backport those assertions
 //! to Rust: each case reads the same `gen_*.usdc` fixture through `CrateData`
-//! and asserts the composed `sdf::Value` matches the reference expectation.
+//! and asserts the composed `vt::Value` matches the reference expectation.
 //!
 //! A few reference cases reach into parser internals (inline-vs-not encoding,
 //! half/float bit conversion) that are not observable through `AbstractData`.
@@ -19,9 +19,10 @@
 use std::fs;
 
 use openusd::gf::f16;
-use openusd::sdf::{self, AbstractData, LayerOffset, Payload, Permission, Specifier, Value, Variability};
+use openusd::sdf::{self, AbstractData, LayerOffset, Payload, Permission, Specifier, Variability};
 use openusd::tf;
 use openusd::usdc::CrateData;
+use openusd::vt::Value;
 
 const VENDOR: &str = concat!(
     env!("CARGO_WORKSPACE_DIR"),

@@ -84,6 +84,7 @@ mod tests {
 
     use super::*;
     use crate::sdf::{AbstractData, FileFormat, SpecType};
+    use crate::vt;
 
     /// Text shared with an asset parses from the shared bytes.
     #[test]
@@ -104,7 +105,7 @@ mod tests {
         assert_eq!(data.spec_type(&size), Some(SpecType::Attribute));
         assert_eq!(
             data.field(&size, "default").unwrap().into_owned(),
-            sdf::Value::Float(2.5)
+            vt::Value::Float(2.5)
         );
     }
 }

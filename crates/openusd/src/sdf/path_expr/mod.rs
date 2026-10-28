@@ -22,10 +22,12 @@ mod parser;
 mod pattern;
 mod predicate;
 
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
 use crate::sdf::Path;
+use crate::vt::Value;
 
 pub use eval::{IncrementalSearcher, PathExpressionEval};
 pub use glob::GlobPattern;
@@ -516,6 +518,79 @@ impl FromStr for PathExpression {
     /// expression carrying [`parse_error`](PathExpression::parse_error).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(PathExpression::parse(s))
+    }
+}
+
+impl Value {
+    /// This value read as a path expression, or `None` for a kind that is not
+    /// one. Borrowed where the value already is one, parsed where it spells
+    /// one.
+    ///
+    /// A `string` or `token` parses leniently into the expression it spells,
+    /// which is what lets a collection be read from a layer no schema declared
+    /// the property in — and what value resolution composes such an opinion
+    /// as. The single source of truth for that reading, so a read and a
+    /// composition cannot disagree about which opinions are expressions.
+    pub fn as_path_expression(&self) -> Option<Cow<'_, PathExpression>> {
+        match self {
+            Value::PathExpression(expr) => Some(Cow::Borrowed(expr)),
+            Value::String(text) => Some(Cow::Owned(PathExpression::parse(text))),
+            Value::Token(text) => Some(Cow::Owned(PathExpression::parse(text.as_str()))),
+            _ => None,
+        }
+    }
+
+    /// [`as_path_expression`](Self::as_path_expression) taking ownership, which
+    /// the expression a value already holds is handed over for.
+    pub fn into_path_expression(self) -> Option<PathExpression> {
+        match self {
+            Value::PathExpression(expr) => Some(expr),
+            other => other.as_path_expression().map(Cow::into_owned),
+        }
+    }
+
+    /// Whether this value embeds a path expression that authoring anchors and
+    /// maps through [`map_path_expressions`](Self::map_path_expressions): a
+    /// `PathExpression` or `PathExpressionVec` at any depth that traversal
+    /// reaches. Checking it lets the common write skip the anchor path and
+    /// the walk.
+    pub fn holds_path_expressions(&self) -> bool {
+        match self {
+            Value::PathExpression(_) | Value::PathExpressionVec(_) => true,
+            Value::Dictionary(entries) => entries.values().any(Value::holds_path_expressions),
+            Value::ValueVec(values) => values.iter().any(Value::holds_path_expressions),
+            Value::TimeSamples(samples) => samples.iter().any(|(_, value)| value.holds_path_expressions()),
+            _ => false,
+        }
+    }
+
+    /// Returns this value with every path expression it holds rewritten
+    /// through `f`: a `PathExpression` or `PathExpressionVec` itself, and any
+    /// nested inside a dictionary, a heterogeneous array, or a time-sample map
+    /// (the reach of C++ `VtValueTryTransform`). List ops, references,
+    /// payloads and relocates are left alone: authoring never transforms them,
+    /// only [`remap_paths`](Self::remap_paths) does, for copies.
+    pub fn map_path_expressions(self, f: &mut impl FnMut(PathExpression) -> PathExpression) -> Value {
+        match self {
+            Value::PathExpression(expr) => Value::PathExpression(f(expr)),
+            Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(f).collect()),
+            Value::Dictionary(entries) => Value::Dictionary(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, value.map_path_expressions(f)))
+                    .collect(),
+            ),
+            Value::ValueVec(values) => {
+                Value::ValueVec(values.into_iter().map(|value| value.map_path_expressions(f)).collect())
+            }
+            Value::TimeSamples(samples) => Value::TimeSamples(
+                samples
+                    .into_iter()
+                    .map(|(time, value)| (time, value.map_path_expressions(f)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 }
 

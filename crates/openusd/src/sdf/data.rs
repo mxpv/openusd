@@ -5,7 +5,8 @@
 
 use std::{borrow::Cow, collections::HashSet};
 
-use crate::sdf::{Path, PathMap, SpecData, SpecType, Value};
+use crate::sdf::{Path, PathMap, SpecData, SpecType};
+use crate::vt::Value;
 
 /// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
 ///

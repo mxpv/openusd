@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use openusd::Result;
 use openusd::usd::{self, SchemaBase};
-use openusd::{sdf, tf};
+use openusd::{sdf, tf, vt};
 
 use super::primvar::{INDICES_SUFFIX, element_stride};
 use super::{Interpolation, PRIMVARS_NAMESPACE, Primvar, PrimvarsAPI, tokens};
@@ -346,6 +346,7 @@ impl PrimvarsAPI {
 ///
 /// ```
 /// use openusd::usd::{self, SchemaBase};
+/// use openusd::vt;
 /// use openusd::{gf, sdf};
 /// use openusd_schemas::SchemaError;
 /// use openusd_schemas::geom::{self, Interpolation, PrimvarBuilder};
@@ -361,11 +362,11 @@ impl PrimvarsAPI {
 ///     let prim = edit.prim(mesh.path().clone())?;
 ///     PrimvarBuilder::in_edit(&prim, "st", "texCoord2f[]")
 ///         .interpolation(Interpolation::FaceVarying)
-///         .set(sdf::Value::Vec2fVec(vec![gf::vec2f(0.0, 0.0), gf::vec2f(1.0, 1.0)]))
+///         .set(vt::Value::Vec2fVec(vec![gf::vec2f(0.0, 0.0), gf::vec2f(1.0, 1.0)]))
 ///         .indices(vec![0, 1, 0])
 ///         .build()?;
 ///     PrimvarBuilder::in_edit(&prim, "displayOpacity", "float[]")
-///         .set(sdf::Value::FloatVec(vec![0.5]))
+///         .set(vt::Value::FloatVec(vec![0.5]))
 ///         .build()?;
 ///     Ok::<_, SchemaError>(())
 /// })?;
@@ -387,7 +388,7 @@ pub struct PrimvarBuilder<'a> {
     interpolation: Option<Interpolation>,
     element_size: Option<i32>,
     /// The value to author, and when it is for.
-    value: Option<(sdf::Value, Option<usd::TimeCode>)>,
+    value: Option<(vt::Value, Option<usd::TimeCode>)>,
     indexing: Indexing,
 }
 
@@ -436,12 +437,12 @@ impl<'a> PrimvarBuilder<'a> {
     }
 
     /// The default value to author with it.
-    pub fn set(self, value: impl Into<sdf::Value>) -> Self {
+    pub fn set(self, value: impl Into<vt::Value>) -> Self {
         self.set_at(value, None)
     }
 
     /// The value to author at `time`, or the default where `time` is `None`.
-    pub fn set_at(mut self, value: impl Into<sdf::Value>, time: impl Into<Option<usd::TimeCode>>) -> Self {
+    pub fn set_at(mut self, value: impl Into<vt::Value>, time: impl Into<Option<usd::TimeCode>>) -> Self {
         self.value = Some((value.into(), time.into()));
         self
     }
@@ -492,7 +493,7 @@ impl<'a> PrimvarBuilder<'a> {
             primvar = primvar.metadata(tokens::INTERPOLATION, interpolation);
         }
         if let Some(element_size) = self.element_size {
-            primvar = primvar.metadata(tokens::ELEMENT_SIZE, sdf::Value::Int(element_size));
+            primvar = primvar.metadata(tokens::ELEMENT_SIZE, vt::Value::Int(element_size));
         }
         if let Some((value, time)) = self.value {
             primvar = primvar.set_at(value, time);
@@ -500,7 +501,7 @@ impl<'a> PrimvarBuilder<'a> {
 
         let indices = match self.indexing {
             Indexing::Untouched => None,
-            Indexing::Indexed(indices) => Some(indices_builder(edit, name).set_at(sdf::Value::IntVec(indices), time)),
+            Indexing::Indexed(indices) => Some(indices_builder(edit, name).set_at(vt::Value::IntVec(indices), time)),
             Indexing::Unindexed => Some(indices_builder(edit, name).block()),
         };
         // A builder with no declaration to report holds a failure, which its
@@ -609,6 +610,7 @@ fn inherit(prim: &usd::Prim, inherited: &[Primvar], accept_all: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use openusd::vt;
     use std::fs;
 
     use openusd::usd::{self, SchemaBase, Stage};
@@ -633,8 +635,8 @@ mod tests {
         Ok(api(Mesh::define(&stage()?, "/Mesh")?.prim()))
     }
 
-    fn floats(values: &[f32]) -> sdf::Value {
-        sdf::Value::FloatVec(values.to_vec())
+    fn floats(values: &[f32]) -> vt::Value {
+        vt::Value::FloatVec(values.to_vec())
     }
 
     /// The attribute path of each primvar, in the order given.
@@ -661,7 +663,7 @@ mod tests {
         assert_eq!(st.attribute().name(), "primvars:st");
         assert_eq!(uv.attribute().name(), "primvars:uv");
         assert!(!st.attribute().is_custom()?);
-        assert_eq!(st.attribute().get::<sdf::Value>()?, None);
+        assert_eq!(st.attribute().get::<vt::Value>()?, None);
         for name in ["st", "primvars:st", "uv"] {
             assert!(mesh.has_primvar(name)?, "{name}");
         }
@@ -950,7 +952,7 @@ mod tests {
         let order = order.into_iter().map(tf::Token::from).collect();
         mesh.prim()
             .clone()
-            .set_metadata("propertyOrder", sdf::Value::TokenVec(order))?;
+            .set_metadata("propertyOrder", vt::Value::TokenVec(order))?;
 
         assert_eq!(
             names(&mesh.primvars()?),
@@ -1290,7 +1292,7 @@ mod tests {
         valued(&s[1], "u1", None)?;
         valued(&s[3], "u1", None)?
             .into_attribute()
-            .set_metadata(tokens::INTERPOLATION, sdf::Value::Token(tf::Token::from("frobosity")))?;
+            .set_metadata(tokens::INTERPOLATION, vt::Value::Token(tf::Token::from("frobosity")))?;
 
         assert!(s[4].inheritable_primvars()?.is_empty());
         assert_eq!(s[4].primvar_with_inheritance("u1")?, None);
@@ -1480,7 +1482,7 @@ mod tests {
         let s = chain()?;
         let color = s[1]
             .primvar_builder("displayColor", "color3f[]")
-            .set(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0].into()]))
+            .set(vt::Value::Vec3fVec(vec![[1.0, 0.0, 0.0].into()]))
             .build()?;
 
         assert!(s[4].has_primvar("displayColor")?);

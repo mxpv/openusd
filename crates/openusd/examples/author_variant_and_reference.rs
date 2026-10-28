@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use openusd::gf;
-use openusd::sdf::{self, ChildrenKey, FieldKey, LayerOffset, ListOp, Reference, SpecType, Specifier, Value};
+use openusd::sdf::{self, ChildrenKey, FieldKey, LayerOffset, ListOp, Reference, SpecType, Specifier};
 use openusd::usda::TextWriter;
+use openusd::vt::{self, Value};
 
 fn main() -> openusd::Result<()> {
     write_spheres("sphere.usda")?;
@@ -113,7 +114,7 @@ fn add_variant(
         asset_path: "./sphere.usda".into(),
         prim_path,
         layer_offset: LayerOffset::IDENTITY,
-        custom_data: sdf::Dictionary::new(),
+        custom_data: vt::Dictionary::new(),
     }]);
     variant_spec.add(FieldKey::References, Value::ReferenceListOp(ref_list));
 

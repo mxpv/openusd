@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use openusd::Result;
+use openusd::{Result, vt};
 
 use openusd::gf;
 use openusd::sdf;
@@ -34,8 +34,8 @@ fn volume_and_fields_from_fixture() -> Result<()> {
 
     let vdb = vol::OpenVDBAsset::get(&stage, sdf::path("/Smoke/density")?)?.expect("OpenVDBAsset");
     assert_eq!(
-        vdb.file_path_attr().get::<sdf::Value>()?,
-        Some(sdf::Value::AssetPath("./smoke.vdb".into()))
+        vdb.file_path_attr().get::<vt::Value>()?,
+        Some(vt::Value::AssetPath("./smoke.vdb".into()))
     );
     assert_eq!(vdb.field_data_type_attr().get::<Token>()?.as_deref(), Some("float"));
     assert_eq!(vdb.field_class_attr().get::<Token>()?.as_deref(), Some("fogVolume"));
@@ -61,9 +61,9 @@ fn memory() -> Result<Stage> {
 fn field3d_asset_and_type_gate() -> Result<()> {
     let stage = memory()?;
     let a = Field3DAsset::define(&stage, "/V/vel")?;
-    a.create_field_data_type_attr()?.set(sdf::Value::token("float3"))?;
+    a.create_field_data_type_attr()?.set(vt::Value::token("float3"))?;
     a.create_vector_data_role_hint_attr()?.set(VectorDataRoleHint::Vector)?;
-    a.create_field_purpose_attr()?.set(sdf::Value::token("motion"))?;
+    a.create_field_purpose_attr()?.set(vt::Value::token("motion"))?;
 
     let a = Field3DAsset::get(&stage, "/V/vel")?.expect("Field3DAsset");
     assert_eq!(a.vector_data_role_hint()?, Some(VectorDataRoleHint::Vector));
@@ -79,12 +79,12 @@ fn openvdb_asset_roundtrip() -> Result<()> {
     let stage = memory()?;
     let a = OpenVDBAsset::define(&stage, "/V/density")?;
     a.create_file_path_attr()?
-        .set(sdf::Value::AssetPath("./smoke.vdb".into()))?;
-    a.create_field_name_attr()?.set(sdf::Value::token("density"))?;
+        .set(vt::Value::AssetPath("./smoke.vdb".into()))?;
+    a.create_field_name_attr()?.set(vt::Value::token("density"))?;
     a.create_field_index_attr()?.set(0)?;
-    a.create_field_data_type_attr()?.set(sdf::Value::token("float"))?;
+    a.create_field_data_type_attr()?.set(vt::Value::token("float"))?;
     a.create_vector_data_role_hint_attr()?.set(VectorDataRoleHint::NoRole)?;
-    a.create_field_class_attr()?.set(sdf::Value::token("fogVolume"))?;
+    a.create_field_class_attr()?.set(vt::Value::token("fogVolume"))?;
 
     let a = OpenVDBAsset::get(&stage, "/V/density")?.expect("OpenVDBAsset");
     assert_eq!(a.field_name_attr().get::<Token>()?.as_deref(), Some("density"));

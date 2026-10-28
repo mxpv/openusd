@@ -5,7 +5,7 @@
 use std::fs;
 
 use openusd::Result;
-use openusd::{sdf, tf, usd};
+use openusd::{sdf, tf, usd, vt};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{self, FamilyType};
 use openusd_schemas::shade::Connectable;
@@ -148,25 +148,21 @@ fn author_then_read_back_roundtrip() -> Result<(), SchemaError> {
 
     // Texture → diffuseColor; scalar metallic/roughness.
     let tex = Shader::define(&stage, "/World/Looks/M/Albedo")?;
-    tex.node_def()
-        .create_id_attr()?
-        .set(sdf::Value::token("UsdUVTexture"))?;
+    tex.node_def().create_id_attr()?.set(vt::Value::token("UsdUVTexture"))?;
     tex.create_input("file", "asset")?
-        .set(sdf::Value::AssetPath("./wood.png".into()))?;
+        .set(vt::Value::AssetPath("./wood.png".into()))?;
     tex.create_output("rgb", "float3")?;
 
     let surface = Shader::define(&stage, "/World/Looks/M/Surface")?;
     surface
         .node_def()
         .create_id_attr()?
-        .set(sdf::Value::token("UsdPreviewSurface"))?;
+        .set(vt::Value::token("UsdPreviewSurface"))?;
     surface
         .create_input("diffuseColor", "color3f")?
         .set_connections(["/World/Looks/M/Albedo.outputs:rgb"])?;
-    surface.create_input("metallic", "float")?.set(sdf::Value::Float(1.0))?;
-    surface
-        .create_input("roughness", "float")?
-        .set(sdf::Value::Float(0.3))?;
+    surface.create_input("metallic", "float")?.set(vt::Value::Float(1.0))?;
+    surface.create_input("roughness", "float")?.set(vt::Value::Float(0.3))?;
     surface.create_output("surface", "token")?;
 
     Material::define(&stage, "/World/Looks/M")?
@@ -344,17 +340,17 @@ fn shader_id_and_inputs() -> Result<()> {
     shader
         .node_def()
         .create_id_attr()?
-        .set(sdf::Value::token("UsdPreviewSurface"))?;
+        .set(vt::Value::token("UsdPreviewSurface"))?;
     shader
         .create_input("diffuseColor", "color3f")?
-        .set(sdf::Value::vec3f(0.8_f32, 0.2, 0.2))?;
+        .set(vt::Value::vec3f(0.8_f32, 0.2, 0.2))?;
     shader.create_output("surface", "token")?;
 
     let shader = Shader::get(&stage, "/Mat/Surface")?.expect("Shader");
     assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("UsdPreviewSurface"));
     assert_eq!(
-        shader.input("diffuseColor").get::<sdf::Value>()?,
-        Some(sdf::Value::vec3f(0.8_f32, 0.2, 0.2))
+        shader.input("diffuseColor").get::<vt::Value>()?,
+        Some(vt::Value::vec3f(0.8_f32, 0.2, 0.2))
     );
     assert!(shader.inputs()?.iter().any(|input| input.base_name() == "diffuseColor"));
     assert!(stage.attribute("/Mat/Surface.outputs:surface")?.is_defined()?);
@@ -404,7 +400,7 @@ fn material_surface_terminal() -> Result<(), SchemaError> {
     Shader::define(&stage, "/Mat/Surface")?
         .node_def()
         .create_id_attr()?
-        .set(sdf::Value::token("UsdPreviewSurface"))?;
+        .set(vt::Value::token("UsdPreviewSurface"))?;
     Shader::get(&stage, "/Mat/Surface")?
         .expect("Shader")
         .create_output("surface", "token")?;
@@ -497,7 +493,7 @@ fn terminal_output_enumeration() -> Result<(), SchemaError> {
 fn node_graph_interface() -> Result<()> {
     let stage = memory()?;
     let ng = NodeGraph::define(&stage, "/NG")?;
-    ng.create_input("gain", "float")?.set(sdf::Value::Float(2.0))?;
+    ng.create_input("gain", "float")?.set(vt::Value::Float(2.0))?;
     ng.create_output("out", "color3f")?;
     let ng = NodeGraph::get(&stage, "/NG")?.expect("NodeGraph");
     assert_eq!(ng.input("gain").get::<f32>()?, Some(2.0));

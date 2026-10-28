@@ -25,7 +25,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::sdf::{LayerOffset, Value};
+use crate::sdf::LayerOffset;
+use crate::vt::Value;
 
 use super::layer_graph::LayerId;
 

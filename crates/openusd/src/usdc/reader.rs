@@ -6,12 +6,9 @@ use crate::gf::f16;
 use bytemuck::{AnyBitPattern, NoUninit, Pod, bytes_of, cast_slice_mut, pod_read_unaligned};
 use num_traits::{AsPrimitive, Float, PrimInt};
 
-use crate::{
-    ar, gf,
-    sdf::{self, Value},
-    tf,
-    usdc::coding,
-};
+use crate::usdc::coding;
+use crate::vt::{self, Value};
+use crate::{ar, gf, sdf, tf};
 
 use super::layout::*;
 use super::{MAX_NESTING, MIN_COMPRESSED_ARRAY_SIZE, ReadError, ReadResultExt};
@@ -205,7 +202,7 @@ impl CrateFile {
     }
 
     /// Decode the value `rep` describes from the file's bytes.
-    pub fn value(&self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
+    pub fn value(&self, rep: ValueRep) -> Result<vt::Value, ReadError> {
         Decoder::new(self).decode(rep)
     }
 
@@ -1016,7 +1013,7 @@ impl<'a> Decoder<'a> {
     /// count, then that many nested values, each holding a recorded body.
     ///
     /// C++ lets an item hold a dictionary or a further list op as well as a
-    /// recorded body, which [`sdf::Value::UnregisteredValueListOp`] has no
+    /// recorded body, which [`vt::Value::UnregisteredValueListOp`] has no
     /// room for. Such an item is dropped rather than failing the layer around
     /// it, since the rest of the file reads perfectly well without it.
     ///
@@ -1025,7 +1022,7 @@ impl<'a> Decoder<'a> {
         let count = self.stream.read_count()?;
         let mut items = Vec::new();
         for _ in 0..count {
-            if let sdf::Value::String(text) = self.read_nested_value()? {
+            if let vt::Value::String(text) = self.read_nested_value()? {
                 items.push(text);
             }
         }
@@ -1043,7 +1040,7 @@ impl<'a> Decoder<'a> {
     /// C++ goes further and hands out arrays of at least 2048 bytes as views
     /// into the mapped file when their address is aligned to the element
     /// (`USDC_ENABLE_ZERO_COPY_ARRAYS`), copying them out only when the file
-    /// is replaced; that needs an `sdf::Value` array form over an
+    /// is replaced; that needs a `vt::Value` array form over an
     /// `ar::SharedBuffer` view.
     fn read_array<U: NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
         corrupt!(value.is_array() && !value.is_compressed());
@@ -1054,7 +1051,7 @@ impl<'a> Decoder<'a> {
     /// Decode the value `rep` describes as one nested in the value being
     /// decoded, refusing one already being decoded above it (a value that
     /// names itself) and one nested deeper than [`MAX_NESTING`].
-    fn nested_value(&mut self, rep: ValueRep) -> Result<sdf::Value, ReadError> {
+    fn nested_value(&mut self, rep: ValueRep) -> Result<vt::Value, ReadError> {
         corrupt!(
             !self.unpacking.contains(&rep),
             "A nested value recursively contains itself"
@@ -1069,7 +1066,7 @@ impl<'a> Decoder<'a> {
         value
     }
 
-    fn decode(&mut self, value: ValueRep) -> Result<sdf::Value, ReadError> {
+    fn decode(&mut self, value: ValueRep) -> Result<vt::Value, ReadError> {
         let ty = value.ty()?;
         corrupt!(ty != Type::Invalid, "Invalid value type");
 
@@ -1078,59 +1075,59 @@ impl<'a> Decoder<'a> {
             // Bool and chars
             //
             Type::Bool if value.is_array() => {
-                sdf::Value::BoolVec(self.read_array::<u8>(value)?.into_iter().map(|v| v != 0).collect())
+                vt::Value::BoolVec(self.read_array::<u8>(value)?.into_iter().map(|v| v != 0).collect())
             }
 
             Type::Bool => {
                 let value: i32 = self.unpack_value(value)?;
-                sdf::Value::Bool(value != 0)
+                vt::Value::Bool(value != 0)
             }
 
-            Type::Uchar if value.is_array() => sdf::Value::UcharVec(self.read_array::<u8>(value)?),
+            Type::Uchar if value.is_array() => vt::Value::UcharVec(self.read_array::<u8>(value)?),
 
             Type::Uchar => {
                 let value = self.unpack_value::<u8>(value)?;
-                sdf::Value::Uchar(value)
+                vt::Value::Uchar(value)
             }
 
             //
             // Ints (int, uint, int64, uint64)
             //
-            Type::Int if value.is_array() => sdf::Value::IntVec(self.read_ints(value)?),
-            Type::Int => sdf::Value::Int(self.unpack_value(value)?),
+            Type::Int if value.is_array() => vt::Value::IntVec(self.read_ints(value)?),
+            Type::Int => vt::Value::Int(self.unpack_value(value)?),
 
-            Type::Uint if value.is_array() => sdf::Value::UintVec(self.read_ints(value)?),
-            Type::Uint => sdf::Value::Uint(self.unpack_value(value)?),
+            Type::Uint if value.is_array() => vt::Value::UintVec(self.read_ints(value)?),
+            Type::Uint => vt::Value::Uint(self.unpack_value(value)?),
 
-            Type::Int64 if value.is_array() => sdf::Value::Int64Vec(self.read_ints(value)?),
+            Type::Int64 if value.is_array() => vt::Value::Int64Vec(self.read_ints(value)?),
             Type::Int64 if value.is_inlined() => {
                 // Stored as i32, which widens sign-extended (C++ `_DecodeInline`)
                 let value = self.unpack_value::<i32>(value)?;
-                sdf::Value::Int64(value.into())
+                vt::Value::Int64(value.into())
             }
-            Type::Int64 => sdf::Value::Int64(self.unpack_value(value)?),
+            Type::Int64 => vt::Value::Int64(self.unpack_value(value)?),
 
-            Type::Uint64 if value.is_array() => sdf::Value::Uint64Vec(self.read_ints(value)?),
-            Type::Uint64 => sdf::Value::Uint64(self.unpack_value(value)?),
+            Type::Uint64 if value.is_array() => vt::Value::Uint64Vec(self.read_ints(value)?),
+            Type::Uint64 => vt::Value::Uint64(self.unpack_value(value)?),
 
             //
             // Float types (half, float, double)
             //
-            Type::Half if value.is_array() => sdf::Value::HalfVec(self.read_floats(value)?),
-            Type::Half => sdf::Value::Half(self.unpack_value(value)?),
+            Type::Half if value.is_array() => vt::Value::HalfVec(self.read_floats(value)?),
+            Type::Half => vt::Value::Half(self.unpack_value(value)?),
 
-            Type::Float if value.is_array() => sdf::Value::FloatVec(self.read_floats(value)?),
-            Type::Float => sdf::Value::Float(self.unpack_value(value)?),
+            Type::Float if value.is_array() => vt::Value::FloatVec(self.read_floats(value)?),
+            Type::Float => vt::Value::Float(self.unpack_value(value)?),
 
-            Type::Double if value.is_array() => sdf::Value::DoubleVec(self.read_floats(value)?),
+            Type::Double if value.is_array() => vt::Value::DoubleVec(self.read_floats(value)?),
             Type::Double if value.is_inlined() => {
                 // Stored as f32
                 let value = self.unpack_value::<f32>(value)?;
-                sdf::Value::Double(value as f64)
+                vt::Value::Double(value as f64)
             }
-            Type::Double => sdf::Value::Double(self.unpack_value(value)?),
+            Type::Double => vt::Value::Double(self.unpack_value(value)?),
 
-            Type::DoubleVector => sdf::Value::DoubleVec(self.read_floats(value)?),
+            Type::DoubleVector => vt::Value::DoubleVec(self.read_floats(value)?),
 
             //
             // Tokens, strings, asset paths
@@ -1139,28 +1136,28 @@ impl<'a> Decoder<'a> {
                 corrupt!(!value.is_inlined());
 
                 self.stream.seek(value.payload())?;
-                sdf::Value::StringVec(self.read_string_vec()?)
+                vt::Value::StringVec(self.read_string_vec()?)
             }
 
             Type::String if value.is_array() => {
                 self.stream.seek(value.payload())?;
-                sdf::Value::StringVec(self.read_string_vec()?)
+                vt::Value::StringVec(self.read_string_vec()?)
             }
 
             Type::String => {
                 corrupt!(!value.is_array());
 
                 let string_index = self.unpack_value::<u32>(value)?;
-                sdf::Value::String(self.resolve_string(string_index)?)
+                vt::Value::String(self.resolve_string(string_index)?)
             }
             Type::AssetPath if value.is_array() => {
                 // Asset arrays (`asset[]`, e.g. value-clip `assetPaths`) are
                 // stored like string arrays — string-table indices, not direct
                 // token indices.
                 self.stream.seek(value.payload())?;
-                sdf::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
+                vt::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
             }
-            Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?.into()),
+            Type::AssetPath => vt::Value::AssetPath(self.read_asset_path(value)?.into()),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
@@ -1170,9 +1167,9 @@ impl<'a> Decoder<'a> {
                     .map(|i| Ok(indexed(&self.file.tokens, i as usize, "token")?.as_str().into()))
                     .collect::<Result<Vec<_>, ReadError>>()?;
 
-                sdf::Value::TokenVec(tokens)
+                vt::Value::TokenVec(tokens)
             }
-            Type::Token => sdf::Value::Token(self.read_token(value)?),
+            Type::Token => vt::Value::Token(self.read_token(value)?),
 
             //
             // Vectors (half, float, double, int + vec{2,3,4})
@@ -1195,69 +1192,69 @@ impl<'a> Decoder<'a> {
             // Inlined scalar vecs: the 32-bit inline payload stores [i8; N]
             // sign-extended integers for all types except half-2, which is the
             // only half variant that fits (2 × 2 bytes = 4 bytes).
-            Type::Vec2h if value.is_inlined() => sdf::Value::Vec2h(self.unpack_value::<gf::Vec2h>(value)?),
+            Type::Vec2h if value.is_inlined() => vt::Value::Vec2h(self.unpack_value::<gf::Vec2h>(value)?),
             Type::Vec2f if value.is_inlined() => {
                 let [x, y] = to_vec::<f32, 2>(self.unpack_value(value)?);
-                sdf::Value::Vec2f(gf::vec2f(x, y))
+                vt::Value::Vec2f(gf::vec2f(x, y))
             }
             Type::Vec2d if value.is_inlined() => {
                 let [x, y] = to_vec::<f64, 2>(self.unpack_value(value)?);
-                sdf::Value::Vec2d(gf::vec2d(x, y))
+                vt::Value::Vec2d(gf::vec2d(x, y))
             }
             Type::Vec2i if value.is_inlined() => {
                 let [x, y] = to_vec::<i32, 2>(self.unpack_value(value)?);
-                sdf::Value::Vec2i(gf::vec2i(x, y))
+                vt::Value::Vec2i(gf::vec2i(x, y))
             }
 
             Type::Vec3h if value.is_inlined() => {
                 let [x, y, z] = to_vec::<f16, 3>(self.unpack_value(value)?);
-                sdf::Value::Vec3h(gf::vec3h(x, y, z))
+                vt::Value::Vec3h(gf::vec3h(x, y, z))
             }
             Type::Vec3f if value.is_inlined() => {
                 let [x, y, z] = to_vec::<f32, 3>(self.unpack_value(value)?);
-                sdf::Value::Vec3f(gf::vec3f(x, y, z))
+                vt::Value::Vec3f(gf::vec3f(x, y, z))
             }
             Type::Vec3d if value.is_inlined() => {
                 let [x, y, z] = to_vec::<f64, 3>(self.unpack_value(value)?);
-                sdf::Value::Vec3d(gf::vec3d(x, y, z))
+                vt::Value::Vec3d(gf::vec3d(x, y, z))
             }
             Type::Vec3i if value.is_inlined() => {
                 let [x, y, z] = to_vec::<i32, 3>(self.unpack_value(value)?);
-                sdf::Value::Vec3i(gf::vec3i(x, y, z))
+                vt::Value::Vec3i(gf::vec3i(x, y, z))
             }
 
             Type::Vec4h if value.is_inlined() => {
                 let [x, y, z, w] = to_vec::<f16, 4>(self.unpack_value(value)?);
-                sdf::Value::Vec4h(gf::vec4h(x, y, z, w))
+                vt::Value::Vec4h(gf::vec4h(x, y, z, w))
             }
             Type::Vec4f if value.is_inlined() => {
                 let [x, y, z, w] = to_vec::<f32, 4>(self.unpack_value(value)?);
-                sdf::Value::Vec4f(gf::vec4f(x, y, z, w))
+                vt::Value::Vec4f(gf::vec4f(x, y, z, w))
             }
             Type::Vec4d if value.is_inlined() => {
                 let [x, y, z, w] = to_vec::<f64, 4>(self.unpack_value(value)?);
-                sdf::Value::Vec4d(gf::vec4d(x, y, z, w))
+                vt::Value::Vec4d(gf::vec4d(x, y, z, w))
             }
             Type::Vec4i if value.is_inlined() => {
                 let [x, y, z, w] = to_vec::<i32, 4>(self.unpack_value(value)?);
-                sdf::Value::Vec4i(gf::vec4i(x, y, z, w))
+                vt::Value::Vec4i(gf::vec4i(x, y, z, w))
             }
 
             // Non-inlined scalar vecs: repr(C) + Pod layout matches [T; N].
-            Type::Vec2h => sdf::Value::Vec2h(self.unpack_value::<gf::Vec2h>(value)?),
-            Type::Vec2f => sdf::Value::Vec2f(self.unpack_value::<gf::Vec2f>(value)?),
-            Type::Vec2d => sdf::Value::Vec2d(self.unpack_value::<gf::Vec2d>(value)?),
-            Type::Vec2i => sdf::Value::Vec2i(self.unpack_value::<gf::Vec2i>(value)?),
+            Type::Vec2h => vt::Value::Vec2h(self.unpack_value::<gf::Vec2h>(value)?),
+            Type::Vec2f => vt::Value::Vec2f(self.unpack_value::<gf::Vec2f>(value)?),
+            Type::Vec2d => vt::Value::Vec2d(self.unpack_value::<gf::Vec2d>(value)?),
+            Type::Vec2i => vt::Value::Vec2i(self.unpack_value::<gf::Vec2i>(value)?),
 
-            Type::Vec3h => sdf::Value::Vec3h(self.unpack_value::<gf::Vec3h>(value)?),
-            Type::Vec3f => sdf::Value::Vec3f(self.unpack_value::<gf::Vec3f>(value)?),
-            Type::Vec3d => sdf::Value::Vec3d(self.unpack_value::<gf::Vec3d>(value)?),
-            Type::Vec3i => sdf::Value::Vec3i(self.unpack_value::<gf::Vec3i>(value)?),
+            Type::Vec3h => vt::Value::Vec3h(self.unpack_value::<gf::Vec3h>(value)?),
+            Type::Vec3f => vt::Value::Vec3f(self.unpack_value::<gf::Vec3f>(value)?),
+            Type::Vec3d => vt::Value::Vec3d(self.unpack_value::<gf::Vec3d>(value)?),
+            Type::Vec3i => vt::Value::Vec3i(self.unpack_value::<gf::Vec3i>(value)?),
 
-            Type::Vec4h => sdf::Value::Vec4h(self.unpack_value::<gf::Vec4h>(value)?),
-            Type::Vec4f => sdf::Value::Vec4f(self.unpack_value::<gf::Vec4f>(value)?),
-            Type::Vec4d => sdf::Value::Vec4d(self.unpack_value::<gf::Vec4d>(value)?),
-            Type::Vec4i => sdf::Value::Vec4i(self.unpack_value::<gf::Vec4i>(value)?),
+            Type::Vec4h => vt::Value::Vec4h(self.unpack_value::<gf::Vec4h>(value)?),
+            Type::Vec4f => vt::Value::Vec4f(self.unpack_value::<gf::Vec4f>(value)?),
+            Type::Vec4d => vt::Value::Vec4d(self.unpack_value::<gf::Vec4d>(value)?),
+            Type::Vec4i => vt::Value::Vec4i(self.unpack_value::<gf::Vec4i>(value)?),
 
             //
             // Matrices
@@ -1267,18 +1264,18 @@ impl<'a> Decoder<'a> {
             Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_array::<gf::Mat4d>(value)?),
 
             Type::Matrix2d if value.is_inlined() => {
-                sdf::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
+                vt::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
             }
             Type::Matrix3d if value.is_inlined() => {
-                sdf::Value::Matrix3d(gf::Mat3d(to_mat_diag::<3, 9>(self.unpack_value(value)?)))
+                vt::Value::Matrix3d(gf::Mat3d(to_mat_diag::<3, 9>(self.unpack_value(value)?)))
             }
             Type::Matrix4d if value.is_inlined() => {
-                sdf::Value::Matrix4d(gf::Mat4d(to_mat_diag::<4, 16>(self.unpack_value(value)?)))
+                vt::Value::Matrix4d(gf::Mat4d(to_mat_diag::<4, 16>(self.unpack_value(value)?)))
             }
 
-            Type::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(self.unpack_value::<[f64; 4]>(value)?)),
-            Type::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(self.unpack_value::<[f64; 9]>(value)?)),
-            Type::Matrix4d => sdf::Value::Matrix4d(gf::Mat4d(self.unpack_value::<[f64; 16]>(value)?)),
+            Type::Matrix2d => vt::Value::Matrix2d(gf::Mat2d(self.unpack_value::<[f64; 4]>(value)?)),
+            Type::Matrix3d => vt::Value::Matrix3d(gf::Mat3d(self.unpack_value::<[f64; 9]>(value)?)),
+            Type::Matrix4d => vt::Value::Matrix4d(gf::Mat4d(self.unpack_value::<[f64; 16]>(value)?)),
 
             //
             // Quats
@@ -1295,19 +1292,19 @@ impl<'a> Decoder<'a> {
             Type::Quath if value.is_array() => Value::QuathVec(xyzw_to_wxyz_quath(self.read_array::<[f16; 4]>(value)?)),
             Type::Quath => {
                 let raw = self.unpack_value::<[f16; 4]>(value)?;
-                sdf::Value::quath(raw[3], raw[0], raw[1], raw[2])
+                vt::Value::quath(raw[3], raw[0], raw[1], raw[2])
             }
 
             Type::Quatf if value.is_array() => Value::QuatfVec(xyzw_to_wxyz_quatf(self.read_array::<[f32; 4]>(value)?)),
             Type::Quatf => {
                 let raw = self.unpack_value::<[f32; 4]>(value)?;
-                sdf::Value::quatf(raw[3], raw[0], raw[1], raw[2])
+                vt::Value::quatf(raw[3], raw[0], raw[1], raw[2])
             }
 
             Type::Quatd if value.is_array() => Value::QuatdVec(xyzw_to_wxyz_quatd(self.read_array::<[f64; 4]>(value)?)),
             Type::Quatd => {
                 let raw = self.unpack_value::<[f64; 4]>(value)?;
-                sdf::Value::quatd(raw[3], raw[0], raw[1], raw[2])
+                vt::Value::quatd(raw[3], raw[0], raw[1], raw[2])
             }
 
             //
@@ -1317,19 +1314,19 @@ impl<'a> Decoder<'a> {
                 corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_token_vec())?;
-                sdf::Value::TokenListOp(list)
+                vt::Value::TokenListOp(list)
             }
             Type::StringListOp => {
                 corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_string_vec())?;
-                sdf::Value::StringListOp(list)
+                vt::Value::StringListOp(list)
             }
             Type::PathListOp => {
                 corrupt!(!value.is_inlined());
 
                 let list = self.read_list_op(value, |decoder: &mut Self| decoder.read_path_vec())?;
-                sdf::Value::PathListOp(list)
+                vt::Value::PathListOp(list)
             }
             Type::ReferenceListOp => {
                 corrupt!(!value.is_inlined());
@@ -1346,24 +1343,24 @@ impl<'a> Decoder<'a> {
                     Ok(vec)
                 })?;
 
-                sdf::Value::ReferenceListOp(list)
+                vt::Value::ReferenceListOp(list)
             }
 
             Type::IntListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::IntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                vt::Value::IntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::Int64ListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::Int64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                vt::Value::Int64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::UIntListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::UIntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                vt::Value::UIntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::UInt64ListOp => {
                 corrupt!(!value.is_inlined());
-                sdf::Value::UInt64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
+                vt::Value::UInt64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
 
             //
@@ -1374,7 +1371,7 @@ impl<'a> Decoder<'a> {
 
                 self.stream.seek(value.payload())?;
 
-                sdf::Value::TokenVec(self.read_token_vec()?)
+                vt::Value::TokenVec(self.read_token_vec()?)
             }
 
             Type::PathVector => {
@@ -1383,7 +1380,7 @@ impl<'a> Decoder<'a> {
                 self.stream.seek(value.payload())?;
 
                 let paths = self.read_path_vec()?;
-                sdf::Value::PathVec(paths)
+                vt::Value::PathVec(paths)
             }
 
             Type::Specifier => {
@@ -1391,7 +1388,7 @@ impl<'a> Decoder<'a> {
                 let specifier = sdf::Specifier::from_repr(tmp)
                     .ok_or_else(|| ReadError::corrupt(format!("Unable to parse SDF specifier: {tmp}")))?;
 
-                sdf::Value::Specifier(specifier)
+                vt::Value::Specifier(specifier)
             }
 
             Type::Permission => {
@@ -1399,7 +1396,7 @@ impl<'a> Decoder<'a> {
                 let permission = sdf::Permission::from_repr(tmp)
                     .ok_or_else(|| ReadError::corrupt(format!("Unable to parse permission: {tmp}")))?;
 
-                sdf::Value::Permission(permission)
+                vt::Value::Permission(permission)
             }
 
             Type::Variability => {
@@ -1407,7 +1404,7 @@ impl<'a> Decoder<'a> {
                 let variability = sdf::Variability::from_repr(tmp)
                     .ok_or_else(|| ReadError::corrupt(format!("Unable to parse variability: {tmp}")))?;
 
-                sdf::Value::Variability(variability)
+                vt::Value::Variability(variability)
             }
 
             Type::LayerOffsetVector => {
@@ -1420,7 +1417,7 @@ impl<'a> Decoder<'a> {
                 let count = self.stream.read_count()?;
                 let vec = self.stream.read_vec(count)?;
 
-                sdf::Value::LayerOffsetVec(vec)
+                vt::Value::LayerOffsetVec(vec)
             }
 
             Type::Payload => {
@@ -1431,7 +1428,7 @@ impl<'a> Decoder<'a> {
                 self.stream.seek(value.payload())?;
 
                 let payload = self.read_payload()?;
-                sdf::Value::Payload(payload)
+                vt::Value::Payload(payload)
             }
 
             Type::PayloadListOp => {
@@ -1446,7 +1443,7 @@ impl<'a> Decoder<'a> {
                     Ok(vec)
                 })?;
 
-                sdf::Value::PayloadListOp(list)
+                vt::Value::PayloadListOp(list)
             }
 
             Type::VariantSelectionMap => {
@@ -1465,7 +1462,7 @@ impl<'a> Decoder<'a> {
                     map.insert(key, value);
                 }
 
-                sdf::Value::VariantSelectionMap(map)
+                vt::Value::VariantSelectionMap(map)
             }
 
             Type::TimeSamples => {
@@ -1509,36 +1506,36 @@ impl<'a> Decoder<'a> {
                     .map(|(time, rep)| Ok((time, self.nested_value(rep)?)))
                     .collect::<Result<Vec<_>, ReadError>>()?;
 
-                sdf::Value::TimeSamples(sdf::normalize_time_samples(samples))
+                vt::Value::TimeSamples(sdf::normalize_time_samples(samples))
             }
 
             // Empty dictionary.
-            Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default().into()),
+            Type::Dictionary if value.is_inlined() => vt::Value::Dictionary(HashMap::default().into()),
             Type::Dictionary => {
                 corrupt!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
                 corrupt!(!value.is_array(), "Dictionary {ty} can't be inlined");
 
                 self.stream.seek(value.payload())?;
 
-                sdf::Value::Dictionary(self.read_custom_data()?.into())
+                vt::Value::Dictionary(self.read_custom_data()?.into())
             }
 
-            Type::ValueBlock => sdf::Value::ValueBlock,
-            Type::Value => sdf::Value::Value,
+            Type::ValueBlock => vt::Value::ValueBlock,
+            Type::Value => vt::Value::Value,
 
-            Type::TimeCode if value.is_array() => sdf::Value::TimeCodeVec(
+            Type::TimeCode if value.is_array() => vt::Value::TimeCodeVec(
                 self.read_floats::<f64>(value)?
                     .into_iter()
                     .map(sdf::TimeCode::from)
                     .collect(),
             ),
-            Type::TimeCode => sdf::Value::TimeCode(self.unpack_value::<f64>(value)?.into()),
+            Type::TimeCode => vt::Value::TimeCode(self.unpack_value::<f64>(value)?.into()),
 
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays
                 // (string-table indices), each entry parsed into an expression.
                 self.stream.seek(value.payload())?;
-                sdf::Value::PathExpressionVec(
+                vt::Value::PathExpressionVec(
                     self.read_string_vec()?
                         .iter()
                         .map(|text| sdf::PathExpression::parse(text))
@@ -1547,7 +1544,7 @@ impl<'a> Decoder<'a> {
             }
             Type::PathExpression => {
                 let expr = self.read_asset_path(value)?;
-                sdf::Value::PathExpression(sdf::PathExpression::parse(&expr))
+                vt::Value::PathExpression(sdf::PathExpression::parse(&expr))
             }
 
             // An unregistered value wraps a nested, self-describing value,
@@ -1556,9 +1553,9 @@ impl<'a> Decoder<'a> {
                 corrupt!(!value.is_inlined());
                 self.stream.seek(value.payload())?;
                 match self.read_nested_value()? {
-                    sdf::Value::String(text) => sdf::Value::UnregisteredValue(text),
-                    sdf::Value::Dictionary(entries) => sdf::Value::UnregisteredDictionary(entries),
-                    list_op @ sdf::Value::UnregisteredValueListOp(_) => list_op,
+                    vt::Value::String(text) => vt::Value::UnregisteredValue(text),
+                    vt::Value::Dictionary(entries) => vt::Value::UnregisteredDictionary(entries),
+                    list_op @ vt::Value::UnregisteredValueListOp(_) => list_op,
                     _ => {
                         return Err(ReadError::corrupt(
                             "An unregistered value holds none of a string, a dictionary or a list op",
@@ -1569,7 +1566,7 @@ impl<'a> Decoder<'a> {
             Type::UnregisteredValueListOp => {
                 corrupt!(!value.is_inlined());
                 let list = self.read_list_op(value, Self::read_unregistered_items)?;
-                sdf::Value::UnregisteredValueListOp(list)
+                vt::Value::UnregisteredValueListOp(list)
             }
 
             Type::Relocates => {
@@ -1584,7 +1581,7 @@ impl<'a> Decoder<'a> {
                     let tgt = indexed(&self.file.paths, tgt_idx as usize, "path")?.clone();
                     pairs.push((src, tgt));
                 }
-                sdf::Value::Relocates(pairs)
+                vt::Value::Relocates(pairs)
             }
 
             Type::Invalid => return Err(ReadError::unsupported(format!("Unsupported value type: {ty}"))),
@@ -1794,14 +1791,14 @@ mod tests {
         }
         let mut data = sdf::Data::new();
         data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
-            .add("primChildren", sdf::Value::token_vec(["P"]));
+            .add("primChildren", vt::Value::token_vec(["P"]));
         let prim = data.create_spec(sdf::Path::new("/P")?, sdf::SpecType::Prim);
-        prim.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        prim.add("propertyChildren", sdf::Value::token_vec(["link"]));
+        prim.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
+        prim.add("propertyChildren", vt::Value::token_vec(["link"]));
         data.create_spec(sdf::Path::new("/P.link")?, sdf::SpecType::Relationship)
             .add(
                 "targetPaths",
-                sdf::Value::PathListOp(sdf::PathListOp::explicit([target.clone()])),
+                vt::Value::PathListOp(sdf::PathListOp::explicit([target.clone()])),
             );
         let mut output = io::Cursor::new(Vec::new());
         usdc::CrateWriter::write(&data, &mut output)?;
@@ -1991,15 +1988,15 @@ mod tests {
 
     /// A crate holding the prim `/P` with one attribute, `name`, of type
     /// `type_name` and default `default`.
-    fn attribute_crate(name: &str, type_name: &str, default: sdf::Value) -> Result<Vec<u8>> {
+    fn attribute_crate(name: &str, type_name: &str, default: vt::Value) -> Result<Vec<u8>> {
         let mut data = sdf::Data::new();
         data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot)
-            .add("primChildren", sdf::Value::token_vec(["P"]));
+            .add("primChildren", vt::Value::token_vec(["P"]));
         let prim = data.create_spec(sdf::Path::new("/P")?, sdf::SpecType::Prim);
-        prim.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        prim.add("propertyChildren", sdf::Value::token_vec([name]));
+        prim.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
+        prim.add("propertyChildren", vt::Value::token_vec([name]));
         let attribute = data.create_spec(sdf::Path::new("/P")?.append_property(name)?, sdf::SpecType::Attribute);
-        attribute.add("typeName", sdf::Value::Token(type_name.into()));
+        attribute.add("typeName", vt::Value::Token(type_name.into()));
         attribute.add("default", default);
         let mut output = io::Cursor::new(Vec::new());
         usdc::CrateWriter::write(&data, &mut output)?;
@@ -2013,7 +2010,7 @@ mod tests {
     fn int_array_compression_threshold() -> Result<()> {
         for (len, compressed) in [(4, false), (15, false), (16, true), (40, true)] {
             let values: Vec<i32> = (0..len).collect();
-            let file = CrateFile::open(attribute_crate("ids", "int[]", sdf::Value::IntVec(values.clone()))?)?;
+            let file = CrateFile::open(attribute_crate("ids", "int[]", vt::Value::IntVec(values.clone()))?)?;
             let rep = file
                 .fields
                 .iter()
@@ -2021,7 +2018,7 @@ mod tests {
                 .find(|rep| rep.is_array() && rep.ty().is_ok_and(|ty| ty == Type::Int))
                 .expect("the integer array");
             assert_eq!(rep.is_compressed(), compressed, "{len} elements");
-            assert_eq!(file.value(rep)?, sdf::Value::IntVec(values), "{len} elements");
+            assert_eq!(file.value(rep)?, vt::Value::IntVec(values), "{len} elements");
         }
         Ok(())
     }
@@ -2029,7 +2026,7 @@ mod tests {
     /// A crate long enough for its bytes to be advised when it is opened:
     /// one attribute holding an array past [`MIN_ADVISED_BYTES`].
     fn long_crate() -> Result<Vec<u8>> {
-        let weights = sdf::Value::FloatVec(vec![0.5; MIN_ADVISED_BYTES / 4 + 1]);
+        let weights = vt::Value::FloatVec(vec![0.5; MIN_ADVISED_BYTES / 4 + 1]);
         attribute_crate("weights", "float[]", weights)
     }
 

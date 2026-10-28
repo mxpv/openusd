@@ -17,7 +17,8 @@ use crate::Result;
 use crate::gf;
 use crate::pcp::clip::keys;
 use crate::pcp::clip_manifest;
-use crate::sdf::{self, AssetPath, Value};
+use crate::sdf::{self, AssetPath};
+use crate::vt::{self, Value};
 
 use super::{ClipsAPI, Object, SchemaBase, StageAuthoringError};
 
@@ -62,7 +63,7 @@ impl ClipsAPI {
     /// The whole composed `clips` dictionary (C++ `UsdClipsAPI::GetClips`),
     /// resolved once. Prefer this over the per-field getters when reading many
     /// fields, since each per-field getter re-resolves the entire dictionary.
-    pub fn clips(&self) -> Result<Option<sdf::Dictionary>> {
+    pub fn clips(&self) -> Result<Option<vt::Dictionary>> {
         Ok(self
             .stage()
             .field::<Value>(self.path(), sdf::FieldKey::Clips)?
@@ -72,7 +73,7 @@ impl ClipsAPI {
     /// Replace the entire `clips` dictionary (C++ `UsdClipsAPI::SetClips`).
     /// Authors all sets in one write, unlike the per-field setters which each
     /// read-modify-write the dictionary.
-    pub fn set_clips(&self, clips: sdf::Dictionary) -> Result<(), StageAuthoringError> {
+    pub fn set_clips(&self, clips: vt::Dictionary) -> Result<(), StageAuthoringError> {
         self.prim()
             .clone()
             .set_metadata(sdf::FieldKey::Clips.as_str(), Value::Dictionary(clips))?;
@@ -302,7 +303,7 @@ impl ClipsAPI {
     /// Read a single field from `clip_set`'s entry in the composed `clips`
     /// dictionary and coerce it to `T` via [`Value::cast`]. Returns `None` when
     /// the set (or field) is unauthored, or its value can't cast to `T`.
-    fn cast_field<T: sdf::FromValueCast>(&self, clip_set: &str, key: &str) -> Result<Option<T>> {
+    fn cast_field<T: vt::FromValueCast>(&self, clip_set: &str, key: &str) -> Result<Option<T>> {
         Ok(self.field(clip_set, key)?.and_then(|v| v.cast().ok()))
     }
 
@@ -511,7 +512,7 @@ mod tests {
         assert!(clips.clips()?.is_none());
 
         let set = Value::Dictionary([(keys::PRIM_PATH.to_string(), Value::String("/Geo".into()))].into());
-        clips.set_clips(sdf::Dictionary::from([("default".to_string(), set)]))?;
+        clips.set_clips(vt::Dictionary::from([("default".to_string(), set)]))?;
 
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string()]);
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));

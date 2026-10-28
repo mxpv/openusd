@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use openusd::sdf;
 use openusd::usda::{self, TextWriter};
+use openusd::{sdf, vt};
 
 const ASSETS: &str = concat!(
     env!("CARGO_WORKSPACE_DIR"),
@@ -90,9 +90,9 @@ fn normalize_json(v: &mut serde_json::Value) {
 /// keeps an order). A spline's knots are compared in time order, the order
 /// C++ keeps and writes them in.
 fn snapshot(reader: &sdf::Data) -> serde_json::Value {
-    let mut out: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();
+    let mut out: BTreeMap<String, BTreeMap<&str, &vt::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
-        let fields: BTreeMap<&str, &sdf::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let fields: BTreeMap<&str, &vt::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
         out.insert(path.to_string(), fields);
     }
     let mut json = serde_json::to_value(&out).expect("serialize");

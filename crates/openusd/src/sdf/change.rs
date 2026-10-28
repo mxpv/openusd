@@ -22,8 +22,9 @@ use std::collections::BTreeMap;
 
 use bitflags::bitflags;
 
-use super::{AbstractData, CowData, FieldKey, Patch, Path, SpecData, SpecType, Specifier, Value};
+use super::{AbstractData, CowData, FieldKey, Patch, Path, SpecData, SpecType, Specifier};
 use crate::tf;
+use crate::vt::Value;
 
 /// Per-layer ordered list of authoring changes.
 ///

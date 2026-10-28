@@ -372,8 +372,8 @@ class Box "Box" (
         let text = values();
         for expected in [
             // A dictionary, written in key order and holding a value of its own.
-            "::openusd::sdf::Dictionary::from(",
-            "::openusd::sdf::Value::DoubleVec(",
+            "::openusd::vt::Dictionary::from(",
+            "::openusd::vt::Value::DoubleVec(",
             // The three matrices, each through the `gf` type that carries it.
             "::openusd::gf::Mat2d([",
             "::openusd::gf::Mat3d([",
@@ -383,7 +383,7 @@ class Box "Box" (
             "::openusd::gf::f16::from_bits(",
             "::openusd::sdf::AssetPath::new(",
             // A blocked default is a value, not a missing one.
-            "::openusd::sdf::Value::ValueBlock",
+            "::openusd::vt::Value::ValueBlock",
             // A bare `rel` is uniform and a `varying rel` is not, and each is
             // written as whichever differs from the constructor's own default.
             "::openusd::usd::PropertyDecl::relationship(\"plain\")",
@@ -705,7 +705,7 @@ class "Held" (
         let text = with_enums(vec![TokenEnum::new("Outcome", "testTokenEnums", "Held.outcome")]).expect("generates");
 
         assert!(text.contains("Error,"), "the token is still a variant: {text}");
-        assert!(text.contains("::openusd::sdf::impl_token_value!(Outcome);"), "{text}");
+        assert!(text.contains("::openusd::vt::impl_token_value!(Outcome);"), "{text}");
         assert!(!text.contains("impl ::std::convert::TryFrom"), "{text}");
     }
 

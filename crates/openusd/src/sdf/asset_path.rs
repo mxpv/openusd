@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-use crate::{ar, sdf};
+use crate::{ar, sdf, vt};
 
 /// A reference to an external asset — the value of an `asset` attribute or
 /// metadatum, authored in `@...@` syntax.
@@ -253,6 +253,53 @@ pub(crate) struct AssetExpressionFailure {
     pub(crate) message: String,
 }
 
+impl vt::Value {
+    /// Whether this value carries `asset` paths, and so needs anchoring and
+    /// expression evaluation before it is handed to a reader.
+    ///
+    /// The single source of truth for the asset-bearing variants, so a value
+    /// resolver and its callers cannot disagree about which values to resolve.
+    /// Asset paths nested inside a dictionary are not counted: resolution does
+    /// not recurse into one. The one dictionary whose asset paths are reached is
+    /// `clips`, which `pcp` walks field by field with the schema in hand rather
+    /// than by recursion — see `PrimIndex::resolve_clip_sets`.
+    pub fn is_asset_valued(&self) -> bool {
+        matches!(self, vt::Value::AssetPath(_) | vt::Value::AssetPathVec(_))
+    }
+
+    /// Returns this value with every `asset` path it holds rewritten through
+    /// `f`: an `AssetPath` or `AssetPathVec` itself, and any nested inside a
+    /// dictionary, a heterogeneous array, or a time-sample map — the same
+    /// reach as [`map_path_expressions`](Self::map_path_expressions).
+    ///
+    /// That reach is wider than [`is_asset_valued`](Self::is_asset_valued)
+    /// admits, which counts only the two top-level forms because resolution
+    /// does not recurse. A caller rewriting paths rather than resolving them
+    /// wants the nested ones too, which is what flattening a stage needs.
+    pub fn map_asset_paths(self, f: &mut impl FnMut(AssetPath) -> AssetPath) -> vt::Value {
+        match self {
+            vt::Value::AssetPath(asset) => vt::Value::AssetPath(f(asset)),
+            vt::Value::AssetPathVec(assets) => vt::Value::AssetPathVec(assets.into_iter().map(&mut *f).collect()),
+            vt::Value::Dictionary(entries) => vt::Value::Dictionary(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, value.map_asset_paths(f)))
+                    .collect(),
+            ),
+            vt::Value::ValueVec(values) => {
+                vt::Value::ValueVec(values.into_iter().map(|value| value.map_asset_paths(f)).collect())
+            }
+            vt::Value::TimeSamples(samples) => vt::Value::TimeSamples(
+                samples
+                    .into_iter()
+                    .map(|(time, value)| (time, value.map_asset_paths(f)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+}
+
 /// Fills the evaluated and resolved paths on an `asset` / `asset[]` value,
 /// recording any expression failure in `errors` (C++ `SdfResolveAssetPaths`).
 /// A value holding no asset paths passes through untouched.
@@ -269,10 +316,10 @@ pub(crate) struct AssetExpressionFailure {
 pub(crate) fn resolve_asset_paths(
     registry: &sdf::LayerRegistry,
     anchor: Option<&ar::ResolvedPath>,
-    variables: Option<&HashMap<String, sdf::Value>>,
-    value: sdf::Value,
+    variables: Option<&HashMap<String, vt::Value>>,
+    value: vt::Value,
     errors: &mut Vec<AssetExpressionFailure>,
-) -> sdf::Value {
+) -> vt::Value {
     map_paths(value, |asset| resolve_path(registry, anchor, variables, asset, errors)).0
 }
 
@@ -284,39 +331,36 @@ pub(crate) fn resolve_asset_paths(
 /// file name at all: a `templateAssetPath` is a `#`-pattern expanded into a
 /// sequence of clip paths, so resolving the pattern would name nothing.
 pub(crate) fn evaluate_asset_paths(
-    variables: Option<&HashMap<String, sdf::Value>>,
-    value: sdf::Value,
+    variables: Option<&HashMap<String, vt::Value>>,
+    value: vt::Value,
     errors: &mut Vec<AssetExpressionFailure>,
-) -> (sdf::Value, AssetOutcome) {
+) -> (vt::Value, AssetOutcome) {
     map_paths(value, |asset| evaluate_path(variables, asset, errors))
 }
 
 /// Whether `value` holds an asset path that needs evaluating, so a caller can
 /// skip assembling the scope and anchor for the ordinary literal case.
-pub(crate) fn holds_asset_expression(value: &sdf::Value) -> bool {
+pub(crate) fn holds_asset_expression(value: &vt::Value) -> bool {
     match value {
-        sdf::Value::AssetPath(asset) => sdf::expr::is_expression(asset.as_str()),
-        sdf::Value::AssetPathVec(assets) => assets.iter().any(|a| sdf::expr::is_expression(a.as_str())),
+        vt::Value::AssetPath(asset) => sdf::expr::is_expression(asset.as_str()),
+        vt::Value::AssetPathVec(assets) => assets.iter().any(|a| sdf::expr::is_expression(a.as_str())),
         _ => false,
     }
 }
 
 /// Rebuilds an `asset` / `asset[]` value through `f`, reporting the worst
 /// outcome over its elements. A value holding no asset paths passes through
-/// untouched, as [`Value::is_asset_valued`](sdf::Value::is_asset_valued)
+/// untouched, as [`Value::is_asset_valued`](vt::Value::is_asset_valued)
 /// defines the set.
-fn map_paths(
-    value: sdf::Value,
-    mut f: impl FnMut(AssetPath) -> (AssetPath, AssetOutcome),
-) -> (sdf::Value, AssetOutcome) {
+fn map_paths(value: vt::Value, mut f: impl FnMut(AssetPath) -> (AssetPath, AssetOutcome)) -> (vt::Value, AssetOutcome) {
     let mut outcome = AssetOutcome::Evaluated;
     let value = match value {
-        sdf::Value::AssetPath(asset) => {
+        vt::Value::AssetPath(asset) => {
             let (asset, element) = f(asset);
             outcome = element;
-            sdf::Value::AssetPath(asset)
+            vt::Value::AssetPath(asset)
         }
-        sdf::Value::AssetPathVec(assets) => sdf::Value::AssetPathVec(
+        vt::Value::AssetPathVec(assets) => vt::Value::AssetPathVec(
             assets
                 .into_iter()
                 .map(|asset| {
@@ -342,7 +386,7 @@ fn map_paths(
 /// derived paths: the result is rebuilt from the authored path so any prior
 /// evaluated or resolved path is discarded.
 fn evaluate_path(
-    variables: Option<&HashMap<String, sdf::Value>>,
+    variables: Option<&HashMap<String, vt::Value>>,
     asset: AssetPath,
     errors: &mut Vec<AssetExpressionFailure>,
 ) -> (AssetPath, AssetOutcome) {
@@ -377,7 +421,7 @@ fn evaluate_path(
 fn resolve_path(
     registry: &sdf::LayerRegistry,
     anchor: Option<&ar::ResolvedPath>,
-    variables: Option<&HashMap<String, sdf::Value>>,
+    variables: Option<&HashMap<String, vt::Value>>,
     asset: AssetPath,
     errors: &mut Vec<AssetExpressionFailure>,
 ) -> (AssetPath, AssetOutcome) {
@@ -429,7 +473,7 @@ mod tests {
     fn no_scope_skips_expression() {
         let registry = sdf::LayerRegistry::default();
         let mut errors = Vec::new();
-        let value = sdf::Value::AssetPath(AssetPath::new("`${A}`"));
+        let value = vt::Value::AssetPath(AssetPath::new("`${A}`"));
 
         let value = resolve_asset_paths(&registry, None, None, value, &mut errors);
 
@@ -446,8 +490,8 @@ mod tests {
     fn empty_evaluation_unresolved() {
         let registry = sdf::LayerRegistry::default();
         let mut errors = Vec::new();
-        let variables = HashMap::from([("A".to_string(), sdf::Value::from(""))]);
-        let value = sdf::Value::AssetPath(AssetPath::new("`${A}`"));
+        let variables = HashMap::from([("A".to_string(), vt::Value::from(""))]);
+        let value = vt::Value::AssetPath(AssetPath::new("`${A}`"));
 
         let value = resolve_asset_paths(&registry, None, Some(&variables), value, &mut errors);
 
@@ -469,7 +513,7 @@ mod tests {
 
         let registry = sdf::LayerRegistry::default();
         let mut errors = Vec::new();
-        let value = sdf::Value::AssetPath(AssetPath::new(authored));
+        let value = vt::Value::AssetPath(AssetPath::new(authored));
 
         let value = resolve_asset_paths(&registry, None, None, value, &mut errors);
 

@@ -11,7 +11,7 @@ use std::path::Path as FsPath;
 use std::rc::Rc;
 
 use openusd::Result;
-use openusd::{gf, pcp, sdf, tf, usd};
+use openusd::{gf, pcp, sdf, tf, usd, vt};
 
 #[test]
 fn change_list_entry_dedups() {
@@ -145,18 +145,18 @@ fn attribute_value_keeps_owner_indexed() {
         .unwrap()
         .create_attribute("x", "double")
         .unwrap()
-        .set(sdf::Value::Double(1.0))
+        .set(vt::Value::Double(1.0))
         .unwrap();
 
     let _ = stage.prim("/A").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
-    let attr = attr.set(sdf::Value::Double(2.0)).unwrap();
+    let attr = attr.set(vt::Value::Double(2.0)).unwrap();
     assert!(
         stage.is_indexed(&sdf::path("/A").unwrap()),
         "attribute value writes must not invalidate the prim graph",
     );
-    assert_eq!(attr.get().unwrap(), Some(sdf::Value::Double(2.0)));
+    assert_eq!(attr.get().unwrap(), Some(vt::Value::Double(2.0)));
 }
 
 /// `instanceable` is a significant-promoter — authoring it drops the index.
@@ -631,8 +631,8 @@ fn unused_var_keeps_index() -> Result<()> {
     let notices = capture_notices(&stage);
 
     stage.set_expression_variables(HashMap::from([
-        ("SEL".to_string(), sdf::Value::String("x".to_string())),
-        ("FREE".to_string(), sdf::Value::String("z".to_string())),
+        ("SEL".to_string(), vt::Value::String("x".to_string())),
+        ("FREE".to_string(), vt::Value::String("z".to_string())),
     ]))?;
 
     {
@@ -669,10 +669,7 @@ fn used_var_drops_user() -> Result<()> {
     let stage = open_variant_fixture(&dir)?;
     let notices = capture_notices(&stage);
 
-    stage.set_expression_variables(HashMap::from([(
-        "SEL".to_string(),
-        sdf::Value::String("y".to_string()),
-    )]))?;
+    stage.set_expression_variables(HashMap::from([("SEL".to_string(), vt::Value::String("y".to_string()))]))?;
 
     {
         let notices = notices.borrow();
@@ -738,7 +735,7 @@ def "B" {
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
     let notices = capture_notices(&stage);
 
-    stage.set_expression_variables(HashMap::from([("W".to_string(), sdf::Value::String("b".to_string()))]))?;
+    stage.set_expression_variables(HashMap::from([("W".to_string(), vt::Value::String("b".to_string()))]))?;
 
     assert!(
         !stage.is_indexed(&sdf::path("/Other")?),
@@ -808,9 +805,10 @@ def "P" {
 
     let notices = capture_notices(&stage);
     let target_id = identifier_by_leaf(&stage, "t.usda");
-    stage.layer_mut(&target_id).expect("target layer is live").edit(|e| {
-        e.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("x".to_string()))]))
-    })?;
+    stage
+        .layer_mut(&target_id)
+        .expect("target layer is live")
+        .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".to_string()))])))?;
 
     assert!(
         !stage.is_indexed(&sdf::path("/P")?),
@@ -907,7 +905,7 @@ def "O" {
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
     let notices = capture_notices(&stage);
 
-    stage.set_expression_variables(HashMap::from([("V".to_string(), sdf::Value::String("y".to_string()))]))?;
+    stage.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("y".to_string()))]))?;
 
     assert!(
         !stage.is_indexed(&sdf::path("/P")?),
@@ -983,7 +981,7 @@ def "P" {
 
     stage.set_expression_variables(HashMap::from([(
         "TGT".to_string(),
-        sdf::Value::String("t.usda".to_string()),
+        vt::Value::String("t.usda".to_string()),
     )]))?;
 
     assert_eq!(
@@ -1069,25 +1067,25 @@ fn threshold_sweep_recomposes() -> Result<()> {
 }
 
 /// A clip set's `clips` dictionary, selecting `active_index` from two clips.
-fn clip_metadata(active_index: f64) -> sdf::Value {
+fn clip_metadata(active_index: f64) -> vt::Value {
     let set = HashMap::from([
         (
             "assetPaths".to_string(),
-            sdf::Value::AssetPathVec(vec!["./clipA.usda".into(), "./clipB.usda".into()]),
+            vt::Value::AssetPathVec(vec!["./clipA.usda".into(), "./clipB.usda".into()]),
         ),
         (
             "manifestAssetPath".to_string(),
-            sdf::Value::AssetPath("./manifest.usda".into()),
+            vt::Value::AssetPath("./manifest.usda".into()),
         ),
-        ("primPath".to_string(), sdf::Value::String("/Model".to_string())),
+        ("primPath".to_string(), vt::Value::String("/Model".to_string())),
         (
             "active".to_string(),
-            sdf::Value::Vec2dVec(vec![gf::vec2d(0.0, active_index)]),
+            vt::Value::Vec2dVec(vec![gf::vec2d(0.0, active_index)]),
         ),
     ]);
-    sdf::Value::Dictionary(sdf::Dictionary::from([(
+    vt::Value::Dictionary(vt::Dictionary::from([(
         "default".to_string(),
-        sdf::Value::Dictionary(set.into()),
+        vt::Value::Dictionary(set.into()),
     )]))
 }
 
@@ -1119,14 +1117,14 @@ fn open_clip_fixture(dir: &tempfile::TempDir) -> Result<usd::Stage> {
     Ok(stage)
 }
 
-/// `/Model.size` at time 0. Read through `sdf::Value` because a usda
+/// `/Model.size` at time 0. Read through `vt::Value` because a usda
 /// `timeSamples` entry carries the type its literal spells, not the one the
 /// attribute declares.
 fn clip_value(stage: &usd::Stage) -> Option<f64> {
     stage
         .attribute("/Model.size")
         .unwrap()
-        .get_at::<sdf::Value>(usd::TimeCode::new(0.0))
+        .get_at::<vt::Value>(usd::TimeCode::new(0.0))
         .expect("value_at")
         .map(|value| value.cast::<f64>().expect("numeric"))
 }
@@ -1186,7 +1184,7 @@ fn info_change_names_referrer() {
         .unwrap()
         .set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Source").unwrap(),
                 ..Default::default()
             }])),
@@ -1199,7 +1197,7 @@ fn info_change_names_referrer() {
     stage
         .attribute("/Source.x")
         .unwrap()
-        .set(sdf::Value::Double(4.0))
+        .set(vt::Value::Double(4.0))
         .unwrap();
 
     let notices = notices.borrow();
@@ -1272,7 +1270,7 @@ fn relocated_info_notice() -> Result<()> {
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")
-            .set_default(sdf::Value::Double(2.0))?;
+            .set_default(vt::Value::Double(2.0))?;
         Ok(())
     })?;
 

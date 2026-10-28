@@ -11,7 +11,8 @@ use std::{iter, mem};
 
 use super::compose_site::{compose_arc_list_in, compose_token_children};
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, LayerOffset, Path, Value};
+use crate::sdf::{self, LayerOffset, Path};
+use crate::vt::Value;
 
 use super::diagnostics::Diagnostics;
 use super::index_store::PrimRevision;

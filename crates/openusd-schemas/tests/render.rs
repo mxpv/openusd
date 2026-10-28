@@ -6,9 +6,10 @@ use std::fs;
 use openusd::Result;
 use openusd::gf;
 
-use openusd::sdf::{self, Value};
+use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{CollectionAPI, SchemaBase, Stage};
+use openusd::vt::{self, Value};
 use openusd_schemas::SchemaError;
 use openusd_schemas::render::{
     AspectRatioConformPolicy, Pass, PassSchema, Product, ProductSchema, ProductType, Settings, SettingsBaseSchema,
@@ -184,7 +185,7 @@ fn memory() -> Result<Stage> {
 fn render_pass_roundtrip() -> Result<()> {
     let stage = memory()?;
     let p = Pass::define(&stage, "/Render/Passes/beauty")?;
-    p.create_pass_type_attr()?.set(sdf::Value::token("prman"))?;
+    p.create_pass_type_attr()?.set(vt::Value::token("prman"))?;
     p.create_command_attr()?.set(Value::StringVec(vec![
         "prman".into(),
         "-t:0".into(),
@@ -209,7 +210,7 @@ fn render_product_roundtrip() -> Result<()> {
     let stage = memory()?;
     let p = Product::define(&stage, "/Render/Products/beauty")?;
     p.create_product_type_attr()?.set(ProductType::Raster)?;
-    p.create_product_name_attr()?.set(sdf::Value::token("beauty.exr"))?;
+    p.create_product_name_attr()?.set(vt::Value::token("beauty.exr"))?;
     // A product-level override of an inherited base attribute.
     p.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
     p.create_ordered_vars_rel()?.add_target("/Render/Vars/color")?;
@@ -237,7 +238,7 @@ fn render_settings_roundtrip() -> Result<()> {
     s.create_included_purposes_attr()?
         .set(Value::TokenVec(vec!["default".into(), "render".into()]))?;
     s.create_rendering_color_space_attr()?
-        .set(sdf::Value::token("lin_rec709"))?;
+        .set(vt::Value::token("lin_rec709"))?;
 
     let s = Settings::get(&stage, "/Render/Settings")?.expect("Settings");
     assert_eq!(
@@ -265,7 +266,7 @@ fn render_settings_roundtrip() -> Result<()> {
 fn render_var_roundtrip() -> Result<()> {
     let stage = memory()?;
     let v = Var::define(&stage, "/Render/Vars/N")?;
-    v.create_data_type_attr()?.set(sdf::Value::token("normal3f"))?;
+    v.create_data_type_attr()?.set(vt::Value::token("normal3f"))?;
     v.create_source_name_attr()?.set("Nworld".to_string())?;
     v.create_source_type_attr()?.set(SourceType::Primvar)?;
 

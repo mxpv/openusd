@@ -14,7 +14,7 @@ use openusd::Result;
 
 use crate::SchemaError;
 
-use openusd::{gf, sdf, usd};
+use openusd::{gf, sdf, usd, vt};
 
 use super::nodes::{PreviewSurface, UVTexture};
 use super::tokens::*;
@@ -196,10 +196,10 @@ fn read_color_channel(context: &ConnectableContext, input: &Input) -> Result<Cha
     if let Some(file) = connected_texture_file(context, input)? {
         return Ok(Channel::Texture(file));
     }
-    Ok(match input.get::<sdf::Value>()? {
-        Some(sdf::Value::Vec3f(v)) => Channel::Value(v),
-        Some(sdf::Value::Vec3d(v)) => Channel::Value(gf::vec3f(v.x as f32, v.y as f32, v.z as f32)),
-        Some(sdf::Value::Vec3h(v)) => Channel::Value(gf::vec3f(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
+    Ok(match input.get::<vt::Value>()? {
+        Some(vt::Value::Vec3f(v)) => Channel::Value(v),
+        Some(vt::Value::Vec3d(v)) => Channel::Value(gf::vec3f(v.x as f32, v.y as f32, v.z as f32)),
+        Some(vt::Value::Vec3h(v)) => Channel::Value(gf::vec3f(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
         _ => Channel::Unset,
     })
 }
@@ -210,11 +210,11 @@ fn read_scalar_channel(context: &ConnectableContext, input: &Input) -> Result<Ch
     if let Some(file) = connected_texture_file(context, input)? {
         return Ok(Channel::Texture(file));
     }
-    Ok(match input.get::<sdf::Value>()? {
-        Some(sdf::Value::Float(f)) => Channel::Value(f),
-        Some(sdf::Value::Double(d)) => Channel::Value(d as f32),
-        Some(sdf::Value::Half(h)) => Channel::Value(h.to_f32()),
-        Some(sdf::Value::Int(i)) => Channel::Value(i as f32),
+    Ok(match input.get::<vt::Value>()? {
+        Some(vt::Value::Float(f)) => Channel::Value(f),
+        Some(vt::Value::Double(d)) => Channel::Value(d as f32),
+        Some(vt::Value::Half(h)) => Channel::Value(h.to_f32()),
+        Some(vt::Value::Int(i)) => Channel::Value(i as f32),
         _ => Channel::Unset,
     })
 }
@@ -232,8 +232,8 @@ mod tests {
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.node_def()
             .create_id_attr()?
-            .set(sdf::Value::token("UsdPreviewSurface"))?;
-        surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
+            .set(vt::Value::token("UsdPreviewSurface"))?;
+        surf.create_input("roughness", "float")?.set(vt::Value::Float(0.4))?;
         surf.create_output("surface", "token")?;
 
         // Only a render-context surface terminal is authored; the reader
@@ -254,21 +254,19 @@ mod tests {
 
         // A UsdUVTexture feeding diffuseColor; roughness/metallic are scalars.
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
-        tex.node_def()
-            .create_id_attr()?
-            .set(sdf::Value::token("UsdUVTexture"))?;
+        tex.node_def().create_id_attr()?.set(vt::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
-            .set(sdf::Value::AssetPath("./albedo.png".into()))?;
+            .set(vt::Value::AssetPath("./albedo.png".into()))?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.node_def()
             .create_id_attr()?
-            .set(sdf::Value::token("UsdPreviewSurface"))?;
+            .set(vt::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections(["/Mat/DiffuseTex.outputs:rgb"])?;
-        surf.create_input("roughness", "float")?.set(sdf::Value::Float(0.4))?;
-        surf.create_input("metallic", "float")?.set(sdf::Value::Float(1.0))?;
+        surf.create_input("roughness", "float")?.set(vt::Value::Float(0.4))?;
+        surf.create_input("metallic", "float")?.set(vt::Value::Float(1.0))?;
         surf.create_output("surface", "token")?;
 
         Material::define(&stage, "/Mat")?
@@ -294,12 +292,10 @@ mod tests {
         // than authored directly on the texture.
         let mat = Material::define(&stage, "/Mat")?;
         mat.create_input("diffuseTexFile", "asset")?
-            .set(sdf::Value::AssetPath("./albedo.png".into()))?;
+            .set(vt::Value::AssetPath("./albedo.png".into()))?;
 
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
-        tex.node_def()
-            .create_id_attr()?
-            .set(sdf::Value::token("UsdUVTexture"))?;
+        tex.node_def().create_id_attr()?.set(vt::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
             .set_connections(["/Mat.inputs:diffuseTexFile"])?;
         tex.create_output("rgb", "float3")?;
@@ -307,7 +303,7 @@ mod tests {
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.node_def()
             .create_id_attr()?
-            .set(sdf::Value::token("UsdPreviewSurface"))?;
+            .set(vt::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections(["/Mat/DiffuseTex.outputs:rgb"])?;
         surf.create_output("surface", "token")?;
@@ -325,7 +321,7 @@ mod tests {
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.node_def()
             .create_id_attr()?
-            .set(sdf::Value::token("ND_standard_surface_surfaceshader"))?;
+            .set(vt::Value::token("ND_standard_surface_surfaceshader"))?;
         surf.create_output("surface", "token")?;
         Material::define(&stage, "/Mat")?
             .create_surface_output()?

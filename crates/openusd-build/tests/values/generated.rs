@@ -66,11 +66,11 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 &[
                     ::openusd::usd::Field::new(
                         "nested",
-                        || ::openusd::sdf::Value::Dictionary(
-                            ::openusd::sdf::Dictionary::from([
+                        || ::openusd::vt::Value::Dictionary(
+                            ::openusd::vt::Dictionary::from([
                                 (
                                     ::std::string::String::from("depth"),
-                                    ::openusd::sdf::Value::Int(2i32),
+                                    ::openusd::vt::Value::Int(2i32),
                                 ),
                             ]),
                         ),
@@ -78,7 +78,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                     ::openusd::usd::Field::string("note", "kept"),
                     ::openusd::usd::Field::new(
                         "providesUsdShadeConnectableAPIBehavior",
-                        || ::openusd::sdf::Value::Bool(true),
+                        || ::openusd::vt::Value::Bool(true),
                     ),
                 ],
             )
@@ -90,7 +90,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::ValueBlock,
+                                    || ::openusd::vt::Value::ValueBlock,
                                 ),
                             ],
                         ),
@@ -102,7 +102,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Matrix4d(
+                                    || ::openusd::vt::Value::Matrix4d(
                                         ::openusd::gf::Mat4d([
                                             1f64, 0f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 0f64,
                                             1f64, 0f64, 0f64, 0f64, 0f64, 1f64,
@@ -117,7 +117,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Matrix2d(
+                                    || ::openusd::vt::Value::Matrix2d(
                                         ::openusd::gf::Mat2d([1f64, 0f64, 0f64, 1f64]),
                                     ),
                                 ),
@@ -129,7 +129,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Matrix3d(
+                                    || ::openusd::vt::Value::Matrix3d(
                                         ::openusd::gf::Mat3d([
                                             1f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 1f64,
                                         ]),
@@ -143,7 +143,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Quath(
+                                    || ::openusd::vt::Value::Quath(
                                         ::openusd::gf::quath(
                                             ::openusd::gf::f16::from_bits(15360u16),
                                             ::openusd::gf::f16::from_bits(0u16),
@@ -160,7 +160,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::TimeCode(
+                                    || ::openusd::vt::Value::TimeCode(
                                         ::openusd::sdf::TimeCode(3f64),
                                     ),
                                 ),
@@ -172,7 +172,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Half(
+                                    || ::openusd::vt::Value::Half(
                                         ::openusd::gf::f16::from_bits(14336u16),
                                     ),
                                 ),
@@ -184,7 +184,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::AssetPath(
+                                    || ::openusd::vt::Value::AssetPath(
                                         ::openusd::sdf::AssetPath::new("./texture.png"),
                                     ),
                                 ),
@@ -196,7 +196,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Float(1f32),
+                                    || ::openusd::vt::Value::Float(1f32),
                                 ),
                             ],
                         ),
@@ -206,17 +206,17 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 &[
                     ::openusd::usd::Field::new(
                         "assetInfo",
-                        || ::openusd::sdf::Value::Dictionary(
-                            ::openusd::sdf::Dictionary::from([
+                        || ::openusd::vt::Value::Dictionary(
+                            ::openusd::vt::Dictionary::from([
                                 (
                                     ::std::string::String::from("version"),
-                                    ::openusd::sdf::Value::String(
+                                    ::openusd::vt::Value::String(
                                         ::std::string::String::from("1"),
                                     ),
                                 ),
                                 (
                                     ::std::string::String::from("weights"),
-                                    ::openusd::sdf::Value::DoubleVec(::std::vec![0.5f64, 1f64]),
+                                    ::openusd::vt::Value::DoubleVec(::std::vec![0.5f64, 1f64]),
                                 ),
                             ]),
                         ),

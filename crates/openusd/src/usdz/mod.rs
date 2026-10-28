@@ -235,6 +235,7 @@ pub(crate) mod tests {
     use crate::ar::tests::TestResolver;
     use crate::sdf::FileFormat;
     use crate::usd::{PrimPredicate, Stage, TimeCode};
+    use crate::vt;
     use std::fs;
     use std::io::Write;
     use std::sync::Arc;
@@ -345,8 +346,8 @@ pub(crate) mod tests {
         assert_eq!(
             stage
                 .attribute("/World.probe")?
-                .get_at::<sdf::Value>(TimeCode::new(0.0))?,
-            Some(sdf::Value::Int(42)),
+                .get_at::<vt::Value>(TimeCode::new(0.0))?,
+            Some(vt::Value::Int(42)),
             "reference to a layer inside the package should compose"
         );
         Ok(())
@@ -554,15 +555,15 @@ pub(crate) mod tests {
         writer.add_layer("inner.usdz", &inner)?;
         writer.finish()?;
 
-        let probe = |stage: &Stage, attr: &str| -> Result<Option<sdf::Value>> {
-            stage.attribute(attr)?.get_at::<sdf::Value>(TimeCode::new(0.0))
+        let probe = |stage: &Stage, attr: &str| -> Result<Option<vt::Value>> {
+            stage.attribute(attr)?.get_at::<vt::Value>(TimeCode::new(0.0))
         };
         let stage = Stage::open(path.to_str().unwrap())?;
-        assert_eq!(probe(&stage, "/World.probe")?, Some(sdf::Value::Int(42)));
+        assert_eq!(probe(&stage, "/World.probe")?, Some(vt::Value::Int(42)));
 
         let nested = ar::join_package_relative_path(path.to_str().unwrap(), "inner.usdz");
         let stage = Stage::open(&nested)?;
-        assert_eq!(probe(&stage, "/Inner.probe")?, Some(sdf::Value::Int(42)));
+        assert_eq!(probe(&stage, "/Inner.probe")?, Some(vt::Value::Int(42)));
 
         let data = Archive::open(&path)?.read("inner.usdz")?;
         assert!(data.has_spec(&sdf::path("/Inner")?));

@@ -3,10 +3,10 @@
 //! An op is an `xformOp:<kind>[:suffix]` attribute, possibly listed through
 //! the `!invert!` prefix, whose value is turned into a 4×4 matrix by its kind.
 
-use openusd::gf;
 use openusd::sdf;
 use openusd::tf;
 use openusd::usd;
+use openusd::{gf, vt};
 
 use super::XformOpPrecision;
 use crate::SchemaError;
@@ -178,7 +178,7 @@ impl XformOpKind {
     /// terms [`XformOp::transform`] states: a value of a type the kind does
     /// not take gives identity. `None` when the inverse of a singular
     /// `transform` is asked for.
-    pub fn matrix(self, value: sdf::Value, inverse: bool) -> Option<gf::Mat4d> {
+    pub fn matrix(self, value: vt::Value, inverse: bool) -> Option<gf::Mat4d> {
         let sign = if inverse { -1.0 } else { 1.0 };
         // C++ negates the value of an inverted `scaleX` / `scaleY` / `scaleZ`
         // as it does a translate's. The reciprocal is that op's inverse, and
@@ -186,8 +186,8 @@ impl XformOpKind {
         let factor = |c: f64| if inverse { 1.0 / c } else { c };
         let matrix = match self {
             Self::Transform => match value {
-                sdf::Value::Matrix4d(m) if inverse => return m.inverse(),
-                sdf::Value::Matrix4d(m) => Some(m),
+                vt::Value::Matrix4d(m) if inverse => return m.inverse(),
+                vt::Value::Matrix4d(m) => Some(m),
                 _ => None,
             },
             Self::TranslateX | Self::TranslateY | Self::TranslateZ => value.cast::<f64>().ok().map(|v| {
@@ -325,7 +325,7 @@ impl XformOp {
 
     /// Author the op's default value (C++ `Set`), on the terms
     /// [`set_at`](Self::set_at) states.
-    pub fn set(&self, value: impl Into<sdf::Value>) -> Result<(), SchemaError> {
+    pub fn set(&self, value: impl Into<vt::Value>) -> Result<(), SchemaError> {
         self.set_at(value, None)
     }
 
@@ -338,7 +338,7 @@ impl XformOp {
     /// inverts holds.
     pub fn set_at(
         &self,
-        value: impl Into<sdf::Value>,
+        value: impl Into<vt::Value>,
         time: impl Into<Option<usd::TimeCode>>,
     ) -> Result<(), SchemaError> {
         if self.inverse {
@@ -369,7 +369,7 @@ impl XformOp {
         let Some(kind) = self.kind else {
             return Ok(gf::Mat4d::IDENTITY);
         };
-        let Some(value) = self.query.get_at::<sdf::Value>(time)? else {
+        let Some(value) = self.query.get_at::<vt::Value>(time)? else {
             return Ok(gf::Mat4d::IDENTITY);
         };
         kind.matrix(value, self.inverse)
@@ -424,11 +424,11 @@ mod tests {
     fn inverse_undoes_kind() {
         let value = |kind: XformOpKind| match kind {
             XformOpKind::Transform => {
-                sdf::Value::Matrix4d(gf::Mat4d::translation([1.0, 2.0, 3.0]) * gf::Mat4d::scale([2.0, 3.0, 4.0]))
+                vt::Value::Matrix4d(gf::Mat4d::translation([1.0, 2.0, 3.0]) * gf::Mat4d::scale([2.0, 3.0, 4.0]))
             }
-            XformOpKind::Orient => sdf::Value::Quatd(gf::quatd(0.5, 0.5, 0.5, 0.5)),
-            k if k.value_type(XformOpPrecision::Double) == sdf::ValueTypeName::DOUBLE => sdf::Value::Double(30.0),
-            _ => sdf::Value::Vec3d(gf::vec3d(10.0, 20.0, 30.0)),
+            XformOpKind::Orient => vt::Value::Quatd(gf::quatd(0.5, 0.5, 0.5, 0.5)),
+            k if k.value_type(XformOpPrecision::Double) == sdf::ValueTypeName::DOUBLE => vt::Value::Double(30.0),
+            _ => vt::Value::Vec3d(gf::vec3d(10.0, 20.0, 30.0)),
         };
         for kind in XformOpKind::ALL {
             let v = value(kind);
@@ -449,12 +449,12 @@ mod tests {
     /// last bit.
     #[test]
     fn rotation_matches_cpp() {
-        let quarter = sdf::Value::Quatf(gf::quatf(0.70710677, 0.70710677, 0.0, 0.0));
-        let euler = sdf::Value::Vec3d(gf::vec3d(10.0, 20.0, 30.0));
+        let quarter = vt::Value::Quatf(gf::quatf(0.70710677, 0.70710677, 0.0, 0.0));
+        let euler = vt::Value::Vec3d(gf::vec3d(10.0, 20.0, 30.0));
         let cases = [
             (
                 XformOpKind::Orient,
-                sdf::Value::Quatf(gf::quatf(0.9511514, 0.04662174, -0.28952447, 0.096504346)),
+                vt::Value::Quatf(gf::quatf(0.9511514, 0.04662174, -0.28952447, 0.096504346)),
                 false,
                 [
                     [0.8137250333625328, 0.15658419738533075, 0.559761519942499],
@@ -484,7 +484,7 @@ mod tests {
             ),
             (
                 XformOpKind::Orient,
-                sdf::Value::Quatd(gf::quatd(0.5, 1.0, 0.25, -0.75)),
+                vt::Value::Quatd(gf::quatd(0.5, 1.0, 0.25, -0.75)),
                 false,
                 [
                     [0.423076923076923, -0.2787554345958372, -0.8621492474293819],
@@ -494,7 +494,7 @@ mod tests {
             ),
             (
                 XformOpKind::RotateX,
-                sdf::Value::Double(30.0),
+                vt::Value::Double(30.0),
                 false,
                 [
                     [1.0, 0.0, 0.0],

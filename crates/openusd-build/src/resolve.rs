@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter;
 
-use openusd::{sdf, tf, usd};
+use openusd::{sdf, tf, usd, vt};
 
 use crate::error::Error;
 use crate::load::{self, CustomData, Declaration, PropertyDeclaration, Source};
@@ -483,7 +483,7 @@ fn shape_at(flattened: &sdf::Layer, path: &sdf::Path) -> Result<Option<Shape>, E
 /// Nothing is filtered. Validation has to see a field it means to reject, the
 /// emitter reads the documentation, and the schematics writer is the one place
 /// that drops what a schematics does not carry.
-fn composed_fields(flattened: &sdf::Layer, path: &sdf::Path) -> Result<BTreeMap<String, sdf::Value>, Error> {
+fn composed_fields(flattened: &sdf::Layer, path: &sdf::Path) -> Result<BTreeMap<String, vt::Value>, Error> {
     let data = flattened.data();
     let mut fields = BTreeMap::new();
     for name in data.list_fields(path).unwrap_or_default() {

@@ -33,7 +33,7 @@ use std::mem;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use crate::sdf::AbstractData;
-use crate::{ar, kind, pcp, sdf, tf};
+use crate::{ar, kind, pcp, sdf, tf, vt};
 
 use super::prim_definition::{self, FamilyVersions};
 use super::schema_decl::{Field, MetadataTargets, PropertyKind, SchemaDecl, SchemaFamily};
@@ -87,7 +87,7 @@ pub struct MetadataField {
     name: tf::Token,
     type_name: sdf::ValueTypeName,
     applies_to: MetadataTargets,
-    fallback: Option<sdf::Value>,
+    fallback: Option<vt::Value>,
     family: tf::Token,
 }
 
@@ -110,7 +110,7 @@ impl MetadataField {
     }
 
     /// What a stage reads for the field where no layer authors it.
-    pub fn fallback(&self) -> Option<&sdf::Value> {
+    pub fn fallback(&self) -> Option<&vt::Value> {
         self.fallback.as_ref()
     }
 
@@ -142,7 +142,7 @@ pub struct SchemaInfo {
     /// [`can_only_apply_to`](Self::can_only_apply_to) with.
     instance_can_only_apply_to: HashMap<tf::Token, Vec<tf::Token>>,
     allowed_instance_names: Vec<tf::Token>,
-    plug_info: sdf::Dictionary,
+    plug_info: vt::Dictionary,
 }
 
 /// One family's parsed schematics — the class prims that define what each
@@ -299,7 +299,7 @@ pub enum SchemaRegistryError {
     #[error("customData.extraPlugInfo must be a dictionary, not a {kind}")]
     PlugInfoNotDictionary {
         /// The kind of value the entry holds.
-        kind: sdf::ValueKind,
+        kind: vt::ValueKind,
     },
 
     /// A schema identifier is not a legal `family` or `family_N` name.
@@ -514,7 +514,7 @@ impl SchemaRegistry {
     /// The fallback of the stage metadata field `name`: the fallback a
     /// registered family declares for it where the field applies to layers
     /// (C++ `SdfSchema::GetFallback` for a layer field).
-    pub fn stage_metadata_fallback(&self, name: &tf::Token) -> Option<&sdf::Value> {
+    pub fn stage_metadata_fallback(&self, name: &tf::Token) -> Option<&vt::Value> {
         self.metadata_field(name)
             .filter(|declared| declared.applies_to().contains(MetadataTargets::LAYERS))
             .and_then(MetadataField::fallback)
@@ -1152,7 +1152,7 @@ struct Declared {
     can_only_apply_to: Vec<tf::Token>,
     instance_can_only_apply_to: HashMap<tf::Token, Vec<tf::Token>>,
     allowed_instance_names: Vec<tf::Token>,
-    plug_info: sdf::Dictionary,
+    plug_info: vt::Dictionary,
 }
 
 impl SchemaInfo {
@@ -1258,7 +1258,7 @@ impl SchemaInfo {
     /// as in `providesUsdShadeConnectableAPIBehavior` or
     /// `implementsComputeExtent`. They belong to this schema alone: a derived
     /// schema does not inherit them.
-    pub fn plug_info(&self) -> &sdf::Dictionary {
+    pub fn plug_info(&self) -> &vt::Dictionary {
         &self.plug_info
     }
 }
@@ -1306,7 +1306,7 @@ impl SchemaFamily<'_> {
         let family = &family;
         let schemas = self.schemas;
         let mut data = sdf::Data::new();
-        let mut fallbacks = sdf::Dictionary::new();
+        let mut fallbacks = vt::Dictionary::new();
 
         for decl in schemas {
             let path = sdf::Path::abs_root().append_path(decl.identifier)?;
@@ -1344,7 +1344,7 @@ impl SchemaFamily<'_> {
                 data.set_field(
                     &path,
                     sdf::FieldKey::CustomData.as_str(),
-                    sdf::Dictionary::from([("apiSchemaOverridePropertyNames".to_owned(), sdf::Value::TokenVec(names))])
+                    vt::Dictionary::from([("apiSchemaOverridePropertyNames".to_owned(), vt::Value::TokenVec(names))])
                         .into(),
                 );
             }
@@ -1377,7 +1377,7 @@ impl SchemaFamily<'_> {
 
             if !decl.fallback_types.is_empty() {
                 let types: Vec<tf::Token> = decl.fallback_types.iter().copied().map(tf::Token::from).collect();
-                fallbacks.insert(decl.identifier.to_owned(), sdf::Value::TokenVec(types));
+                fallbacks.insert(decl.identifier.to_owned(), vt::Value::TokenVec(types));
             }
         }
 
@@ -1385,7 +1385,7 @@ impl SchemaFamily<'_> {
             data.set_field(
                 &sdf::Path::abs_root(),
                 sdf::FieldKey::FallbackPrimTypes.as_str(),
-                sdf::Value::Dictionary(fallbacks),
+                vt::Value::Dictionary(fallbacks),
             );
         }
 
@@ -2023,14 +2023,14 @@ fn override_property_names(schematics: &Schematics, class_prim: &sdf::Path) -> V
 
     custom_data(schematics.data(), class_prim)
         .and_then(|custom| custom.get(OVERRIDE_NAMES))
-        .and_then(sdf::Value::try_as_token_vec_ref)
+        .and_then(vt::Value::try_as_token_vec_ref)
         .cloned()
         .unwrap_or_default()
 }
 
 /// Reads one field off a prim in a family's parsed text — a schema's class
 /// prim in the schematics, or its entry in the manifest.
-fn prim_field<'a>(data: &'a sdf::Data, prim: &sdf::Path, field: sdf::FieldKey) -> Option<&'a sdf::Value> {
+fn prim_field<'a>(data: &'a sdf::Data, prim: &sdf::Path, field: sdf::FieldKey) -> Option<&'a vt::Value> {
     data.spec(prim)?.get(field.as_str())
 }
 
@@ -2191,8 +2191,8 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
 }
 
 /// The `customData` dictionary of a prim in a family's parsed text.
-fn custom_data<'a>(data: &'a sdf::Data, prim: &sdf::Path) -> Option<&'a sdf::Dictionary> {
-    prim_field(data, prim, sdf::FieldKey::CustomData).and_then(sdf::Value::try_as_dictionary_ref)
+fn custom_data<'a>(data: &'a sdf::Data, prim: &sdf::Path) -> Option<&'a vt::Dictionary> {
+    prim_field(data, prim, sdf::FieldKey::CustomData).and_then(vt::Value::try_as_dictionary_ref)
 }
 
 /// Reads a multiple-apply schema's per-instance `apiSchemaCanOnlyApplyTo`
@@ -2202,7 +2202,7 @@ fn custom_data<'a>(data: &'a sdf::Data, prim: &sdf::Path) -> Option<&'a sdf::Dic
 fn manifest_instance_restrictions(manifest: &sdf::Data, prim: &sdf::Path) -> HashMap<tf::Token, Vec<tf::Token>> {
     custom_data(manifest, prim)
         .and_then(|custom| custom.get("apiSchemaInstances"))
-        .and_then(sdf::Value::try_as_dictionary_ref)
+        .and_then(vt::Value::try_as_dictionary_ref)
         .into_iter()
         .flatten()
         .filter_map(|(instance, entry)| {
@@ -2229,7 +2229,7 @@ fn manifest_token_vec(manifest: &sdf::Data, prim: &sdf::Path, attribute: &str) -
 }
 
 /// Reads the `default` field of a manifest attribute.
-fn manifest_default<'a>(manifest: &'a sdf::Data, prim: &sdf::Path, attribute: &str) -> Option<&'a sdf::Value> {
+fn manifest_default<'a>(manifest: &'a sdf::Data, prim: &sdf::Path, attribute: &str) -> Option<&'a vt::Value> {
     let path = prim.append_property(attribute).ok()?;
     manifest.spec(&path)?.get(sdf::FieldKey::Default.as_str())
 }
@@ -2551,14 +2551,14 @@ def "Plain"
         assert_eq!(info.len(), 3);
         assert_eq!(
             info.get("providesUsdShadeConnectableAPIBehavior"),
-            Some(&sdf::Value::Bool(true))
+            Some(&vt::Value::Bool(true))
         );
-        assert_eq!(info.get("note"), Some(&sdf::Value::String("kept".into())));
+        assert_eq!(info.get("note"), Some(&vt::Value::String("kept".into())));
         let nested = info
             .get("nested")
-            .and_then(sdf::Value::try_as_dictionary_ref)
+            .and_then(vt::Value::try_as_dictionary_ref)
             .expect("a nested dictionary");
-        assert_eq!(nested.get("depth"), Some(&sdf::Value::Int(2)));
+        assert_eq!(nested.get("depth"), Some(&vt::Value::Int(2)));
 
         // A derived schema does not inherit its base's entries.
         let plain = registry.schema_info(&tf::Token::new("Plain")).expect("Plain");
@@ -2579,7 +2579,7 @@ def "Plain"
             matches!(
                 *cause,
                 SchemaRegistryError::PlugInfoNotDictionary {
-                    kind: sdf::ValueKind::String
+                    kind: vt::ValueKind::String
                 }
             ),
             "{cause}"
@@ -2594,7 +2594,7 @@ def "Plain"
             &[SchemaDecl::new("Widget", SchemaKind::ConcreteTyped)
                 .bases(&["Typed"])
                 .plug_info(&[
-                    Field::new("isUsdShadeContainer", || sdf::Value::Bool(true)),
+                    Field::new("isUsdShadeContainer", || vt::Value::Bool(true)),
                     Field::string("note", "kept"),
                 ])],
         );
@@ -2604,8 +2604,8 @@ def "Plain"
             .expect("Widget")
             .plug_info();
         assert_eq!(info.len(), 2);
-        assert_eq!(info.get("isUsdShadeContainer"), Some(&sdf::Value::Bool(true)));
-        assert_eq!(info.get("note"), Some(&sdf::Value::String("kept".into())));
+        assert_eq!(info.get("isUsdShadeContainer"), Some(&vt::Value::Bool(true)));
+        assert_eq!(info.get("note"), Some(&vt::Value::String("kept".into())));
         Ok(())
     }
 
@@ -2924,7 +2924,7 @@ def "Plain"
         // A prim with no type still gets everything its applied schemas declare.
         assert_eq!(
             definition.attribute_fallback(&tf::Token::new("collection:render:expansionRule")),
-            Some(sdf::Value::token("expandPrims"))
+            Some(vt::Value::token("expandPrims"))
         );
         assert_eq!(
             definition.applied_api_schemas(),
@@ -2943,7 +2943,7 @@ def "Plain"
         // The type's own override still wins over everything authored.
         assert_eq!(
             definition.attribute_fallback(&tf::Token::new("inputs:intensity")),
-            Some(sdf::Value::Float(50000.0))
+            Some(vt::Value::Float(50000.0))
         );
         assert_eq!(
             definition.applied_api_schemas(),

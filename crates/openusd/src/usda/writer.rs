@@ -22,12 +22,12 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::sdf::stream_out;
 use crate::sdf::{
     self, AbstractData, AssetPath, ChildrenKey, FieldKey, FormatError, LayerOffset, ListOp, Path, Payload, Reference,
-    SpecType, Specifier, Value, Variability,
+    SpecType, Specifier, Variability,
 };
 use crate::tf::{self, Token};
+use crate::vt::{self, Value, stream_out};
 
 /// Emits `usda` text from an [`AbstractData`].
 pub struct TextWriter;
@@ -53,7 +53,7 @@ impl TextWriter {
     ///
     /// The same rendering a layer's own text uses, for a caller that has a value
     /// rather than a layer — showing a schema's fallback in documentation, say.
-    pub fn value_to_string(value: &sdf::Value) -> Result<String, FormatError> {
+    pub fn value_to_string(value: &vt::Value) -> Result<String, FormatError> {
         let mut text = String::new();
         format_value(&mut ValueText::of(&mut text), value, 0)?;
         Ok(text)
@@ -423,12 +423,12 @@ impl Emitter<'_> {
         self.indent += 1;
 
         // In time order, as C++ keeps a spline's knots.
-        let mut knots: Vec<&sdf::Dictionary> = match dict.get("knots") {
+        let mut knots: Vec<&vt::Dictionary> = match dict.get("knots") {
             Some(Value::ValueVec(knots)) => knots.iter().filter_map(|knot| knot.try_as_dictionary_ref()).collect(),
             _ => Vec::new(),
         };
         let by_time =
-            |a: &&sdf::Dictionary, b: &&sdf::Dictionary| get_double(a, "time").total_cmp(&get_double(b, "time"));
+            |a: &&vt::Dictionary, b: &&vt::Dictionary| get_double(a, "time").total_cmp(&get_double(b, "time"));
         if !knots.is_sorted_by(|a, b| by_time(a, b).is_le()) {
             knots.sort_by(by_time);
         }
@@ -542,7 +542,7 @@ impl Emitter<'_> {
         knot: &HashMap<String, Value>,
         incoming: &str,
         hermite: bool,
-        knot_custom: Option<&sdf::Dictionary>,
+        knot_custom: Option<&vt::Dictionary>,
     ) -> Result<(), FormatError> {
         let time = get_double(knot, "time");
         let pre_value = get_double(knot, "preValue");
@@ -1478,7 +1478,7 @@ fn push_entry_head(s: &mut String, key: &str, value: &Value) -> Result<(), Forma
         // A dictionary under an unregistered field is still spelled as one;
         // only the field around it was unregistered.
         Value::Dictionary(_) | Value::UnregisteredDictionary(_) => Some(Token::new("dictionary")),
-        other => sdf::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
+        other => vt::ValueKind::from(other).type_name().map(|ty| ty.as_token()),
     };
     if let Some(ty) = type_name {
         s.push_str(ty.as_str());
@@ -1977,8 +1977,8 @@ def \"P\" (
         let mut data = Data::new();
         let root = sdf::Path::abs_root();
         data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
-        let inner = sdf::Dictionary::from([("k".to_owned(), Value::Int(1))]);
-        let outer = sdf::Dictionary::from([("nested".to_owned(), Value::UnregisteredDictionary(inner))]);
+        let inner = vt::Dictionary::from([("k".to_owned(), Value::Int(1))]);
+        let outer = vt::Dictionary::from([("nested".to_owned(), Value::UnregisteredDictionary(inner))]);
         data.set_field(&root, FieldKey::CustomLayerData.as_str(), Value::Dictionary(outer));
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).expect("writes");

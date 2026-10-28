@@ -16,8 +16,9 @@ use std::mem;
 
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{LayerOffset, Path, SpecType, Value};
+use crate::sdf::{LayerOffset, Path, SpecType};
 use crate::tf::Token;
+use crate::vt::{self, Value};
 
 use super::asset_resolve::{self, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
@@ -463,7 +464,7 @@ struct ValueAtResolver<'a> {
     withheld: bool,
     /// The kinds a typed read accepts. At the default time an initial
     /// `default` of any other kind is passed over. `None` for an untyped read.
-    accepts: Option<fn(sdf::ValueKind) -> bool>,
+    accepts: Option<fn(vt::ValueKind) -> bool>,
 }
 
 impl ValueAtResolver<'_> {
@@ -511,7 +512,7 @@ impl OpinionResolver for ValueAtResolver<'_> {
         if self.time.is_none()
             && self.composing.is_empty()
             && let Some(accepts) = self.accepts
-            && !accepts(sdf::ValueKind::from(value.as_ref()))
+            && !accepts(vt::ValueKind::from(value.as_ref()))
             && !composes_over_weaker(&value)
         {
             return Step::Continue;
@@ -1668,7 +1669,7 @@ impl IndexCache {
         attr_path: &Path,
         time: Option<f64>,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-        accepts: Option<fn(sdf::ValueKind) -> bool>,
+        accepts: Option<fn(vt::ValueKind) -> bool>,
     ) -> Result<TimedValue, QueryError> {
         let (owner, suffix) = attr_path.split_prim();
         let prim = self.effective_prim(graph, &owner)?;
@@ -5598,8 +5599,8 @@ def "Anchor" (inherits = </Rig>) {}
         let size = |cache: &mut IndexCache, t: f64| {
             cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &interp, None)
         };
-        assert_eq!(size(&mut cache, 1.0)?, TimedValue::Value(sdf::Value::Float(10.0)));
-        assert_eq!(size(&mut cache, 2.0)?, TimedValue::Value(sdf::Value::Float(20.0)));
+        assert_eq!(size(&mut cache, 1.0)?, TimedValue::Value(vt::Value::Float(10.0)));
+        assert_eq!(size(&mut cache, 2.0)?, TimedValue::Value(vt::Value::Float(20.0)));
         Ok(())
     }
 
@@ -5836,15 +5837,15 @@ def "Model" (
             |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
         assert_eq!(
             size(&mut cache, "/A/Child.size")?,
-            TimedValue::Value(sdf::Value::Double(5.0))
+            TimedValue::Value(vt::Value::Double(5.0))
         );
         assert_eq!(
             size(&mut cache, "/B/Child.size")?,
-            TimedValue::Value(sdf::Value::Double(5.0))
+            TimedValue::Value(vt::Value::Double(5.0))
         );
         assert_eq!(
             size(&mut cache, "/C/Child.size")?,
-            TimedValue::Value(sdf::Value::Double(9.0))
+            TimedValue::Value(vt::Value::Double(9.0))
         );
 
         // /A and /B share /__Prototype_0; /C uses /__Prototype_1. The shared
@@ -5875,11 +5876,11 @@ def "Model" (
         // testing each for instance-ness.
         assert_eq!(
             v(&mut cache, "/A/Mid/Leaf.v")?,
-            TimedValue::Value(sdf::Value::Double(1.0))
+            TimedValue::Value(vt::Value::Double(1.0))
         );
         assert_eq!(
             v(&mut cache, "/B/Mid/Leaf.v")?,
-            TimedValue::Value(sdf::Value::Double(1.0))
+            TimedValue::Value(vt::Value::Double(1.0))
         );
 
         // The shared subtree composes once, under the prototype namespace.
@@ -5947,11 +5948,11 @@ def "Model" (
         // prototype-namespace path resolve the nested leaf.
         assert_eq!(
             v(&mut cache, "/A/Nested/Leaf.v")?,
-            TimedValue::Value(sdf::Value::Double(3.0))
+            TimedValue::Value(vt::Value::Double(3.0))
         );
         assert_eq!(
             v(&mut cache, "/__Prototype_0/Nested/Leaf.v")?,
-            TimedValue::Value(sdf::Value::Double(3.0))
+            TimedValue::Value(vt::Value::Double(3.0))
         );
 
         // Both redirect to the nested prototype; neither the prototype-namespace

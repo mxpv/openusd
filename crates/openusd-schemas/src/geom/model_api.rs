@@ -3,7 +3,7 @@
 //! publishes.
 
 use openusd::usd::{self, SchemaBase};
-use openusd::{Result, gf, sdf, tf};
+use openusd::{Result, gf, sdf, tf, vt};
 
 use super::constraint_target::holds_matrix;
 use super::{
@@ -263,7 +263,7 @@ fn decided_draw_mode(prim: &usd::Prim) -> Result<Option<DrawMode>> {
     }
     // A value that is no token decides nothing, as an attribute with no
     // value does.
-    let value = prim.attribute(tokens::MODEL_DRAW_MODE).get::<sdf::Value>()?;
+    let value = prim.attribute(tokens::MODEL_DRAW_MODE).get::<vt::Value>()?;
     let Some(token) = value.and_then(|value| value.try_as_token()) else {
         return Ok(None);
     };

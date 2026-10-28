@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use openusd::Result;
 use openusd::usd::{InitialLoadSet, LoadPolicy, Stage};
-use openusd::{sdf, usd};
+use openusd::{sdf, usd, vt};
 
 /// Reads `path` both through a warmed query and through a fresh attribute
 /// handle, requiring the two to agree, and returns the value.
@@ -164,7 +164,7 @@ def "Model" (
             edit.attribute_mut(&sdf::path("/Clip.size")?)
                 .expect("the clip layer parsed")
                 .expect("the clip authors the attribute")
-                .set_time_sample(0.0, sdf::Value::Double(7.0))?;
+                .set_time_sample(0.0, vt::Value::Double(7.0))?;
             Ok(())
         })?;
 
@@ -235,7 +235,7 @@ def "Model" (
                 sdf::Variability::Varying,
                 false,
             )?
-            .set_time_sample(0.0, sdf::Value::Double(7.0))?;
+            .set_time_sample(0.0, vt::Value::Double(7.0))?;
             Ok(())
         })?;
 
@@ -276,7 +276,7 @@ def "Ref" (
     let query = stage.attribute_query("/Ref/Inner.x")?;
     assert_eq!(agreed(&stage, &query, "/Ref/Inner.x", 0.0)?, Some(1.0));
 
-    stage.attribute("/Source/Inner.x")?.set(sdf::Value::Double(5.0))?;
+    stage.attribute("/Source/Inner.x")?.set(vt::Value::Double(5.0))?;
 
     assert_eq!(
         agreed(&stage, &query, "/Ref/Inner.x", 0.0)?,
@@ -330,7 +330,7 @@ def "Ref" (
         "the relocate moved the referenced prim, and its value came with it"
     );
 
-    stage.attribute("/Source/Inner.x")?.set(sdf::Value::Double(5.0))?;
+    stage.attribute("/Source/Inner.x")?.set(vt::Value::Double(5.0))?;
 
     assert_eq!(
         agreed(&stage, &query, "/Ref/Moved.x", 0.0)?,
@@ -378,7 +378,7 @@ def "P" (
         edit.attribute_mut(&sdf::path("/P{v=x}Child.size")?)
             .expect("the root layer parsed")
             .expect("the variant declares the attribute")
-            .set_default(sdf::Value::Double(3.0))?;
+            .set_default(vt::Value::Double(3.0))?;
         Ok(())
     })?;
 
@@ -427,7 +427,7 @@ fn stack_mutations_keep_current() -> Result<()> {
     // A stronger opinion in the root layer wins over the sublayer's; the
     // attribute is declared there for the first time, which is a spec add as
     // well as a value.
-    stage.create_attribute("/A.x", "double")?.set(sdf::Value::Double(3.0))?;
+    stage.create_attribute("/A.x", "double")?.set(vt::Value::Double(3.0))?;
     assert_eq!(agreed(&stage, &a, "/A.x", 0.0)?, Some(3.0));
 
     // Root metadata that retimes the stack, and one that retargets expressions:
@@ -436,7 +436,7 @@ fn stack_mutations_keep_current() -> Result<()> {
     assert_eq!(agreed(&stage, &a, "/A.x", 0.0)?, Some(3.0));
     stage.set_expression_variables(HashMap::from([(
         "WHICH".to_string(),
-        sdf::Value::String("b".to_string()),
+        vt::Value::String("b".to_string()),
     )]))?;
     assert_eq!(agreed(&stage, &a, "/A.x", 0.0)?, Some(3.0));
     assert_eq!(agreed(&stage, &b, "/B.y", 0.0)?, Some(2.0));
@@ -686,7 +686,7 @@ def "Inst" (
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")
-            .set_default(sdf::Value::Double(7.0))?;
+            .set_default(vt::Value::Double(7.0))?;
         Ok(())
     })?;
 

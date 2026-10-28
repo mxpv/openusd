@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use openusd::ar;
 use openusd::pcp;
 use openusd::sdf;
 use openusd::usd::{self, Stage};
 use openusd::usdz::ArchiveWriter;
+use openusd::{ar, vt};
 
 /// Writes `source` as `scene.usda` under `dir` and opens it against the
 /// process-wide schemas.
@@ -1037,7 +1037,7 @@ fn clip_expression_reevaluated() {
         .edit(|e| {
             e.set_expression_variables(HashMap::from([(
                 "SHOT".to_string(),
-                sdf::Value::String("s060".to_string()),
+                vt::Value::String("s060".to_string()),
             )]))
         })
         .expect("author variables");
@@ -1186,7 +1186,7 @@ fn clip_expression_remanifests() {
         .edit(|e| {
             e.set_expression_variables(HashMap::from([(
                 "SHOT".to_string(),
-                sdf::Value::String("s130".to_string()),
+                vt::Value::String("s130".to_string()),
             )]))
         })
         .expect("author variables");
@@ -1596,7 +1596,7 @@ fn mixed_asset_array_fallback() {
     let values = stage
         .attribute("/W.inputs:files")
         .expect("attribute")
-        .get::<sdf::Value>()
+        .get::<vt::Value>()
         .expect("read")
         .expect("asset array value")
         .try_as_asset_path_vec()
@@ -1710,7 +1710,7 @@ fn schema_metadatum_stays_unanchored() {
     );
 
     let declared = attribute
-        .metadata::<sdf::Value>("default")
+        .metadata::<vt::Value>("default")
         .expect("read metadata")
         .expect("the schema declares a default")
         .try_as_asset_path()
@@ -1759,7 +1759,7 @@ fn expr_edit_restales_asset() {
     stage
         .set_expression_variables(HashMap::from([(
             "WHICH".to_string(),
-            sdf::Value::String("b".to_string()),
+            vt::Value::String("b".to_string()),
         )]))
         .expect("author expression variables");
 

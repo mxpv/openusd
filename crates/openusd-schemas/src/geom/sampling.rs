@@ -8,7 +8,7 @@
 //! same sample.
 
 use openusd::usd;
-use openusd::{Result, gf, sdf};
+use openusd::{Result, gf, vt};
 
 use crate::SchemaError;
 
@@ -32,7 +32,7 @@ impl<T> Held<T> {
     /// (C++ `_GetAttrForTransforms`). `None` where that reads no value.
     pub(super) fn read(attr: &usd::Attribute, base_time: Option<usd::TimeCode>) -> Result<Option<Self>>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<openusd::Error>,
     {
         let Some(base_time) = base_time else {
@@ -88,8 +88,8 @@ impl<T> Held<Vec<T>> {
         len: usize,
     ) -> Result<Option<Self>>
     where
-        Vec<T>: sdf::FromValue,
-        <Vec<T> as TryFrom<sdf::Value>>::Error: Into<openusd::Error>,
+        Vec<T>: vt::FromValue,
+        <Vec<T> as TryFrom<vt::Value>>::Error: Into<openusd::Error>,
     {
         let (Some(lead_time), Some(lead_bracket)) = (lead.sample_time, lead.bracket) else {
             return Ok(None);

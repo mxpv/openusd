@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use openusd::{kind, sdf, tf, usd};
+use openusd::{kind, sdf, tf, usd, vt};
 
 use crate::model::{Class, Library, Property};
 
@@ -221,7 +221,7 @@ fn override_names(class: &Class) -> Vec<&str> {
 /// choice: a registry would carry it, and the generated views say it instead.
 /// Everything else is carried, and a value the emitter has no Rust literal for
 /// stops the build rather than being dropped on the way past.
-fn fields<'a>(fields: &'a BTreeMap<String, sdf::Value>, spec: sdf::SpecType) -> Vec<usd::Field<'a>> {
+fn fields<'a>(fields: &'a BTreeMap<String, vt::Value>, spec: sdf::SpecType) -> Vec<usd::Field<'a>> {
     fields
         .iter()
         .filter(|(key, _)| {
@@ -280,7 +280,7 @@ class "Refined" (
     }
 
     /// One field of one spec.
-    fn field(data: &sdf::Data, path: &str, key: sdf::FieldKey) -> Option<sdf::Value> {
+    fn field(data: &sdf::Data, path: &str, key: sdf::FieldKey) -> Option<vt::Value> {
         data.spec(&sdf::path(path).expect("a path"))?.get(key.as_str()).cloned()
     }
 
@@ -301,7 +301,7 @@ class "Refined" (
 
         let type_name = |path: &str| {
             field(&data, path, sdf::FieldKey::TypeName)
-                .and_then(sdf::Value::try_as_token)
+                .and_then(vt::Value::try_as_token)
                 .map(|token| token.as_str().to_owned())
         };
         assert_eq!(type_name("/Derived").as_deref(), Some("Derived"));
@@ -317,7 +317,7 @@ class "Refined" (
         let data = declared(&library);
 
         let applied = field(&data, "/PublicMultipleApplyAPI", sdf::FieldKey::ApiSchemas)
-            .and_then(sdf::Value::try_as_token_list_op)
+            .and_then(vt::Value::try_as_token_list_op)
             .expect("the built-in list");
         assert_eq!(
             applied.explicit_items(),
@@ -335,10 +335,10 @@ class "Refined" (
         let data = declared(&library);
 
         let fallbacks = field(&data, "/", sdf::FieldKey::FallbackPrimTypes)
-            .and_then(sdf::Value::try_as_dictionary)
+            .and_then(vt::Value::try_as_dictionary)
             .expect("the fallback dictionary");
         assert_eq!(
-            fallbacks.get("Derived").and_then(sdf::Value::try_as_token_vec_ref),
+            fallbacks.get("Derived").and_then(vt::Value::try_as_token_vec_ref),
             Some(&vec![tf::Token::from("OldDerived"), tf::Token::from("OlderDerived")])
         );
     }
@@ -420,7 +420,7 @@ class "Bound" (
         let data = declared(&library);
 
         let variability = |name: &str| {
-            field(&data, &format!("/Bound.{name}"), sdf::FieldKey::Variability).and_then(sdf::Value::try_as_variability)
+            field(&data, &format!("/Bound.{name}"), sdf::FieldKey::Variability).and_then(vt::Value::try_as_variability)
         };
         assert_eq!(variability("plain"), Some(sdf::Variability::Uniform));
         assert_eq!(variability("loose"), None, "varying is the unauthored spelling");

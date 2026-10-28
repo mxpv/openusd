@@ -1,6 +1,6 @@
 //! Integration test for the UsdProc schema views against a fixture.
 
-use openusd::Result;
+use openusd::{Result, vt};
 
 use openusd::sdf;
 use openusd::tf::Token;
@@ -36,15 +36,15 @@ fn generative_procedural_roundtrip() -> Result<()> {
     let stage = memory()?;
     let p = GenerativeProcedural::define(&stage, "/World/Proc")?;
     p.create_procedural_system_attr()?
-        .set(sdf::Value::Token("Houdini".into()))?;
+        .set(vt::Value::Token("Houdini".into()))?;
 
     let p = GenerativeProcedural::get(&stage, "/World/Proc")?.expect("GenerativeProcedural");
     assert_eq!(
-        p.procedural_system_attr().get::<sdf::Value>()?,
-        Some(sdf::Value::Token("Houdini".into()))
+        p.procedural_system_attr().get::<vt::Value>()?,
+        Some(vt::Value::Token("Houdini".into()))
     );
     // Inherited Boundable accessor is available on the handle.
-    assert_eq!(p.extent_attr().get::<sdf::Value>()?, None);
+    assert_eq!(p.extent_attr().get::<vt::Value>()?, None);
     assert!(GenerativeProcedural::get(&stage, "/Missing")?.is_none());
     Ok(())
 }

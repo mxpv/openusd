@@ -12,7 +12,7 @@ use openusd::usd::{
     FamilySource, Field, MetadataDecl, MetadataTargets, PropertyDecl, SchemaDecl, SchemaFamily, SchemaKind,
     SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError,
 };
-use openusd::{sdf, tf};
+use openusd::{sdf, tf, vt};
 
 /// One of a family's layers, over text: how a family stored as `.usda` and
 /// read into memory reaches the registry.
@@ -57,7 +57,7 @@ fn metadata_fields_registered() {
     static FIELDS: &SchemaFamily<'_> = &SchemaFamily::new("fields", &[]).metadata(&[
         MetadataDecl::new("role", "token")
             .applies_to(MetadataTargets::ATTRIBUTES)
-            .fallback(|| sdf::Value::token("plain")),
+            .fallback(|| vt::Value::token("plain")),
         MetadataDecl::new("hints", "dictionary"),
     ]);
     let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
@@ -65,7 +65,7 @@ fn metadata_fields_registered() {
     let role = registry.metadata_field(&tf::Token::new("role")).expect("registered");
     assert_eq!(role.type_name(), &sdf::ValueTypeName::TOKEN);
     assert_eq!(role.applies_to(), MetadataTargets::ATTRIBUTES);
-    assert_eq!(role.fallback(), Some(&sdf::Value::token("plain")));
+    assert_eq!(role.fallback(), Some(&vt::Value::token("plain")));
     assert_eq!(role.family().as_str(), "fields");
 
     let hints = registry.metadata_field(&tf::Token::new("hints")).expect("registered");
@@ -85,10 +85,10 @@ fn stage_metadata_falls_back() {
     static FIELDS: &SchemaFamily<'_> = &SchemaFamily::new("units", &[]).metadata(&[
         MetadataDecl::new("unitsPerMeter", "double")
             .applies_to(MetadataTargets::LAYERS)
-            .fallback(|| sdf::Value::Double(100.0)),
+            .fallback(|| vt::Value::Double(100.0)),
         MetadataDecl::new("role", "token")
             .applies_to(MetadataTargets::ATTRIBUTES)
-            .fallback(|| sdf::Value::token("plain")),
+            .fallback(|| vt::Value::token("plain")),
     ]);
     let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
     let stage = openusd::usd::Stage::builder()
@@ -98,7 +98,7 @@ fn stage_metadata_falls_back() {
 
     assert_eq!(
         stage.stage_metadata("unitsPerMeter").expect("reads"),
-        Some(sdf::Value::Double(100.0))
+        Some(vt::Value::Double(100.0))
     );
     assert_eq!(stage.stage_metadata("unregistered").expect("reads"), None);
     assert_eq!(
@@ -117,7 +117,7 @@ fn stage_metadata_falls_back() {
     stage.set_stage_metadata("unitsPerMeter", 1_i32).expect("authors");
     assert_eq!(
         stage.stage_metadata("unitsPerMeter").expect("reads"),
-        Some(sdf::Value::Double(1.0))
+        Some(vt::Value::Double(1.0))
     );
     assert!(stage.set_stage_metadata("unitsPerMeter", "one").is_err());
     assert!(stage.set_stage_metadata("defaultPrim", "World").is_err());
@@ -129,7 +129,7 @@ fn stage_metadata_falls_back() {
 
     // Blocking a field is authoring it, though it reads no value.
     stage
-        .set_stage_metadata("comment", sdf::Value::ValueBlock)
+        .set_stage_metadata("comment", vt::Value::ValueBlock)
         .expect("authors");
     assert!(stage.has_authored_stage_metadata("comment").expect("reads"));
     assert_eq!(stage.stage_metadata("comment").expect("reads"), None);
@@ -138,7 +138,7 @@ fn stage_metadata_falls_back() {
     assert!(!stage.has_authored_stage_metadata("unitsPerMeter").expect("reads"));
     assert_eq!(
         stage.stage_metadata("unitsPerMeter").expect("reads"),
-        Some(sdf::Value::Double(100.0))
+        Some(vt::Value::Double(100.0))
     );
 }
 
@@ -381,7 +381,7 @@ class "ThingAPI_2"
     let composed = registry.build_composed_prim_definition(&tf::Token::default(), &[tf::Token::new("ThingAPI:bar")]);
     assert_eq!(
         composed.attribute_fallback(&tf::Token::new("thing:bar:one")),
-        Some(sdf::Value::Float(1.0))
+        Some(vt::Value::Float(1.0))
     );
 }
 
@@ -572,7 +572,7 @@ class Widget "Widget"
     assert_eq!(widget.applied_api_schemas(), [tf::Token::new("MarkerAPI")]);
     assert_eq!(
         widget.attribute_fallback(&tf::Token::new("marker:size")),
-        Some(sdf::Value::Float(2.0))
+        Some(vt::Value::Float(2.0))
     );
 }
 
@@ -751,7 +751,7 @@ class Widget "Widget" (
     );
     assert_eq!(
         widget.attribute_fallback(&tf::Token::new("shared")),
-        Some(sdf::Value::Float(1.0))
+        Some(vt::Value::Float(1.0))
     );
 }
 
@@ -804,7 +804,7 @@ class Widget "Widget"
     assert_eq!(widget.applied_api_schemas(), [tf::Token::new("ThingAPI_2")]);
     assert_eq!(
         widget.attribute_fallback(&tf::Token::new("version")),
-        Some(sdf::Value::Float(2.0))
+        Some(vt::Value::Float(2.0))
     );
     assert!(widget.has_property(&tf::Token::new("extra")));
 }
@@ -1181,7 +1181,7 @@ class Widget "Widget" (
     assert_eq!(definition.applied_api_schemas(), [tf::Token::new("ThingAPI")]);
     assert_eq!(
         definition.attribute_fallback(&tf::Token::new("version")),
-        Some(sdf::Value::Float(1.0))
+        Some(vt::Value::Float(1.0))
     );
     assert!(!definition.has_property(&tf::Token::new("extra")));
 }
@@ -1243,7 +1243,7 @@ static DECLARED: &SchemaFamily<'_> = &SchemaFamily::new(
         SchemaDecl::new("Gadget", SchemaKind::ConcreteTyped)
             .bases(&["Typed"])
             .properties(&[
-                PropertyDecl::attribute("size", "double").fields(&[Field::new("default", || sdf::Value::Double(2.0))]),
+                PropertyDecl::attribute("size", "double").fields(&[Field::new("default", || vt::Value::Double(2.0))]),
                 PropertyDecl::attribute("purpose", "token").uniform().fields(&[
                     Field::token("default", "render"),
                     Field::strings("allowedTokens", &["render", "proxy"]),
@@ -1259,7 +1259,7 @@ static DECLARED: &SchemaFamily<'_> = &SchemaFamily::new(
             .instance_restrictions(&[("left", &["Gadget"]), ("right", &[])])
             .allowed_instance_names(&["left", "right"])
             .properties(&[PropertyDecl::attribute("slot:__INSTANCE_NAME__:depth", "int")
-                .fields(&[Field::new("default", || sdf::Value::Int(3))])]),
+                .fields(&[Field::new("default", || vt::Value::Int(3))])]),
     ],
 );
 
@@ -1394,7 +1394,7 @@ fn declared_family_answers_is_a() {
             .property(&tf::Token::new("size"))
             .expect("size")
             .fallback(),
-        Some(sdf::Value::Double(2.0))
+        Some(vt::Value::Double(2.0))
     );
 }
 

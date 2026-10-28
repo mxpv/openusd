@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openusd::usd::{Attribute, Prim, Relationship, TimeCode};
-use openusd::{Result, gf, sdf};
+use openusd::{Result, gf, vt};
 
 use super::anim_mapper::AnimMapper;
 use super::anim_query::AnimQuery;
@@ -153,10 +153,10 @@ impl SkinningQuery {
         let value = self
             .skinning_method
             .as_ref()
-            .map(Attribute::get::<sdf::Value>)
+            .map(Attribute::get::<vt::Value>)
             .transpose()?;
         Ok(match value.flatten() {
-            Some(sdf::Value::Token(token)) => SkinningMethod::from_token(token),
+            Some(vt::Value::Token(token)) => SkinningMethod::from_token(token),
             _ => Some(SkinningMethod::ClassicLinear),
         })
     }
@@ -521,9 +521,9 @@ fn influences(indices: Option<&Primvar>, weights: Option<&Primvar>) -> Result<Op
 /// indices, where it holds an array of weights. The schema declares
 /// `float[]`. Weights authored as `double[]` are narrowed to `f32`.
 fn joint_weights(weights: &Primvar, time: Option<TimeCode>) -> Result<Option<Vec<f32>>, SchemaError> {
-    Ok(match weights.flattened::<sdf::Value>(time)? {
-        Some(sdf::Value::FloatVec(weights)) => Some(weights),
-        Some(sdf::Value::DoubleVec(weights)) => Some(weights.into_iter().map(|weight| weight as f32).collect()),
+    Ok(match weights.flattened::<vt::Value>(time)? {
+        Some(vt::Value::FloatVec(weights)) => Some(weights),
+        Some(vt::Value::DoubleVec(weights)) => Some(weights.into_iter().map(|weight| weight as f32).collect()),
         _ => None,
     })
 }

@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::{Result, sdf, tf};
+use crate::{Result, sdf, tf, vt};
 
 use super::{SchemaInfo, SchemaRegistry, Schematics, schema_registry};
 
@@ -127,7 +127,7 @@ impl PrimDefinition {
     ///
     /// Fields that cannot mean anything as a fallback read back `None`; see
     /// [`SchemaRegistry::is_disallowed_field`](super::SchemaRegistry::is_disallowed_field).
-    pub fn metadata(&self, field: impl AsRef<str>) -> Option<&sdf::Value> {
+    pub fn metadata(&self, field: impl AsRef<str>) -> Option<&vt::Value> {
         self.entry(&PRIM_METADATA)?.field(field)
     }
 
@@ -137,7 +137,7 @@ impl PrimDefinition {
     /// A relationship, an attribute with no declared default, and a default
     /// authored as a value block all read back `None` — a schema cannot block
     /// a value that has no weaker opinion to block.
-    pub fn attribute_fallback(&self, name: &tf::Token) -> Option<sdf::Value> {
+    pub fn attribute_fallback(&self, name: &tf::Token) -> Option<vt::Value> {
         self.property(name)?.attribute_fallback()
     }
 
@@ -388,7 +388,7 @@ impl PrimDefinition {
         let variability = defined
             .get(sdf::FieldKey::Variability.as_str())
             .cloned()
-            .unwrap_or(sdf::Value::Variability(sdf::Variability::default()));
+            .unwrap_or(vt::Value::Variability(sdf::Variability::default()));
 
         for (field, value) in defined.fields {
             if !composed.contains(&field) {
@@ -503,7 +503,7 @@ impl<'a> DefProperty<'a> {
     ///
     /// Fields that cannot mean anything as a fallback read back `None`; see
     /// [`SchemaRegistry::is_disallowed_field`](super::SchemaRegistry::is_disallowed_field).
-    pub fn field(&self, name: impl AsRef<str>) -> Option<&'a sdf::Value> {
+    pub fn field(&self, name: impl AsRef<str>) -> Option<&'a vt::Value> {
         let name = name.as_ref();
         if SchemaRegistry::is_disallowed_field(name) {
             return None;
@@ -545,7 +545,7 @@ impl<'a> DefProperty<'a> {
     /// (C++ `UsdPrimDefinition::GetAttributeFallbackValue`).
     ///
     /// A relationship reads back `None`: only an attribute carries a value.
-    pub fn attribute_fallback(&self) -> Option<sdf::Value> {
+    pub fn attribute_fallback(&self) -> Option<vt::Value> {
         if self.spec_type() != sdf::SpecType::Attribute {
             return None;
         }
@@ -553,9 +553,9 @@ impl<'a> DefProperty<'a> {
     }
 
     /// The property's fallback value, with a value block read as no value.
-    pub fn fallback(&self) -> Option<sdf::Value> {
+    pub fn fallback(&self) -> Option<vt::Value> {
         match self.field(sdf::FieldKey::Default)?.clone() {
-            sdf::Value::ValueBlock | sdf::Value::None => None,
+            vt::Value::ValueBlock | vt::Value::None => None,
             value => Some(value),
         }
     }
@@ -632,7 +632,7 @@ pub(super) fn child_names(data: &sdf::Data, path: &sdf::Path, key: sdf::Children
 /// append after the stronger ones without duplicating, dictionaries compose
 /// recursively. Documentation never comes from a weaker schema, and neither
 /// does a property's `custom` flag.
-fn compose_fields(strong: Option<&sdf::SpecData>, weak: &sdf::SpecData) -> Option<Vec<(String, sdf::Value)>> {
+fn compose_fields(strong: Option<&sdf::SpecData>, weak: &sdf::SpecData) -> Option<Vec<(String, vt::Value)>> {
     if strong.is_some_and(|strong| !types_match(strong, weak)) {
         return None;
     }
@@ -662,21 +662,21 @@ fn compose_fields(strong: Option<&sdf::SpecData>, weak: &sdf::SpecData) -> Optio
 /// Token arrays concatenate without duplicating, dictionaries compose
 /// recursively, and anything else keeps the weaker value — the caller only
 /// reaches those cases for fields the stronger spec does not declare.
-fn merge_over(strong: Option<&sdf::Value>, weak: sdf::Value) -> sdf::Value {
+fn merge_over(strong: Option<&vt::Value>, weak: vt::Value) -> vt::Value {
     match (strong, weak) {
-        (Some(sdf::Value::TokenVec(strong)), sdf::Value::TokenVec(weak)) => {
+        (Some(vt::Value::TokenVec(strong)), vt::Value::TokenVec(weak)) => {
             let mut merged = strong.clone();
             for token in weak {
                 if !merged.contains(&token) {
                     merged.push(token);
                 }
             }
-            sdf::Value::TokenVec(merged)
+            vt::Value::TokenVec(merged)
         }
-        (Some(sdf::Value::Dictionary(strong)), sdf::Value::Dictionary(weak)) => {
+        (Some(vt::Value::Dictionary(strong)), vt::Value::Dictionary(weak)) => {
             let mut merged = strong.clone();
             merged.over(weak);
-            sdf::Value::Dictionary(merged)
+            vt::Value::Dictionary(merged)
         }
         (_, weak) => weak,
     }
@@ -708,6 +708,7 @@ fn composed_path(name: &tf::Token) -> Option<sdf::Path> {
 
 #[cfg(test)]
 mod tests {
+    use crate::vt;
     use std::sync::Arc;
 
     use crate::usd::SchemaRegistry;
@@ -801,7 +802,7 @@ class Thing "Thing" (
         assert!(distant.has_property(&tf::Token::new("inputs:angle")));
         assert_eq!(
             distant.attribute_fallback(&tf::Token::new("inputs:angle")),
-            Some(sdf::Value::Float(0.53))
+            Some(vt::Value::Float(0.53))
         );
         assert_eq!(distant.attribute_fallback(&tf::Token::new("nonexistent")), None);
     }
@@ -843,7 +844,7 @@ class Thing "Thing" (
         // its fallbacks come along.
         assert_eq!(
             light.attribute_fallback(&tf::Token::new("collection:lightLink:expansionRule")),
-            Some(sdf::Value::token("expandPrims"))
+            Some(vt::Value::token("expandPrims"))
         );
         assert!(!light.has_property(&tf::Token::new("collection:__INSTANCE_NAME__:expansionRule")));
         assert_eq!(
@@ -879,15 +880,15 @@ class Thing "Thing" (
         // 50000 has to arrive through LightAPI's property.
         assert_eq!(
             light.attribute_fallback(&tf::Token::new("inputs:intensity")),
-            Some(sdf::Value::Float(1.0))
+            Some(vt::Value::Float(1.0))
         );
         assert_eq!(
             distant.attribute_fallback(&tf::Token::new("inputs:intensity")),
-            Some(sdf::Value::Float(50000.0))
+            Some(vt::Value::Float(50000.0))
         );
         assert_eq!(
             distant.attribute_fallback(&tf::Token::new("light:shaderId")),
-            Some(sdf::Value::token("DistantLight"))
+            Some(vt::Value::token("DistantLight"))
         );
     }
 
@@ -909,7 +910,7 @@ class Thing "Thing" (
         );
         assert_eq!(
             distant.attribute_fallback(&tf::Token::new("collection:lightLink:includeRoot")),
-            Some(sdf::Value::Bool(true))
+            Some(vt::Value::Bool(true))
         );
     }
 
@@ -944,7 +945,7 @@ class Thing "Thing" (
         assert_eq!(light.applied_api_schemas()[0], tf::Token::new("LightAPI"));
         assert_eq!(
             light.attribute_fallback(&tf::Token::new("inputs:intensity")),
-            Some(sdf::Value::Float(1.0))
+            Some(vt::Value::Float(1.0))
         );
     }
 
@@ -959,7 +960,7 @@ class Thing "Thing" (
         assert!(collection.has_property(&expansion));
         assert_eq!(
             collection.attribute_fallback(&expansion),
-            Some(sdf::Value::token("expandPrims"))
+            Some(vt::Value::token("expandPrims"))
         );
 
         // Declared with no default, so there is no fallback to report.
@@ -1029,12 +1030,12 @@ class Thing "Thing" (
         // and so does the display group it never mentions.
         assert_eq!(
             thing.attribute_fallback(&tf::Token::new("shared")),
-            Some(sdf::Value::Float(1.0))
+            Some(vt::Value::Float(1.0))
         );
         let shared = thing.property(&tf::Token::new("shared")).expect("shared");
         assert_eq!(
             shared.field(sdf::FieldKey::DisplayGroup),
-            Some(&sdf::Value::String("weak group".into()))
+            Some(&vt::Value::String("weak group".into()))
         );
     }
 
@@ -1048,11 +1049,11 @@ class Thing "Thing" (
         let shared = thing.property(&tf::Token::new("shared")).expect("shared");
         assert_eq!(
             shared.field(sdf::FieldKey::Documentation),
-            Some(&sdf::Value::String("strong property docs".into()))
+            Some(&vt::Value::String("strong property docs".into()))
         );
         assert_eq!(
             thing.metadata(sdf::FieldKey::Documentation),
-            Some(&sdf::Value::String("strong prim docs".into()))
+            Some(&vt::Value::String("strong prim docs".into()))
         );
     }
 
@@ -1070,8 +1071,8 @@ class Thing "Thing" (
             .clone()
             .try_as_dictionary()
             .expect("dictionary");
-        assert_eq!(asset_info["both"], sdf::Value::String("strong".into()));
-        assert_eq!(asset_info["only_weak"], sdf::Value::String("weak".into()));
+        assert_eq!(asset_info["both"], vt::Value::String("strong".into()));
+        assert_eq!(asset_info["only_weak"], vt::Value::String("weak".into()));
 
         let prim_data = thing
             .metadata(sdf::FieldKey::AssetInfo)
@@ -1079,10 +1080,10 @@ class Thing "Thing" (
             .clone()
             .try_as_dictionary()
             .expect("dictionary");
-        assert_eq!(prim_data["both"], sdf::Value::String("strong".into()));
+        assert_eq!(prim_data["both"], vt::Value::String("strong".into()));
         let nested = prim_data["nested"].clone().try_as_dictionary().expect("nested");
-        assert_eq!(nested["both"], sdf::Value::String("strong".into()));
-        assert_eq!(nested["only_weak"], sdf::Value::String("weak".into()));
+        assert_eq!(nested["both"], vt::Value::String("strong".into()));
+        assert_eq!(nested["only_weak"], vt::Value::String("weak".into()));
     }
 
     #[test]
@@ -1098,7 +1099,7 @@ class Thing "Thing" (
         assert_eq!(mismatched.type_name(), Some(sdf::ValueTypeName::from("float")));
         assert_eq!(
             thing.attribute_fallback(&tf::Token::new("mismatched")),
-            Some(sdf::Value::Float(2.0))
+            Some(vt::Value::Float(2.0))
         );
     }
 

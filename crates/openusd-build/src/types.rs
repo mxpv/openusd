@@ -5,8 +5,10 @@
 //! a `gf::Vec3f`. The constant its creator declares it with comes from
 //! [`sdf::ValueTypeName::constant_ident`], since `sdf` is what names its own
 //! constants.
+//!
+//! [`sdf::ValueTypeName::constant_ident`]: openusd::sdf::ValueTypeName::constant_ident
 
-use openusd::sdf;
+use openusd::vt;
 
 /// The Rust type a value of `kind` reads back as, or `None` for a kind no
 /// attribute can hold — `opaque`, which carries no value, and the metadata-only
@@ -15,7 +17,7 @@ use openusd::sdf;
 /// Paths are spelled the way generated code spells them: in full, since the
 /// generated file is included bare into a consumer's module and carries no
 /// `use` block of its own.
-pub fn rust_type(kind: sdf::ValueKind) -> Option<syn::Type> {
+pub fn rust_type(kind: vt::ValueKind) -> Option<syn::Type> {
     let spelled = match kind.element_kind() {
         Some(element) => format!("::std::vec::Vec<{}>", scalar_type(element)?),
         None => scalar_type(kind)?.to_owned(),
@@ -26,46 +28,46 @@ pub fn rust_type(kind: sdf::ValueKind) -> Option<syn::Type> {
 /// The Rust type one scalar value reads back as. A role does not change it: a
 /// point, a normal and a colour are all one vector type, as they are one kind.
 ///
-/// The pairing restates what `sdf::Value` declares, [`sdf::ValueKind`] being
+/// The pairing restates what `vt::Value` declares, [`vt::ValueKind`] being
 /// derived from it, as the module-qualified source text a generated file
-/// spells. That spelling is the part `sdf` has no reason to know.
-fn scalar_type(kind: sdf::ValueKind) -> Option<&'static str> {
+/// spells. That spelling is the part `vt` has no reason to know.
+fn scalar_type(kind: vt::ValueKind) -> Option<&'static str> {
     Some(match kind {
-        sdf::ValueKind::Bool => "bool",
-        sdf::ValueKind::Uchar => "u8",
-        sdf::ValueKind::Int => "i32",
-        sdf::ValueKind::Uint => "u32",
-        sdf::ValueKind::Int64 => "i64",
-        sdf::ValueKind::Uint64 => "u64",
-        sdf::ValueKind::Half => "::openusd::gf::f16",
-        sdf::ValueKind::Float => "f32",
-        sdf::ValueKind::Double => "f64",
-        sdf::ValueKind::String => "::std::string::String",
-        sdf::ValueKind::Token => "::openusd::tf::Token",
-        sdf::ValueKind::AssetPath => "::openusd::sdf::AssetPath",
-        sdf::ValueKind::TimeCode => "::openusd::sdf::TimeCode",
-        sdf::ValueKind::PathExpression => "::openusd::sdf::PathExpression",
+        vt::ValueKind::Bool => "bool",
+        vt::ValueKind::Uchar => "u8",
+        vt::ValueKind::Int => "i32",
+        vt::ValueKind::Uint => "u32",
+        vt::ValueKind::Int64 => "i64",
+        vt::ValueKind::Uint64 => "u64",
+        vt::ValueKind::Half => "::openusd::gf::f16",
+        vt::ValueKind::Float => "f32",
+        vt::ValueKind::Double => "f64",
+        vt::ValueKind::String => "::std::string::String",
+        vt::ValueKind::Token => "::openusd::tf::Token",
+        vt::ValueKind::AssetPath => "::openusd::sdf::AssetPath",
+        vt::ValueKind::TimeCode => "::openusd::sdf::TimeCode",
+        vt::ValueKind::PathExpression => "::openusd::sdf::PathExpression",
 
-        sdf::ValueKind::Vec2h => "::openusd::gf::Vec2h",
-        sdf::ValueKind::Vec2f => "::openusd::gf::Vec2f",
-        sdf::ValueKind::Vec2d => "::openusd::gf::Vec2d",
-        sdf::ValueKind::Vec2i => "::openusd::gf::Vec2i",
-        sdf::ValueKind::Vec3h => "::openusd::gf::Vec3h",
-        sdf::ValueKind::Vec3f => "::openusd::gf::Vec3f",
-        sdf::ValueKind::Vec3d => "::openusd::gf::Vec3d",
-        sdf::ValueKind::Vec3i => "::openusd::gf::Vec3i",
-        sdf::ValueKind::Vec4h => "::openusd::gf::Vec4h",
-        sdf::ValueKind::Vec4f => "::openusd::gf::Vec4f",
-        sdf::ValueKind::Vec4d => "::openusd::gf::Vec4d",
-        sdf::ValueKind::Vec4i => "::openusd::gf::Vec4i",
+        vt::ValueKind::Vec2h => "::openusd::gf::Vec2h",
+        vt::ValueKind::Vec2f => "::openusd::gf::Vec2f",
+        vt::ValueKind::Vec2d => "::openusd::gf::Vec2d",
+        vt::ValueKind::Vec2i => "::openusd::gf::Vec2i",
+        vt::ValueKind::Vec3h => "::openusd::gf::Vec3h",
+        vt::ValueKind::Vec3f => "::openusd::gf::Vec3f",
+        vt::ValueKind::Vec3d => "::openusd::gf::Vec3d",
+        vt::ValueKind::Vec3i => "::openusd::gf::Vec3i",
+        vt::ValueKind::Vec4h => "::openusd::gf::Vec4h",
+        vt::ValueKind::Vec4f => "::openusd::gf::Vec4f",
+        vt::ValueKind::Vec4d => "::openusd::gf::Vec4d",
+        vt::ValueKind::Vec4i => "::openusd::gf::Vec4i",
 
-        sdf::ValueKind::Quath => "::openusd::gf::Quath",
-        sdf::ValueKind::Quatf => "::openusd::gf::Quatf",
-        sdf::ValueKind::Quatd => "::openusd::gf::Quatd",
+        vt::ValueKind::Quath => "::openusd::gf::Quath",
+        vt::ValueKind::Quatf => "::openusd::gf::Quatf",
+        vt::ValueKind::Quatd => "::openusd::gf::Quatd",
 
-        sdf::ValueKind::Matrix2d => "::openusd::gf::Mat2d",
-        sdf::ValueKind::Matrix3d => "::openusd::gf::Mat3d",
-        sdf::ValueKind::Matrix4d => "::openusd::gf::Mat4d",
+        vt::ValueKind::Matrix2d => "::openusd::gf::Mat2d",
+        vt::ValueKind::Matrix3d => "::openusd::gf::Mat3d",
+        vt::ValueKind::Matrix4d => "::openusd::gf::Mat4d",
 
         // `opaque` carries no value, and the rest are metadata kinds no
         // attribute is declared with.
@@ -76,11 +78,12 @@ fn scalar_type(kind: sdf::ValueKind) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openusd::sdf;
 
     use quote::ToTokens;
 
     /// `kind`'s Rust type as source text, spaces removed.
-    fn spelled(kind: sdf::ValueKind) -> Option<String> {
+    fn spelled(kind: vt::ValueKind) -> Option<String> {
         rust_type(kind).map(|ty| ty.to_token_stream().to_string().replace(' ', ""))
     }
 
@@ -90,7 +93,7 @@ mod tests {
     fn every_attribute_type_maps() {
         for type_name in sdf::ValueTypeName::all() {
             let Some(kind) = type_name.kind() else { continue };
-            if kind == sdf::ValueKind::Opaque {
+            if kind == vt::ValueKind::Opaque {
                 continue;
             }
             assert!(
@@ -100,13 +103,13 @@ mod tests {
             );
         }
 
-        assert_eq!(spelled(sdf::ValueKind::Float).as_deref(), Some("f32"));
+        assert_eq!(spelled(vt::ValueKind::Float).as_deref(), Some("f32"));
         assert_eq!(
-            spelled(sdf::ValueKind::Vec3fVec).as_deref(),
+            spelled(vt::ValueKind::Vec3fVec).as_deref(),
             Some("::std::vec::Vec<::openusd::gf::Vec3f>")
         );
         assert_eq!(
-            spelled(sdf::ValueKind::TokenVec).as_deref(),
+            spelled(vt::ValueKind::TokenVec).as_deref(),
             Some("::std::vec::Vec<::openusd::tf::Token>")
         );
     }
@@ -128,6 +131,6 @@ mod tests {
     /// `opaque` carries no value, so it has no type to read.
     #[test]
     fn opaque_has_no_type() {
-        assert!(rust_type(sdf::ValueKind::Opaque).is_none());
+        assert!(rust_type(vt::ValueKind::Opaque).is_none());
     }
 }

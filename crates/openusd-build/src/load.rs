@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::iter;
 use std::path::{Path, PathBuf};
 
-use openusd::{ar, sdf, tf, usd};
+use openusd::{ar, sdf, tf, usd, vt};
 
 use crate::Builder;
 use crate::error::Error;
@@ -249,7 +249,7 @@ fn read_global(layer: &sdf::Layer) -> Global {
         .prim(GLOBAL)
         .ok()
         .flatten()
-        .map(|prim| CustomData::read(prim.get::<sdf::Value>(sdf::FieldKey::CustomData)))
+        .map(|prim| CustomData::read(prim.get::<vt::Value>(sdf::FieldKey::CustomData)))
         .unwrap_or_default();
 
     Global {
@@ -287,7 +287,7 @@ fn read_classes(layer: &sdf::Layer, identifier: &str, owner: &Owner<'_>, generat
                 prefix: owner.prefix.clone(),
                 generated,
                 bases: inherit_names(&prim),
-                custom_data: CustomData::read(prim.get::<sdf::Value>(sdf::FieldKey::CustomData)),
+                custom_data: CustomData::read(prim.get::<vt::Value>(sdf::FieldKey::CustomData)),
                 type_name: prim.type_name(),
                 api_schemas: prim.api_schemas(),
                 documentation: prim.get(sdf::FieldKey::Documentation),
@@ -333,13 +333,13 @@ fn read_properties(
                 .attribute(&path)
                 .ok()
                 .flatten()
-                .map(|attribute| attribute.get::<sdf::Value>(sdf::FieldKey::CustomData))
+                .map(|attribute| attribute.get::<vt::Value>(sdf::FieldKey::CustomData))
                 .or_else(|| {
                     layer
                         .relationship(&path)
                         .ok()
                         .flatten()
-                        .map(|relationship| relationship.get::<sdf::Value>(sdf::FieldKey::CustomData))
+                        .map(|relationship| relationship.get::<vt::Value>(sdf::FieldKey::CustomData))
                 })?;
 
             Some(PropertyDeclaration {
@@ -359,33 +359,33 @@ fn read_properties(
 /// Both a class prim and a property carry one, and the generator asks the same
 /// few questions of each.
 #[derive(Default)]
-pub struct CustomData(sdf::Dictionary);
+pub struct CustomData(vt::Dictionary);
 
 impl CustomData {
     /// Reads one, empty when the field is absent or holds something else.
-    fn read(value: Option<sdf::Value>) -> Self {
-        Self(value.and_then(sdf::Value::try_as_dictionary).unwrap_or_default())
+    fn read(value: Option<vt::Value>) -> Self {
+        Self(value.and_then(vt::Value::try_as_dictionary).unwrap_or_default())
     }
 
     /// One entry as a string, written either as a string or as a token.
     pub fn string(&self, key: &str) -> Option<String> {
-        self.0.get(key).and_then(sdf::Value::as_str).map(str::to_owned)
+        self.0.get(key).and_then(vt::Value::as_str).map(str::to_owned)
     }
 
     /// One entry as a boolean.
     pub fn flag(&self, key: &str) -> Option<bool> {
-        self.0.get(key).and_then(sdf::Value::try_as_bool_ref).copied()
+        self.0.get(key).and_then(vt::Value::try_as_bool_ref).copied()
     }
 
     /// One entry as a dictionary, by key, empty when it is absent. An entry
     /// holding something else is the kind it holds.
-    pub fn dictionary(&self, key: &str) -> Result<BTreeMap<String, sdf::Value>, sdf::ValueKind> {
+    pub fn dictionary(&self, key: &str) -> Result<BTreeMap<String, vt::Value>, vt::ValueKind> {
         let Some(value) = self.0.get(key) else {
             return Ok(BTreeMap::new());
         };
         let dictionary = value
             .try_as_dictionary_ref()
-            .ok_or_else(|| sdf::ValueKind::from(value))?;
+            .ok_or_else(|| vt::ValueKind::from(value))?;
         Ok(dictionary
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -417,7 +417,7 @@ impl CustomData {
     pub fn token_declarations(&self, key: &str) -> Vec<DeclaredToken> {
         self.0
             .get(key)
-            .and_then(sdf::Value::try_as_dictionary_ref)
+            .and_then(vt::Value::try_as_dictionary_ref)
             .into_iter()
             .flatten()
             .map(|(id, entry)| {
@@ -440,7 +440,7 @@ impl CustomData {
     pub fn instance_restrictions(&self) -> BTreeMap<tf::Token, Vec<tf::Token>> {
         self.0
             .get("apiSchemaInstances")
-            .and_then(sdf::Value::try_as_dictionary_ref)
+            .and_then(vt::Value::try_as_dictionary_ref)
             .into_iter()
             .flatten()
             .filter_map(|(instance, entry)| {

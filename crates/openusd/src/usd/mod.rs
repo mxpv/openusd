@@ -97,16 +97,15 @@ pub use crate::pcp::PopulationMaskError as StagePopulationMaskError;
 pub use crate::pcp::SpecSiteRecord as SpecSite;
 pub use timecode::TimeCode;
 
-use crate::Result;
-use crate::sdf;
+use crate::{Result, vt};
 
 /// Decodes an optionally-composed value to `T`, folding the conversion
 /// failure into the caller's error. The one decode step behind every generic
 /// read accessor ([`Attribute::get_at`], [`Prim::metadata`], ...), so a
 /// future decode nuance lands in one place.
-pub(crate) fn decode_value<T, E>(value: Option<sdf::Value>) -> Result<Option<T>, E>
+pub(crate) fn decode_value<T, E>(value: Option<vt::Value>) -> Result<Option<T>, E>
 where
-    T: TryFrom<sdf::Value>,
+    T: TryFrom<vt::Value>,
     T::Error: Into<E>,
 {
     value.map(T::try_from).transpose().map_err(Into::into)
@@ -116,10 +115,10 @@ where
 /// reads it: a value of a kind `T` does not accept is no value, since the
 /// typed read fails there without an error, while a failure to convert a
 /// value of an accepted kind is still an error.
-pub(crate) fn decode_accepted<T>(value: Option<sdf::Value>) -> Result<Option<T>>
+pub(crate) fn decode_accepted<T>(value: Option<vt::Value>) -> Result<Option<T>>
 where
-    T: sdf::FromValue,
+    T: vt::FromValue,
     T::Error: Into<crate::Error>,
 {
-    decode_value(value.filter(|value| T::accepts_kind(sdf::ValueKind::from(value))))
+    decode_value(value.filter(|value| T::accepts_kind(vt::ValueKind::from(value))))
 }

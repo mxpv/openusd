@@ -147,7 +147,7 @@ impl ExpansionRule {
     }
 }
 
-::openusd::sdf::impl_token_value!(ExpansionRule);
+::openusd::vt::impl_token_value!(ExpansionRule);
 
 /// Specifies which mode the collection uses to determine
 /// membership: `automatic`, `relationship`, or `expression`.
@@ -212,7 +212,7 @@ impl CollectionMode {
     }
 }
 
-::openusd::sdf::impl_token_value!(CollectionMode);
+::openusd::vt::impl_token_value!(CollectionMode);
 
 /// The library's name, which is the family its declarations register
 /// under.
@@ -284,7 +284,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Vec2f(
+                                    || ::openusd::vt::Value::Vec2f(
                                         ::openusd::gf::vec2f(1f32, 0f32),
                                     ),
                                 ),
@@ -299,7 +299,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Vec2f(
+                                    || ::openusd::vt::Value::Vec2f(
                                         ::openusd::gf::vec2f(0f32, 1f32),
                                     ),
                                 ),
@@ -314,7 +314,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Vec2f(
+                                    || ::openusd::vt::Value::Vec2f(
                                         ::openusd::gf::vec2f(0f32, 0f32),
                                     ),
                                 ),
@@ -329,7 +329,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Vec2f(
+                                    || ::openusd::vt::Value::Vec2f(
                                         ::openusd::gf::vec2f(0.33333334f32, 0.33333334f32),
                                     ),
                                 ),
@@ -344,7 +344,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Float(1f32),
+                                    || ::openusd::vt::Value::Float(1f32),
                                 ),
                             ],
                         ),
@@ -357,7 +357,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Float(0f32),
+                                    || ::openusd::vt::Value::Float(0f32),
                                 ),
                             ],
                         ),

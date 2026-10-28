@@ -8,10 +8,10 @@
 use std::collections::BTreeSet;
 use std::ops::Deref;
 
-use openusd::Result;
 use openusd::sdf;
 use openusd::tf;
 use openusd::usd::{self, CollectionAPI, SchemaBase, Stage};
+use openusd::{Result, vt};
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{self, XformableExt, XformableSchema};
 use openusd_schemas::lux::{
@@ -42,14 +42,14 @@ fn distant_light_inputs_and_angle() -> Result<()> {
     let stage = open()?;
     let sun = DistantLight::get(&stage, sdf::path("/World/Sun")?)?.expect("DistantLight");
     // `get::<T>()` decodes straight to the Rust type instead of matching on
-    // `sdf::Value`.
+    // `vt::Value`.
     assert_eq!(sun.intensity()?, Some(12000.0));
     assert_eq!(sun.exposure()?, Some(1.5));
     assert_eq!(sun.color_attr().get::<[f32; 3]>()?, Some([1.0, 0.95, 0.85]));
     assert_eq!(sun.enable_color_temperature()?, Some(true));
     assert_eq!(sun.color_temperature()?, Some(5500.0));
-    // `get::<sdf::Value>()` still yields the raw value when that's wanted.
-    assert_eq!(sun.angle_attr().get::<sdf::Value>()?, Some(sdf::Value::Float(0.53)));
+    // `get::<vt::Value>()` still yields the raw value when that's wanted.
+    assert_eq!(sun.angle_attr().get::<vt::Value>()?, Some(vt::Value::Float(0.53)));
     Ok(())
 }
 
@@ -59,7 +59,7 @@ fn distant_light_unauthored_intensity_falls_back() -> Result<()> {
     // the fallback the schema declares.
     let stage = from_usda("#usda 1.0\ndef DistantLight \"Bare\" {}\n")?;
     let bare = DistantLight::get(&stage, sdf::path("/Bare")?)?.expect("DistantLight");
-    assert_eq!(bare.intensity_attr().get()?, Some(sdf::Value::Float(50000.0)));
+    assert_eq!(bare.intensity_attr().get()?, Some(vt::Value::Float(50000.0)));
     Ok(())
 }
 
@@ -67,9 +67,9 @@ fn distant_light_unauthored_intensity_falls_back() -> Result<()> {
 fn sphere_light_radius_and_treat_as_point() -> Result<()> {
     let stage = open()?;
     let s = SphereLight::get(&stage, sdf::path("/World/Sphere")?)?.expect("SphereLight");
-    assert_eq!(s.radius_attr().get()?, Some(sdf::Value::Float(0.25)));
-    assert_eq!(s.treat_as_point_attr().get()?, Some(sdf::Value::Bool(true)));
-    assert_eq!(s.intensity_attr().get()?, Some(sdf::Value::Float(800.0)));
+    assert_eq!(s.radius_attr().get()?, Some(vt::Value::Float(0.25)));
+    assert_eq!(s.treat_as_point_attr().get()?, Some(vt::Value::Bool(true)));
+    assert_eq!(s.intensity_attr().get()?, Some(vt::Value::Float(800.0)));
     Ok(())
 }
 
@@ -79,32 +79,26 @@ fn rect_light_with_shaping_and_shadow() -> Result<()> {
     let prim = sdf::path("/World/Rect")?;
 
     let rect = RectLight::get(&stage, &prim)?.expect("RectLight");
-    assert_eq!(rect.width_attr().get()?, Some(sdf::Value::Float(2.0)));
-    assert_eq!(rect.height_attr().get()?, Some(sdf::Value::Float(1.0)));
+    assert_eq!(rect.width_attr().get()?, Some(vt::Value::Float(2.0)));
+    assert_eq!(rect.height_attr().get()?, Some(vt::Value::Float(1.0)));
     assert_eq!(
         rect.texture_file_attr().get()?,
-        Some(sdf::Value::AssetPath("./textures/softbox.exr".into()))
+        Some(vt::Value::AssetPath("./textures/softbox.exr".into()))
     );
 
     let shaping = ShapingAPI::get(&stage, &prim)?.expect("ShapingAPI");
-    assert_eq!(shaping.shaping_cone_angle_attr().get()?, Some(sdf::Value::Float(45.0)));
-    assert_eq!(
-        shaping.shaping_cone_softness_attr().get()?,
-        Some(sdf::Value::Float(0.2))
-    );
+    assert_eq!(shaping.shaping_cone_angle_attr().get()?, Some(vt::Value::Float(45.0)));
+    assert_eq!(shaping.shaping_cone_softness_attr().get()?, Some(vt::Value::Float(0.2)));
     assert_eq!(
         shaping.shaping_ies_file_attr().get()?,
-        Some(sdf::Value::AssetPath("./ies/profile.ies".into()))
+        Some(vt::Value::AssetPath("./ies/profile.ies".into()))
     );
-    assert_eq!(
-        shaping.shaping_ies_normalize_attr().get()?,
-        Some(sdf::Value::Bool(true))
-    );
+    assert_eq!(shaping.shaping_ies_normalize_attr().get()?, Some(vt::Value::Bool(true)));
 
     let shadow = ShadowAPI::get(&stage, &prim)?.expect("ShadowAPI");
-    assert_eq!(shadow.shadow_enable_attr().get()?, Some(sdf::Value::Bool(true)));
-    assert_eq!(shadow.shadow_distance_attr().get()?, Some(sdf::Value::Float(10.0)));
-    assert_eq!(shadow.shadow_falloff_attr().get()?, Some(sdf::Value::Float(2.0)));
+    assert_eq!(shadow.shadow_enable_attr().get()?, Some(vt::Value::Bool(true)));
+    assert_eq!(shadow.shadow_distance_attr().get()?, Some(vt::Value::Float(10.0)));
+    assert_eq!(shadow.shadow_falloff_attr().get()?, Some(vt::Value::Float(2.0)));
     Ok(())
 }
 
@@ -122,12 +116,12 @@ fn disk_and_cylinder_lights() -> Result<()> {
     let stage = open()?;
 
     let disk = DiskLight::get(&stage, sdf::path("/World/Disk")?)?.expect("DiskLight");
-    assert_eq!(disk.radius_attr().get()?, Some(sdf::Value::Float(0.75)));
+    assert_eq!(disk.radius_attr().get()?, Some(vt::Value::Float(0.75)));
 
     let tube = CylinderLight::get(&stage, sdf::path("/World/Tube")?)?.expect("CylinderLight");
-    assert_eq!(tube.length_attr().get()?, Some(sdf::Value::Float(3.0)));
-    assert_eq!(tube.radius_attr().get()?, Some(sdf::Value::Float(0.05)));
-    assert_eq!(tube.treat_as_line_attr().get()?, Some(sdf::Value::Bool(true)));
+    assert_eq!(tube.length_attr().get()?, Some(vt::Value::Float(3.0)));
+    assert_eq!(tube.radius_attr().get()?, Some(vt::Value::Float(0.05)));
+    assert_eq!(tube.treat_as_line_attr().get()?, Some(vt::Value::Bool(true)));
     Ok(())
 }
 
@@ -137,7 +131,7 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
     let dome = DomeLight::get(&stage, sdf::path("/World/Dome")?)?.expect("DomeLight");
     assert_eq!(
         dome.texture_file_attr().get()?,
-        Some(sdf::Value::AssetPath("./hdri/studio.hdr".into()))
+        Some(vt::Value::AssetPath("./hdri/studio.hdr".into()))
     );
     assert_eq!(
         dome.texture_format_attr()
@@ -146,7 +140,7 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
             .and_then(TextureFormat::from_token),
         Some(TextureFormat::Latlong)
     );
-    assert_eq!(dome.guide_radius_attr().get()?, Some(sdf::Value::Float(50.0)));
+    assert_eq!(dome.guide_radius_attr().get()?, Some(vt::Value::Float(50.0)));
     assert_eq!(dome.portals_rel().targets()?, vec![sdf::path("/World/Dome/Portal")?]);
     Ok(())
 }
@@ -155,8 +149,8 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
 fn portal_light_dimensions() -> Result<()> {
     let stage = open()?;
     let portal = PortalLight::get(&stage, sdf::path("/World/Dome/Portal")?)?.expect("PortalLight");
-    assert_eq!(portal.width_attr().get()?, Some(sdf::Value::Float(1.2)));
-    assert_eq!(portal.height_attr().get()?, Some(sdf::Value::Float(2.4)));
+    assert_eq!(portal.width_attr().get()?, Some(vt::Value::Float(1.2)));
+    assert_eq!(portal.height_attr().get()?, Some(vt::Value::Float(2.4)));
     Ok(())
 }
 
@@ -165,7 +159,7 @@ fn geometry_light_target() -> Result<()> {
     let stage = open()?;
     let g = GeometryLight::get(&stage, sdf::path("/World/MeshLight")?)?.expect("GeometryLight");
     assert_eq!(g.geometry_rel().targets()?, vec![sdf::path("/World/Emitter")?]);
-    assert_eq!(g.intensity_attr().get()?, Some(sdf::Value::Float(200.0)));
+    assert_eq!(g.intensity_attr().get()?, Some(vt::Value::Float(200.0)));
     Ok(())
 }
 
@@ -212,7 +206,7 @@ fn light_api_via_applied_schema() -> Result<()> {
         "#usda 1.0\ndef Mesh \"Panel\" (\n  prepend apiSchemas = [\"LightAPI\"]\n) {\n  float inputs:intensity = 750\n}\n",
     )?;
     let light = LightAPI::get(&stage, sdf::path("/Panel")?)?.expect("LightAPI applied to Mesh");
-    assert_eq!(light.intensity_attr().get()?, Some(sdf::Value::Float(750.0)));
+    assert_eq!(light.intensity_attr().get()?, Some(vt::Value::Float(750.0)));
     Ok(())
 }
 
@@ -225,9 +219,9 @@ fn light_api_mesh_and_volume() -> Result<()> {
     ))?;
 
     let panel = LightAPI::get(&stage, sdf::path("/Panel")?)?.expect("MeshLightAPI");
-    assert_eq!(panel.intensity_attr().get()?, Some(sdf::Value::Float(321.0)));
+    assert_eq!(panel.intensity_attr().get()?, Some(vt::Value::Float(321.0)));
     let fog = LightAPI::get(&stage, sdf::path("/Fog")?)?.expect("VolumeLightAPI");
-    assert_eq!(fog.intensity_attr().get()?, Some(sdf::Value::Float(123.0)));
+    assert_eq!(fog.intensity_attr().get()?, Some(vt::Value::Float(123.0)));
     Ok(())
 }
 
@@ -242,20 +236,20 @@ fn animated_intensity_via_get_at() -> Result<()> {
     let light = SphereLight::get(&stage, sdf::path("/Flicker")?)?.expect("SphereLight");
     // A default-time read ignores timeSamples, so it answers the schema's
     // fallback rather than a sample.
-    assert_eq!(light.intensity_attr().get()?, Some(sdf::Value::Float(1.0)));
+    assert_eq!(light.intensity_attr().get()?, Some(vt::Value::Float(1.0)));
     // At-time reads pick / interpolate the samples (stage default is linear).
     // The samples decode as `float`, the declared type.
     assert_eq!(
         light.intensity_attr().get_at(openusd::usd::TimeCode::new(0.0))?,
-        Some(sdf::Value::Float(100.0))
+        Some(vt::Value::Float(100.0))
     );
     assert_eq!(
         light.intensity_attr().get_at(openusd::usd::TimeCode::new(10.0))?,
-        Some(sdf::Value::Float(1000.0))
+        Some(vt::Value::Float(1000.0))
     );
     assert_eq!(
         light.intensity_attr().get_at(openusd::usd::TimeCode::new(5.0))?,
-        Some(sdf::Value::Float(550.0))
+        Some(vt::Value::Float(550.0))
     );
     Ok(())
 }
@@ -290,26 +284,26 @@ fn dome_light_and_v1() -> Result<()> {
     let stage = memory()?;
     let d = DomeLight::define(&stage, "/Dome")?;
     d.create_texture_format_attr()?
-        .set(sdf::Value::Token("latlong".into()))?;
+        .set(vt::Value::Token("latlong".into()))?;
     d.create_portals_rel()?.set_targets(["/Dome/Portal"])?;
     assert_eq!(
         DomeLight::get(&stage, "/Dome")?
             .expect("DomeLight")
             .texture_format_attr()
             .get()?,
-        Some(sdf::Value::Token("latlong".into()))
+        Some(vt::Value::Token("latlong".into()))
     );
 
     // `DomeLight_1` is a schema of its own, not a version of this one: it is
     // what carries `poleAxis`, and the unversioned view does not answer for it.
     let v1 = DomeLight_1::define(&stage, "/Dome1")?;
-    v1.create_pole_axis_attr()?.set(sdf::Value::Token("Y".into()))?;
+    v1.create_pole_axis_attr()?.set(vt::Value::Token("Y".into()))?;
     assert_eq!(
         DomeLight_1::get(&stage, "/Dome1")?
             .expect("DomeLight_1")
             .pole_axis_attr()
             .get()?,
-        Some(sdf::Value::Token("Y".into()))
+        Some(vt::Value::Token("Y".into()))
     );
     assert!(DomeLight::get(&stage, "/Dome1")?.is_none(), "a version is its own type");
     Ok(())
@@ -359,7 +353,7 @@ fn light_api_apply_and_get() -> Result<()> {
 
     assert!(stage.prim("/Emitter")?.api_schemas()?.iter().any(|s| s == "LightAPI"));
     let light = LightAPI::get(&stage, "/Emitter")?.expect("LightAPI");
-    assert_eq!(light.intensity_attr().get()?, Some(sdf::Value::Float(1500.0)));
+    assert_eq!(light.intensity_attr().get()?, Some(vt::Value::Float(1500.0)));
     assert_eq!(LightAPI::KIND, openusd::usd::SchemaKind::SingleApplyApi);
     Ok(())
 }
@@ -382,13 +376,13 @@ fn light_list_roundtrip() -> Result<()> {
     let list = LightListAPI::apply(&stage.prim("/World")?)?;
     list.create_light_list_rel()?.set_targets(["/World/Sun"])?;
     list.create_light_list_cache_behavior_attr()?
-        .set(sdf::Value::Token("consumeAndContinue".into()))?;
+        .set(vt::Value::Token("consumeAndContinue".into()))?;
 
     let list = LightListAPI::get(&stage, "/World")?.expect("LightListAPI");
     assert_eq!(list.light_list_rel().targets()?, vec![sdf::path("/World/Sun")?]);
     assert_eq!(
         list.light_list_cache_behavior_attr().get()?,
-        Some(sdf::Value::Token("consumeAndContinue".into()))
+        Some(vt::Value::Token("consumeAndContinue".into()))
     );
     Ok(())
 }
@@ -399,11 +393,11 @@ fn rect_light_texture_and_filters() -> Result<()> {
     let r = RectLight::define(&stage, "/Rect")?;
     r.create_width_attr()?.set(2.0_f32)?;
     r.create_texture_file_attr()?
-        .set(sdf::Value::AssetPath("./softbox.exr".into()))?;
+        .set(vt::Value::AssetPath("./softbox.exr".into()))?;
     r.create_filters_rel()?.set_targets(["/Filter"])?;
 
     let r = RectLight::get(&stage, "/Rect")?.expect("RectLight");
-    assert_eq!(r.width_attr().get()?, Some(sdf::Value::Float(2.0)));
+    assert_eq!(r.width_attr().get()?, Some(vt::Value::Float(2.0)));
     assert_eq!(r.filters_rel().targets()?, vec![sdf::path("/Filter")?]);
     Ok(())
 }
@@ -424,14 +418,14 @@ fn shaping_and_shadow_roundtrip() -> Result<()> {
             .expect("ShapingAPI")
             .shaping_cone_angle_attr()
             .get()?,
-        Some(sdf::Value::Float(45.0))
+        Some(vt::Value::Float(45.0))
     );
     assert_eq!(
         ShadowAPI::get(&stage, "/Spot")?
             .expect("ShadowAPI")
             .shadow_distance_attr()
             .get()?,
-        Some(sdf::Value::Float(10.0))
+        Some(vt::Value::Float(10.0))
     );
     Ok(())
 }
@@ -445,9 +439,9 @@ fn sphere_light_roundtrip() -> Result<()> {
     s.create_intensity_attr()?.set(800.0_f32)?;
 
     let s = SphereLight::get(&stage, "/Bulb")?.expect("SphereLight");
-    assert_eq!(s.radius_attr().get()?, Some(sdf::Value::Float(0.25)));
-    assert_eq!(s.treat_as_point_attr().get()?, Some(sdf::Value::Bool(true)));
-    assert_eq!(s.intensity_attr().get()?, Some(sdf::Value::Float(800.0)));
+    assert_eq!(s.radius_attr().get()?, Some(vt::Value::Float(0.25)));
+    assert_eq!(s.treat_as_point_attr().get()?, Some(vt::Value::Bool(true)));
+    assert_eq!(s.intensity_attr().get()?, Some(vt::Value::Float(800.0)));
     assert!(SphereLight::get(&stage, "/Missing")?.is_none());
     Ok(())
 }
@@ -576,12 +570,12 @@ fn check_shader_ids(ids: ShaderIds<'_>) -> Result<()> {
     assert_eq!(id(&[])?, None);
     assert_eq!(id(&["other", "ri"])?, None);
 
-    ids.universal.clone().set(sdf::Value::token("DefaultLight"))?;
+    ids.universal.clone().set(vt::Value::token("DefaultLight"))?;
     assert_eq!(names("ri")?, None);
     assert_eq!(id(&[])?.as_deref(), Some("DefaultLight"));
     assert_eq!(id(&["other", "ri"])?.as_deref(), Some("DefaultLight"));
 
-    (ids.builder_for)("ri").set(sdf::Value::token("SphereLight")).build()?;
+    (ids.builder_for)("ri").set(vt::Value::token("SphereLight")).build()?;
     assert_eq!(names("")?.as_deref(), Some(name));
     assert_eq!(names("ri")?, Some(format!("ri:{name}")));
     assert_eq!(names("other")?, None);
@@ -686,7 +680,7 @@ fn dome_orient_existing() -> Result<(), SchemaError> {
 #[test]
 fn dome_orient_errors() -> Result<(), SchemaError> {
     let stage = memory()?;
-    stage.set_stage_metadata("upAxis", sdf::Value::token("X"))?;
+    stage.set_stage_metadata("upAxis", vt::Value::token("X"))?;
     let dome = DomeLight::define(&stage, "/dome")?;
     assert!(dome.orient_to_stage_up_axis().is_err());
 

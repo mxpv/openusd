@@ -14,7 +14,7 @@
 //! single statement that ends with the final handle bound:
 //!
 //! ```no_run
-//! use openusd::{sdf, usd};
+//! use openusd::{usd, vt};
 //!
 //! let stage = usd::Stage::builder().in_memory("anon.usda").unwrap();
 //! let mesh = stage
@@ -23,7 +23,7 @@
 //!     .set_kind("component").unwrap();
 //! let radius = mesh
 //!     .create_attribute("radius", "double").unwrap()
-//!     .set(sdf::Value::Double(1.0)).unwrap();
+//!     .set(vt::Value::Double(1.0)).unwrap();
 //! # let _ = radius;
 //! ```
 //!
@@ -40,7 +40,7 @@ use super::{
     VersionFilter, list_edit,
 };
 use crate::tf::Token;
-use crate::{Result, pcp, sdf};
+use crate::{Result, pcp, sdf, vt};
 
 /// Which property names [`Prim::typed_properties`] walks, and whether a
 /// schema declaration may answer for a name no layer authors.
@@ -249,7 +249,7 @@ impl Prim {
     ///
     /// The read counterpart of [`set_metadata`](Self::set_metadata), and the
     /// prim-level sibling of [`Attribute::metadata`]. Decode to the field's
-    /// type (`metadata::<String>("documentation")`) or to [`sdf::Value`]
+    /// type (`metadata::<String>("documentation")`) or to [`vt::Value`]
     /// for the raw value. Dictionary-valued fields come back merged key-by-key
     /// across layers, as value resolution composes them (spec 12.2.5).
     ///
@@ -262,7 +262,7 @@ impl Prim {
     /// keys answering where no layer authors them.
     pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: TryFrom<vt::Value>,
         T::Error: Into<crate::Error>,
     {
         super::authoring::metadata(&self.stage, &self.path, key)
@@ -277,7 +277,7 @@ impl Prim {
     ///
     /// `value` is in stage time, so any `timecode` it holds is mapped into the
     /// edit target's own time frame (C++ `_StageValueToFieldXf`).
-    pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+    pub fn set_metadata(self, key: &'static str, value: impl Into<vt::Value>) -> Result<Self, StageAuthoringError> {
         super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
         let value = self.stage.map_to_spec_value(&self.path, value);
         self.edit(|spec| {
@@ -338,7 +338,7 @@ impl Prim {
     /// [`set_metadata`](Self::set_metadata).
     pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+        F: FnOnce(Option<vt::Value>) -> Option<vt::Value>,
     {
         super::authoring::check_reserved(sdf::SpecType::Prim, key)?;
         // The local opinion is read, and `f` decided, ahead of any transaction:
@@ -447,8 +447,7 @@ impl Prim {
     /// carries is [`ClipsAPI::clip_sets`](super::ClipsAPI::clip_sets), and is
     /// not applied to these names.
     pub fn clip_set_names(&self) -> Result<Vec<String>> {
-        let Some(sdf::Value::Dictionary(sets)) = self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Clips)?
-        else {
+        let Some(vt::Value::Dictionary(sets)) = self.stage.field::<vt::Value>(&self.path, sdf::FieldKey::Clips)? else {
             return Ok(Vec::new());
         };
         let mut names: Vec<String> = sets.into_iter().map(|(name, _)| name).collect();
@@ -475,7 +474,7 @@ impl Prim {
     pub(crate) fn type_name_composed(&self) -> Result<Option<Token>, pcp::QueryError> {
         Ok(self
             .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::TypeName)?
+            .field::<vt::Value>(&self.path, sdf::FieldKey::TypeName)?
             .and_then(|v| v.try_as_token()))
     }
 
@@ -493,7 +492,7 @@ impl Prim {
     pub fn kind(&self) -> Result<Option<Token>> {
         Ok(self
             .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::Kind)?
+            .field::<vt::Value>(&self.path, sdf::FieldKey::Kind)?
             .and_then(|v| v.try_as_token()))
     }
 
@@ -1195,8 +1194,8 @@ impl Prim {
     fn apply_property_order<T: PartialEq<Token>>(&self, names: &mut Vec<T>) -> Result<()> {
         if let Some(order) = self
             .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
-            .and_then(sdf::Value::try_as_token_vec)
+            .field::<vt::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
+            .and_then(vt::Value::try_as_token_vec)
         {
             sdf::apply_ordering(names, &order);
         }
@@ -1897,6 +1896,7 @@ impl Iterator for PrimRange {
 
 #[cfg(test)]
 mod tests {
+    use crate::vt;
     use std::collections::HashSet;
     use std::fs;
     use std::sync::Arc;
@@ -2080,7 +2080,7 @@ mod tests {
 
         assert_eq!(
             a.prim_definition().attribute_fallback(&Token::new("inputs:intensity")),
-            Some(sdf::Value::Float(50000.0))
+            Some(vt::Value::Float(50000.0))
         );
         Ok(())
     }
@@ -2099,7 +2099,7 @@ mod tests {
         let definition = prim.prim_definition()?;
         assert_eq!(
             definition.attribute_fallback(&Token::new("collection:render:expansionRule")),
-            Some(sdf::Value::token("expandPrims"))
+            Some(vt::Value::token("expandPrims"))
         );
         assert_eq!(
             prim.prim_type_info()?.id().applied_api_schemas(),
@@ -2212,9 +2212,9 @@ mod tests {
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set(
                     "fallbackPrimTypes",
-                    sdf::Value::Dictionary(sdf::Dictionary::from([(
+                    vt::Value::Dictionary(vt::Dictionary::from([(
                         "MyStudioLight".to_owned(),
-                        sdf::Value::token_vec(["Unregistered", "DistantLight"]),
+                        vt::Value::token_vec(["Unregistered", "DistantLight"]),
                     )])),
                 );
                 Ok(())
@@ -2228,7 +2228,7 @@ mod tests {
         assert_eq!(
             prim.prim_definition()?
                 .attribute_fallback(&Token::new("inputs:intensity")),
-            Some(sdf::Value::Float(50000.0))
+            Some(vt::Value::Float(50000.0))
         );
 
         // An `IsA` query answers for the type it resolved to. The authored name
@@ -2775,7 +2775,7 @@ mod tests {
         let size = super::Attribute::new(&stage, sdf::path("/Model.size")?);
         assert_eq!(
             size.get_at(crate::usd::TimeCode::new(10.0))?,
-            Some(sdf::Value::Float(10.0))
+            Some(vt::Value::Float(10.0))
         );
 
         // A prim with no clips reports none.
@@ -2823,8 +2823,8 @@ mod tests {
             .set_kind("group")?
             .set_active(true)?;
         assert_eq!(
-            stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
-            Some(sdf::Value::Token("Xform".into())),
+            stage.field::<vt::Value>("/World", sdf::FieldKey::TypeName)?,
+            Some(vt::Value::Token("Xform".into())),
         );
         assert_eq!(stage.prim("/World")?.kind()?.as_deref(), Some("group"));
         Ok(())
@@ -2851,7 +2851,7 @@ mod tests {
             layer.data_mut().set_field(
                 &path,
                 sdf::FieldKey::ApiSchemas.as_str(),
-                sdf::Value::TokenListOp(sdf::TokenListOp::appended(vec![Token::from("ExistingAPI")])),
+                vt::Value::TokenListOp(sdf::TokenListOp::appended(vec![Token::from("ExistingAPI")])),
             );
             Ok(())
         })?;
@@ -2876,15 +2876,15 @@ mod tests {
     fn set_prim_metadata() -> Result<()> {
         let stage = stage()?;
         let mut dict = std::collections::HashMap::new();
-        dict.insert("hint".to_string(), sdf::Value::String("v".to_string()));
+        dict.insert("hint".to_string(), vt::Value::String("v".to_string()));
         stage
             .define_prim("/World")?
-            .set_metadata("customData", sdf::Value::Dictionary(dict.into()))?;
+            .set_metadata("customData", vt::Value::Dictionary(dict.into()))?;
 
-        let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
+        let Some(vt::Value::Dictionary(read)) = stage.field::<vt::Value>("/World", "customData")? else {
             panic!("expected customData dictionary");
         };
-        assert_eq!(read.get("hint"), Some(&sdf::Value::String("v".to_string())));
+        assert_eq!(read.get("hint"), Some(&vt::Value::String("v".to_string())));
         Ok(())
     }
 
@@ -2892,25 +2892,25 @@ mod tests {
     fn update_metadata_reads_local() -> Result<()> {
         let stage = stage()?;
         let mut dict = std::collections::HashMap::new();
-        dict.insert("a".to_string(), sdf::Value::Int(1));
+        dict.insert("a".to_string(), vt::Value::Int(1));
         stage
             .define_prim("/World")?
-            .set_metadata("customData", sdf::Value::Dictionary(dict.into()))?;
+            .set_metadata("customData", vt::Value::Dictionary(dict.into()))?;
 
         // The closure receives the local opinion and merges into it.
         stage.define_prim("/World")?.update_metadata("customData", |local| {
-            let Some(sdf::Value::Dictionary(mut d)) = local else {
+            let Some(vt::Value::Dictionary(mut d)) = local else {
                 panic!("expected local customData dictionary");
             };
-            d.insert("b".to_string(), sdf::Value::Int(2));
-            Some(sdf::Value::Dictionary(d))
+            d.insert("b".to_string(), vt::Value::Int(2));
+            Some(vt::Value::Dictionary(d))
         })?;
 
-        let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
+        let Some(vt::Value::Dictionary(read)) = stage.field::<vt::Value>("/World", "customData")? else {
             panic!("expected customData dictionary");
         };
-        assert_eq!(read.get("a"), Some(&sdf::Value::Int(1)));
-        assert_eq!(read.get("b"), Some(&sdf::Value::Int(2)));
+        assert_eq!(read.get("a"), Some(&vt::Value::Int(1)));
+        assert_eq!(read.get("b"), Some(&vt::Value::Int(2)));
         Ok(())
     }
 
@@ -2919,7 +2919,7 @@ mod tests {
         let stage = stage()?;
         stage
             .define_prim("/World")?
-            .set_metadata("documentation", sdf::Value::String("x".into()))?;
+            .set_metadata("documentation", vt::Value::String("x".into()))?;
         assert_eq!(
             stage.prim("/World")?.metadata::<String>("documentation")?.as_deref(),
             Some("x")
@@ -3030,7 +3030,7 @@ mod tests {
         assert_eq!(prim.authored_property_names()?, before);
 
         let order = vec![Token::from("primvars:skel:weights"), Token::from("points")];
-        let prim = prim.set_metadata("propertyOrder", sdf::Value::TokenVec(order))?;
+        let prim = prim.set_metadata("propertyOrder", vt::Value::TokenVec(order))?;
         // Each ordered name moves with the names that followed it, and the
         // names ahead of the first ordered one stay where they were.
         let expected: Vec<Token> = [
@@ -3053,7 +3053,7 @@ mod tests {
     #[test]
     fn namespace_keeps_property_order() -> Result<()> {
         let order = vec![Token::from("primvars:skel:weights"), Token::from("primvars:st")];
-        let prim = namespaced()?.set_metadata("propertyOrder", sdf::Value::TokenVec(order))?;
+        let prim = namespaced()?.set_metadata("propertyOrder", vt::Value::TokenVec(order))?;
         let expected = ["primvars:skel:weights", "primvars:st"];
         assert_eq!(names(&prim.attributes_in_namespace("primvars")?), expected);
         assert_eq!(names(&prim.authored_attributes_in_namespace("primvars")?), expected);
@@ -3067,7 +3067,7 @@ mod tests {
         let stage = stage()?;
         let result = stage
             .prim("/")?
-            .set_metadata("documentation", sdf::Value::String("x".into()));
+            .set_metadata("documentation", vt::Value::String("x".into()));
         assert!(result.is_err());
         Ok(())
     }

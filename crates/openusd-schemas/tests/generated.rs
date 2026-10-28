@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use openusd::usd::{SchemaRegistry, SchemaRegistryBuilder};
-use openusd::{sdf, tf, usd};
+use openusd::{sdf, tf, usd, vt};
 
 /// Where the vendored definitions live, which is what the build script reads.
 fn schemas() -> PathBuf {
@@ -91,7 +91,7 @@ fn described(registry: &SchemaRegistry, identifier: &tf::Token) -> String {
 /// Fields are keyed rather than kept in the order they were authored, since a
 /// registry reads them by name; the order inside one, as `propertyChildren`
 /// keeps, is part of the value and compares with it.
-type Specs = BTreeMap<String, (sdf::SpecType, BTreeMap<String, sdf::Value>)>;
+type Specs = BTreeMap<String, (sdf::SpecType, BTreeMap<String, vt::Value>)>;
 
 fn specs(family: &usd::SchemaFamily<'_>) -> Specs {
     family

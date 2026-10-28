@@ -8,18 +8,18 @@
 //! and [`CastError`](super::CastError), which this crate owns, so every token
 //! enum reaches it the same way.
 
-/// Carries a token-valued schema enum through [`Value`](crate::sdf::Value), in
+/// Carries a token-valued schema enum through [`Value`](crate::vt::Value), in
 /// both directions.
 ///
-/// [`From`] authors a [`Value::Token`](crate::sdf::Value::Token), so the enum
+/// [`From`] authors a [`Value::Token`](crate::vt::Value::Token), so the enum
 /// passes straight to [`Attribute::set`](crate::usd::Attribute::set)
 /// (`attr.set(Axis::X)?`); [`TryFrom`] decodes one, so
 /// [`Attribute::get`](crate::usd::Attribute::get) extracts it
 /// (`attr.get::<Axis>()?`). These attributes are `token`-valued, so only a
-/// `Value::Token` decodes. The enum's [`FromValue`](crate::sdf::FromValue)
+/// `Value::Token` decodes. The enum's [`FromValue`](crate::vt::FromValue)
 /// accepts that kind alone, so a typed read of any other kind is no value. A
 /// token the enum does not spell, or a direct `try_from` of another kind, is a
-/// [`CastError::TypeMismatch`](crate::sdf::CastError::TypeMismatch) naming the
+/// [`CastError::TypeMismatch`](crate::vt::CastError::TypeMismatch) naming the
 /// enum.
 ///
 /// Each enum must expose `fn as_token(self) -> &'static str` and
@@ -28,7 +28,7 @@
 /// macro themselves.
 ///
 /// ```
-/// use openusd::sdf;
+/// use openusd::vt;
 ///
 /// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// pub enum Axis {
@@ -56,49 +56,49 @@
 ///     }
 /// }
 ///
-/// sdf::impl_token_value!(Axis);
+/// vt::impl_token_value!(Axis);
 ///
-/// assert_eq!(sdf::Value::from(Axis::Y), sdf::Value::token("Y"));
-/// assert_eq!(Axis::try_from(sdf::Value::token("Z")), Ok(Axis::Z));
-/// assert!(Axis::try_from(sdf::Value::Bool(true)).is_err());
+/// assert_eq!(vt::Value::from(Axis::Y), vt::Value::token("Y"));
+/// assert_eq!(Axis::try_from(vt::Value::token("Z")), Ok(Axis::Z));
+/// assert!(Axis::try_from(vt::Value::Bool(true)).is_err());
 /// ```
 // `#[macro_export]` binds at the crate root whatever module a macro lives in,
 // and this crate's root holds only `Error` and `Result`. The binding is hidden
-// so `sdf::impl_token_value` is the one path documented for it.
+// so `vt::impl_token_value` is the one path documented for it.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! impl_token_value {
     ($($ty:ty),+ $(,)?) => {$(
-        impl ::std::convert::From<$ty> for $crate::sdf::Value {
+        impl ::std::convert::From<$ty> for $crate::vt::Value {
             fn from(value: $ty) -> Self {
                 // The token is `'static`, so it is held rather than copied.
-                $crate::sdf::Value::Token($crate::tf::Token::new(value.as_token()))
+                $crate::vt::Value::Token($crate::tf::Token::new(value.as_token()))
             }
         }
 
-        impl ::std::convert::TryFrom<$crate::sdf::Value> for $ty {
-            type Error = $crate::sdf::CastError;
+        impl ::std::convert::TryFrom<$crate::vt::Value> for $ty {
+            type Error = $crate::vt::CastError;
 
             // The error is named outright rather than as `Self::Error`: a token
             // spelled `error` gives the enum an `Error` variant, and
             // `Self::Error` would then name two things.
             fn try_from(
-                value: $crate::sdf::Value,
-            ) -> ::std::result::Result<Self, $crate::sdf::CastError> {
+                value: $crate::vt::Value,
+            ) -> ::std::result::Result<Self, $crate::vt::CastError> {
                 match &value {
-                    $crate::sdf::Value::Token(token) => <$ty>::from_token(token.as_str()),
+                    $crate::vt::Value::Token(token) => <$ty>::from_token(token.as_str()),
                     _ => ::std::option::Option::None,
                 }
-                .ok_or_else(|| $crate::sdf::CastError::TypeMismatch {
+                .ok_or_else(|| $crate::vt::CastError::TypeMismatch {
                     target: ::std::stringify!($ty),
                     actual: ::std::convert::Into::into(&value),
                 })
             }
         }
 
-        impl $crate::sdf::FromValue for $ty {
-            fn accepts_kind(kind: $crate::sdf::ValueKind) -> bool {
-                kind == $crate::sdf::ValueKind::Token
+        impl $crate::vt::FromValue for $ty {
+            fn accepts_kind(kind: $crate::vt::ValueKind) -> bool {
+                kind == $crate::vt::ValueKind::Token
             }
         }
     )+};
@@ -106,7 +106,7 @@ macro_rules! impl_token_value {
 
 #[cfg(test)]
 mod tests {
-    use crate::sdf;
+    use crate::vt;
 
     /// A token set admitting `error`, which names a variant that an associated
     /// `Error` type would otherwise be confused with.
@@ -133,27 +133,27 @@ mod tests {
         }
     }
 
-    sdf::impl_token_value!(Outcome);
+    vt::impl_token_value!(Outcome);
 
     /// An `Error` variant and the `TryFrom` associated type coexist, which the
     /// signature naming `CastError` outright is what allows.
     #[test]
-    fn error_variant_admitted() -> Result<(), sdf::CastError> {
-        assert_eq!(Outcome::try_from(sdf::Value::token("error"))?, Outcome::Error);
+    fn error_variant_admitted() -> Result<(), vt::CastError> {
+        assert_eq!(Outcome::try_from(vt::Value::token("error"))?, Outcome::Error);
         Ok(())
     }
 
     /// The authored value holds the static token rather than a copy of it.
     #[test]
     fn authors_a_token() {
-        assert_eq!(sdf::Value::from(Outcome::Ok), sdf::Value::token("ok"));
+        assert_eq!(vt::Value::from(Outcome::Ok), vt::Value::token("ok"));
     }
 
     /// A token the enum does not name, and a value that is no token at all,
     /// both fail against the enum's own name.
     #[test]
     fn unknown_value_reports_the_enum() {
-        for value in [sdf::Value::token("maybe"), sdf::Value::Bool(true)] {
+        for value in [vt::Value::token("maybe"), vt::Value::Bool(true)] {
             let error = Outcome::try_from(value).expect_err("not an Outcome");
             assert!(error.to_string().contains("Outcome"), "{error}");
         }

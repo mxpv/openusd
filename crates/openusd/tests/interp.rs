@@ -2,8 +2,9 @@
 //! time-sample evaluator wired through stage composition.
 
 use openusd::Result;
-use openusd::sdf::{Value, path};
+use openusd::sdf::path;
 use openusd::usd;
+use openusd::vt::Value;
 
 const FIXTURE: &str = "fixtures/interp_scene.usda";
 

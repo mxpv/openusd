@@ -6,7 +6,7 @@ use crate::sdf::{
     self,
     schema::{ChildrenKey, FieldKey},
 };
-use crate::tf;
+use crate::{tf, vt};
 
 use super::cursor::Cursor;
 use super::error::ParseError;
@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
         }
 
         if !root_children.is_empty() {
-            pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(root_children));
+            pseudo_root_spec.add(ChildrenKey::PrimChildren, vt::Value::token_vec(root_children));
         }
         data.insert(current_path.clone(), pseudo_root_spec);
         Ok(data)
@@ -163,12 +163,12 @@ impl<'a> Parser<'a> {
                     bail!("Unexpected token {other:?} after a list op keyword")
                 }
                 Token::String(str) => {
-                    root.add(FieldKey::Comment, sdf::Value::String(str.into_owned()));
+                    root.add(FieldKey::Comment, vt::Value::String(str.into_owned()));
                 }
                 Token::Doc => {
                     this.cursor.expect_punctuation('=')?;
                     let value = this.cursor.expect_string()?;
-                    root.add(FieldKey::Documentation, sdf::Value::String(value.into_owned()));
+                    root.add(FieldKey::Documentation, vt::Value::String(value.into_owned()));
                 }
                 Token::SubLayers => {
                     this.cursor.expect_punctuation('=')?;
@@ -176,15 +176,15 @@ impl<'a> Parser<'a> {
                         types::parse_sublayers(&mut this.cursor).context("Unable to parse subLayers")?;
                     // An empty list authors nothing, as in C++.
                     if !sublayers.is_empty() {
-                        root.add(FieldKey::SubLayers, sdf::Value::StringVec(sublayers));
-                        root.add(FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
+                        root.add(FieldKey::SubLayers, vt::Value::StringVec(sublayers));
+                        root.add(FieldKey::SubLayerOffsets, vt::Value::LayerOffsetVec(offsets));
                     }
                 }
                 Token::Relocates => {
                     this.cursor.expect_punctuation('=')?;
                     let pairs = types::parse_relocates(&mut this.cursor, &sdf::Path::abs_root())
                         .context("Unable to parse relocates")?;
-                    root.add(FieldKey::LayerRelocates, sdf::Value::Relocates(pairs));
+                    root.add(FieldKey::LayerRelocates, vt::Value::Relocates(pairs));
                 }
                 Token::Identifier(name) => {
                     this.cursor.expect_punctuation('=')?;
@@ -232,7 +232,7 @@ impl<'a> Parser<'a> {
 
         let mut name_token = self.cursor.bump()?;
         if let Token::Identifier(prim_type) = name_token {
-            spec.add(FieldKey::TypeName, sdf::Value::token(prim_type));
+            spec.add(FieldKey::TypeName, vt::Value::token(prim_type));
             name_token = self.cursor.bump()?;
         }
 
@@ -252,15 +252,15 @@ impl<'a> Parser<'a> {
 
         let (children, properties, variant_sets) = self.read_prim_body(&prim_path, &mut spec, data)?;
         if !children.is_empty() {
-            spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(children));
+            spec.add(ChildrenKey::PrimChildren, vt::Value::token_vec(children));
         }
 
-        spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
+        spec.add(FieldKey::Specifier, vt::Value::Specifier(specifier));
         if !properties.order.is_empty() {
-            spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties.order));
+            spec.add(ChildrenKey::PropertyChildren, vt::Value::TokenVec(properties.order));
         }
         if !variant_sets.is_empty() {
-            spec.add(ChildrenKey::VariantSetChildren, sdf::Value::token_vec(variant_sets));
+            spec.add(ChildrenKey::VariantSetChildren, vt::Value::token_vec(variant_sets));
         }
         data.insert(prim_path, spec);
 
@@ -336,7 +336,7 @@ impl<'a> Parser<'a> {
         self.cursor.expect_punctuation('=')?;
 
         let names = self.parse_one_or_list(|c| Ok(c.expect_string()?.into_owned()))?;
-        owner_spec.add(field_key, sdf::Value::token_vec(names));
+        owner_spec.add(field_key, vt::Value::token_vec(names));
 
         Ok(())
     }
@@ -388,19 +388,19 @@ impl<'a> Parser<'a> {
             // Variant body.
             let (children, properties, variant_sets) = this.read_prim_body(&variant_path, &mut variant_spec, data)?;
             if !children.is_empty() {
-                variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(children));
+                variant_spec.add(ChildrenKey::PrimChildren, vt::Value::token_vec(children));
             }
             if !properties.order.is_empty() {
-                variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties.order));
+                variant_spec.add(ChildrenKey::PropertyChildren, vt::Value::TokenVec(properties.order));
             }
             if !variant_sets.is_empty() {
-                variant_spec.add(ChildrenKey::VariantSetChildren, sdf::Value::token_vec(variant_sets));
+                variant_spec.add(ChildrenKey::VariantSetChildren, vt::Value::token_vec(variant_sets));
             }
             data.insert(variant_path, variant_spec);
             Ok(())
         })?;
 
-        vset_spec.add(ChildrenKey::VariantChildren, sdf::Value::token_vec(variant_children));
+        vset_spec.add(ChildrenKey::VariantChildren, vt::Value::token_vec(variant_children));
         data.insert(vset_path, vset_spec);
 
         Ok(name)
@@ -429,12 +429,12 @@ impl<'a> Parser<'a> {
         variability: sdf::Variability,
     ) -> sdf::SpecData {
         let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
-        spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.as_token()));
+        spec.add(FieldKey::TypeName, vt::Value::Token(type_name.as_token()));
         if custom {
-            spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+            spec.add(FieldKey::Custom, vt::Value::Bool(true));
         }
         if variability != sdf::Variability::default() {
-            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+            spec.add(FieldKey::Variability, vt::Value::Variability(variability));
         }
         spec
     }
@@ -518,7 +518,7 @@ impl<'a> Parser<'a> {
                 .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
 
             let (ty, list_op) = apply_list_op(list_op, targets).context("Unable to build connection listOp")?;
-            spec.add_list_op(FieldKey::ConnectionPaths, ty, sdf::Value::PathListOp(list_op));
+            spec.add_list_op(FieldKey::ConnectionPaths, ty, vt::Value::PathListOp(list_op));
             return Ok(());
         }
 
@@ -531,7 +531,7 @@ impl<'a> Parser<'a> {
             let spec = data
                 .entry(path)
                 .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
-            spec.add(FieldKey::TimeSamples, sdf::Value::TimeSamples(samples));
+            spec.add(FieldKey::TimeSamples, vt::Value::TimeSamples(samples));
             return Ok(());
         }
 
@@ -598,7 +598,7 @@ impl<'a> Parser<'a> {
             let name = match name_token {
                 // Bare string in property metadata is a comment.
                 Token::String(s) => {
-                    spec.add(FieldKey::Comment, sdf::Value::String(s.into_owned()));
+                    spec.add(FieldKey::Comment, vt::Value::String(s.into_owned()));
                     return Ok(());
                 }
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
@@ -633,7 +633,7 @@ impl<'a> Parser<'a> {
             // rejects any other rather than carrying it, so a typo is caught
             // where it was written instead of silently measuring in metres.
             if name == FieldKey::DisplayUnit.as_str() {
-                let Some(spelling) = spec.get(&name).and_then(sdf::Value::try_as_token_ref) else {
+                let Some(spelling) = spec.get(&name).and_then(vt::Value::try_as_token_ref) else {
                     bail!("A display unit is spelled by name, as `displayUnit = mm`");
                 };
                 ensure!(
@@ -655,7 +655,7 @@ impl<'a> Parser<'a> {
             "private" => sdf::Permission::Private,
             other => bail!("Invalid permission value: {other}"),
         };
-        spec.add(FieldKey::Permission, sdf::Value::Permission(permission));
+        spec.add(FieldKey::Permission, vt::Value::Permission(permission));
         Ok(())
     }
 
@@ -673,7 +673,7 @@ impl<'a> Parser<'a> {
             }
             _ => "",
         };
-        spec.add(FieldKey::SymmetryFunction, sdf::Value::token(function));
+        spec.add(FieldKey::SymmetryFunction, vt::Value::token(function));
         Ok(())
     }
 
@@ -690,14 +690,14 @@ impl<'a> Parser<'a> {
 
         let mut spec = sdf::SpecData::new(sdf::SpecType::Relationship);
         if custom {
-            spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+            spec.add(FieldKey::Custom, vt::Value::Bool(true));
         }
         // `variability` falls back to varying, so only a uniform relationship —
         // the plain `rel` spelling — carries the field. A later statement's
         // variability replaces an earlier one's, as in C++, so a `varying`
         // statement also clears the field a plain one set.
         if variability == sdf::Variability::Uniform {
-            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+            spec.add(FieldKey::Variability, vt::Value::Variability(variability));
         } else if let Some(earlier) = data.get_mut(&current_path.append_property(name)?) {
             earlier.remove(FieldKey::Variability.as_str());
         }
@@ -738,7 +738,7 @@ impl<'a> Parser<'a> {
         // Each statement sets its list of targets on those of the
         // relationship's earlier statements (`delete rel r = ...` then
         // `add rel r = ...`), as a connection's do.
-        Self::merge_spec(data, path, spec).add_list_op(FieldKey::TargetPaths, ty, sdf::Value::PathListOp(list_op));
+        Self::merge_spec(data, path, spec).add_list_op(FieldKey::TargetPaths, ty, vt::Value::PathListOp(list_op));
         Ok(())
     }
 
@@ -769,7 +769,7 @@ impl<'a> Parser<'a> {
         let name = match name_token {
             // Bare string in metadata is a comment.
             Token::String(s) => {
-                spec.add(FieldKey::Comment, sdf::Value::String(s.into_owned()));
+                spec.add(FieldKey::Comment, vt::Value::String(s.into_owned()));
                 return Ok(());
             }
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
@@ -793,38 +793,38 @@ impl<'a> Parser<'a> {
         match name {
             n if n == FieldKey::Active.as_str() => {
                 let value = types::parse_token::<bool>(&mut self.cursor).context("Unable to parse active flag")?;
-                spec.add(FieldKey::Active, sdf::Value::Bool(value));
+                spec.add(FieldKey::Active, vt::Value::Bool(value));
             }
             "apiSchemas" => {
                 let values = self
                     .parse_one_or_list(types::parse_token::<tf::Token>)
                     .context("Unable to parse apiSchemas list")?;
                 let (ty, list_op) = apply_list_op(list_op, values).context("Unable to build apiSchemas listOp")?;
-                spec.add_list_op("apiSchemas", ty, sdf::Value::TokenListOp(list_op));
+                spec.add_list_op("apiSchemas", ty, vt::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
                 let references = self
                     .parse_one_or_list(types::parse_reference)
                     .context("Unable to parse references")?;
                 let (ty, list_op) = apply_list_op(list_op, references).context("Unable to build references listOp")?;
-                spec.add_list_op(FieldKey::References, ty, sdf::Value::ReferenceListOp(list_op));
+                spec.add_list_op(FieldKey::References, ty, vt::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
                 let payloads = self
                     .parse_one_or_list(types::parse_payload)
                     .context("Unable to parse payloads")?;
                 let (ty, list_op) = apply_list_op(list_op, payloads).context("Unable to build payload listOp")?;
-                spec.add_list_op(FieldKey::Payload, ty, sdf::Value::PayloadListOp(list_op));
+                spec.add_list_op(FieldKey::Payload, ty, vt::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
                 let paths = self.parse_arc_paths(anchor, "Inherit")?;
                 let (ty, list_op) = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
-                spec.add_list_op(FieldKey::InheritPaths, ty, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::InheritPaths, ty, vt::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
                 let value = types::parse_token::<String>(&mut self.cursor).context("Unable to parse kind metadata")?;
-                spec.add(FieldKey::Kind, sdf::Value::token(value));
+                spec.add(FieldKey::Kind, vt::Value::token(value));
             }
             "customData" => {
                 ensure!(list_op.is_none(), "customData metadata does not support list ops");
@@ -835,12 +835,12 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Documentation.as_str() => {
                 ensure!(list_op.is_none(), "doc metadata does not support list ops");
                 let value = types::parse_token::<String>(&mut self.cursor).context("Unable to parse doc metadata")?;
-                spec.add(FieldKey::Documentation, sdf::Value::String(value));
+                spec.add(FieldKey::Documentation, vt::Value::String(value));
             }
             n if n == FieldKey::AssetInfo.as_str() => {
                 ensure!(list_op.is_none(), "assetInfo does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse assetInfo")?;
-                spec.add(FieldKey::AssetInfo, sdf::Value::Dictionary(value.into()));
+                spec.add(FieldKey::AssetInfo, vt::Value::Dictionary(value.into()));
             }
             n if n == FieldKey::VariantSelection.as_str() => {
                 ensure!(list_op.is_none(), "variants does not support list ops");
@@ -849,7 +849,7 @@ impl<'a> Parser<'a> {
                     .into_iter()
                     .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s)))
                     .collect();
-                spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
+                spec.add(FieldKey::VariantSelection, vt::Value::VariantSelectionMap(selections));
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
                 // Names, not tokens: C++ registers the field as an
@@ -859,27 +859,27 @@ impl<'a> Parser<'a> {
                     .parse_one_or_list(types::parse_token::<String>)
                     .context("Unable to parse variantSets")?;
                 let (ty, list_op) = apply_list_op(list_op, values).context("Unable to build variantSets listOp")?;
-                spec.add_list_op(FieldKey::VariantSetNames, ty, sdf::Value::StringListOp(list_op));
+                spec.add_list_op(FieldKey::VariantSetNames, ty, vt::Value::StringListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
                 let paths = self.parse_arc_paths(anchor, "Specializes")?;
                 let (ty, list_op) = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
-                spec.add_list_op(FieldKey::Specializes, ty, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::Specializes, ty, vt::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Instanceable.as_str() => {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
                 let value = types::parse_bool(&mut self.cursor).context("Unable to parse instanceable flag")?;
-                spec.add(FieldKey::Instanceable, sdf::Value::Bool(value));
+                spec.add(FieldKey::Instanceable, vt::Value::Bool(value));
             }
             n if n == FieldKey::Relocates.as_str() => {
                 ensure!(list_op.is_none(), "relocates does not support list ops");
                 let pairs = types::parse_relocates(&mut self.cursor, anchor).context("Unable to parse relocates")?;
-                spec.add(FieldKey::Relocates, sdf::Value::Relocates(pairs));
+                spec.add(FieldKey::Relocates, vt::Value::Relocates(pairs));
             }
             "displayName" => {
                 ensure!(list_op.is_none(), "displayName does not support list ops");
                 let value = self.cursor.expect_string().context("Unable to parse displayName")?;
-                spec.add("displayName", sdf::Value::String(value.into_owned()));
+                spec.add("displayName", vt::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Permission.as_str() => {
                 ensure!(list_op.is_none(), "permission does not support list ops");
@@ -892,19 +892,19 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Prefix.as_str() => {
                 ensure!(list_op.is_none(), "prefix does not support list ops");
                 let value = self.cursor.expect_string().context("Unable to parse prefix")?;
-                spec.add(FieldKey::Prefix, sdf::Value::String(value.into_owned()));
+                spec.add(FieldKey::Prefix, vt::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");
                 let value = types::parse_dictionary(&mut self.cursor).context("Unable to parse clips dictionary")?;
-                spec.add(FieldKey::Clips, sdf::Value::Dictionary(value.into()));
+                spec.add(FieldKey::Clips, vt::Value::Dictionary(value.into()));
             }
             n if n == FieldKey::ClipSets.as_str() => {
                 let values = self
                     .parse_one_or_list(|c| Ok(c.expect_string()?.into_owned()))
                     .context("Unable to parse clipSets list")?;
                 let (ty, list_op) = apply_list_op(list_op, values).context("Unable to build clipSets listOp")?;
-                spec.add_list_op(FieldKey::ClipSets, ty, sdf::Value::StringListOp(list_op));
+                spec.add_list_op(FieldKey::ClipSets, ty, vt::Value::StringListOp(list_op));
             }
             other => match sdf::registered_field_type(other) {
                 // A registered field none of the productions above claims.
@@ -945,7 +945,7 @@ impl<'a> Parser<'a> {
         declared: &sdf::FieldType,
         list_op: Option<Token<'a>>,
     ) -> Result<(), RawError> {
-        use sdf::{Value, ValueKind};
+        use vt::{Value, ValueKind};
 
         let element = match declared {
             sdf::FieldType::ListOp(element) => element,
@@ -986,8 +986,8 @@ impl<'a> Parser<'a> {
         &mut self,
         op: Option<Token<'a>>,
         parse: impl FnMut(&mut Cursor<'a>) -> Result<T, RawError>,
-        wrap: fn(sdf::ListOp<T>) -> sdf::Value,
-    ) -> Result<(sdf::ListOpType, sdf::Value), RawError> {
+        wrap: fn(sdf::ListOp<T>) -> vt::Value,
+    ) -> Result<(sdf::ListOpType, vt::Value), RawError> {
         let items = self.parse_one_or_list(parse)?;
         let (ty, list_op) = apply_list_op(op, items)?;
         Ok((ty, wrap(list_op)))
@@ -1054,14 +1054,14 @@ fn record_unregistered_metadata(
 ) -> Result<(), RawError> {
     if cursor.at_punctuation('{')? {
         let entries = types::parse_dictionary(cursor)?;
-        spec.add(name, sdf::Value::UnregisteredDictionary(entries.into()));
+        spec.add(name, vt::Value::UnregisteredDictionary(entries.into()));
         return Ok(());
     }
 
     let literal = types::record_literal(cursor)?;
 
     let Some(op) = list_op else {
-        spec.add(name, sdf::Value::UnregisteredValue(literal.to_owned()));
+        spec.add(name, vt::Value::UnregisteredValue(literal.to_owned()));
         return Ok(());
     };
 
@@ -1076,11 +1076,11 @@ fn record_unregistered_metadata(
     };
 
     match spec.get_mut(name) {
-        Some(sdf::Value::UnregisteredValueListOp(stored)) => stored.set_items(list_op_type(op)?, items),
+        Some(vt::Value::UnregisteredValueListOp(stored)) => stored.set_items(list_op_type(op)?, items),
         Some(_) => {}
         None => {
             let stored = sdf::ListOp::default().with(list_op_type(op)?, items);
-            spec.add(name, sdf::Value::UnregisteredValueListOp(stored));
+            spec.add(name, vt::Value::UnregisteredValueListOp(stored));
         }
     }
     Ok(())
@@ -1132,7 +1132,7 @@ def "Mesh"
 
         // A relationship is uniform unless it spells `varying`, the reverse of
         // an attribute, and only the uniform case carries the field.
-        let uniform = Some(sdf::Value::Variability(sdf::Variability::Uniform));
+        let uniform = Some(vt::Value::Variability(sdf::Variability::Uniform));
         assert_eq!(variability("/Mesh.plain"), uniform);
         assert_eq!(variability("/Mesh.owned"), uniform);
         assert_eq!(variability("/Mesh.moving"), None);
@@ -1210,12 +1210,12 @@ def "Mesh"
             .get("customLayerData")
             .expect("customLayerData metadata present");
         let dict = match custom_layer_data {
-            sdf::Value::Dictionary(dict) => dict,
+            vt::Value::Dictionary(dict) => dict,
             other => panic!("customLayerData parsed as unexpected value: {other:?}"),
         };
 
         let render_settings = match dict.get("renderSettings") {
-            Some(sdf::Value::Dictionary(d)) => d,
+            Some(vt::Value::Dictionary(d)) => d,
             other => panic!("renderSettings parsed as unexpected value: {other:?}"),
         };
 
@@ -1250,38 +1250,38 @@ def "Mesh"
             .expect("customLayerData metadata present");
 
         let dict = match custom_layer_data {
-            sdf::Value::Dictionary(dict) => dict,
+            vt::Value::Dictionary(dict) => dict,
             other => panic!("customLayerData parsed as unexpected value: {other:?}"),
         };
 
         let camera_settings = dict.get("cameraSettings").expect("cameraSettings dictionary entry");
         let camera_dict = match camera_settings {
-            sdf::Value::Dictionary(dict) => dict,
+            vt::Value::Dictionary(dict) => dict,
             other => panic!("cameraSettings parsed as unexpected value: {other:?}"),
         };
 
         let front = camera_dict.get("Front").expect("Front entry");
         let front_dict = match front {
-            sdf::Value::Dictionary(dict) => dict,
+            vt::Value::Dictionary(dict) => dict,
             other => panic!("Front stored as unexpected value: {other:?}"),
         };
 
         let position = front_dict.get("position").expect("Front.position entry");
         match position {
-            sdf::Value::Vec3d(values) => assert_eq!(*values, gf::vec3d(5.0, 0.0, 0.0)),
+            vt::Value::Vec3d(values) => assert_eq!(*values, gf::vec3d(5.0, 0.0, 0.0)),
             other => panic!("Front.position stored as unexpected value: {other:?}"),
         }
 
         let radius = front_dict.get("radius").expect("Front.radius entry");
         match radius {
-            sdf::Value::Double(value) => assert_eq!(*value, 5.0),
+            vt::Value::Double(value) => assert_eq!(*value, 5.0),
             other => panic!("Front.radius stored as unexpected value: {other:?}"),
         }
 
         let bound_camera = dict.get("boundCamera").expect("boundCamera entry");
         match bound_camera {
-            sdf::Value::String(value) => assert_eq!(value, "/OmniverseKit_Persp"),
-            sdf::Value::Token(value) => assert_eq!(value.as_str(), "/OmniverseKit_Persp"),
+            vt::Value::String(value) => assert_eq!(value, "/OmniverseKit_Persp"),
+            vt::Value::Token(value) => assert_eq!(value.as_str(), "/OmniverseKit_Persp"),
             other => panic!("boundCamera stored as unexpected value: {other:?}"),
         }
     }
@@ -1309,25 +1309,25 @@ def "Mesh"
             .expect("expressionVariables metadata present");
 
         let dict = match expr_vars {
-            sdf::Value::Dictionary(dict) => dict,
+            vt::Value::Dictionary(dict) => dict,
             other => panic!("expressionVariables parsed as unexpected value: {other:?}"),
         };
 
         let asset_path = dict.get("ASSET_PATH").expect("ASSET_PATH entry");
         match asset_path {
-            sdf::Value::String(value) => assert_eq!(value, "/models/characters"),
+            vt::Value::String(value) => assert_eq!(value, "/models/characters"),
             other => panic!("ASSET_PATH stored as unexpected value: {other:?}"),
         }
 
         let use_high_res = dict.get("USE_HIGH_RES").expect("USE_HIGH_RES entry");
         match use_high_res {
-            sdf::Value::Bool(value) => assert!(*value),
+            vt::Value::Bool(value) => assert!(*value),
             other => panic!("USE_HIGH_RES stored as unexpected value: {other:?}"),
         }
 
         let lod_level = dict.get("LOD_LEVEL").expect("LOD_LEVEL entry");
         match lod_level {
-            sdf::Value::Int64(value) => assert_eq!(*value, 2),
+            vt::Value::Int64(value) => assert_eq!(*value, 2),
             other => panic!("LOD_LEVEL stored as unexpected value: {other:?}"),
         }
     }
@@ -1355,7 +1355,7 @@ def "Mesh"
             .expect("expressionVariables metadata present");
 
         let dict = match expr_vars {
-            sdf::Value::Dictionary(dict) => dict,
+            vt::Value::Dictionary(dict) => dict,
             other => panic!("expressionVariables parsed as unexpected value: {other:?}"),
         };
 
@@ -1368,13 +1368,13 @@ def "Mesh"
 
         let frame_range = dict.get("FRAME_RANGE").expect("FRAME_RANGE entry");
         match frame_range {
-            sdf::Value::Int64Vec(values) => assert_eq!(values, &[1, 100]),
+            vt::Value::Int64Vec(values) => assert_eq!(values, &[1, 100]),
             other => panic!("FRAME_RANGE stored as unexpected value: {other:?}"),
         }
 
         let flags = dict.get("FLAGS").expect("FLAGS entry");
         match flags {
-            sdf::Value::BoolVec(values) => assert_eq!(values, &[true, false, true]),
+            vt::Value::BoolVec(values) => assert_eq!(values, &[true, false, true]),
             other => panic!("FLAGS stored as unexpected value: {other:?}"),
         }
     }
@@ -1495,25 +1495,25 @@ def Mesh "M"
         let data = parser.parse().unwrap();
 
         let primvar = data.get(&sdf::path("/M.primvars:w").unwrap()).unwrap();
-        assert_eq!(primvar.get("elementSize"), Some(&sdf::Value::Int(3)));
-        assert_eq!(primvar.get("unauthoredValuesIndex"), Some(&sdf::Value::Int(-1)));
-        assert_eq!(primvar.get("weight"), Some(&sdf::Value::Float(0.5)));
-        assert_eq!(primvar.get("irIsInvertible"), Some(&sdf::Value::Bool(true)));
+        assert_eq!(primvar.get("elementSize"), Some(&vt::Value::Int(3)));
+        assert_eq!(primvar.get("unauthoredValuesIndex"), Some(&vt::Value::Int(-1)));
+        assert_eq!(primvar.get("weight"), Some(&vt::Value::Float(0.5)));
+        assert_eq!(primvar.get("irIsInvertible"), Some(&vt::Value::Bool(true)));
         assert_eq!(
             primvar.get("payloadAssetDependencies"),
-            Some(&sdf::Value::AssetPathVec(Vec::new()))
+            Some(&vt::Value::AssetPathVec(Vec::new()))
         );
 
         let other = data.get(&sdf::path("/M.primvars:v").unwrap()).unwrap();
-        assert_eq!(other.get("irIsInvertible"), Some(&sdf::Value::Bool(false)));
-        assert_eq!(other.get("weight"), Some(&sdf::Value::Float(1.0)));
+        assert_eq!(other.get("irIsInvertible"), Some(&vt::Value::Bool(false)));
+        assert_eq!(other.get("weight"), Some(&vt::Value::Float(1.0)));
         let dependencies = other.get("payloadAssetDependencies").unwrap();
         assert_eq!(dependencies.array_len(), Some(2));
         assert!(dependencies.is_asset_valued());
 
         let root = data.get(&sdf::Path::abs_root()).unwrap();
-        assert_eq!(root.get("metersPerUnit"), Some(&sdf::Value::Double(1.0)));
-        assert_eq!(root.get("upAxis"), Some(&sdf::Value::token("Y")));
+        assert_eq!(root.get("metersPerUnit"), Some(&vt::Value::Double(1.0)));
+        assert_eq!(root.get("upAxis"), Some(&vt::Value::token("Y")));
     }
 
     /// A literal the declared type cannot hold fails the parse, naming the
@@ -1556,20 +1556,20 @@ def Shader "Image_Texture"
         let double_sided = data.get(&sdf::path("/Image_Texture.doubleSided").unwrap()).unwrap();
         assert!(matches!(
             double_sided.get(FieldKey::Default.as_str()),
-            Some(sdf::Value::Bool(true))
+            Some(vt::Value::Bool(true))
         ));
 
         let info_spec = data.get(&sdf::path("/Image_Texture.info:id").unwrap()).unwrap();
         assert!(matches!(
             info_spec.get(FieldKey::Custom.as_str()),
-            Some(sdf::Value::Bool(true))
+            Some(vt::Value::Bool(true))
         ));
 
         let file_spec = data.get(&sdf::path("/Image_Texture.inputs:file").unwrap()).unwrap();
         assert!(matches!(
             file_spec
                 .get(FieldKey::Default.as_str()),
-            Some(sdf::Value::AssetPath(path)) if path == "./texture.png"
+            Some(vt::Value::AssetPath(path)) if path == "./texture.png"
         ));
 
         let output_spec = data
@@ -1578,20 +1578,20 @@ def Shader "Image_Texture"
         assert!(matches!(
             output_spec
                 .get(FieldKey::TypeName.as_str()),
-            Some(sdf::Value::Token(t)) if t.as_str() == "token"
+            Some(vt::Value::Token(t)) if t.as_str() == "token"
         ));
 
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
         assert!(matches!(
             output_spec
                 .get(FieldKey::ConnectionPaths.as_str()),
-            Some(sdf::Value::PathListOp(op)) if op.explicit_items().len() == 1
+            Some(vt::Value::PathListOp(op)) if op.explicit_items().len() == 1
         ));
 
         let props = shader
             .get(sdf::schema::ChildrenKey::PropertyChildren.as_str())
             .and_then(|value| match value {
-                sdf::Value::TokenVec(tokens) => Some(tokens.iter().map(|t| t.to_string()).collect::<Vec<String>>()),
+                vt::Value::TokenVec(tokens) => Some(tokens.iter().map(|t| t.to_string()).collect::<Vec<String>>()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -1623,7 +1623,7 @@ def Xform "X" {
             .expect("matrix default missing");
 
         match matrix {
-            sdf::Value::Matrix4d(m) => {
+            vt::Value::Matrix4d(m) => {
                 assert_eq!(m.0.len(), 16);
                 assert_eq!(m[(0, 0)], 1.0);
                 assert_eq!(m[(1, 1)], 1.0);
@@ -1659,7 +1659,7 @@ def Scope "Root" {
             .expect("matrix default missing");
 
         match matrix {
-            sdf::Value::Matrix4dVec(values) => {
+            vt::Value::Matrix4dVec(values) => {
                 assert_eq!(values.len(), 2);
                 assert_eq!(values[0][0], 1.0);
                 assert_eq!(values[0][15], 1.0);
@@ -1748,12 +1748,12 @@ def Material "Mat"
             .expect("missing outputs:surface spec");
         assert!(matches!(
             output.get(FieldKey::TypeName.as_str()),
-            Some(sdf::Value::Token(t)) if t.as_str() == "token"
+            Some(vt::Value::Token(t)) if t.as_str() == "token"
         ));
 
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
         match output.get(FieldKey::ConnectionPaths.as_str()) {
-            Some(sdf::Value::PathListOp(op)) => {
+            Some(vt::Value::PathListOp(op)) => {
                 assert_eq!(op.explicit_items().len(), 1);
                 assert_eq!(op.explicit_items()[0].as_str(), "/Mat/Preview.outputs:surface");
             }
@@ -2359,16 +2359,16 @@ def Material "M"
                 .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
                 .expect("timeSamples present");
             match value {
-                sdf::Value::TimeSamples(s) => s[0].1.clone(),
+                vt::Value::TimeSamples(s) => s[0].1.clone(),
                 other => panic!("expected TimeSamples, got {other:?}"),
             }
         };
         match sample("/M.inputs:file") {
-            sdf::Value::AssetPath(a) => assert_eq!(a.as_str(), "./a.png"),
+            vt::Value::AssetPath(a) => assert_eq!(a.as_str(), "./a.png"),
             other => panic!("expected AssetPath, got {other:?}"),
         }
         match sample("/M.inputs:files") {
-            sdf::Value::AssetPathVec(v) => {
+            vt::Value::AssetPathVec(v) => {
                 assert_eq!(v.len(), 2);
                 assert_eq!(v[1].as_str(), "./b.png");
             }
@@ -2411,12 +2411,12 @@ def Xform "Anim"
             .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
             .expect("rotations.timeSamples present");
         let samples = match rotations {
-            sdf::Value::TimeSamples(s) => s,
+            vt::Value::TimeSamples(s) => s,
             other => panic!("expected TimeSamples, got {other:?}"),
         };
         assert_eq!(samples.len(), 2);
         match &samples[0].1 {
-            sdf::Value::QuatfVec(v) => {
+            vt::Value::QuatfVec(v) => {
                 assert_eq!(v.len(), 2);
                 assert_eq!(v[0], gf::quatf(1.0, 0.0, 0.0, 0.0));
             }
@@ -2428,11 +2428,11 @@ def Xform "Anim"
             .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
             .expect("translations.timeSamples present");
         let samples = match translations {
-            sdf::Value::TimeSamples(s) => s,
+            vt::Value::TimeSamples(s) => s,
             other => panic!("expected TimeSamples, got {other:?}"),
         };
         match &samples[0].1 {
-            sdf::Value::Vec3fVec(v) => {
+            vt::Value::Vec3fVec(v) => {
                 assert_eq!(v.len(), 2);
                 assert_eq!(v[1], gf::vec3f(1.0, 2.0, 3.0));
             }
@@ -2444,11 +2444,11 @@ def Xform "Anim"
             .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
             .expect("xformOp:transform.timeSamples present");
         let samples = match xform {
-            sdf::Value::TimeSamples(s) => s,
+            vt::Value::TimeSamples(s) => s,
             other => panic!("expected TimeSamples, got {other:?}"),
         };
         match &samples[0].1 {
-            sdf::Value::Matrix4d(m) => {
+            vt::Value::Matrix4d(m) => {
                 assert_eq!(m[0], 1.0);
                 assert_eq!(m[5], 1.0);
                 assert_eq!(m[10], 1.0);
@@ -2492,34 +2492,34 @@ def Xform "Anim"
                 .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
                 .unwrap_or_else(|| panic!("{path}.timeSamples present"));
             match value {
-                sdf::Value::TimeSamples(s) => s.clone(),
+                vt::Value::TimeSamples(s) => s.clone(),
                 other => panic!("expected TimeSamples for {path}, got {other:?}"),
             }
         };
 
         match &take("/Anim.indices")[0].1 {
-            sdf::Value::IntVec(v) => assert_eq!(v, &[1, 2, 3]),
+            vt::Value::IntVec(v) => assert_eq!(v, &[1, 2, 3]),
             other => panic!("expected IntVec for int[] sample, got {other:?}"),
         }
         match &take("/Anim.weights")[0].1 {
-            sdf::Value::FloatVec(v) => assert_eq!(v, &[0.25, 0.5, 0.25]),
+            vt::Value::FloatVec(v) => assert_eq!(v, &[0.25, 0.5, 0.25]),
             other => panic!("expected FloatVec for float[] sample, got {other:?}"),
         }
         match &take("/Anim.joints")[0].1 {
-            sdf::Value::TokenVec(v) => assert_eq!(
+            vt::Value::TokenVec(v) => assert_eq!(
                 v.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
                 ["Root", "Hip", "Knee"]
             ),
             other => panic!("expected TokenVec for token[] sample, got {other:?}"),
         }
         match &take("/Anim.flags")[0].1 {
-            sdf::Value::BoolVec(v) => assert_eq!(v, &[true, false, true]),
+            vt::Value::BoolVec(v) => assert_eq!(v, &[true, false, true]),
             other => panic!("expected BoolVec for bool[] sample, got {other:?}"),
         }
     }
 
     /// One field of one parsed spec.
-    fn field(text: &str, path: &str, key: &str) -> Option<sdf::Value> {
+    fn field(text: &str, path: &str, key: &str) -> Option<vt::Value> {
         let specs = Parser::new(text).parse().expect("parses");
         specs
             .get(&sdf::Path::new(path).unwrap())
@@ -2537,15 +2537,15 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    Color c = (1, 2, 3)\n    Vec3f v = (1, 2, 3)\n}\n";
         assert_eq!(
             field(text, "/P.c", FieldKey::Default.as_str()),
-            Some(sdf::Value::vec3d(1.0, 2.0, 3.0))
+            Some(vt::Value::vec3d(1.0, 2.0, 3.0))
         );
         assert_eq!(
             field(text, "/P.c", FieldKey::TypeName.as_str()),
-            Some(sdf::Value::token("Color"))
+            Some(vt::Value::token("Color"))
         );
         assert_eq!(
             field(text, "/P.v", FieldKey::Default.as_str()),
-            Some(sdf::Value::vec3f(1.0, 2.0, 3.0))
+            Some(vt::Value::vec3f(1.0, 2.0, 3.0))
         );
     }
 
@@ -2554,17 +2554,17 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    opaque o\n    group g\n    opaque blocked = None\n}\n";
         assert_eq!(
             field(text, "/P.o", FieldKey::TypeName.as_str()),
-            Some(sdf::Value::token("opaque"))
+            Some(vt::Value::token("opaque"))
         );
         assert_eq!(field(text, "/P.o", FieldKey::Default.as_str()), None);
         assert_eq!(
             field(text, "/P.g", FieldKey::TypeName.as_str()),
-            Some(sdf::Value::token("group"))
+            Some(vt::Value::token("group"))
         );
         // A block is the one value an opaque attribute takes.
         assert_eq!(
             field(text, "/P.blocked", FieldKey::Default.as_str()),
-            Some(sdf::Value::ValueBlock)
+            Some(vt::Value::ValueBlock)
         );
     }
 
@@ -2596,15 +2596,15 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    float f = 4\n    double d = 4\n    half h = 4\n}\n";
         assert_eq!(
             field(text, "/P.f", FieldKey::Default.as_str()),
-            Some(sdf::Value::Float(4.0))
+            Some(vt::Value::Float(4.0))
         );
         assert_eq!(
             field(text, "/P.d", FieldKey::Default.as_str()),
-            Some(sdf::Value::Double(4.0))
+            Some(vt::Value::Double(4.0))
         );
         assert_eq!(
             field(text, "/P.h", FieldKey::Default.as_str()),
-            Some(sdf::Value::Half(gf::f16::from_f32(4.0)))
+            Some(vt::Value::Half(gf::f16::from_f32(4.0)))
         );
     }
 
@@ -2625,7 +2625,7 @@ def Xform "Anim"
             let text = format!("#usda 1.0\ndef \"P\" {{\n    custom myType x = {literal}\n}}\n");
             assert_eq!(
                 field(&text, "/P.x", FieldKey::Default.as_str()),
-                Some(sdf::Value::UnregisteredValue(literal.to_owned())),
+                Some(vt::Value::UnregisteredValue(literal.to_owned())),
                 "{literal}"
             );
         }
@@ -2638,7 +2638,7 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    custom myType x = None\n}\n";
         assert_eq!(
             field(text, "/P.x", FieldKey::Default.as_str()),
-            Some(sdf::Value::ValueBlock)
+            Some(vt::Value::ValueBlock)
         );
     }
 
@@ -2649,11 +2649,11 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    custom myType x = 7 (\n        doc = \"note\"\n    )\n}\n";
         assert_eq!(
             field(text, "/P.x", FieldKey::Default.as_str()),
-            Some(sdf::Value::UnregisteredValue("7".to_owned()))
+            Some(vt::Value::UnregisteredValue("7".to_owned()))
         );
         assert_eq!(
             field(text, "/P.x", FieldKey::Documentation.as_str()),
-            Some(sdf::Value::String("note".to_owned()))
+            Some(vt::Value::String("note".to_owned()))
         );
     }
 
@@ -2665,7 +2665,7 @@ def Xform "Anim"
             let text = format!("#usda 1.0\ndef \"P\" {{\n    custom myType x = {literal}\n}}\n");
             assert_eq!(
                 field(&text, "/P.x", FieldKey::Default.as_str()),
-                Some(sdf::Value::UnregisteredValue(literal.to_owned())),
+                Some(vt::Value::UnregisteredValue(literal.to_owned())),
                 "{literal}"
             );
         }
@@ -2673,7 +2673,7 @@ def Xform "Anim"
         let metadata = "#usda 1.0\ndef \"P\" (\n    madeUpField = -inf\n)\n{\n}\n";
         assert_eq!(
             field(metadata, "/P", "madeUpField"),
-            Some(sdf::Value::UnregisteredValue("-inf".to_owned()))
+            Some(vt::Value::UnregisteredValue("-inf".to_owned()))
         );
     }
 
@@ -2684,7 +2684,7 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    custom myType x = [1, # note\n        2]\n}\n";
         assert_eq!(
             field(text, "/P.x", FieldKey::Default.as_str()),
-            Some(sdf::Value::UnregisteredValue("[1, # note\n        2]".to_owned()))
+            Some(vt::Value::UnregisteredValue("[1, # note\n        2]".to_owned()))
         );
     }
 
@@ -2700,8 +2700,8 @@ def Xform "Anim"
         assert_eq!(
             samples,
             vec![
-                (1.0, sdf::Value::UnregisteredValue("(2, 3)".to_owned())),
-                (2.0, sdf::Value::ValueBlock),
+                (1.0, vt::Value::UnregisteredValue("(2, 3)".to_owned())),
+                (2.0, vt::Value::ValueBlock),
             ]
         );
     }
@@ -2718,11 +2718,11 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    custom double3d[] baz\n}\n";
         assert_eq!(
             field(text, "/P.baz", FieldKey::TypeName.as_str()),
-            Some(sdf::Value::token("double3d[]"))
+            Some(vt::Value::token("double3d[]"))
         );
         assert_eq!(
             field(text, "/P.baz", FieldKey::Custom.as_str()),
-            Some(sdf::Value::Bool(true))
+            Some(vt::Value::Bool(true))
         );
     }
 
@@ -2741,7 +2741,7 @@ def Xform "Anim"
             .expect("a sample map");
         assert_eq!(
             samples,
-            vec![(0.0, sdf::Value::Double(2.0)), (10.0, sdf::Value::Double(5.0))],
+            vec![(0.0, vt::Value::Double(2.0)), (10.0, vt::Value::Double(5.0))],
             "sorted, and the last value of a repeated time wins"
         );
     }
@@ -2757,10 +2757,10 @@ def Xform "Anim"
         };
         assert_eq!(
             samples("/P.f"),
-            vec![(1.0, sdf::Value::Float(4.0)), (2.0, sdf::Value::ValueBlock)]
+            vec![(1.0, vt::Value::Float(4.0)), (2.0, vt::Value::ValueBlock)]
         );
-        assert_eq!(samples("/P.t"), vec![(1.0, sdf::Value::token("on"))]);
-        assert_eq!(samples("/P.i"), vec![(1.0, sdf::Value::IntVec(vec![3]))]);
+        assert_eq!(samples("/P.t"), vec![(1.0, vt::Value::token("on"))]);
+        assert_eq!(samples("/P.i"), vec![(1.0, vt::Value::IntVec(vec![3]))]);
         assert!(parse_error("#usda 1.0\ndef \"P\" {\n    int[] i.timeSamples = { 1: 3 }\n}\n").contains("array type"));
     }
 
@@ -2774,15 +2774,15 @@ def Xform "Anim"
         assert!(op.is_explicit() && op.explicit_items().is_empty());
         assert_eq!(
             field(text, "/P.a", FieldKey::TypeName.as_str()),
-            Some(sdf::Value::token("vector3f"))
+            Some(vt::Value::token("vector3f"))
         );
         assert_eq!(
             field(text, "/P.a", FieldKey::Custom.as_str()),
-            Some(sdf::Value::Bool(true))
+            Some(vt::Value::Bool(true))
         );
         assert_eq!(
             field(text, "/P.a", FieldKey::Variability.as_str()),
-            Some(sdf::Value::Variability(sdf::Variability::Uniform))
+            Some(vt::Value::Variability(sdf::Variability::Uniform))
         );
     }
 
@@ -2792,11 +2792,11 @@ def Xform "Anim"
             "#usda 1.0\ndef \"P\" {\n    color4f a.connect = [</x>, </y>]\n    delete color4f a.connect = None\n}\n";
         assert!(matches!(
             field(text, "/P.a", FieldKey::ConnectionPaths.as_str()),
-            Some(sdf::Value::PathListOp(_))
+            Some(vt::Value::PathListOp(_))
         ));
         assert_eq!(
             field(text, "/P.a", FieldKey::TypeName.as_str()),
-            Some(sdf::Value::token("color4f"))
+            Some(vt::Value::token("color4f"))
         );
     }
 
@@ -2805,11 +2805,11 @@ def Xform "Anim"
         let text = "#usda 1.0\ndef \"P\" {\n    float a = None\n    float[] b = None\n}\n";
         assert_eq!(
             field(text, "/P.a", FieldKey::Default.as_str()),
-            Some(sdf::Value::ValueBlock)
+            Some(vt::Value::ValueBlock)
         );
         assert_eq!(
             field(text, "/P.b", FieldKey::Default.as_str()),
-            Some(sdf::Value::ValueBlock)
+            Some(vt::Value::ValueBlock)
         );
     }
 
@@ -2884,9 +2884,9 @@ def Scope "Root" {
         let spec = data.get(&path).expect("myList spec not found");
         assert_eq!(
             spec.get(FieldKey::TypeName.as_str()),
-            Some(&sdf::Value::Token("int[]".into()))
+            Some(&vt::Value::Token("int[]".into()))
         );
-        assert_eq!(spec.get("default"), Some(&sdf::Value::IntVec(vec![5, 6, 7])));
+        assert_eq!(spec.get("default"), Some(&vt::Value::IntVec(vec![5, 6, 7])));
     }
 
     /// `over` with a type name should parse the type and prim name.
@@ -2906,11 +2906,11 @@ over MfScope "TestOver"
         let spec = data.get(&path).expect("TestOver not found");
         assert_eq!(
             spec.get(FieldKey::Specifier.as_str()),
-            Some(&sdf::Value::Specifier(sdf::Specifier::Over))
+            Some(&vt::Value::Specifier(sdf::Specifier::Over))
         );
         assert_eq!(
             spec.get(FieldKey::TypeName.as_str()),
-            Some(&sdf::Value::Token("MfScope".into()))
+            Some(&vt::Value::Token("MfScope".into()))
         );
     }
 
@@ -2928,11 +2928,11 @@ def "P" {
         let data = parser.parse().unwrap();
         assert_eq!(
             data.get(&sdf::path("/P.startTime").unwrap()).unwrap().get("default"),
-            Some(&sdf::Value::TimeCode(sdf::TimeCode(24.0))),
+            Some(&vt::Value::TimeCode(sdf::TimeCode(24.0))),
         );
         assert_eq!(
             data.get(&sdf::path("/P.beats").unwrap()).unwrap().get("default"),
-            Some(&sdf::Value::TimeCodeVec(vec![
+            Some(&vt::Value::TimeCodeVec(vec![
                 sdf::TimeCode(0.0),
                 sdf::TimeCode(12.0),
                 sdf::TimeCode(24.0)
@@ -2961,8 +2961,8 @@ def "P" {
             .get(sdf::FieldKey::TimeSamples.as_str())
             .expect("cue.timeSamples present");
         let samples = cue.try_as_time_samples_ref().expect("TimeSamples");
-        assert_eq!(samples[0].1, sdf::Value::TimeCode(sdf::TimeCode(24.0)));
-        assert_eq!(samples[1].1, sdf::Value::TimeCode(sdf::TimeCode(48.5)));
+        assert_eq!(samples[0].1, vt::Value::TimeCode(sdf::TimeCode(24.0)));
+        assert_eq!(samples[1].1, vt::Value::TimeCode(sdf::TimeCode(48.5)));
     }
 
     /// Prim metadata `displayName` should be parsed as a string.
@@ -2982,7 +2982,7 @@ def Scope "Root" (
         let data = parser.parse().unwrap();
         let path = sdf::path("/Root").unwrap();
         let spec = data.get(&path).unwrap();
-        assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("My Root".into())));
+        assert_eq!(spec.get("displayName"), Some(&vt::Value::String("My Root".into())));
     }
 
     /// Variant-set names are strings, which is what upstream registers the
@@ -3010,7 +3010,7 @@ def \"P\" (
         let text = "#usda 1.0\ndef \"P\" {\n    custom double a = 1 (\n        displayUnit = mm\n    )\n}\n";
         assert_eq!(
             field(text, "/P.a", FieldKey::DisplayUnit.as_str()),
-            Some(sdf::Value::token("mm"))
+            Some(vt::Value::token("mm"))
         );
 
         let bad = "#usda 1.0\ndef \"P\" {\n    custom double a = 1 (\n        displayUnit = furlong\n    )\n}\n";
@@ -3038,7 +3038,7 @@ def Xform "Root" (
         ] {
             assert_eq!(
                 field(text, "/Root", name),
-                Some(sdf::Value::UnregisteredValue(literal.to_owned())),
+                Some(vt::Value::UnregisteredValue(literal.to_owned())),
                 "{name}"
             );
         }
@@ -3051,7 +3051,7 @@ def Xform "Root" (
         let text = "#usda 1.0\ndef \"P\" (\n    madeUpField = 1.50\n)\n{\n}\n";
         assert_eq!(
             field(text, "/P", "madeUpField"),
-            Some(sdf::Value::UnregisteredValue("1.50".to_owned()))
+            Some(vt::Value::UnregisteredValue("1.50".to_owned()))
         );
     }
 
@@ -3060,7 +3060,7 @@ def Xform "Root" (
     #[test]
     fn registered_metadata_stays_typed() {
         let text = "#usda 1.0\ndef \"P\" (\n    hidden = true\n)\n{\n}\n";
-        assert_eq!(field(text, "/P", "hidden"), Some(sdf::Value::Bool(true)));
+        assert_eq!(field(text, "/P", "hidden"), Some(vt::Value::Bool(true)));
     }
 
     /// A field its schema declares as a list op reads as one, each operation
@@ -3086,14 +3086,14 @@ def \"R\" (
 }
 ";
         let edited = sdf::Int64ListOp::deleted([4, -1]).with(sdf::ListOpType::Appended, [7]);
-        assert_eq!(field(text, "/P", "inactiveIds"), Some(sdf::Value::Int64ListOp(edited)));
+        assert_eq!(field(text, "/P", "inactiveIds"), Some(vt::Value::Int64ListOp(edited)));
         assert_eq!(
             field(text, "/Q", "inactiveIds"),
-            Some(sdf::Value::Int64ListOp(sdf::ListOp::explicit([1, 2])))
+            Some(vt::Value::Int64ListOp(sdf::ListOp::explicit([1, 2])))
         );
         assert_eq!(
             field(text, "/R", "inactiveIds"),
-            Some(sdf::Value::Int64ListOp(sdf::ListOp::explicit([])))
+            Some(vt::Value::Int64ListOp(sdf::ListOp::explicit([])))
         );
     }
 
@@ -3121,7 +3121,7 @@ def \"Q\" (
 
         for path in ["/P", "/Q"] {
             let authored = field(source, path, "inactiveIds");
-            assert!(authored.as_ref().is_some_and(sdf::Value::is_int_64_list_op), "{path}");
+            assert!(authored.as_ref().is_some_and(vt::Value::is_int_64_list_op), "{path}");
             assert_eq!(field(&text, path, "inactiveIds"), authored, "{path}");
         }
     }
@@ -3138,10 +3138,10 @@ def \"Q\" (
 )
 ";
         let edited = sdf::Int64ListOp::deleted([4]).with(sdf::ListOpType::Appended, [7]);
-        assert_eq!(field(text, "/", "inactiveIds"), Some(sdf::Value::Int64ListOp(edited)));
+        assert_eq!(field(text, "/", "inactiveIds"), Some(vt::Value::Int64ListOp(edited)));
         assert_eq!(
             field(text, "/", "made_up"),
-            Some(sdf::Value::UnregisteredValueListOp(sdf::ListOp::prepended([
+            Some(vt::Value::UnregisteredValueListOp(sdf::ListOp::prepended([
                 "1, 2".to_owned()
             ])))
         );
@@ -3161,7 +3161,7 @@ def \"Q\" (
             sdf::ListOp::<String>::prepended(["1, 2".to_owned()]).with(sdf::ListOpType::Deleted, ["3".to_owned()]);
         assert_eq!(
             field(text, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(expected))
+            Some(vt::Value::UnregisteredValueListOp(expected))
         );
     }
 
@@ -3173,7 +3173,7 @@ def \"Q\" (
         let expected = sdf::ListOp::<String>::prepended(vec!["2".to_owned()]);
         assert_eq!(
             field(text, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(expected))
+            Some(vt::Value::UnregisteredValueListOp(expected))
         );
     }
 
@@ -3184,7 +3184,7 @@ def \"Q\" (
         let text = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = [1]\n    madeUpList = 2\n)\n{\n}\n";
         assert_eq!(
             field(text, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+            Some(vt::Value::UnregisteredValue("2".to_owned()))
         );
     }
 
@@ -3196,7 +3196,7 @@ def \"Q\" (
         let text = "#usda 1.0\ndef \"P\" (\n    madeUpList = 2\n    prepend madeUpList = [1]\n)\n{\n}\n";
         assert_eq!(
             field(text, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+            Some(vt::Value::UnregisteredValue("2".to_owned()))
         );
     }
 
@@ -3207,14 +3207,14 @@ def \"Q\" (
         let none = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = None\n)\n{\n}\n";
         assert_eq!(
             field(none, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(sdf::ListOp::default()))
+            Some(vt::Value::UnregisteredValueListOp(sdf::ListOp::default()))
         );
 
         let empty = "#usda 1.0\ndef \"P\" (\n    prepend madeUpList = []\n)\n{\n}\n";
         let expected = sdf::ListOp::<String>::prepended(vec![String::new()]);
         assert_eq!(
             field(empty, "/P", "madeUpList"),
-            Some(sdf::Value::UnregisteredValueListOp(expected))
+            Some(vt::Value::UnregisteredValueListOp(expected))
         );
     }
 
@@ -3236,7 +3236,7 @@ def \"Q\" (
             .expect("a value")
             .try_as_unregistered_dictionary()
             .expect("a wrapped dictionary");
-        assert_eq!(entries["a"], sdf::Value::Int(1));
+        assert_eq!(entries["a"], vt::Value::Int(1));
     }
 
     /// Property metadata follows the same rule as a prim's.
@@ -3245,7 +3245,7 @@ def \"Q\" (
         let text = "#usda 1.0\ndef \"P\" {\n    custom int x = 1 (\n        madeUpField = 2\n    )\n}\n";
         assert_eq!(
             field(text, "/P.x", "madeUpField"),
-            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+            Some(vt::Value::UnregisteredValue("2".to_owned()))
         );
     }
 
@@ -3255,7 +3255,7 @@ def \"Q\" (
         let text = "#usda 1.0\n(\n    madeUpField = 2\n)\n";
         assert_eq!(
             field(text, "/", "madeUpField"),
-            Some(sdf::Value::UnregisteredValue("2".to_owned()))
+            Some(vt::Value::UnregisteredValue("2".to_owned()))
         );
     }
 
@@ -3265,7 +3265,7 @@ def \"Q\" (
         let parser = Parser::new(input);
         let data = parser.parse().unwrap();
         let spec = data.get(&sdf::path("/R").unwrap()).unwrap();
-        assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("\u{1F680}".into())));
+        assert_eq!(spec.get("displayName"), Some(&vt::Value::String("\u{1F680}".into())));
     }
 
     #[test]
@@ -3283,8 +3283,8 @@ def "p" { double x.spline = {} }
             .unwrap()
             .try_as_dictionary_ref()
             .unwrap();
-        assert_eq!(d.get("curveType"), Some(&sdf::Value::Token("bezier".into())));
-        assert_eq!(d.get("preExtrapolation"), Some(&sdf::Value::ValueBlock));
+        assert_eq!(d.get("curveType"), Some(&vt::Value::Token("bezier".into())));
+        assert_eq!(d.get("preExtrapolation"), Some(&vt::Value::ValueBlock));
         assert!(d.get("knots").unwrap().try_as_value_vec_ref().unwrap().is_empty());
     }
 
@@ -3308,21 +3308,21 @@ def "p" {
             .unwrap()
             .try_as_dictionary_ref()
             .unwrap();
-        assert_eq!(d.get("curveType"), Some(&sdf::Value::Token("hermite".into())));
+        assert_eq!(d.get("curveType"), Some(&vt::Value::Token("hermite".into())));
 
         let knots = d.get("knots").unwrap().try_as_value_vec_ref().unwrap();
         assert_eq!(knots.len(), 1);
 
         let knot = knots[0].try_as_dictionary_ref().unwrap();
-        assert_eq!(knot.get("time"), Some(&sdf::Value::Double(10.0)));
-        assert_eq!(knot.get("value"), Some(&sdf::Value::Double(5.0)));
-        assert_eq!(knot.get("preTangentSlope"), Some(&sdf::Value::Double(1.0)));
-        assert_eq!(knot.get("preTangentWidth"), Some(&sdf::Value::Double(2.0)));
-        assert_eq!(knot.get("postTangentSlope"), Some(&sdf::Value::Double(3.0)));
-        assert_eq!(knot.get("postTangentWidth"), Some(&sdf::Value::Double(4.0)));
+        assert_eq!(knot.get("time"), Some(&vt::Value::Double(10.0)));
+        assert_eq!(knot.get("value"), Some(&vt::Value::Double(5.0)));
+        assert_eq!(knot.get("preTangentSlope"), Some(&vt::Value::Double(1.0)));
+        assert_eq!(knot.get("preTangentWidth"), Some(&vt::Value::Double(2.0)));
+        assert_eq!(knot.get("postTangentSlope"), Some(&vt::Value::Double(3.0)));
+        assert_eq!(knot.get("postTangentWidth"), Some(&vt::Value::Double(4.0)));
         assert_eq!(
             knot.get("nextInterpolationMode"),
-            Some(&sdf::Value::Token("curve".into()))
+            Some(&vt::Value::Token("curve".into()))
         );
     }
 
@@ -3350,24 +3350,24 @@ def "p" {
             .unwrap();
 
         let pre = d.get("preExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
-        assert_eq!(pre.get("mode"), Some(&sdf::Value::Token("sloped".into())));
-        assert_eq!(pre.get("slope"), Some(&sdf::Value::Double(2.5)));
+        assert_eq!(pre.get("mode"), Some(&vt::Value::Token("sloped".into())));
+        assert_eq!(pre.get("slope"), Some(&vt::Value::Double(2.5)));
 
         let post = d.get("postExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
-        assert_eq!(post.get("mode"), Some(&sdf::Value::Token("clamp".into())));
-        assert_eq!(post.get("slope"), Some(&sdf::Value::Double(0.0)));
+        assert_eq!(post.get("mode"), Some(&vt::Value::Token("clamp".into())));
+        assert_eq!(post.get("slope"), Some(&vt::Value::Double(0.0)));
 
         let lp = d.get("loopParameters").unwrap().try_as_dictionary_ref().unwrap();
-        assert_eq!(lp.get("protoStart"), Some(&sdf::Value::Double(1.0)));
-        assert_eq!(lp.get("numPostLoops"), Some(&sdf::Value::Double(3.0)));
-        assert_eq!(lp.get("valueOffset"), Some(&sdf::Value::Double(0.5)));
+        assert_eq!(lp.get("protoStart"), Some(&vt::Value::Double(1.0)));
+        assert_eq!(lp.get("numPostLoops"), Some(&vt::Value::Double(3.0)));
+        assert_eq!(lp.get("valueOffset"), Some(&vt::Value::Double(0.5)));
 
         // `5 : 1.0 & 9.0` — preValue is 1.0, value is 9.0.
         let knot = d.get("knots").unwrap().try_as_value_vec_ref().unwrap()[0]
             .try_as_dictionary_ref()
             .unwrap();
-        assert_eq!(knot.get("preValue"), Some(&sdf::Value::Double(1.0)));
-        assert_eq!(knot.get("value"), Some(&sdf::Value::Double(9.0)));
+        assert_eq!(knot.get("preValue"), Some(&vt::Value::Double(1.0)));
+        assert_eq!(knot.get("value"), Some(&vt::Value::Double(9.0)));
     }
 
     /// A property declared only by a suffixed statement keeps its place among

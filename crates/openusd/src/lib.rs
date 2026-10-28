@@ -16,7 +16,8 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`sdf`] | Core data model — [`Value`](sdf::Value), [`Path`](sdf::Path), [`Spec`](sdf::Spec), [`AbstractData`](sdf::AbstractData) trait, mutable [`Data`](sdf::Data), and schema field keys. |
+//! | [`vt`] | Value types — [`Value`](vt::Value), the value an attribute or metadata field holds, and [`Dictionary`](vt::Dictionary). |
+//! | [`sdf`] | Core data model — [`Path`](sdf::Path), [`Spec`](sdf::Spec), [`AbstractData`](sdf::AbstractData) trait, mutable [`Data`](sdf::Data), and schema field keys. |
 //! | [`usda`] | Text format. [`usda::parse`] / [`usda::read_file`] parse and [`TextWriter`](usda::TextWriter) emits `.usda` files. |
 //! | [`usdc`] | Binary format. [`CrateData`](usdc::CrateData) parses and [`CrateWriter`](usdc::CrateWriter) emits `.usdc` files. |
 //! | [`usdz`] | Archive format. [`Archive`](usdz::Archive) reads and [`ArchiveWriter`](usdz::ArchiveWriter) emits `.usdz` packages. |
@@ -119,6 +120,7 @@ pub mod usd_utils;
 pub mod usda;
 pub mod usdc;
 pub mod usdz;
+pub mod vt;
 
 pub use error::{Error, Result};
 

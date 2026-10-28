@@ -676,9 +676,10 @@ pub(crate) mod tests {
     use std::path::{MAIN_SEPARATOR, Path};
 
     use super::*;
-    use crate::sdf::{FieldKey, Value};
+    use crate::sdf::FieldKey;
     use crate::usd_utils::{DependencyError, modify_asset_paths};
     use crate::usdz::ArchiveWriter;
+    use crate::vt::Value;
 
     /// Writes `contents` to `path` under `dir`, creating its directories.
     pub(crate) fn write(dir: &Path, path: &str, contents: &str) {

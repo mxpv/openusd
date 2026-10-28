@@ -10,8 +10,8 @@
 //! one carries its prim path in the *referenced* layer's namespace and is left
 //! untouched.
 
-use crate::sdf;
 use crate::tf;
+use crate::{sdf, vt};
 
 /// Recursively copy the spec at `src_path` (and its namespace descendants) from
 /// `src` into `dst` rooted at `dst_path`, re-rooting every embedded namespace
@@ -164,7 +164,7 @@ pub enum CopyValue {
     /// Do not copy this field.
     Skip,
     /// Copy this transformed value (path-remapped, …) in place of the source.
-    Replace(sdf::Value),
+    Replace(vt::Value),
 }
 
 /// What [`copy_spec_with`] does with one namespace-children field.
@@ -186,7 +186,7 @@ pub struct CopyValueArgs<'a> {
     /// Name of the field offered for copying.
     pub field: &'a str,
     /// The authored source value.
-    pub value: &'a sdf::Value,
+    pub value: &'a vt::Value,
     /// Path of the spec in the source.
     pub src_path: &'a sdf::Path,
     /// Path the spec is being copied to in the destination.
@@ -302,6 +302,91 @@ where
     }
 }
 
+impl vt::Value {
+    /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
+    /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
+    /// connections, `inheritPaths`, `specializes`), `Relocates`,
+    /// `ReferenceListOp` / `PayloadListOp` (whose internal entries target this
+    /// layer's own namespace), and `PathExpression` / `PathExpressionVec`
+    /// (pattern prefixes and expression-reference paths). The single source of
+    /// truth a copy value policy checks before remapping, so the set of
+    /// path-bearing variants lives only here.
+    pub fn has_embedded_paths(&self) -> bool {
+        matches!(
+            self,
+            vt::Value::PathVec(_)
+                | vt::Value::PathListOp(_)
+                | vt::Value::Relocates(_)
+                | vt::Value::ReferenceListOp(_)
+                | vt::Value::PayloadListOp(_)
+                | vt::Value::PathExpression(_)
+                | vt::Value::PathExpressionVec(_)
+        )
+    }
+
+    /// Returns a copy of this value with every embedded namespace path rewritten
+    /// through `remap`. Paths live in `PathVec`, `PathListOp` (relationship
+    /// targets, attribute connections, `inheritPaths`, `specializes`),
+    /// `Relocates` (source/target pairs), and the prim paths of internal
+    /// (same-layer) `ReferenceListOp` / `PayloadListOp` entries. An external
+    /// reference or payload carries its prim path in the referenced layer's
+    /// namespace, and an empty prim path is the defaultPrim selector — both
+    /// are left untouched; every other value kind is cloned unchanged.
+    ///
+    /// The path-rewriting core behind [`copy_spec`](crate::sdf::copy_spec),
+    /// exposed so callers building a custom copy value policy (flatten, namespace
+    /// editing, rename) can remap paths with their own mapping rather than the
+    /// default root-to-root prefix swap.
+    pub fn remap_paths(&self, remap: impl Fn(&sdf::Path) -> sdf::Path) -> vt::Value {
+        self.filter_map_paths(|path| Some(remap(path)))
+    }
+
+    /// Returns a copy of this value with every embedded namespace path mapped
+    /// through `remap`, dropping any path it maps to `None`. The dropping form
+    /// of [`remap_paths`](Self::remap_paths): namespace-edit deletion fixup maps
+    /// the targets/connections/internal references that point at a removed object
+    /// to `None` so the entries vanish, while moves map to `Some(new_path)`.
+    ///
+    /// A `PathVec` element or list-op item that maps to `None` is removed. An
+    /// external reference or payload (whose prim path lives in the referenced
+    /// layer's namespace) is never offered to `remap` and is always kept; a
+    /// relocate pair is dropped when its source maps to `None`; a
+    /// `PathExpression` atom whose path maps to `None` collapses to the empty
+    /// expression.
+    pub fn filter_map_paths(&self, remap: impl Fn(&sdf::Path) -> Option<sdf::Path>) -> vt::Value {
+        let remap = &remap;
+        match self {
+            vt::Value::PathVec(paths) => vt::Value::PathVec(paths.iter().filter_map(remap).collect()),
+            vt::Value::PathListOp(op) => vt::Value::PathListOp(op.clone().convert(|_, p| remap(&p))),
+            vt::Value::Relocates(relocates) => vt::Value::Relocates(
+                relocates
+                    .iter()
+                    // Drop a pair whose source maps away; a target that maps away
+                    // keeps its original (a relocate must keep both endpoints).
+                    .filter_map(|(s, t)| remap(s).map(|s| (s, remap(t).unwrap_or_else(|| t.clone()))))
+                    .collect(),
+            ),
+            vt::Value::ReferenceListOp(op) => vt::Value::ReferenceListOp(op.clone().convert(|_, mut reference| {
+                if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
+                    reference.prim_path = remap(&reference.prim_path)?;
+                }
+                Some(reference)
+            })),
+            vt::Value::PayloadListOp(op) => vt::Value::PayloadListOp(op.clone().convert(|_, mut payload| {
+                if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
+                    payload.prim_path = remap(&payload.prim_path)?;
+                }
+                Some(payload)
+            })),
+            vt::Value::PathExpression(expr) => vt::Value::PathExpression(expr.clone().map_paths(remap)),
+            vt::Value::PathExpressionVec(exprs) => {
+                vt::Value::PathExpressionVec(exprs.iter().map(|e| e.clone().map_paths(remap)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+}
+
 /// Ensure a spec of `spec_type` exists at `path` and author `fields` on it.
 ///
 /// An upsert: a spec already present with the matching kind keeps its state
@@ -322,7 +407,7 @@ pub(crate) fn author_spec<'a>(
     dst: &mut dyn sdf::AbstractData,
     path: &sdf::Path,
     spec_type: sdf::SpecType,
-    fields: impl IntoIterator<Item = (&'a str, sdf::Value)>,
+    fields: impl IntoIterator<Item = (&'a str, vt::Value)>,
 ) -> Result<(), sdf::AuthoringError> {
     if !is_copyable(spec_type) {
         return Err(sdf::AuthoringError::InvalidPath {
@@ -467,7 +552,7 @@ fn read_child_names(
         return Ok(Vec::new());
     };
     Ok(match value.into_owned() {
-        sdf::Value::TokenVec(names) => names,
+        vt::Value::TokenVec(names) => names,
         _ => Vec::new(),
     })
 }
@@ -485,7 +570,8 @@ pub(crate) fn is_children_field(field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdf::{AbstractData, Data, FieldKey, PathListOp, SpecType, Value, path};
+    use crate::sdf::{AbstractData, Data, FieldKey, PathListOp, SpecType, path};
+    use crate::vt::Value;
 
     /// Author a prim subtree with an attribute and a relationship into a fresh
     /// `Data`, returning it. Shape:

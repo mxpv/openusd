@@ -4,8 +4,9 @@
 
 use openusd::Result;
 use openusd::gf;
-use openusd::sdf::{self, Value};
+use openusd::sdf;
 use openusd::usd::{Attribute, Object, StageAuthoringError};
+use openusd::vt::Value;
 
 use super::{AttributeMetadata, BlendShape, tokens};
 use crate::namespaced;

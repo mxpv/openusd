@@ -385,6 +385,7 @@ fn serialize(data: &dyn AbstractData, location: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vt;
     use std::fs;
 
     use crate::ar::Resolver;
@@ -553,11 +554,11 @@ def "T"
         assert!(texts["0/b.usda"].contains("@../tex/t.png@"));
 
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/S.probe"), Some(sdf::Value::Int(1)));
-        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(4)));
-        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(sdf::Value::Int(3)));
-        assert_eq!(attribute_value(&packaged, "/C.probe"), Some(sdf::Value::Int(5)));
-        assert_eq!(attribute_value(&packaged, "/N.probe"), Some(sdf::Value::Int(6)));
+        assert_eq!(attribute_value(&packaged, "/S.probe"), Some(vt::Value::Int(1)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(4)));
+        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(vt::Value::Int(3)));
+        assert_eq!(attribute_value(&packaged, "/C.probe"), Some(vt::Value::Int(5)));
+        assert_eq!(attribute_value(&packaged, "/N.probe"), Some(vt::Value::Int(6)));
         Ok(())
     }
 
@@ -675,7 +676,7 @@ def "T"
         create_usdz_package(&stage, source.to_str().unwrap(), &output, None)?;
         assert_eq!(entries(&output).0, ["root.usda", "sub/inner.usda", "tex.png"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(7)));
         Ok(())
     }
 
@@ -695,12 +696,12 @@ def "T"
         writer.finish()?;
 
         let stage = Stage::open(source.to_str().unwrap())?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(7)));
         create_usdz_package(&stage, source.to_str().unwrap(), &source, None)?;
         assert_eq!(fs::read_dir(dir.path())?.count(), 1, "only the package is left");
         assert_eq!(entries(&source).0, ["root.usda", "tex.png"]);
         let packaged = Stage::open(source.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(7)));
         Ok(())
     }
 
@@ -722,8 +723,8 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\ndef \"B\" (\n    prepend references = @./pkg.usdz[other.usda]@</S>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
-        assert_eq!(attribute_value(&stage, "/B.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/B.probe"), Some(vt::Value::Int(1)));
         let dependencies = all_dependencies(&stage, &root)?;
         let default_layer = dependencies
             .layers
@@ -733,15 +734,15 @@ def "T"
         let probe = sdf::path("/R.probe")?;
         stage.layer_mut(default_layer).unwrap().edit(|edit| {
             edit.data_mut()
-                .set_field(&probe, sdf::FieldKey::Default.as_str(), sdf::Value::Int(42));
+                .set_field(&probe, sdf::FieldKey::Default.as_str(), vt::Value::Int(42));
             Ok(())
         })?;
 
         let output = dir.path().join("out.usdz");
         create_usdz_package(&stage, &root, &output, None)?;
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(42)));
-        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(sdf::Value::Int(42)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(42)));
+        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(vt::Value::Int(42)));
         Ok(())
     }
 
@@ -767,7 +768,7 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(1)));
         let skipped = create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None)?;
         assert_eq!(skipped.len(), 1, "{skipped:?}");
         assert!(
@@ -859,14 +860,14 @@ def "T"
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
         // Composing the references loads the packaged layers into the stage.
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
-        assert_eq!(attribute_value(&stage, "/B.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/B.probe"), Some(vt::Value::Int(1)));
         let dependencies = all_dependencies(&stage, &root)?;
         let probe = sdf::path("/R.probe")?;
         for identifier in dependencies.layers.iter().filter(|layer| layer.contains("pkg.usdz")) {
             stage.layer_mut(identifier).unwrap().edit(|edit| {
                 edit.data_mut()
-                    .set_field(&probe, sdf::FieldKey::Default.as_str(), sdf::Value::Int(42));
+                    .set_field(&probe, sdf::FieldKey::Default.as_str(), vt::Value::Int(42));
                 Ok(())
             })?;
         }
@@ -878,8 +879,8 @@ def "T"
         assert_eq!(nested_entries(&nested).0, ["first.usda", "other.usda", "tex.png"]);
 
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(42)));
-        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(sdf::Value::Int(42)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(42)));
+        assert_eq!(attribute_value(&packaged, "/B.probe"), Some(vt::Value::Int(42)));
         Ok(())
     }
 
@@ -909,14 +910,14 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./outer.usdz@</A>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(7)));
 
         let output = dir.path().join("out.usdz");
         create_usdz_package(&stage, &root, &output, None)?;
         let nested = ar::join_package_relative_path(output.to_str().unwrap(), "outer.usdz[inner.usdz]");
         assert_eq!(nested_entries(&nested).0, ["first.usda", "second.usda", "tex.png"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(7)));
         Ok(())
     }
 
@@ -940,7 +941,7 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(1)));
 
         let output = dir.path().join("out.usdz");
         create_usdz_package(&stage, &root, &output, None)?;
@@ -985,7 +986,7 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(1)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(1)));
 
         let output = dir.path().join("out.usdz");
         create_usdz_package(&stage, &root, &output, None)?;
@@ -1020,7 +1021,7 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./outer.usdz@</A>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(7)));
 
         let output = dir.path().join("out.usdz");
         let error = create_usdz_package(&stage, &root, &output, None).unwrap_err();
@@ -1061,7 +1062,7 @@ def "T"
             "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
         );
         let (root, stage) = open(dir.path(), "root.usda")?;
-        assert_eq!(attribute_value(&stage, "/A.deep"), Some(sdf::Value::Int(9)));
+        assert_eq!(attribute_value(&stage, "/A.deep"), Some(vt::Value::Int(9)));
 
         let output = dir.path().join("out.usdz");
         create_usdz_package(&stage, &root, &output, None)?;
@@ -1077,7 +1078,7 @@ def "T"
         assert!(texts["first.usda"].contains("@tex.png@"), "{}", texts["first.usda"]);
 
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/A.deep"), Some(sdf::Value::Int(9)));
+        assert_eq!(attribute_value(&packaged, "/A.deep"), Some(vt::Value::Int(9)));
         let dependencies = all_dependencies(&packaged, output.to_str().unwrap())?;
         assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
         Ok(())

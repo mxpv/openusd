@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use openusd::{sdf, tf, usd};
+use openusd::{sdf, tf, usd, vt};
 use openusd_build::Views;
 
 mod common;
@@ -41,7 +41,7 @@ fn fixture() -> PathBuf {
 }
 
 /// Every field of every spec, which for this fixture is every value shape.
-fn fields(data: &sdf::Data) -> BTreeMap<String, sdf::Value> {
+fn fields(data: &sdf::Data) -> BTreeMap<String, vt::Value> {
     data.iter()
         .flat_map(|(path, spec)| {
             spec.fields
@@ -83,17 +83,17 @@ fn compiled_values_match_the_model() {
 
     // The fixture exists to reach the shapes with no literal, so a run that
     // stopped covering them would pass having proved nothing.
-    let kinds: Vec<sdf::ValueKind> = from_model.values().map(sdf::ValueKind::from).collect();
+    let kinds: Vec<vt::ValueKind> = from_model.values().map(vt::ValueKind::from).collect();
     for expected in [
-        sdf::ValueKind::ValueBlock,
-        sdf::ValueKind::Dictionary,
-        sdf::ValueKind::Matrix2d,
-        sdf::ValueKind::Matrix3d,
-        sdf::ValueKind::Matrix4d,
-        sdf::ValueKind::Half,
-        sdf::ValueKind::Quath,
-        sdf::ValueKind::TimeCode,
-        sdf::ValueKind::AssetPath,
+        vt::ValueKind::ValueBlock,
+        vt::ValueKind::Dictionary,
+        vt::ValueKind::Matrix2d,
+        vt::ValueKind::Matrix3d,
+        vt::ValueKind::Matrix4d,
+        vt::ValueKind::Half,
+        vt::ValueKind::Quath,
+        vt::ValueKind::TimeCode,
+        vt::ValueKind::AssetPath,
     ] {
         assert!(kinds.contains(&expected), "the fixture declares a {expected:?}");
     }

@@ -1274,7 +1274,8 @@ mod value_resolution {
     use std::collections::HashMap;
 
     use super::*;
-    use openusd::sdf::{Specifier, Value, Variability};
+    use openusd::sdf::{Specifier, Variability};
+    use openusd::vt::Value;
 
     fn open_fixture() -> usd::Stage {
         usd::Stage::open("fixtures/value_resolution.usda").expect("open value_resolution fixture")

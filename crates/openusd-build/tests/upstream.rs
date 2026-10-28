@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use openusd::sdf::{self, AbstractData};
+use openusd::vt;
 use openusd_build::Views;
 
 mod common;
@@ -30,7 +31,7 @@ mod common;
 /// the order the schema declared them in, while this crate takes the composed
 /// order, which is `sdf::element_cmp`. Nothing resolves a value through that
 /// order, so it is a divergence rather than a defect.
-fn specs(data: &dyn AbstractData) -> BTreeMap<sdf::Path, BTreeMap<String, sdf::Value>> {
+fn specs(data: &dyn AbstractData) -> BTreeMap<sdf::Path, BTreeMap<String, vt::Value>> {
     const APART: [&str; 4] = [
         sdf::FieldKey::Documentation.as_str(),
         sdf::FieldKey::Comment.as_str(),
@@ -63,10 +64,10 @@ fn specs(data: &dyn AbstractData) -> BTreeMap<sdf::Path, BTreeMap<String, sdf::V
 /// A spec's `customData` less the brief user documentation upstream carries and
 /// this crate drops, `None` once nothing else is left in it — an emptied
 /// dictionary meaning the same as an absent one.
-fn emitted_custom_data(value: sdf::Value) -> Option<sdf::Value> {
+fn emitted_custom_data(value: vt::Value) -> Option<vt::Value> {
     let mut custom_data = value.try_as_dictionary()?;
     custom_data.remove("userDocBrief");
-    (!custom_data.is_empty()).then_some(sdf::Value::Dictionary(custom_data))
+    (!custom_data.is_empty()).then_some(vt::Value::Dictionary(custom_data))
 }
 
 /// The upstream test corpus, whose own baseline covers what the shipped

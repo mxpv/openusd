@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use openusd::Result;
 
 use openusd::usd::SchemaBase;
-use openusd::{sdf, tf, usd};
+use openusd::{sdf, tf, usd, vt};
 
 use super::tokens;
 use super::{ImplementationSource, NodeDefAPI, Shader};
@@ -76,9 +76,9 @@ impl NodeDefAPI {
     /// unrecognized `info:implementationSource` resolves to
     /// [`ImplementationSource::Id`].
     pub fn implementation(&self) -> Result<ImplementationSource> {
-        let value = self.implementation_source_attr().get::<sdf::Value>()?;
+        let value = self.implementation_source_attr().get::<vt::Value>()?;
         Ok(value
-            .and_then(sdf::Value::try_as_token)
+            .and_then(vt::Value::try_as_token)
             .and_then(ImplementationSource::from_token)
             .unwrap_or_default())
     }
@@ -118,7 +118,7 @@ impl NodeDefAPI {
             self,
             &SOURCE_ASSET,
             source_type.as_ref(),
-            sdf::Value::AssetPath(asset.into()),
+            vt::Value::AssetPath(asset.into()),
         )
     }
 
@@ -142,7 +142,7 @@ impl NodeDefAPI {
             self,
             &SOURCE_ASSET_SUBIDENTIFIER,
             source_type.as_ref(),
-            sdf::Value::Token(subidentifier.into()),
+            vt::Value::Token(subidentifier.into()),
         )
     }
 
@@ -162,7 +162,7 @@ impl NodeDefAPI {
             self,
             &SOURCE_CODE,
             source_type.as_ref(),
-            sdf::Value::String(source.into()),
+            vt::Value::String(source.into()),
         )
     }
 
@@ -174,8 +174,8 @@ impl NodeDefAPI {
     /// and an authored one is corrected.
     pub fn set_shader_id(&self, id: impl Into<tf::Token>) -> Result<usd::Attribute> {
         let source = self.implementation_source_attr();
-        let id_mode = sdf::Value::token(ImplementationSource::Id.as_token());
-        let sparse = !source.has_authored_value()? && source.get::<sdf::Value>()? == Some(id_mode);
+        let id_mode = vt::Value::token(ImplementationSource::Id.as_token());
+        let sparse = !source.has_authored_value()? && source.get::<vt::Value>()? == Some(id_mode);
         Ok(self.stage().edit(|edit| {
             if !sparse {
                 self.implementation_source_attr_builder()
@@ -228,7 +228,7 @@ impl Shader {
 
     /// Whether a composed shader-level `sdrMetadata` field exists.
     pub fn has_sdr_metadata(&self) -> Result<bool> {
-        Ok(self.metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
+        Ok(self.metadata::<vt::Value>(tokens::SDR_METADATA)?.is_some())
     }
 
     /// Whether the composed shader-level `sdrMetadata` dictionary contains
@@ -283,7 +283,7 @@ impl Shader {
 /// requested attribute is not defined.
 fn source_value<T>(node_def: &NodeDefAPI, attr: &SourceAttr, source_type: &str) -> Result<Option<T>>
 where
-    T: sdf::FromValue,
+    T: vt::FromValue,
     T::Error: Into<openusd::Error>,
 {
     if node_def.implementation()? != attr.implementation {
@@ -309,7 +309,7 @@ fn set_source_value(
     node_def: &NodeDefAPI,
     attr: &SourceAttr,
     source_type: &str,
-    value: sdf::Value,
+    value: vt::Value,
 ) -> Result<usd::Attribute> {
     let name = source_property_name(attr, source_type);
     Ok(node_def.stage().edit(|edit| {
@@ -347,8 +347,8 @@ fn source_type<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
 /// Converts a composed metadata dictionary to its public map, each value as
 /// the text C++ `TfStringify` makes of it (C++ `_GetSdrMetadata`,
 /// `nodeDefAPI.cpp:383-395`).
-pub(super) fn metadata_map(value: Option<sdf::Value>) -> SdrMetadata {
-    let Some(sdf::Value::Dictionary(dictionary)) = value else {
+pub(super) fn metadata_map(value: Option<vt::Value>) -> SdrMetadata {
+    let Some(vt::Value::Dictionary(dictionary)) = value else {
         return SdrMetadata::new();
     };
     dictionary
@@ -358,36 +358,36 @@ pub(super) fn metadata_map(value: Option<sdf::Value>) -> SdrMetadata {
 }
 
 /// Extracts one metadata entry, as [`metadata_map`] renders it.
-pub(super) fn metadata_value(value: Option<sdf::Value>, key: &str) -> Option<String> {
-    let sdf::Value::Dictionary(mut dictionary) = value? else {
+pub(super) fn metadata_value(value: Option<vt::Value>, key: &str) -> Option<String> {
+    let vt::Value::Dictionary(mut dictionary) = value? else {
         return None;
     };
     Some(dictionary.remove(key)?.to_string())
 }
 
 /// Tests one composed dictionary key without interpreting its value.
-pub(super) fn metadata_has_key(value: Option<sdf::Value>, key: &str) -> bool {
-    matches!(value, Some(sdf::Value::Dictionary(dictionary)) if dictionary.contains_key(key))
+pub(super) fn metadata_has_key(value: Option<vt::Value>, key: &str) -> bool {
+    matches!(value, Some(vt::Value::Dictionary(dictionary)) if dictionary.contains_key(key))
 }
 
 /// Merges string entries into a metadata dictionary authored on the edit
 /// target, keeping whatever keys it already carries. Merging nothing into an
 /// unauthored field leaves it unauthored, so an empty map authors no opinion.
 pub(super) fn merge_metadata(
-    current: Option<sdf::Value>,
+    current: Option<vt::Value>,
     entries: impl IntoIterator<Item = (String, String)>,
-) -> Option<sdf::Value> {
+) -> Option<vt::Value> {
     let mut dictionary = match current {
-        Some(sdf::Value::Dictionary(dictionary)) => dictionary,
-        _ => sdf::Dictionary::new(),
+        Some(vt::Value::Dictionary(dictionary)) => dictionary,
+        _ => vt::Dictionary::new(),
     };
-    dictionary.extend(entries.into_iter().map(|(key, value)| (key, sdf::Value::String(value))));
-    (!dictionary.is_empty()).then_some(sdf::Value::Dictionary(dictionary))
+    dictionary.extend(entries.into_iter().map(|(key, value)| (key, vt::Value::String(value))));
+    (!dictionary.is_empty()).then_some(vt::Value::Dictionary(dictionary))
 }
 
 /// Merges a whole [`SdrMetadata`] map into a metadata dictionary authored on the
 /// edit target. The map-shaped counterpart of [`merge_metadata`].
-pub(super) fn merge_metadata_map(current: Option<sdf::Value>, metadata: &SdrMetadata) -> Option<sdf::Value> {
+pub(super) fn merge_metadata_map(current: Option<vt::Value>, metadata: &SdrMetadata) -> Option<vt::Value> {
     let entries = metadata
         .iter()
         .map(|(key, value)| (key.as_str().to_string(), value.clone()));
@@ -396,11 +396,11 @@ pub(super) fn merge_metadata_map(current: Option<sdf::Value>, metadata: &SdrMeta
 
 /// Removes one key from a metadata dictionary, dropping the field itself once
 /// its last entry is gone.
-pub(super) fn remove_metadata_key(current: Option<sdf::Value>, key: &str) -> Option<sdf::Value> {
+pub(super) fn remove_metadata_key(current: Option<vt::Value>, key: &str) -> Option<vt::Value> {
     match current {
-        Some(sdf::Value::Dictionary(mut dictionary)) => {
+        Some(vt::Value::Dictionary(mut dictionary)) => {
             dictionary.remove(key);
-            (!dictionary.is_empty()).then_some(sdf::Value::Dictionary(dictionary))
+            (!dictionary.is_empty()).then_some(vt::Value::Dictionary(dictionary))
         }
         other => other,
     }
@@ -418,7 +418,7 @@ pub(super) fn attribute_sdr_metadata_by_key(attribute: &usd::Attribute, key: &st
 
 /// Whether a composed `sdrMetadata` field exists on a shading attribute.
 pub(super) fn attribute_has_sdr_metadata(attribute: &usd::Attribute) -> Result<bool> {
-    Ok(attribute.metadata::<sdf::Value>(tokens::SDR_METADATA)?.is_some())
+    Ok(attribute.metadata::<vt::Value>(tokens::SDR_METADATA)?.is_some())
 }
 
 /// Whether a shading attribute's composed `sdrMetadata` dictionary holds `key`.
@@ -466,11 +466,11 @@ mod tests {
         Ok(types.into_iter().map(String::from).collect())
     }
 
-    fn dictionary(entries: &[(&str, &str)]) -> sdf::Value {
-        sdf::Value::Dictionary(
+    fn dictionary(entries: &[(&str, &str)]) -> vt::Value {
+        vt::Value::Dictionary(
             entries
                 .iter()
-                .map(|&(key, value)| (key.to_string(), sdf::Value::String(value.to_string())))
+                .map(|&(key, value)| (key.to_string(), vt::Value::String(value.to_string())))
                 .collect(),
         )
     }
@@ -479,7 +479,7 @@ mod tests {
     fn implementation_selects_id() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
-        shader.node_def().create_id_attr()?.set(sdf::Value::token("Example"))?;
+        shader.node_def().create_id_attr()?.set(vt::Value::token("Example"))?;
 
         assert_eq!(shader.node_def().implementation()?, ImplementationSource::Id);
         assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
@@ -487,7 +487,7 @@ mod tests {
         shader
             .node_def()
             .create_implementation_source_attr()?
-            .set(sdf::Value::token("invalid"))?;
+            .set(vt::Value::token("invalid"))?;
         assert_eq!(shader.node_def().implementation()?, ImplementationSource::Id);
         assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
 
@@ -508,11 +508,11 @@ mod tests {
         node_def.set_source_asset_subidentifier("Universal", "")?;
         shader
             .create_attribute("info:osl:sourceAsset", "asset")?
-            .set(sdf::Value::AssetPath("./specific.osl".into()))?;
+            .set(vt::Value::AssetPath("./specific.osl".into()))?;
         shader.create_attribute("info:mdl:sourceAsset", "asset")?;
         shader
             .create_attribute("info:osl:sourceAsset:subIdentifier", "token")?
-            .set(sdf::Value::token("Specific"))?;
+            .set(vt::Value::token("Specific"))?;
         shader
             .create_attribute("info:ri:sourceCode", "string")?
             .set("inactive")?;
@@ -549,7 +549,7 @@ mod tests {
         shader.create_attribute("info:ri:sourceCode", "string")?;
         shader
             .create_attribute("info:mdl:sourceAsset", "asset")?
-            .set(sdf::Value::AssetPath("./inactive.mdl".into()))?;
+            .set(vt::Value::AssetPath("./inactive.mdl".into()))?;
 
         assert_eq!(shader.node_def().source_code("osl")?.as_deref(), Some("specific"));
         assert_eq!(shader.node_def().source_code("ri")?, None);
@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(shader.node_def().shader_id()?.as_deref(), Some("Example"));
         assert_eq!(
             shader.node_def().implementation_source_attr().get()?,
-            Some(sdf::Value::token("id"))
+            Some(vt::Value::token("id"))
         );
 
         shader.node_def().set_source_asset("./shader.mdl", "mdl")?;
@@ -674,11 +674,11 @@ mod tests {
         let mut strong_metadata = dictionary(&[("page", "strong")])
             .try_as_dictionary()
             .expect("dictionary helper result");
-        strong_metadata.insert("count".to_string(), sdf::Value::Int(7));
+        strong_metadata.insert("count".to_string(), vt::Value::Int(7));
         shader
             .prim()
             .clone()
-            .set_metadata(tokens::SDR_METADATA, sdf::Value::Dictionary(strong_metadata))?;
+            .set_metadata(tokens::SDR_METADATA, vt::Value::Dictionary(strong_metadata))?;
         let input = shader.create_input("value", "float")?;
         let output = shader.create_output("result", "float")?;
         output
@@ -718,12 +718,12 @@ mod tests {
     fn metadata_stringified() -> Result<()> {
         let stage = crate::tests::stage("anon.usda")?;
         let shader = Shader::define(&stage, "/Shader")?;
-        let entries: sdf::Dictionary = [
-            ("flag", sdf::Value::Bool(true)),
-            ("big", sdf::Value::Double(1e20)),
-            ("list", sdf::Value::IntVec(vec![1, 2])),
-            ("color", sdf::Value::Vec3f(gf::vec3f(1.0, 0.5, 0.0))),
-            ("file", sdf::Value::AssetPath(sdf::AssetPath::new("a.png"))),
+        let entries: vt::Dictionary = [
+            ("flag", vt::Value::Bool(true)),
+            ("big", vt::Value::Double(1e20)),
+            ("list", vt::Value::IntVec(vec![1, 2])),
+            ("color", vt::Value::Vec3f(gf::vec3f(1.0, 0.5, 0.0))),
+            ("file", vt::Value::AssetPath(sdf::AssetPath::new("a.png"))),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
@@ -731,7 +731,7 @@ mod tests {
         shader
             .prim()
             .clone()
-            .set_metadata(tokens::SDR_METADATA, sdf::Value::Dictionary(entries))?;
+            .set_metadata(tokens::SDR_METADATA, vt::Value::Dictionary(entries))?;
 
         for (key, text) in [
             ("flag", "1"),

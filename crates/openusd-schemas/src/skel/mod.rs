@@ -54,7 +54,7 @@
 //!     .in_memory("rig.usda").unwrap();
 //! let skel = Skeleton::define(&stage, "/Rig").unwrap();
 //! skel.create_joints_attr().unwrap()
-//!     .set(openusd::sdf::Value::TokenVec(vec!["Root".into(), "Root/Hip".into()])).unwrap();
+//!     .set(openusd::vt::Value::TokenVec(vec!["Root".into(), "Root/Hip".into()])).unwrap();
 //!
 //! let skel = Skeleton::get(&stage, "/Rig").unwrap().expect("Skeleton");
 //! let query = SkeletonQuery::new(&skel).unwrap().expect("valid topology");
@@ -121,4 +121,4 @@ impl InfluenceInterpolation {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()` and the primvar-metadata accessors.
-openusd::sdf::impl_token_value!(InfluenceInterpolation);
+openusd::vt::impl_token_value!(InfluenceInterpolation);

@@ -38,7 +38,7 @@
 
 use bitflags::bitflags;
 
-use crate::{kind, sdf};
+use crate::{kind, sdf, vt};
 
 use super::SchemaKind;
 
@@ -71,12 +71,12 @@ pub struct SchemaFamily<'a> {
 /// authors it.
 ///
 /// ```
-/// use openusd::sdf;
+/// use openusd::vt;
 /// use openusd::usd::{MetadataDecl, MetadataTargets};
 ///
 /// const CONNECTABILITY: MetadataDecl<'_> = MetadataDecl::new("connectability", "token")
 ///     .applies_to(MetadataTargets::ATTRIBUTES)
-///     .fallback(|| sdf::Value::token("full"));
+///     .fallback(|| vt::Value::token("full"));
 /// # let _ = CONNECTABILITY;
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -177,8 +177,8 @@ enum FieldValue<'a> {
     Strings(&'a [&'a str]),
     Token(&'a str),
     Tokens(&'a [&'a str]),
-    Built(fn() -> sdf::Value),
-    Ref(&'a sdf::Value),
+    Built(fn() -> vt::Value),
+    Ref(&'a vt::Value),
 }
 
 impl<'a> SchemaFamily<'a> {
@@ -260,13 +260,13 @@ impl<'a> MetadataDecl<'a> {
 
     /// What a stage reads for the field where no layer authors it, built when
     /// the family is registered.
-    pub const fn fallback(mut self, value: fn() -> sdf::Value) -> Self {
+    pub const fn fallback(mut self, value: fn() -> vt::Value) -> Self {
         self.fallback = Some(FieldValue::Built(value));
         self
     }
 
     /// As [`fallback`](Self::fallback), from a value the caller already holds.
-    pub const fn fallback_borrowed(mut self, value: &'a sdf::Value) -> Self {
+    pub const fn fallback_borrowed(mut self, value: &'a vt::Value) -> Self {
         self.fallback = Some(FieldValue::Ref(value));
         self
     }
@@ -287,7 +287,7 @@ impl<'a> MetadataDecl<'a> {
     }
 
     /// What [`fallback`](Self::fallback) declared, built afresh.
-    pub fn declared_fallback(&self) -> Option<sdf::Value> {
+    pub fn declared_fallback(&self) -> Option<vt::Value> {
         self.fallback.map(|value| value.to_value())
     }
 }
@@ -615,7 +615,7 @@ impl<'a> Field<'a> {
     /// A field of any type, built when the family is registered. This is what
     /// a `static` declaration uses for a value no other constructor covers,
     /// since a non-capturing closure is a function pointer and so `const`.
-    pub const fn new(name: &'a str, value: fn() -> sdf::Value) -> Self {
+    pub const fn new(name: &'a str, value: fn() -> vt::Value) -> Self {
         Self {
             name,
             value: FieldValue::Built(value),
@@ -624,7 +624,7 @@ impl<'a> Field<'a> {
 
     /// A field of any type, borrowed from a caller that already holds the
     /// value — what a program declaring a family it computed at run time uses.
-    pub const fn borrowed(name: &'a str, value: &'a sdf::Value) -> Self {
+    pub const fn borrowed(name: &'a str, value: &'a vt::Value) -> Self {
         Self {
             name,
             value: FieldValue::Ref(value),
@@ -640,19 +640,19 @@ impl<'a> Field<'a> {
     ///
     /// Which constructor wrote it is not recorded: the value is the whole of
     /// what a field means, and its own type says which shape it took.
-    pub fn value(&self) -> sdf::Value {
+    pub fn value(&self) -> vt::Value {
         self.value.to_value()
     }
 }
 
 impl FieldValue<'_> {
     /// The value this spelling stands for.
-    fn to_value(self) -> sdf::Value {
+    fn to_value(self) -> vt::Value {
         match self {
-            FieldValue::Str(text) => sdf::Value::String(text.to_owned()),
-            FieldValue::Strings(texts) => sdf::Value::StringVec(texts.iter().map(|text| (*text).to_owned()).collect()),
-            FieldValue::Token(token) => sdf::Value::token(token),
-            FieldValue::Tokens(tokens) => sdf::Value::token_vec(tokens.iter().copied()),
+            FieldValue::Str(text) => vt::Value::String(text.to_owned()),
+            FieldValue::Strings(texts) => vt::Value::StringVec(texts.iter().map(|text| (*text).to_owned()).collect()),
+            FieldValue::Token(token) => vt::Value::token(token),
+            FieldValue::Tokens(tokens) => vt::Value::token_vec(tokens.iter().copied()),
             FieldValue::Built(build) => build(),
             FieldValue::Ref(value) => value.clone(),
         }

@@ -268,6 +268,7 @@ fn input_matches(input: &Input, stage: &usd::Stage, path: &sdf::Path) -> bool {
 mod tests {
     use super::*;
     use crate::SchemaError;
+    use openusd::vt;
 
     use crate::shade::Shader;
     use openusd::Result;
@@ -475,7 +476,7 @@ mod tests {
             .define_prim("/Instance")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     ..Default::default()
                 }])),

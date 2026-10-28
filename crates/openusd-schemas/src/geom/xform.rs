@@ -9,7 +9,7 @@
 
 use openusd::Result;
 use openusd::usd::{self, SchemaBase};
-use openusd::{gf, sdf, tf};
+use openusd::{gf, tf, vt};
 
 use super::xform_op::TOKEN_RESET_XFORM_STACK;
 use super::xformable::{OpWrite, StackEdit};
@@ -89,7 +89,7 @@ impl RotationOrder {
     /// `GetRotationTransform`).
     pub fn rotation_transform(self, rotation: gf::Vec3f) -> gf::Mat4d {
         self.op_kind()
-            .matrix(sdf::Value::Vec3f(rotation), false)
+            .matrix(vt::Value::Vec3f(rotation), false)
             .unwrap_or(gf::Mat4d::IDENTITY)
     }
 }
@@ -329,7 +329,7 @@ impl XformCommonAPI {
     fn author(
         &self,
         rotation_order: Option<RotationOrder>,
-        ops: Vec<(CommonXformOp, Option<sdf::Value>)>,
+        ops: Vec<(CommonXformOp, Option<vt::Value>)>,
         time: Option<usd::TimeCode>,
     ) -> Result<CommonXformOps, SchemaError> {
         let prim = self.prim();
@@ -434,13 +434,13 @@ fn common_ops(ops: Vec<XformOp>) -> Option<CommonXformOps> {
 /// The vectors the ops of a fitting stack hold at `time`, with the identity
 /// for an op the stack does not list or that has no value.
 fn common_vectors(ops: &CommonXformOps, time: Option<usd::TimeCode>) -> Result<XformVectors> {
-    let read = |op: &Option<XformOp>| -> Result<Option<sdf::Value>> {
+    let read = |op: &Option<XformOp>| -> Result<Option<vt::Value>> {
         match op {
-            Some(op) => op.attribute().get_at::<sdf::Value>(time),
+            Some(op) => op.attribute().get_at::<vt::Value>(time),
             None => Ok(None),
         }
     };
-    let float3 = |value: Option<sdf::Value>| value.and_then(|value| value.cast::<gf::Vec3f>().ok());
+    let float3 = |value: Option<vt::Value>| value.and_then(|value| value.cast::<gf::Vec3f>().ok());
     let identity = XformVectors::default();
     Ok(XformVectors {
         translation: read(&ops.translate)?
@@ -584,8 +584,9 @@ fn are_inverses(a: gf::Mat4d, b: gf::Mat4d) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use openusd::gf;
     use openusd::usd::{self, SchemaBase};
-    use openusd::{gf, sdf};
+    use openusd::vt;
 
     use super::{CommonXformOp, RotationOrder, XformVectors};
     use crate::SchemaError;
@@ -606,7 +607,7 @@ mod tests {
     }
 
     /// Adds an op of `kind` under `suffix`, holding `value`.
-    fn add(xform: &Xform, kind: XformOpKind, suffix: Option<&str>, value: impl Into<sdf::Value>) -> Result {
+    fn add(xform: &Xform, kind: XformOpKind, suffix: Option<&str>, value: impl Into<vt::Value>) -> Result {
         xform
             .add_xform_op(kind, XformOpPrecision::Float, suffix, false)?
             .set(value)

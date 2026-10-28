@@ -46,14 +46,14 @@ use std::io::{self, Cursor, Write};
 use std::path::Path as FsPath;
 use std::rc::Rc;
 
+use crate::vt::Value;
 use crate::{ar, sdf, tf};
 
 use super::schema::FieldKey;
 use super::{
     AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, FormatError, IntoPath,
     LayerData, Patch, Path, PathParseError, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef,
-    RelationshipSpecMut, RelationshipSpecRef, RelocateList, SpecError, SpecType, Value, ValueTypeError, sink,
-    try_into_path,
+    RelationshipSpecMut, RelationshipSpecRef, RelocateList, SpecError, SpecType, ValueTypeError, sink, try_into_path,
 };
 
 /// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
@@ -1228,6 +1228,7 @@ impl Drop for GroupEditGuard<'_, '_> {
 mod tests {
     use super::*;
     use crate::Result;
+    use crate::vt;
 
     use std::cell::{Cell, RefCell};
     use std::fs;
@@ -1846,11 +1847,11 @@ mod tests {
         let mut data = sdf::Data::new();
         let root = sdf::Path::abs_root();
         let ps = data.create_spec(root, SpecType::PseudoRoot);
-        ps.add("primChildren", sdf::Value::TokenVec(vec!["Foo".into()]));
+        ps.add("primChildren", vt::Value::TokenVec(vec!["Foo".into()]));
         let foo = sdf::path("/Foo")?;
         let sp = data.create_spec(foo, SpecType::Prim);
-        sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        sp.add("typeName", sdf::Value::Token("Xform".into()));
+        sp.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
+        sp.add("typeName", vt::Value::Token("Xform".into()));
 
         let layer = sdf::Layer::new("test://layer", Box::new(data));
         let dir = tempfile::tempdir()?;
@@ -1881,11 +1882,11 @@ mod tests {
         let mut data = sdf::Data::new();
         let root = sdf::Path::abs_root();
         let ps = data.create_spec(root, SpecType::PseudoRoot);
-        ps.add("primChildren", sdf::Value::TokenVec(vec!["Bar".into()]));
+        ps.add("primChildren", vt::Value::TokenVec(vec!["Bar".into()]));
         let bar = sdf::path("/Bar")?;
         let sp = data.create_spec(bar.clone(), SpecType::Prim);
-        sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        sp.add("typeName", sdf::Value::Token("Cube".into()));
+        sp.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
+        sp.add("typeName", vt::Value::Token("Cube".into()));
 
         let layer = sdf::Layer::new("test://layer-usd", Box::new(data));
         let dir = tempfile::tempdir()?;
@@ -1908,7 +1909,7 @@ mod tests {
         assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));
         assert_eq!(
             round.field(&bar, "typeName").unwrap().into_owned(),
-            sdf::Value::Token("Cube".into())
+            vt::Value::Token("Cube".into())
         );
         Ok(())
     }
@@ -1982,9 +1983,9 @@ mod tests {
 
         let mut data = sdf::Data::new();
         let ps = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
-        ps.add("primChildren", sdf::Value::TokenVec(vec!["Foo".into()]));
+        ps.add("primChildren", vt::Value::TokenVec(vec!["Foo".into()]));
         let sp = data.create_spec(sdf::path("/Foo")?, SpecType::Prim);
-        sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
+        sp.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
 
         // A binary identifier must not influence the textual form.
         let layer = sdf::Layer::new("scratch.usdc", Box::new(data));
@@ -2120,7 +2121,7 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 sdf::ChildrenKey::PrimChildren.as_str(),
-                sdf::Value::String("bad".into()),
+                vt::Value::String("bad".into()),
             );
         });
 
@@ -2140,7 +2141,7 @@ mod tests {
             .field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
             .unwrap()
             .into_owned();
-        assert!(matches!(value, sdf::Value::String(value) if value == "bad"));
+        assert!(matches!(value, vt::Value::String(value) if value == "bad"));
     }
 
     #[test]
@@ -2151,7 +2152,7 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::path("/Mesh").unwrap(),
                 sdf::ChildrenKey::PropertyChildren.as_str(),
-                sdf::Value::String("bad".into()),
+                vt::Value::String("bad".into()),
             );
         });
 
@@ -2175,7 +2176,7 @@ mod tests {
             )
             .unwrap()
             .into_owned();
-        assert!(matches!(value, sdf::Value::String(value) if value == "bad"));
+        assert!(matches!(value, vt::Value::String(value) if value == "bad"));
         Ok(())
     }
 
@@ -2193,23 +2194,23 @@ mod tests {
             )
             .unwrap();
             radius
-                .set_default(sdf::Value::Double(2.5))
+                .set_default(vt::Value::Double(2.5))
                 .expect("value fits the declared type");
             radius
-                .set_time_sample(0.0, sdf::Value::Double(1.0))
+                .set_time_sample(0.0, vt::Value::Double(1.0))
                 .expect("value fits the declared type");
             radius
-                .set_time_sample(10.0, sdf::Value::Double(3.0))
+                .set_time_sample(10.0, vt::Value::Double(3.0))
                 .expect("value fits the declared type");
             // Out-of-order insert lands in sorted position.
             radius
-                .set_time_sample(5.0, sdf::Value::Double(2.0))
+                .set_time_sample(5.0, vt::Value::Double(2.0))
                 .expect("value fits the declared type");
         });
 
         let read = layer.attribute("/Sphere.radius")?.expect("attr");
         assert_eq!(read.type_name(), Some(sdf::ValueTypeName::DOUBLE));
-        assert_eq!(read.default(), Some(sdf::Value::Double(2.5)));
+        assert_eq!(read.default(), Some(vt::Value::Double(2.5)));
         let samples = read.time_samples().expect("samples authored");
         let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
         assert_eq!(times, vec![0.0, 5.0, 10.0]);
@@ -2289,11 +2290,11 @@ mod tests {
                 false,
             )
             .unwrap();
-            r.set_time_sample(1.0, sdf::Value::Double(1.0))
+            r.set_time_sample(1.0, vt::Value::Double(1.0))
                 .expect("value fits the declared type");
-            r.set_time_sample(f64::NAN, sdf::Value::Double(99.0))
+            r.set_time_sample(f64::NAN, vt::Value::Double(99.0))
                 .expect("value fits the declared type");
-            r.set_time_sample(2.0, sdf::Value::Double(2.0))
+            r.set_time_sample(2.0, vt::Value::Double(2.0))
                 .expect("value fits the declared type");
         });
         // NaN does not collide with finite samples — both finite values survive.
@@ -2474,7 +2475,7 @@ mod tests {
 
         let token_vec = |path: &str, key: sdf::ChildrenKey| -> Result<Vec<String>> {
             match layer.data().field(&sdf::path(path)?, key.as_str())?.into_owned() {
-                sdf::Value::TokenVec(v) => Ok(v.into_iter().map(Into::into).collect()),
+                vt::Value::TokenVec(v) => Ok(v.into_iter().map(Into::into).collect()),
                 other => panic!("expected TokenVec at {path}, got {other:?}"),
             }
         };
@@ -2536,7 +2537,7 @@ mod tests {
             )
             .unwrap();
             radius
-                .set_default(sdf::Value::Double(1.5))
+                .set_default(vt::Value::Double(1.5))
                 .expect("value fits the declared type");
             sdf::PrimSpec::new(e.data_mut(), &material, sdf::Specifier::Def, "Material").unwrap();
             let mut binding = sdf::RelationshipSpec::new(
@@ -2578,7 +2579,7 @@ mod tests {
             parsed
                 .field(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())?
                 .into_owned(),
-            sdf::Value::Token("World".into())
+            vt::Value::Token("World".into())
         );
         let targets = parsed
             .field(

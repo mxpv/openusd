@@ -14,7 +14,7 @@
 //! [`tokens::METERS_PER_UNIT`].
 
 use openusd::Result;
-use openusd::{sdf, tf, usd};
+use openusd::{tf, usd, vt};
 
 use super::{StageMetadata, tokens};
 
@@ -47,7 +47,7 @@ impl UpAxis {
     }
 }
 
-sdf::impl_token_value!(UpAxis);
+vt::impl_token_value!(UpAxis);
 
 /// The axis `stage` is up along (C++ `UsdGeomGetStageUpAxis`): the `upAxis`
 /// its session or root layer authors, and [`fallback_up_axis`] of the stage's
@@ -57,7 +57,7 @@ sdf::impl_token_value!(UpAxis);
 /// returns the token.
 pub fn stage_up_axis(stage: &usd::Stage) -> Result<UpAxis> {
     match stage.up_axis()? {
-        Some(token) => Ok(UpAxis::try_from(sdf::Value::Token(token))?),
+        Some(token) => Ok(UpAxis::try_from(vt::Value::Token(token))?),
         None => fallback_up_axis(stage.schema_registry()),
     }
 }
@@ -146,6 +146,7 @@ pub mod linear_units {
 
 #[cfg(test)]
 mod tests {
+    use openusd::vt;
     use std::fs;
 
     use openusd::{sdf, usd};
@@ -253,7 +254,7 @@ mod tests {
     /// is up along it.
     #[test]
     fn fallback_axis() -> Result {
-        let registry = |targets, fallback: fn() -> sdf::Value| {
+        let registry = |targets, fallback: fn() -> vt::Value| {
             let fields = [usd::MetadataDecl::new(tokens::UP_AXIS, "token")
                 .applies_to(targets)
                 .fallback(fallback)];
@@ -262,14 +263,14 @@ mod tests {
                 .build()
                 .map_err(openusd::Error::from)
         };
-        let z = registry(usd::MetadataTargets::LAYERS, || sdf::Value::token("Z"))?;
+        let z = registry(usd::MetadataTargets::LAYERS, || vt::Value::token("Z"))?;
         assert_eq!(fallback_up_axis(&z)?, UpAxis::Z);
         let stage = usd::Stage::builder().schema_registry(z).in_memory("z.usda")?;
         assert_eq!(stage_up_axis(&stage)?, UpAxis::Z);
 
-        let prims_only = registry(usd::MetadataTargets::PRIMS, || sdf::Value::token("Z"))?;
+        let prims_only = registry(usd::MetadataTargets::PRIMS, || vt::Value::token("Z"))?;
         assert_eq!(fallback_up_axis(&prims_only)?, UpAxis::Y);
-        let x = registry(usd::MetadataTargets::LAYERS, || sdf::Value::token("X"))?;
+        let x = registry(usd::MetadataTargets::LAYERS, || vt::Value::token("X"))?;
         assert!(fallback_up_axis(&x).is_err());
 
         assert_eq!(fallback_up_axis(&crate::schema_registry())?, UpAxis::Y);

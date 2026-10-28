@@ -9,6 +9,7 @@ use openusd::gf::{self, Mat4d, Vec2f, Vec3d, Vec3f};
 use openusd::sdf;
 use openusd::tf::Token;
 use openusd::usd::{Attribute, EditTarget, SchemaBase, Stage, TimeCode};
+use openusd::vt;
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
     self, Axis, BasisCurves, BasisCurvesSchema, BoundableSchema, Camera, CameraSchema, Capsule, CapsuleSchema, Cone,
@@ -54,11 +55,11 @@ fn direct_purpose(view: &impl ImageableSchema) -> Result<Purpose> {
 }
 
 /// Length of an authored array attribute, or 0 when unauthored.
-fn array_len(attr: &Attribute, kind: impl Fn(sdf::Value) -> usize) -> Result<usize> {
+fn array_len(attr: &Attribute, kind: impl Fn(vt::Value) -> usize) -> Result<usize> {
     Ok(attr.get()?.map_or(0, kind))
 }
 
-fn vec3f_len(v: sdf::Value) -> usize {
+fn vec3f_len(v: vt::Value) -> usize {
     v.try_as_vec_3f_vec().map_or(0, |a| a.len())
 }
 
@@ -142,7 +143,7 @@ fn reads_extent_when_authored() -> Result<()> {
     let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
     assert_eq!(
         hero.extent_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![
+        Some(vt::Value::Vec3fVec(vec![
             openusd::gf::Vec3f {
                 x: -1.0,
                 y: -1.0,
@@ -160,7 +161,7 @@ fn extent_unauthored_returns_none() -> Result<()> {
     let cam = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
     // Camera is Xformable but not Boundable, so it has no `extent`; the
     // /World/Cam prim authors none either way.
-    assert!(cam.attribute("extent").get::<sdf::Value>()?.is_none());
+    assert!(cam.attribute("extent").get::<vt::Value>()?.is_none());
     Ok(())
 }
 
@@ -465,7 +466,7 @@ fn imageable_world_transform() -> Result<(), SchemaError> {
 fn cube_authored_size() -> Result<()> {
     let stage = open()?;
     let cube = Cube::get(&stage, sdf::path("/World/Shapes/AuthoredCube")?)?.expect("Cube");
-    assert_eq!(cube.size_attr().get()?, Some(sdf::Value::Double(3.0)));
+    assert_eq!(cube.size_attr().get()?, Some(vt::Value::Double(3.0)));
     Ok(())
 }
 
@@ -475,7 +476,7 @@ fn unauthored_cube_size_falls_back() -> Result<()> {
     // which is what the registry resolves it through.
     let stage = open()?;
     let cube = Cube::get(&stage, sdf::path("/World/Shapes/DefaultCube")?)?.expect("Cube");
-    assert_eq!(cube.size_attr().get()?, Some(sdf::Value::Double(2.0)));
+    assert_eq!(cube.size_attr().get()?, Some(vt::Value::Double(2.0)));
     Ok(())
 }
 
@@ -490,7 +491,7 @@ fn cube_get_rejects_non_cube() -> Result<()> {
 fn sphere_authored_radius() -> Result<()> {
     let stage = open()?;
     let s = Sphere::get(&stage, sdf::path("/World/Shapes/Ball")?)?.expect("Sphere");
-    assert_eq!(s.radius_attr().get()?, Some(sdf::Value::Double(4.5)));
+    assert_eq!(s.radius_attr().get()?, Some(vt::Value::Double(4.5)));
     Ok(())
 }
 
@@ -498,9 +499,9 @@ fn sphere_authored_radius() -> Result<()> {
 fn cylinder_with_y_axis() -> Result<()> {
     let stage = open()?;
     let c = Cylinder::get(&stage, sdf::path("/World/Shapes/Pipe")?)?.expect("Cylinder");
-    assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(0.25)));
-    assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(2.0)));
-    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::token("Y")));
+    assert_eq!(c.radius_attr().get()?, Some(vt::Value::Double(0.25)));
+    assert_eq!(c.height_attr().get()?, Some(vt::Value::Double(2.0)));
+    assert_eq!(c.axis_attr().get()?, Some(vt::Value::token("Y")));
     Ok(())
 }
 
@@ -508,9 +509,9 @@ fn cylinder_with_y_axis() -> Result<()> {
 fn capsule_with_x_axis() -> Result<()> {
     let stage = open()?;
     let c = Capsule::get(&stage, sdf::path("/World/Shapes/Pill")?)?.expect("Capsule");
-    assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(0.1)));
-    assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(0.5)));
-    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::token("X")));
+    assert_eq!(c.radius_attr().get()?, Some(vt::Value::Double(0.1)));
+    assert_eq!(c.height_attr().get()?, Some(vt::Value::Double(0.5)));
+    assert_eq!(c.axis_attr().get()?, Some(vt::Value::token("X")));
     Ok(())
 }
 
@@ -518,9 +519,9 @@ fn capsule_with_x_axis() -> Result<()> {
 fn cone_unauthored_axis_falls_back() -> Result<()> {
     let stage = open()?;
     let c = Cone::get(&stage, sdf::path("/World/Shapes/Pyramid")?)?.expect("Cone");
-    assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(1.5)));
-    assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(4.0)));
-    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::token("Z")));
+    assert_eq!(c.radius_attr().get()?, Some(vt::Value::Double(1.5)));
+    assert_eq!(c.height_attr().get()?, Some(vt::Value::Double(4.0)));
+    assert_eq!(c.axis_attr().get()?, Some(vt::Value::token("Z")));
     Ok(())
 }
 
@@ -528,10 +529,10 @@ fn cone_unauthored_axis_falls_back() -> Result<()> {
 fn plane_dimensions_and_axis() -> Result<()> {
     let stage = open()?;
     let p = Plane::get(&stage, sdf::path("/World/Shapes/Ground")?)?.expect("Plane");
-    assert_eq!(p.width_attr().get()?, Some(sdf::Value::Double(10.0)));
-    assert_eq!(p.length_attr().get()?, Some(sdf::Value::Double(8.0)));
-    assert_eq!(p.axis_attr().get()?, Some(sdf::Value::token("Y")));
-    assert_eq!(p.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
+    assert_eq!(p.width_attr().get()?, Some(vt::Value::Double(10.0)));
+    assert_eq!(p.length_attr().get()?, Some(vt::Value::Double(8.0)));
+    assert_eq!(p.axis_attr().get()?, Some(vt::Value::token("Y")));
+    assert_eq!(p.double_sided_attr().get()?, Some(vt::Value::Bool(true)));
     Ok(())
 }
 
@@ -552,10 +553,10 @@ fn axis_token_round_trip() {
 fn camera_authored_attrs() -> Result<()> {
     let stage = open()?;
     let c = Camera::get(&stage, sdf::path("/World/AuthoredCam")?)?.expect("Camera");
-    assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(35.0)));
-    assert_eq!(c.f_stop_attr().get()?, Some(sdf::Value::Float(2.8)));
-    assert_eq!(c.projection_attr().get()?, Some(sdf::Value::token("perspective")));
-    assert_eq!(c.stereo_role_attr().get()?, Some(sdf::Value::token("left")));
+    assert_eq!(c.focal_length_attr().get()?, Some(vt::Value::Float(35.0)));
+    assert_eq!(c.f_stop_attr().get()?, Some(vt::Value::Float(2.8)));
+    assert_eq!(c.projection_attr().get()?, Some(vt::Value::token("perspective")));
+    assert_eq!(c.stereo_role_attr().get()?, Some(vt::Value::token("left")));
     Ok(())
 }
 
@@ -565,9 +566,9 @@ fn camera_unauthored_attrs_fall_back() -> Result<()> {
     // /World/Cam authors only focalLength; the rest read back the fallbacks
     // `Camera` declares.
     let c = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
-    assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(50.0)));
-    assert_eq!(c.horizontal_aperture_attr().get()?, Some(sdf::Value::Float(20.955)));
-    assert_eq!(c.projection_attr().get()?, Some(sdf::Value::token("perspective")));
+    assert_eq!(c.focal_length_attr().get()?, Some(vt::Value::Float(50.0)));
+    assert_eq!(c.horizontal_aperture_attr().get()?, Some(vt::Value::Float(20.955)));
+    assert_eq!(c.projection_attr().get()?, Some(vt::Value::token("perspective")));
     Ok(())
 }
 
@@ -575,7 +576,7 @@ fn camera_unauthored_attrs_fall_back() -> Result<()> {
 fn orthographic_projection_token() -> Result<()> {
     let stage = open()?;
     let c = Camera::get(&stage, sdf::path("/World/OrthoCam")?)?.expect("Camera");
-    assert_eq!(c.projection_attr().get()?, Some(sdf::Value::token("orthographic")));
+    assert_eq!(c.projection_attr().get()?, Some(vt::Value::token("orthographic")));
     // `Projection` decodes the authored token.
     let tok = c.projection_attr().get::<Token>()?;
     assert_eq!(
@@ -671,10 +672,10 @@ fn mesh_returns_topology() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(array_len(&m.points_attr(), vec3f_len)?, 4);
-    assert_eq!(m.face_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(m.face_vertex_counts_attr().get()?, Some(vt::Value::IntVec(vec![4])));
     assert_eq!(
         m.face_vertex_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 1, 2, 3]))
+        Some(vt::Value::IntVec(vec![0, 1, 2, 3]))
     );
     Ok(())
 }
@@ -683,11 +684,11 @@ fn mesh_returns_topology() -> Result<()> {
 fn mesh_gprim_attrs_round_trip() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
-    assert_eq!(m.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
+    assert_eq!(m.double_sided_attr().get()?, Some(vt::Value::Bool(true)));
     assert_eq!(m.orientation_attr().get::<Token>()?.as_deref(), Some("leftHanded"));
     assert_eq!(
         m.extent_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![
+        Some(vt::Value::Vec3fVec(vec![
             openusd::gf::Vec3f { x: 0.0, y: 0.0, z: 0.0 },
             openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 0.0 },
         ]))
@@ -704,19 +705,19 @@ fn mesh_subdivision_attrs() -> Result<()> {
         m.interpolate_boundary_attr().get::<Token>()?.as_deref(),
         Some("edgeAndCorner")
     );
-    assert_eq!(m.corner_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 2])));
+    assert_eq!(m.corner_indices_attr().get()?, Some(vt::Value::IntVec(vec![0, 2])));
     assert_eq!(
         m.corner_sharpnesses_attr().get()?,
-        Some(sdf::Value::FloatVec(vec![10.0, 5.0]))
+        Some(vt::Value::FloatVec(vec![10.0, 5.0]))
     );
     assert_eq!(
         m.crease_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 1, 1, 2]))
+        Some(vt::Value::IntVec(vec![0, 1, 1, 2]))
     );
-    assert_eq!(m.crease_lengths_attr().get()?, Some(sdf::Value::IntVec(vec![2, 2])));
+    assert_eq!(m.crease_lengths_attr().get()?, Some(vt::Value::IntVec(vec![2, 2])));
     assert_eq!(
         m.crease_sharpnesses_attr().get()?,
-        Some(sdf::Value::FloatVec(vec![3.0, 4.0]))
+        Some(vt::Value::FloatVec(vec![3.0, 4.0]))
     );
     Ok(())
 }
@@ -740,7 +741,7 @@ fn mesh_uvs_face_varying() -> Result<()> {
     // `primvars:st` is no schema property, so it has no accessor of its own.
     let st = m.attribute("primvars:st");
     assert_eq!(
-        st.get::<sdf::Value>()?
+        st.get::<vt::Value>()?
             .and_then(|v| v.try_as_vec_2f_vec())
             .map(|v| v.len()),
         Some(4)
@@ -755,11 +756,7 @@ fn mesh_display_color() -> Result<()> {
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(
         m.display_color_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![openusd::gf::Vec3f {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0
-        }]))
+        Some(vt::Value::Vec3fVec(vec![openusd::gf::Vec3f { x: 1.0, y: 0.0, z: 0.0 }]))
     );
     assert_eq!(
         m.display_color_attr().metadata::<Token>("interpolation")?.as_deref(),
@@ -773,7 +770,7 @@ fn mesh_velocities_pass_through() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(array_len(&m.velocities_attr(), vec3f_len)?, 4);
-    assert!(m.accelerations_attr().get::<sdf::Value>()?.is_none());
+    assert!(m.accelerations_attr().get::<vt::Value>()?.is_none());
     Ok(())
 }
 
@@ -783,7 +780,7 @@ fn geom_subset_round_trip() -> Result<()> {
     let s = Subset::get(&stage, sdf::path("/World/FancyMesh/Front")?)?.expect("Subset");
     assert_eq!(s.element_type_attr().get::<Token>()?.as_deref(), Some("face"));
     assert_eq!(s.family_name_attr().get::<Token>()?.as_deref(), Some("materialBind"));
-    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec(vec![0])));
+    assert_eq!(s.indices_attr().get()?, Some(vt::Value::IntVec(vec![0])));
     Ok(())
 }
 
@@ -825,18 +822,18 @@ fn basis_curves_topology_and_type() -> Result<()> {
     let stage = open()?;
     let c = BasisCurves::get(&stage, sdf::path("/World/Curves/Linear")?)?.expect("BasisCurves");
     assert_eq!(array_len(&c.points_attr(), vec3f_len)?, 4);
-    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(vt::Value::IntVec(vec![4])));
     assert_eq!(c.type_attr().get::<Token>()?.as_deref(), Some("linear"));
     assert_eq!(c.wrap_attr().get::<Token>()?.as_deref(), Some("nonperiodic"));
     assert_eq!(
         c.widths_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_float_vec())
             .map(|v| v.len()),
         Some(4)
     );
     // `basis` is unauthored, so it reads back the schema's own fallback.
-    assert_eq!(c.basis_attr().get()?, Some(sdf::Value::token("bezier")));
+    assert_eq!(c.basis_attr().get()?, Some(vt::Value::token("bezier")));
     Ok(())
 }
 
@@ -844,17 +841,17 @@ fn basis_curves_topology_and_type() -> Result<()> {
 fn nurbs_curves_order_and_weights() -> Result<()> {
     let stage = open()?;
     let c = NurbsCurves::get(&stage, sdf::path("/World/Curves/Smooth")?)?.expect("NurbsCurves");
-    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(c.order_attr().get()?, Some(vt::Value::IntVec(vec![4])));
     assert_eq!(
         c.knots_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_double_vec())
             .map(|v| v.len()),
         Some(8)
     );
     assert_eq!(
         c.point_weights_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_double_vec())
             .map(|v| v.len()),
         Some(4)
@@ -866,13 +863,13 @@ fn nurbs_curves_order_and_weights() -> Result<()> {
 fn nurbs_patch_grid() -> Result<()> {
     let stage = open()?;
     let p = NurbsPatch::get(&stage, sdf::path("/World/Curves/Sheet")?)?.expect("NurbsPatch");
-    assert_eq!(p.u_vertex_count_attr().get()?, Some(sdf::Value::Int(4)));
-    assert_eq!(p.v_vertex_count_attr().get()?, Some(sdf::Value::Int(4)));
+    assert_eq!(p.u_vertex_count_attr().get()?, Some(vt::Value::Int(4)));
+    assert_eq!(p.v_vertex_count_attr().get()?, Some(vt::Value::Int(4)));
     assert_eq!(array_len(&p.points_attr(), vec3f_len)?, 16);
-    assert_eq!(p.u_order_attr().get()?, Some(sdf::Value::Int(4)));
+    assert_eq!(p.u_order_attr().get()?, Some(vt::Value::Int(4)));
     // uForm is authored; vForm is not, and reads back the schema's fallback.
     assert_eq!(p.u_form_attr().get::<Token>()?.as_deref(), Some("periodic"));
-    assert_eq!(p.v_form_attr().get()?, Some(sdf::Value::token("open")));
+    assert_eq!(p.v_form_attr().get()?, Some(vt::Value::token("open")));
     Ok(())
 }
 
@@ -892,10 +889,7 @@ fn hermite_curves_carry_tangents() -> Result<()> {
     let c = HermiteCurves::get(&stage, sdf::path("/World/Curves/Hairs")?)?.expect("HermiteCurves");
     assert_eq!(array_len(&c.points_attr(), vec3f_len)?, 4);
     assert_eq!(array_len(&c.tangents_attr(), vec3f_len)?, 4);
-    assert_eq!(
-        c.curve_vertex_counts_attr().get()?,
-        Some(sdf::Value::IntVec(vec![2, 2]))
-    );
+    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(vt::Value::IntVec(vec![2, 2])));
     Ok(())
 }
 
@@ -906,9 +900,9 @@ fn points_with_ids_and_widths() -> Result<()> {
     assert_eq!(array_len(&p.points_attr(), vec3f_len)?, 3);
     assert_eq!(
         p.widths_attr().get()?,
-        Some(sdf::Value::FloatVec(vec![0.05, 0.05, 0.05]))
+        Some(vt::Value::FloatVec(vec![0.05, 0.05, 0.05]))
     );
-    assert_eq!(p.ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![10, 20, 30])));
+    assert_eq!(p.ids_attr().get()?, Some(vt::Value::Int64Vec(vec![10, 20, 30])));
     Ok(())
 }
 
@@ -920,12 +914,12 @@ fn tet_mesh_indices() -> Result<()> {
     // The fixture authors the flat `int[]` form; eight indices = two tets.
     assert_eq!(
         t.tet_vertex_indices_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_int_vec())
             .map(|v| v.len()),
         Some(8)
     );
-    assert!(t.surface_face_vertex_indices_attr().get::<sdf::Value>()?.is_none());
+    assert!(t.surface_face_vertex_indices_attr().get::<vt::Value>()?.is_none());
     Ok(())
 }
 
@@ -952,25 +946,25 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
     );
     assert_eq!(
         pi.proto_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 0, 0, 0]))
+        Some(vt::Value::IntVec(vec![0, 0, 0, 0]))
     );
     assert_eq!(array_len(&pi.positions_attr(), vec3f_len)?, 4);
     let scales = pi
         .scales_attr()
-        .get::<sdf::Value>()?
+        .get::<vt::Value>()?
         .and_then(|v| v.try_as_vec_3f_vec())
         .expect("scales");
     assert_eq!(scales.len(), 4);
     assert_eq!(scales[1], openusd::gf::Vec3f { x: 2.0, y: 2.0, z: 2.0 });
     assert_eq!(
         pi.ids_attr().get()?,
-        Some(sdf::Value::Int64Vec(vec![100, 200, 300, 400]))
+        Some(vt::Value::Int64Vec(vec![100, 200, 300, 400]))
     );
-    assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![300])));
+    assert_eq!(pi.invisible_ids_attr().get()?, Some(vt::Value::Int64Vec(vec![300])));
     assert_eq!(array_len(&pi.velocities_attr(), vec3f_len)?, 4);
     // Unauthored attributes read back `None`.
-    assert!(pi.orientations_attr().get::<sdf::Value>()?.is_none());
-    assert!(pi.angular_velocities_attr().get::<sdf::Value>()?.is_none());
+    assert!(pi.orientations_attr().get::<vt::Value>()?.is_none());
+    assert!(pi.angular_velocities_attr().get::<vt::Value>()?.is_none());
     Ok(())
 }
 
@@ -1041,19 +1035,19 @@ fn camera_roundtrip() -> Result<()> {
     let cam = Camera::define(&stage, "/Cam")?;
     cam.create_focal_length_attr()?.set(50.0_f32)?;
     cam.create_projection_attr()?
-        .set(sdf::Value::Token("perspective".into()))?;
+        .set(vt::Value::Token("perspective".into()))?;
     cam.create_clipping_range_attr()?
-        .set(sdf::Value::vec2f(0.1_f32, 1000.0))?;
+        .set(vt::Value::vec2f(0.1_f32, 1000.0))?;
 
     let cam = Camera::get(&stage, "/Cam")?.expect("Camera");
-    assert_eq!(cam.focal_length_attr().get()?, Some(sdf::Value::Float(50.0)));
+    assert_eq!(cam.focal_length_attr().get()?, Some(vt::Value::Float(50.0)));
     assert_eq!(
         cam.projection_attr().get()?,
-        Some(sdf::Value::Token("perspective".into()))
+        Some(vt::Value::Token("perspective".into()))
     );
     assert_eq!(
         cam.clipping_range_attr().get()?,
-        Some(sdf::Value::vec2f(0.1_f32, 1000.0))
+        Some(vt::Value::vec2f(0.1_f32, 1000.0))
     );
     assert!(Camera::get(&stage, "/Cam")?.is_some());
     Ok(())
@@ -1063,22 +1057,22 @@ fn camera_roundtrip() -> Result<()> {
 fn basis_curves_roundtrip() -> Result<()> {
     let stage = memory()?;
     let c = BasisCurves::define(&stage, "/C")?;
-    c.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+    c.create_points_attr()?.set(vt::Value::Vec3fVec(vec![
         [0.0_f32, 0.0, 0.0].into(),
         [1.0, 0.0, 0.0].into(),
     ]))?;
-    c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
-    c.create_type_attr()?.set(sdf::Value::Token("linear".into()))?;
+    c.create_curve_vertex_counts_attr()?.set(vt::Value::IntVec(vec![2]))?;
+    c.create_type_attr()?.set(vt::Value::Token("linear".into()))?;
     c.create_widths_attr()?
-        .set_metadata(geom::tokens::INTERPOLATION, sdf::Value::Token("vertex".into()))?
-        .set(sdf::Value::FloatVec(vec![0.1, 0.1]))?;
+        .set_metadata(geom::tokens::INTERPOLATION, vt::Value::Token("vertex".into()))?
+        .set(vt::Value::FloatVec(vec![0.1, 0.1]))?;
 
     let c = BasisCurves::get(&stage, "/C")?.expect("BasisCurves");
-    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![2])));
-    assert_eq!(c.type_attr().get()?, Some(sdf::Value::Token("linear".into())));
+    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(vt::Value::IntVec(vec![2])));
+    assert_eq!(c.type_attr().get()?, Some(vt::Value::Token("linear".into())));
     assert_eq!(
         c.widths_attr().metadata(geom::tokens::INTERPOLATION)?,
-        Some(sdf::Value::Token("vertex".into()))
+        Some(vt::Value::Token("vertex".into()))
     );
     assert!(BasisCurves::get(&stage, "/Missing")?.is_none());
     Ok(())
@@ -1088,12 +1082,12 @@ fn basis_curves_roundtrip() -> Result<()> {
 fn hermite_curves_tangents() -> Result<()> {
     let stage = memory()?;
     let c = HermiteCurves::define(&stage, "/H")?;
-    c.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+    c.create_points_attr()?.set(vt::Value::Vec3fVec(vec![
         [0.0_f32, 0.0, 0.0].into(),
         [1.0, 0.0, 0.0].into(),
     ]))?;
-    c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
-    c.create_tangents_attr()?.set(sdf::Value::Vec3fVec(vec![
+    c.create_curve_vertex_counts_attr()?.set(vt::Value::IntVec(vec![2]))?;
+    c.create_tangents_attr()?.set(vt::Value::Vec3fVec(vec![
         [1.0_f32, 0.0, 0.0].into(),
         [1.0, 0.0, 0.0].into(),
     ]))?;
@@ -1101,7 +1095,7 @@ fn hermite_curves_tangents() -> Result<()> {
     let c = HermiteCurves::get(&stage, "/H")?.expect("HermiteCurves");
     assert_eq!(
         c.tangents_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_vec_3f_vec())
             .map(|v| v.len()),
         Some(2)
@@ -1115,14 +1109,14 @@ fn nurbs_curves_attrs() -> Result<()> {
     let c = NurbsCurves::define(&stage, "/N")?;
     c.create_order_attr()?.set(vec![4])?;
     c.create_knots_attr()?
-        .set(sdf::Value::DoubleVec(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]))?;
+        .set(vt::Value::DoubleVec(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]))?;
     c.create_point_weights_attr()?.set(vec![1.0_f64, 1.0, 1.0, 1.0])?;
 
     let c = NurbsCurves::get(&stage, "/N")?.expect("NurbsCurves");
-    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(c.order_attr().get()?, Some(vt::Value::IntVec(vec![4])));
     assert_eq!(
         c.point_weights_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_double_vec())
             .map(|v| v.len()),
         Some(4)
@@ -1153,21 +1147,21 @@ fn point_instancer_roundtrip() -> Result<()> {
 
     let pi = PointInstancer::define(&stage, "/Instances")?;
     pi.create_prototypes_rel()?.set_targets(["/Proto/Marker"])?;
-    pi.create_proto_indices_attr()?.set(sdf::Value::IntVec(vec![0, 0, 0]))?;
-    pi.create_positions_attr()?.set(sdf::Value::Vec3fVec(vec![
+    pi.create_proto_indices_attr()?.set(vt::Value::IntVec(vec![0, 0, 0]))?;
+    pi.create_positions_attr()?.set(vt::Value::Vec3fVec(vec![
         [0.0_f32, 0.0, 0.0].into(),
         [1.0, 0.0, 0.0].into(),
         [2.0, 0.0, 0.0].into(),
     ]))?;
-    pi.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![100, 200, 300]))?;
-    pi.create_invisible_ids_attr()?.set(sdf::Value::Int64Vec(vec![200]))?;
+    pi.create_ids_attr()?.set(vt::Value::Int64Vec(vec![100, 200, 300]))?;
+    pi.create_invisible_ids_attr()?.set(vt::Value::Int64Vec(vec![200]))?;
 
     let pi = PointInstancer::get(&stage, "/Instances")?.expect("PointInstancer");
-    assert_eq!(pi.proto_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 0, 0])));
-    assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![200])));
+    assert_eq!(pi.proto_indices_attr().get()?, Some(vt::Value::IntVec(vec![0, 0, 0])));
+    assert_eq!(pi.invisible_ids_attr().get()?, Some(vt::Value::Int64Vec(vec![200])));
     assert_eq!(pi.prototypes_rel().targets()?, vec![sdf::path("/Proto/Marker")?]);
     // Inherited Boundable / Xformable accessors are available.
-    assert_eq!(pi.extent_attr().get::<sdf::Value>()?, None);
+    assert_eq!(pi.extent_attr().get::<vt::Value>()?, None);
     assert!(PointInstancer::get(&stage, "/Proto/Marker")?.is_none());
     Ok(())
 }
@@ -1176,14 +1170,14 @@ fn point_instancer_roundtrip() -> Result<()> {
 fn geom_subset_is_typed_not_imageable() -> Result<()> {
     let stage = memory()?;
     let s = Subset::define(&stage, "/M/RedFaces")?;
-    s.create_element_type_attr()?.set(sdf::Value::Token("face".into()))?;
+    s.create_element_type_attr()?.set(vt::Value::Token("face".into()))?;
     s.create_family_name_attr()?
-        .set(sdf::Value::Token("materialBind".into()))?;
-    s.create_indices_attr()?.set(sdf::Value::IntVec(vec![0]))?;
+        .set(vt::Value::Token("materialBind".into()))?;
+    s.create_indices_attr()?.set(vt::Value::IntVec(vec![0]))?;
 
     let s = Subset::get(&stage, "/M/RedFaces")?.expect("Subset");
-    assert_eq!(s.element_type_attr().get()?, Some(sdf::Value::Token("face".into())));
-    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec(vec![0])));
+    assert_eq!(s.element_type_attr().get()?, Some(vt::Value::Token("face".into())));
+    assert_eq!(s.indices_attr().get()?, Some(vt::Value::IntVec(vec![0])));
     assert_eq!(Subset::KIND, openusd::usd::SchemaKind::ConcreteTyped);
     Ok(())
 }
@@ -1192,47 +1186,44 @@ fn geom_subset_is_typed_not_imageable() -> Result<()> {
 fn mesh_topology_and_subdiv() -> Result<()> {
     let stage = memory()?;
     let m = Mesh::define(&stage, "/M")?;
-    m.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+    m.create_points_attr()?.set(vt::Value::Vec3fVec(vec![
         [0.0_f32, 0.0, 0.0].into(),
         [1.0, 0.0, 0.0].into(),
         [1.0, 1.0, 0.0].into(),
         [0.0, 1.0, 0.0].into(),
     ]))?;
-    m.create_face_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![4]))?;
+    m.create_face_vertex_counts_attr()?.set(vt::Value::IntVec(vec![4]))?;
     m.create_face_vertex_indices_attr()?
-        .set(sdf::Value::IntVec(vec![0, 1, 2, 3]))?;
+        .set(vt::Value::IntVec(vec![0, 1, 2, 3]))?;
     m.create_subdivision_scheme_attr()?
-        .set(sdf::Value::Token("none".into()))?;
+        .set(vt::Value::Token("none".into()))?;
     m.create_orientation_attr()?
-        .set(sdf::Value::Token("leftHanded".into()))?;
+        .set(vt::Value::Token("leftHanded".into()))?;
     m.create_display_color_attr()?
-        .set(sdf::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))?;
+        .set(vt::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))?;
 
     let m = Mesh::get(&stage, "/M")?.expect("Mesh");
-    assert_eq!(m.face_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(m.face_vertex_counts_attr().get()?, Some(vt::Value::IntVec(vec![4])));
     assert_eq!(
         m.face_vertex_indices_attr().get()?,
-        Some(sdf::Value::IntVec(vec![0, 1, 2, 3]))
+        Some(vt::Value::IntVec(vec![0, 1, 2, 3]))
     );
     assert_eq!(
         m.subdivision_scheme_attr().get()?,
-        Some(sdf::Value::Token("none".into()))
+        Some(vt::Value::Token("none".into()))
     );
     // Inherited Gprim / PointBased accessors are available on the handle.
-    assert_eq!(
-        m.orientation_attr().get()?,
-        Some(sdf::Value::Token("leftHanded".into()))
-    );
+    assert_eq!(m.orientation_attr().get()?, Some(vt::Value::Token("leftHanded".into())));
     assert_eq!(
         m.points_attr()
-            .get::<sdf::Value>()?
+            .get::<vt::Value>()?
             .and_then(|v| v.try_as_vec_3f_vec())
             .map(|v| v.len()),
         Some(4)
     );
     assert_eq!(
         m.display_color_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))
+        Some(vt::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))
     );
     Ok(())
 }
@@ -1241,16 +1232,16 @@ fn mesh_topology_and_subdiv() -> Result<()> {
 fn points_widths_and_ids() -> Result<()> {
     let stage = memory()?;
     let p = Points::define(&stage, "/Cloud")?;
-    p.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+    p.create_points_attr()?.set(vt::Value::Vec3fVec(vec![
         [0.0_f32, 0.0, 0.0].into(),
         [1.0, 0.0, 0.0].into(),
     ]))?;
-    p.create_widths_attr()?.set(sdf::Value::FloatVec(vec![0.1, 0.1]))?;
-    p.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![10, 20]))?;
+    p.create_widths_attr()?.set(vt::Value::FloatVec(vec![0.1, 0.1]))?;
+    p.create_ids_attr()?.set(vt::Value::Int64Vec(vec![10, 20]))?;
 
     let p = Points::get(&stage, "/Cloud")?.expect("Points");
-    assert_eq!(p.widths_attr().get()?, Some(sdf::Value::FloatVec(vec![0.1, 0.1])));
-    assert_eq!(p.ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![10, 20])));
+    assert_eq!(p.widths_attr().get()?, Some(vt::Value::FloatVec(vec![0.1, 0.1])));
+    assert_eq!(p.ids_attr().get()?, Some(vt::Value::Int64Vec(vec![10, 20])));
     Ok(())
 }
 
@@ -1260,11 +1251,11 @@ fn axial_shapes_roundtrip() -> Result<()> {
     let cyl = Cylinder::define(&stage, "/Pipe")?;
     cyl.create_radius_attr()?.set(0.3_f64)?;
     cyl.create_height_attr()?.set(2.0_f64)?;
-    cyl.create_axis_attr()?.set(sdf::Value::Token("X".into()))?;
+    cyl.create_axis_attr()?.set(vt::Value::Token("X".into()))?;
 
     let cyl = Cylinder::get(&stage, "/Pipe")?.expect("Cylinder");
-    assert_eq!(cyl.radius_attr().get()?, Some(sdf::Value::Double(0.3)));
-    assert_eq!(cyl.axis_attr().get()?, Some(sdf::Value::Token("X".into())));
+    assert_eq!(cyl.radius_attr().get()?, Some(vt::Value::Double(0.3)));
+    assert_eq!(cyl.axis_attr().get()?, Some(vt::Value::Token("X".into())));
 
     Cone::define(&stage, "/Pyramid")?.create_height_attr()?.set(2.0_f64)?;
     assert!(Cone::get(&stage, "/Pyramid")?.is_some());
@@ -1279,7 +1270,7 @@ fn cube_roundtrip() -> Result<()> {
     Cube::define(&stage, "/Box")?.create_size_attr()?.set(0.5_f64)?;
 
     let cube = Cube::get(&stage, "/Box")?.expect("Cube");
-    assert_eq!(cube.size_attr().get()?, Some(sdf::Value::Double(0.5)));
+    assert_eq!(cube.size_attr().get()?, Some(vt::Value::Double(0.5)));
     assert!(Cube::get(&stage, "/Missing")?.is_none());
     Ok(())
 }
@@ -1290,12 +1281,12 @@ fn plane_roundtrip() -> Result<()> {
     let plane = Plane::define(&stage, "/Ground")?;
     plane.create_width_attr()?.set(10.0_f64)?;
     plane.create_length_attr()?.set(20.0_f64)?;
-    plane.create_axis_attr()?.set(sdf::Value::Token("Y".into()))?;
+    plane.create_axis_attr()?.set(vt::Value::Token("Y".into()))?;
     plane.create_double_sided_attr()?.set(false)?;
 
     let plane = Plane::get(&stage, "/Ground")?.expect("Plane");
-    assert_eq!(plane.width_attr().get()?, Some(sdf::Value::Double(10.0)));
-    assert_eq!(plane.double_sided_attr().get()?, Some(sdf::Value::Bool(false)));
+    assert_eq!(plane.width_attr().get()?, Some(vt::Value::Double(10.0)));
+    assert_eq!(plane.double_sided_attr().get()?, Some(vt::Value::Bool(false)));
     Ok(())
 }
 
@@ -1305,13 +1296,13 @@ fn sphere_roundtrip_and_chain() -> Result<()> {
     let sphere = Sphere::define(&stage, "/Ball")?;
     sphere.create_radius_attr()?.set(2.5_f64)?;
     // Inherited through the Gprim â†’ â€¦ â†’ Imageable chain.
-    sphere.create_purpose_attr()?.set(sdf::Value::Token("render".into()))?;
+    sphere.create_purpose_attr()?.set(vt::Value::Token("render".into()))?;
     sphere.create_double_sided_attr()?.set(true)?;
 
     let sphere = Sphere::get(&stage, "/Ball")?.expect("Sphere");
-    assert_eq!(sphere.radius_attr().get()?, Some(sdf::Value::Double(2.5)));
+    assert_eq!(sphere.radius_attr().get()?, Some(vt::Value::Double(2.5)));
     assert_eq!(sphere.compute_purpose()?, Purpose::Render);
-    assert_eq!(sphere.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
+    assert_eq!(sphere.double_sided_attr().get()?, Some(vt::Value::Bool(true)));
     assert_eq!(Sphere::KIND, openusd::usd::SchemaKind::ConcreteTyped);
     Ok(())
 }
@@ -1368,8 +1359,8 @@ fn teapot_indices_blocked() -> Result<(), SchemaError> {
         assert!(primvar.indices_attr().is_defined()?, "{name}");
         assert!(!primvar.is_indexed()?, "{name}");
         assert_eq!(
-            primvar.flattened::<sdf::Value>(None)?,
-            primvar.get_at::<sdf::Value>(None)?,
+            primvar.flattened::<vt::Value>(None)?,
+            primvar.get_at::<vt::Value>(None)?,
             "{name}"
         );
     }

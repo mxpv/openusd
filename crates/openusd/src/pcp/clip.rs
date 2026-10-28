@@ -27,8 +27,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::gf;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AssetPath, LayerOffset, Path, Value};
+use crate::sdf::{self, AssetPath, LayerOffset, Path};
 use crate::tf;
+use crate::vt::Value;
 
 use super::asset_resolve::{self, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};

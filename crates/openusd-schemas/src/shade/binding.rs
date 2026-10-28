@@ -719,6 +719,7 @@ fn purpose_passes(purpose: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openusd::vt;
 
     use openusd::usd::{StagePopulationMask, apply_collection};
 
@@ -1398,7 +1399,7 @@ def Xform "Set" (prepend apiSchemas = ["MaterialBindingAPI"]) {
         assert_eq!(binding_strength(&rel)?, BindingStrength::StrongerThanDescendants);
         // An unrecognized token reads as the fallback, and the fallback
         // request overwrites it.
-        let rel = rel.set_metadata(BIND_MATERIAL_AS, sdf::Value::token("sideways"))?;
+        let rel = rel.set_metadata(BIND_MATERIAL_AS, vt::Value::token("sideways"))?;
         assert_eq!(binding_strength(&rel)?, BindingStrength::WeakerThanDescendants);
         let rel = set_binding_strength(rel, None)?;
         assert_eq!(rel.bind_material_as()?.as_deref(), Some(WEAKER_THAN_DESCENDANTS));

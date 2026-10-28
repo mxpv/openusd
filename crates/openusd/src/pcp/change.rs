@@ -1176,7 +1176,8 @@ mod tests {
     use crate::pcp::Diagnostics;
     use crate::pcp::layer_stack::{ExprVarId, ExprVarInterner, VarsSource};
     use crate::pcp::{LoadRules, PopulationMask, VariantFallbackMap};
-    use crate::sdf::{ChangeFlags, ChangeList, Value};
+    use crate::sdf::{ChangeFlags, ChangeList};
+    use crate::vt::Value;
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")

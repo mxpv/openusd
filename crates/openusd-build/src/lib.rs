@@ -487,7 +487,7 @@ impl Builder {
         // TODO(rayon): a library is an independent stage open, composition and
         // emission over `&self`, so the families of `openusd-schemas` could
         // build at once. `Output` is what stands in the way: its model holds
-        // `sdf::Value`s read from a stage that is neither `Send` nor `Sync`, so
+        // `vt::Value`s read from a stage that is neither `Send` nor `Sync`, so
         // a parallel version has to finish with each library inside the worker
         // and return the generated text alone.
         let plugins = self.plugins()?;
@@ -784,7 +784,7 @@ mod tests {
 
     use std::time::{Duration, SystemTime};
 
-    use openusd::sdf;
+    use openusd::vt;
 
     /// Resolves one file of the vendored upstream corpus, which every module's
     /// tests read.
@@ -1286,7 +1286,7 @@ class "MissingSuffix" (
             .plug_info(&info)
             .build_library(&schema, Views::Generate)
             .expect("builds");
-        let fallbacks: Vec<Option<sdf::Value>> = output.with_family(|family| {
+        let fallbacks: Vec<Option<vt::Value>> = output.with_family(|family| {
             family
                 .declared_metadata()
                 .iter()
@@ -1294,7 +1294,7 @@ class "MissingSuffix" (
                 .collect()
         });
         assert!(
-            fallbacks.contains(&Some(sdf::Value::DoubleVec(vec![0.0, 1.0]))),
+            fallbacks.contains(&Some(vt::Value::DoubleVec(vec![0.0, 1.0]))),
             "{fallbacks:?}"
         );
         assert!(output.rust.contains(".fallback(||"), "{}", output.rust);

@@ -9,8 +9,9 @@
 //! These are pure value types; [`render_spec`](super::render_spec) fills
 //! them.
 
-use openusd::sdf::{Path, Value};
+use openusd::sdf::Path;
 use openusd::tf;
+use openusd::vt::Value;
 
 use super::{ProductType, SourceType};
 

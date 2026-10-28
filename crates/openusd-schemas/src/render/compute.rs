@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 
-use openusd::sdf::{self, Path, Value};
+use openusd::sdf::Path;
 use openusd::usd::{Attribute, Stage};
+use openusd::vt::{self, Value};
 use openusd::{Result, gf, tf};
 
 use super::conform::conform_aperture;
@@ -297,7 +298,7 @@ impl ResolvedBase {
 /// C++ spec's zero-initialized field does.
 fn read_attr<T>(attr: &Attribute, inherited: Option<T>) -> Result<T>
 where
-    T: sdf::FromValue + Default,
+    T: vt::FromValue + Default,
     T::Error: Into<openusd::Error>,
 {
     Ok(match inherited {
@@ -346,10 +347,10 @@ mod tests {
         let stage = crate::tests::stage("anon.usda")?;
 
         let color = Var::define(&stage, "/Render/Vars/color")?;
-        color.create_data_type_attr()?.set(sdf::Value::token("color3f"))?;
+        color.create_data_type_attr()?.set(vt::Value::token("color3f"))?;
         color.create_source_type_attr()?.set(SourceType::Raw)?;
         let alpha = Var::define(&stage, "/Render/Vars/alpha")?;
-        alpha.create_data_type_attr()?.set(sdf::Value::token("float"))?;
+        alpha.create_data_type_attr()?.set(vt::Value::token("float"))?;
         alpha.create_source_name_attr()?.set("a".to_string())?;
 
         let beauty = Product::define(&stage, "/Render/Products/beauty")?;
@@ -607,7 +608,7 @@ mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         Product::define(&stage, "/Render/Products/p")?
             .create_aspect_ratio_conform_policy_attr()?
-            .set(sdf::Value::token("bogus"))?;
+            .set(vt::Value::token("bogus"))?;
         settings(&stage, &["/Render/Products/p"])?
             .create_resolution_attr()?
             .set(gf::vec2i(200, 100))?;
@@ -663,7 +664,7 @@ mod tests {
     fn int_attr(stage: &Stage, name: &str) -> Result<Attribute> {
         Ok(stage
             .create_attribute(sdf::path("/S")?.append_property(name)?, "int")?
-            .set(sdf::Value::Int(1))?)
+            .set(vt::Value::Int(1))?)
     }
 
     #[test]

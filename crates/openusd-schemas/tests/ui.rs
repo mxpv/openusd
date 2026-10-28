@@ -2,9 +2,9 @@
 
 mod common;
 
-use openusd::Result;
 use openusd::gf;
 use openusd::usd::{self, Object, Property, SchemaBase, Stage};
+use openusd::{Result, vt};
 use openusd_schemas::SchemaError;
 
 use openusd::sdf;
@@ -39,7 +39,7 @@ fn check_property<O: Property>(hints: &Hints<O>, display_group: Option<&str>, sh
 
 /// Asserts the prim tier of `hints`: the two dictionaries, each of their
 /// entries read alone, and a group neither holds.
-fn check_prim(hints: &Hints<usd::Prim>, expanded: &sdf::Dictionary, shown_if: &sdf::Dictionary) -> Result<()> {
+fn check_prim(hints: &Hints<usd::Prim>, expanded: &vt::Dictionary, shown_if: &vt::Dictionary) -> Result<()> {
     assert_eq!(&hints.groups_expanded()?, expanded);
     for (group, value) in expanded.iter() {
         assert_eq!(hints.group_expanded(group)?, value.try_as_bool_ref() == Some(&true));
@@ -55,7 +55,7 @@ fn check_prim(hints: &Hints<usd::Prim>, expanded: &sdf::Dictionary, shown_if: &s
 }
 
 /// Asserts the attribute tier of `hints`.
-fn check_attribute(hints: &Hints<usd::Attribute>, labels: &sdf::Dictionary, order: &[&str]) -> Result<()> {
+fn check_attribute(hints: &Hints<usd::Attribute>, labels: &vt::Dictionary, order: &[&str]) -> Result<()> {
     assert_eq!(&hints.value_labels()?, labels);
     assert_eq!(
         hints.value_labels_order()?,
@@ -65,7 +65,7 @@ fn check_attribute(hints: &Hints<usd::Attribute>, labels: &sdf::Dictionary, orde
 }
 
 /// A dictionary of `entries`.
-fn dict<const N: usize>(entries: [(&str, sdf::Value); N]) -> sdf::Dictionary {
+fn dict<const N: usize>(entries: [(&str, vt::Value); N]) -> vt::Dictionary {
     entries
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value))
@@ -79,12 +79,12 @@ fn hints_fallbacks() -> Result<()> {
     let stage = hints_stage()?;
     let prim = Hints::new(stage.prim("/HintlessPrim")?);
     check_object(&prim, None, false)?;
-    check_prim(&prim, &sdf::Dictionary::default(), &sdf::Dictionary::default())?;
+    check_prim(&prim, &vt::Dictionary::default(), &vt::Dictionary::default())?;
 
     let attr = Hints::new(stage.attribute("/HintlessPrim.hintlessAttribute")?);
     check_object(&attr, None, false)?;
     check_property(&attr, None, None)?;
-    check_attribute(&attr, &sdf::Dictionary::default(), &[])?;
+    check_attribute(&attr, &vt::Dictionary::default(), &[])?;
     Ok(())
 }
 
@@ -156,7 +156,7 @@ fn legacy_hint_writes() -> Result<()> {
     assert!(attr.is_hidden()?);
     assert_eq!(
         attr.metadata_by_key(hint_keys::UI_HINTS, hint_keys::SHOWN_IF)?,
-        Some(sdf::Value::String("x == 1".into()))
+        Some(vt::Value::String("x == 1".into()))
     );
     Ok(())
 }
@@ -232,7 +232,7 @@ fn backdrop_roundtrip() -> Result<()> {
     let stage = memory()?;
     Backdrop::define(&stage, "/Mat/Note")?
         .create_description_attr()?
-        .set(sdf::Value::token("lighting nodes"))?;
+        .set(vt::Value::token("lighting nodes"))?;
 
     let b = Backdrop::get(&stage, "/Mat/Note")?.expect("Backdrop");
     assert_eq!(
@@ -252,7 +252,7 @@ fn nodegraph_node_roundtrip() -> Result<()> {
     n.create_size_attr()?.set(gf::vec2f(180.0, 90.0))?;
     n.create_stacking_order_attr()?.set(3)?;
     n.create_display_color_attr()?.set(gf::vec3f(0.2, 0.4, 0.8))?;
-    n.create_icon_attr()?.set(sdf::Value::AssetPath("./node.png".into()))?;
+    n.create_icon_attr()?.set(vt::Value::AssetPath("./node.png".into()))?;
     n.create_expansion_state_attr()?.set(ExpansionState::Minimized)?;
     n.create_doc_uri_attr()?.set("https://example.com/node".to_string())?;
 
@@ -274,8 +274,8 @@ fn scene_graph_prim_roundtrip() -> Result<()> {
     let stage = memory()?;
     stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
     let sg = SceneGraphPrimAPI::apply(&stage.prim("/World/Mesh")?)?;
-    sg.create_display_name_attr()?.set(sdf::Value::token("Hero Mesh"))?;
-    sg.create_display_group_attr()?.set(sdf::Value::token("Characters"))?;
+    sg.create_display_name_attr()?.set(vt::Value::token("Hero Mesh"))?;
+    sg.create_display_group_attr()?.set(vt::Value::token("Characters"))?;
 
     let p = SceneGraphPrimAPI::get(&stage, "/World/Mesh")?.expect("SceneGraphPrimAPI");
     assert_eq!(p.display_name_attr().get::<tf::Token>()?.as_deref(), Some("Hero Mesh"));
@@ -298,10 +298,10 @@ fn prim_hints_asset() -> Result<()> {
     check_prim(
         &hints,
         &dict([
-            ("a group", sdf::Value::Bool(true)),
-            ("a group:a nested group", sdf::Value::Bool(false)),
+            ("a group", vt::Value::Bool(true)),
+            ("a group:a nested group", vt::Value::Bool(false)),
         ]),
-        &dict([("a group", sdf::Value::from("x == 1"))]),
+        &dict([("a group", vt::Value::from("x == 1"))]),
     )?;
     check_object(&hints, Some("a prim"), true)?;
     Ok(())
@@ -312,23 +312,23 @@ fn prim_hints_asset() -> Result<()> {
 fn prim_hints_setters() -> Result<(), SchemaError> {
     let stage = memory()?;
     let hints = Hints::new(stage.define_prim("/test_PrimHintsSetters")?);
-    check_prim(&hints, &sdf::Dictionary::default(), &sdf::Dictionary::default())?;
+    check_prim(&hints, &vt::Dictionary::default(), &vt::Dictionary::default())?;
     assert!(!hints.group_expanded("group:subgroup")?);
 
     let hints = hints.set_groups_expanded([("group", true), ("group:subgroup", true)])?;
     let mut expanded = dict([
-        ("group", sdf::Value::Bool(true)),
-        ("group:subgroup", sdf::Value::Bool(true)),
+        ("group", vt::Value::Bool(true)),
+        ("group:subgroup", vt::Value::Bool(true)),
     ]);
-    check_prim(&hints, &expanded, &sdf::Dictionary::default())?;
+    check_prim(&hints, &expanded, &vt::Dictionary::default())?;
     assert!(!hints.group_expanded("group2")?);
 
     let hints = hints.set_group_expanded("group2", true)?;
-    expanded.insert("group2".into(), sdf::Value::Bool(true));
-    check_prim(&hints, &expanded, &sdf::Dictionary::default())?;
+    expanded.insert("group2".into(), vt::Value::Bool(true));
+    check_prim(&hints, &expanded, &vt::Dictionary::default())?;
 
     let hints = hints.set_groups_shown_if([("group", "x == 1")])?;
-    check_prim(&hints, &expanded, &dict([("group", sdf::Value::from("x == 1"))]))?;
+    check_prim(&hints, &expanded, &dict([("group", vt::Value::from("x == 1"))]))?;
     assert_eq!(hints.group_shown_if("group2")?, None);
 
     let hints = hints.set_group_shown_if("group2", "x == 2")?;
@@ -336,8 +336,8 @@ fn prim_hints_setters() -> Result<(), SchemaError> {
         &hints,
         &expanded,
         &dict([
-            ("group", sdf::Value::from("x == 1")),
-            ("group2", sdf::Value::from("x == 2")),
+            ("group", vt::Value::from("x == 1")),
+            ("group2", vt::Value::from("x == 2")),
         ]),
     )?;
     Ok(())
@@ -348,7 +348,7 @@ fn prim_hints_setters() -> Result<(), SchemaError> {
 fn group_expanded_flat() -> Result<(), SchemaError> {
     let stage = memory()?;
     let hints = Hints::new(stage.define_prim("/P")?).set_group_expanded("A:B", true)?;
-    assert_eq!(hints.groups_expanded()?, dict([("A:B", sdf::Value::Bool(true))]));
+    assert_eq!(hints.groups_expanded()?, dict([("A:B", vt::Value::Bool(true))]));
     assert!(hints.group_expanded("A:B")?);
     Ok(())
 }
@@ -361,7 +361,7 @@ fn group_shown_nested() -> Result<()> {
     let hints = Hints::new(stage.define_prim("/P")?).set_group_shown_if("A:B", "x == 1")?;
     assert_eq!(
         hints.groups_shown_if()?,
-        dict([("A", sdf::Value::Dictionary(dict([("B", sdf::Value::from("x == 1"))])))])
+        dict([("A", vt::Value::Dictionary(dict([("B", vt::Value::from("x == 1"))])))])
     );
     assert_eq!(hints.group_shown_if("A:B")?.as_deref(), Some("x == 1"));
     Ok(())
@@ -372,7 +372,7 @@ fn group_shown_nested() -> Result<()> {
 fn group_expanded_empty() -> Result<(), SchemaError> {
     let stage = memory()?;
     let hints = Hints::new(stage.define_prim("/P")?).set_group_expanded("", true)?;
-    assert_eq!(hints.groups_expanded()?, dict([("", sdf::Value::Bool(true))]));
+    assert_eq!(hints.groups_expanded()?, dict([("", vt::Value::Bool(true))]));
     assert!(hints.group_expanded("")?);
     Ok(())
 }
@@ -383,7 +383,7 @@ fn group_expanded_empty() -> Result<(), SchemaError> {
 fn group_shown_empty() -> Result<()> {
     let stage = memory()?;
     let hints = Hints::new(stage.define_prim("/P")?).set_group_shown_if("", "x == 1")?;
-    assert_eq!(hints.groups_shown_if()?, dict([("", sdf::Value::from("x == 1"))]));
+    assert_eq!(hints.groups_shown_if()?, dict([("", vt::Value::from("x == 1"))]));
     assert_eq!(hints.group_shown_if("")?.as_deref(), Some("x == 1"));
     Ok(())
 }
@@ -424,7 +424,7 @@ fn group_expanded_weaker() -> Result<(), SchemaError> {
     assert!(root.contains("old") && root.contains("new"), "{root}");
     assert_eq!(
         hints.groups_expanded()?,
-        dict([("old", sdf::Value::Bool(true)), ("new", sdf::Value::Bool(false))])
+        dict([("old", vt::Value::Bool(true)), ("new", vt::Value::Bool(false))])
     );
     Ok(())
 }
@@ -456,7 +456,7 @@ fn group_shown_sibling() -> Result<()> {
     let hints = Hints::new(stage.prim("/P")?).set_group_shown_if("good", "x == 1")?;
     assert_eq!(
         hints.groups_shown_if()?,
-        dict([("bad", sdf::Value::Int(5)), ("good", sdf::Value::from("x == 1"))])
+        dict([("bad", vt::Value::Int(5)), ("good", vt::Value::from("x == 1"))])
     );
     Ok(())
 }
@@ -469,9 +469,9 @@ fn attribute_hints_asset() -> Result<()> {
     check_attribute(
         &hints,
         &dict([
-            ("low", sdf::Value::Int(1)),
-            ("med", sdf::Value::Int(2)),
-            ("high", sdf::Value::Int(3)),
+            ("low", vt::Value::Int(1)),
+            ("med", vt::Value::Int(2)),
+            ("high", vt::Value::Int(3)),
         ]),
         &["low", "med", "high"],
     )?;
@@ -489,9 +489,9 @@ fn attribute_hints_setters() -> Result<()> {
         .attribute_builder("newAttribute", "int")
         .build()?;
     let hints = Hints::new(attr);
-    check_attribute(&hints, &sdf::Dictionary::default(), &[])?;
+    check_attribute(&hints, &vt::Dictionary::default(), &[])?;
 
-    let labels = dict([("round", sdf::Value::Int(1)), ("square", sdf::Value::Int(2))]);
+    let labels = dict([("round", vt::Value::Int(1)), ("square", vt::Value::Int(2))]);
     let hints = hints.set_value_labels(labels.clone())?;
     check_attribute(&hints, &labels, &[])?;
 
@@ -507,23 +507,23 @@ fn attribute_hints_setters() -> Result<()> {
 fn apply_value_labels() -> Result<(), SchemaError> {
     let stage = hints_stage()?;
     for (path, initial) in [
-        ("/HintsPrim.attribute", sdf::Value::Int(1)),
-        ("/HintsPrim.tokenArrayAttr", sdf::Value::TokenVec(Vec::new())),
+        ("/HintsPrim.attribute", vt::Value::Int(1)),
+        ("/HintsPrim.tokenArrayAttr", vt::Value::TokenVec(Vec::new())),
     ] {
         let hints = Hints::new(stage.attribute(path)?);
-        assert_eq!(hints.object().get::<sdf::Value>()?, Some(initial), "{path}");
+        assert_eq!(hints.object().get::<vt::Value>()?, Some(initial), "{path}");
         for (label, value) in &hints.value_labels()? {
             assert!(hints.apply_value_label(label)?, "{path} {label}");
             assert_eq!(
-                hints.object().get::<sdf::Value>()?.as_ref(),
+                hints.object().get::<vt::Value>()?.as_ref(),
                 Some(value),
                 "{path} {label}"
             );
         }
 
-        let current = hints.object().get::<sdf::Value>()?;
+        let current = hints.object().get::<vt::Value>()?;
         assert!(!hints.apply_value_label("non-existent")?);
-        assert_eq!(hints.object().get::<sdf::Value>()?, current);
+        assert_eq!(hints.object().get::<vt::Value>()?, current);
     }
     Ok(())
 }
@@ -538,7 +538,7 @@ fn value_label_mismatch() -> Result<(), SchemaError> {
         .attribute_builder("count", "int")
         .set(3)
         .build()?;
-    let hints = Hints::new(attr).set_value_labels(dict([("bad", sdf::Value::from("three"))]))?;
+    let hints = Hints::new(attr).set_value_labels(dict([("bad", vt::Value::from("three"))]))?;
     assert!(hints.apply_value_label("bad").is_err());
     assert_eq!(hints.object().get::<i32>()?, Some(3));
     Ok(())

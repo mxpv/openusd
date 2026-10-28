@@ -21,8 +21,9 @@
 use std::collections::HashMap;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, Path, Specifier, Value};
+use crate::sdf::{self, Path, Specifier};
 use crate::tf;
+use crate::vt::Value;
 
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;

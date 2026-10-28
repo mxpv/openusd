@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use crate::usd::{Attribute, Prim, PrimPredicate, SpecSite, Stage};
-use crate::{Result, sdf, tf};
+use crate::{Result, sdf, tf, vt};
 
 /// Fields flattening does not copy.
 ///
@@ -152,7 +152,7 @@ fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Toke
                 data.set_field(
                     &path,
                     sdf::FieldKey::TimeSamples.as_str(),
-                    sdf::Value::TimeSamples(samples),
+                    vt::Value::TimeSamples(samples),
                 );
             }
             // Connections are composed paths on the flattened stage, so they
@@ -185,7 +185,7 @@ fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Toke
 
 /// The stage metadata a standalone layer still carries: what the pseudo-root
 /// holds, less the fields that describe the layer stack it came from.
-fn stage_fields(stage: &Stage) -> Result<Vec<(String, sdf::Value)>> {
+fn stage_fields(stage: &Stage) -> Result<Vec<(String, vt::Value)>> {
     let root = sdf::Path::abs_root();
     let sites: Vec<SpecSite> = stage
         .layer_stack()
@@ -210,7 +210,7 @@ fn spec_fields(
     path: &sdf::Path,
     sites: &[SpecSite],
     also_dropped: &[sdf::FieldKey],
-) -> Result<Vec<(String, sdf::Value)>> {
+) -> Result<Vec<(String, vt::Value)>> {
     let mut names = BTreeSet::new();
     for site in sites {
         let Some(layer) = stage.layer(&site.layer) else {
@@ -224,7 +224,7 @@ fn spec_fields(
         if !copied(&name, also_dropped) {
             continue;
         }
-        if let Some(value) = stage.field::<sdf::Value>(path, &name)? {
+        if let Some(value) = stage.field::<vt::Value>(path, &name)? {
             fields.push((name, bake_asset_paths(value)));
         }
     }
@@ -234,7 +234,7 @@ fn spec_fields(
 /// What an attribute holds, as the one site that answers for it.
 #[derive(Default)]
 struct Held {
-    default: Option<sdf::Value>,
+    default: Option<vt::Value>,
     samples: Option<sdf::TimeSampleMap>,
 }
 
@@ -279,7 +279,7 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite]) -> Result<Held
         .find(|site| holds(stage, site, sdf::FieldKey::Default))
         .and_then(|site| authored(stage, site, sdf::FieldKey::Default))
     {
-        Some(raw) => Some(attribute.get::<sdf::Value>()?.map_or(raw, bake_asset_paths)),
+        Some(raw) => Some(attribute.get::<vt::Value>()?.map_or(raw, bake_asset_paths)),
         None => None,
     };
 
@@ -298,7 +298,7 @@ fn resolve_samples(attribute: &Attribute, samples: &mut sdf::TimeSampleMap) -> R
     }
     let query = attribute.query();
     for (time, value) in samples {
-        if let Some(resolved) = query.get_at::<sdf::Value>(super::TimeCode::from(*time))? {
+        if let Some(resolved) = query.get_at::<vt::Value>(super::TimeCode::from(*time))? {
             *value = bake_asset_paths(resolved);
         }
     }
@@ -314,7 +314,7 @@ fn holds(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> bool {
 }
 
 /// One field as a single site authored it.
-fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<sdf::Value> {
+fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Value> {
     let layer = stage.layer(&site.layer)?;
     let value = layer.data().try_field(&site.path, key.as_str()).ok()??;
     Some(value.into_owned())
@@ -331,7 +331,7 @@ fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<sdf::V
 // — `is_asset_valued` says so — so a relative path inside `customData` reaches
 // here unresolved and stays that way, losing the directory it was authored
 // against. C++ anchors those too, over every value it copies.
-fn bake_asset_paths(value: sdf::Value) -> sdf::Value {
+fn bake_asset_paths(value: vt::Value) -> vt::Value {
     value.map_asset_paths(
         &mut |asset| match asset.resolved_path().or_else(|| asset.evaluated_path()) {
             Some(resolved) => sdf::AssetPath::with_resolved_path(resolved, resolved),
@@ -349,7 +349,7 @@ fn copied(name: &str, also_dropped: &[sdf::FieldKey]) -> bool {
 }
 
 /// Writes every field composition left on a spec.
-fn write_fields(data: &mut dyn sdf::AbstractData, path: &sdf::Path, fields: Vec<(String, sdf::Value)>) {
+fn write_fields(data: &mut dyn sdf::AbstractData, path: &sdf::Path, fields: Vec<(String, vt::Value)>) {
     for (key, value) in fields {
         data.set_field(path, &key, value);
     }
@@ -397,7 +397,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.size").expect("path"),
                 "default",
-                sdf::Value::Double(size),
+                vt::Value::Double(size),
             );
         })
     }
@@ -416,13 +416,9 @@ mod tests {
             .attribute("/Prim.size")
             .expect("a path")
             .expect("the attribute")
-            .get::<sdf::Value>("default")
+            .get::<vt::Value>("default")
             .expect("a default");
-        assert_eq!(
-            value,
-            sdf::Value::Double(2.0),
-            "the weaker layer is not consulted again"
-        );
+        assert_eq!(value, vt::Value::Double(2.0), "the weaker layer is not consulted again");
     }
 
     /// An arc is resolved, not copied: what it contributed is written where it
@@ -442,7 +438,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Class.color").expect("path"),
                 "default",
-                sdf::Value::Double(7.0),
+                vt::Value::Double(7.0),
             );
 
             sdf::PrimSpec::new(data, "/Prim", sdf::Specifier::Def, "").expect("prim");
@@ -450,7 +446,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim").expect("path"),
                 sdf::FieldKey::InheritPaths.as_str(),
-                sdf::Value::PathListOp(inherits),
+                vt::Value::PathListOp(inherits),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -465,8 +461,8 @@ mod tests {
             .attribute("/Prim.color")
             .expect("a path")
             .expect("the inherited attribute is written where it landed")
-            .get::<sdf::Value>("default");
-        assert_eq!(value, Some(sdf::Value::Double(7.0)));
+            .get::<vt::Value>("default");
+        assert_eq!(value, Some(vt::Value::Double(7.0)));
     }
 
     /// A relationship keeps its composed targets.
@@ -480,7 +476,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.rel").expect("path"),
                 sdf::FieldKey::TargetPaths.as_str(),
-                sdf::Value::PathListOp(targets),
+                vt::Value::PathListOp(targets),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -541,7 +537,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Schema.size").expect("path"),
                 "default",
-                sdf::Value::Double(3.0),
+                vt::Value::Double(3.0),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -554,8 +550,8 @@ mod tests {
                 .attribute("/Schema.size")
                 .expect("a path")
                 .expect("its attribute")
-                .get::<sdf::Value>("default"),
-            Some(sdf::Value::Double(3.0))
+                .get::<vt::Value>("default"),
+            Some(vt::Value::Double(3.0))
         );
     }
 
@@ -573,7 +569,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.sink").expect("path"),
                 sdf::FieldKey::ConnectionPaths.as_str(),
-                sdf::Value::PathListOp(connections),
+                vt::Value::PathListOp(connections),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -614,7 +610,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.file").expect("path"),
                 "default",
-                sdf::Value::AssetPath(sdf::AssetPath::new("./texture.png")),
+                vt::Value::AssetPath(sdf::AssetPath::new("./texture.png")),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -624,9 +620,9 @@ mod tests {
             .attribute("/Prim.file")
             .expect("a path")
             .expect("the attribute")
-            .get::<sdf::Value>("default")
+            .get::<vt::Value>("default")
             .expect("a default");
-        let sdf::Value::AssetPath(asset) = value else {
+        let vt::Value::AssetPath(asset) = value else {
             panic!("an asset value");
         };
         assert!(
@@ -654,9 +650,9 @@ mod tests {
             )
             .expect("attribute");
             let path = sdf::Path::new("/Prim.size").expect("path");
-            data.set_field(&path, "default", sdf::Value::Double(1.0));
-            let samples: sdf::TimeSampleMap = vec![(0.0, sdf::Value::ValueBlock)];
-            data.set_field(&path, "timeSamples", sdf::Value::TimeSamples(samples));
+            data.set_field(&path, "default", vt::Value::Double(1.0));
+            let samples: sdf::TimeSampleMap = vec![(0.0, vt::Value::ValueBlock)];
+            data.set_field(&path, "timeSamples", vt::Value::TimeSamples(samples));
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
 
@@ -690,11 +686,11 @@ mod tests {
                 false,
             )
             .expect("attribute");
-            let samples: sdf::TimeSampleMap = vec![(0.0, sdf::Value::AssetPath(sdf::AssetPath::new("./texture.png")))];
+            let samples: sdf::TimeSampleMap = vec![(0.0, vt::Value::AssetPath(sdf::AssetPath::new("./texture.png")))];
             data.set_field(
                 &sdf::Path::new("/Prim.file").expect("path"),
                 "timeSamples",
-                sdf::Value::TimeSamples(samples),
+                vt::Value::TimeSamples(samples),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -706,7 +702,7 @@ mod tests {
             .expect("the attribute")
             .get::<sdf::TimeSampleMap>("timeSamples")
             .expect("samples");
-        let sdf::Value::AssetPath(asset) = &samples[0].1 else {
+        let vt::Value::AssetPath(asset) = &samples[0].1 else {
             panic!("an asset sample");
         };
         assert!(
@@ -723,7 +719,7 @@ mod tests {
             data.set_field(
                 &sdf::Path::abs_root(),
                 sdf::FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".to_owned()]),
+                vt::Value::StringVec(vec!["sub.usda".to_owned()]),
             );
             root(data);
         });
@@ -731,7 +727,7 @@ mod tests {
     }
 
     /// Declares `/Prim.size` and authors `field` on it.
-    fn size_opinion(field: &'static str, value: sdf::Value) -> impl FnOnce(&mut dyn sdf::AbstractData) {
+    fn size_opinion(field: &'static str, value: vt::Value) -> impl FnOnce(&mut dyn sdf::AbstractData) {
         move |data: &mut dyn sdf::AbstractData| {
             sdf::PrimSpec::new(data, "/Prim", sdf::Specifier::Def, "").expect("prim");
             sdf::AttributeSpec::new(
@@ -755,10 +751,10 @@ mod tests {
     #[test]
     fn both_value_opinions_answer() {
         let hidden = stack(
-            size_opinion("default", sdf::Value::Double(1.0)),
+            size_opinion("default", vt::Value::Double(1.0)),
             size_opinion(
                 "timeSamples",
-                sdf::Value::TimeSamples(vec![(0.0, sdf::Value::Double(9.0))]),
+                vt::Value::TimeSamples(vec![(0.0, vt::Value::Double(9.0))]),
             ),
         );
         let flattened = hidden.flatten().expect("flattens");
@@ -777,9 +773,9 @@ mod tests {
         let both = stack(
             size_opinion(
                 "timeSamples",
-                sdf::Value::TimeSamples(vec![(0.0, sdf::Value::Double(9.0))]),
+                vt::Value::TimeSamples(vec![(0.0, vt::Value::Double(9.0))]),
             ),
-            size_opinion("default", sdf::Value::Double(1.0)),
+            size_opinion("default", vt::Value::Double(1.0)),
         );
         let flattened = both.flatten().expect("flattens");
         let reopened = Stage::builder().make_stage(vec![flattened], 0, pcp::Diagnostics::default());
@@ -813,19 +809,19 @@ mod tests {
             data.set_field(
                 &sdf::Path::new("/Prim.frame").expect("path"),
                 "default",
-                sdf::Value::TimeCode(sdf::TimeCode::from(1.0)),
+                vt::Value::TimeCode(sdf::TimeCode::from(1.0)),
             );
         });
         let root = layer("root.usda", |data| {
             data.set_field(
                 &sdf::Path::abs_root(),
                 sdf::FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".to_owned()]),
+                vt::Value::StringVec(vec!["sub.usda".to_owned()]),
             );
             data.set_field(
                 &sdf::Path::abs_root(),
                 sdf::FieldKey::SubLayerOffsets.as_str(),
-                sdf::Value::LayerOffsetVec(vec![sdf::LayerOffset::new(10.0, 1.0)]),
+                vt::Value::LayerOffsetVec(vec![sdf::LayerOffset::new(10.0, 1.0)]),
             );
         });
         let stage = Stage::builder().make_stage(vec![root, sublayer], 0, pcp::Diagnostics::default());

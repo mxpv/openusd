@@ -1,6 +1,7 @@
 use strum::VariantArray;
 
-use super::{ValueKind, ValueTypeName};
+use super::ValueTypeName;
+use crate::vt::ValueKind;
 
 /// The following fields are pre-registered by Sdf.
 ///
@@ -376,8 +377,8 @@ fn schema_field_spelling(name: &str) -> Option<&'static str> {
 ///
 /// C++ separates `std::vector<T>` from `VtArray<T>`: `subLayers` is a vector
 /// of strings, while a `string[]` attribute's value is an array of them.
-/// [`Value::TokenVec`](super::Value::TokenVec) and
-/// [`Value::StringVec`](super::Value::StringVec) carry both, so a format that
+/// [`Value::TokenVec`](crate::vt::Value::TokenVec) and
+/// [`Value::StringVec`](crate::vt::Value::StringVec) carry both, so a format that
 /// encodes them differently has to ask the field which it is looking at.
 ///
 /// These are the fields `SdfSchema` registers with a `std::vector` fallback

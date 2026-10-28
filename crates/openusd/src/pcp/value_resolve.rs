@@ -15,7 +15,7 @@ use std::borrow::Cow;
 
 use strum::EnumTryAs;
 
-use crate::sdf;
+use crate::{sdf, vt};
 
 use super::QueryError;
 use super::asset_resolve::AssetSite;
@@ -127,10 +127,10 @@ pub(crate) enum SampleField<'a> {
 
 impl<'a> SampleField<'a> {
     /// Reads a `timeSamples` field's authored value.
-    pub(crate) fn classify(value: &'a sdf::Value) -> Self {
+    pub(crate) fn classify(value: &'a vt::Value) -> Self {
         match value {
-            sdf::Value::TimeSamples(samples) if !samples.is_empty() => Self::Map(samples),
-            sdf::Value::ValueBlock | sdf::Value::None => Self::Blocked,
+            vt::Value::TimeSamples(samples) if !samples.is_empty() => Self::Map(samples),
+            vt::Value::ValueBlock | vt::Value::None => Self::Blocked,
             _ => Self::Unusable,
         }
     }
@@ -144,7 +144,7 @@ impl<'a> SampleField<'a> {
 pub(crate) enum TimedValue {
     /// The value the authored sources composed, which may still be open to a
     /// weaker one.
-    Value(sdf::Value),
+    Value(vt::Value),
     /// A time-varying source answers at this time without supplying a value:
     /// a blocked sample, or a clip set that owns the property. C++
     /// `UsdAttribute::Get` fails there, and the fallback does not answer.
@@ -264,8 +264,8 @@ pub(crate) fn samples_supply_any_value(samples: &sdf::TimeSampleMap) -> bool {
 }
 
 /// Whether a value is one of the two spec sentinels for "no value".
-pub(crate) fn is_block(value: &sdf::Value) -> bool {
-    matches!(value, sdf::Value::ValueBlock | sdf::Value::None)
+pub(crate) fn is_block(value: &vt::Value) -> bool {
+    matches!(value, vt::Value::ValueBlock | vt::Value::None)
 }
 
 /// An owned, alias-free record of the composition node an opinion came from
@@ -435,7 +435,7 @@ pub(crate) enum ClipAnswer {
     /// all the same, so nothing weaker contributes.
     Blocked,
     /// The set supplied a value.
-    Value(sdf::Value),
+    Value(vt::Value),
 }
 
 impl ClipAnswer {
@@ -454,7 +454,7 @@ impl ClipAnswer {
     }
 
     /// The value the set supplied, if any.
-    pub(crate) fn into_value(self) -> Option<sdf::Value> {
+    pub(crate) fn into_value(self) -> Option<vt::Value> {
         match self {
             Self::Value(value) => Some(value),
             Self::Absent | Self::Blocked => None,
@@ -468,7 +468,7 @@ impl ClipProbe<'_> {
     pub(crate) fn answer_at(
         &mut self,
         time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<sdf::Value>,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<vt::Value>,
     ) -> Result<ClipAnswer, QueryError> {
         match self
             .cache
@@ -541,7 +541,7 @@ pub(crate) trait OpinionResolver {
     /// A `default` opinion at this site, in the layer's own time frame. Owned
     /// where the backend decoded it for this read, so a resolver that keeps
     /// the value takes it rather than copying it.
-    fn on_default(&mut self, _value: Cow<'_, sdf::Value>, _site: &OpinionSite<'_>) -> Step {
+    fn on_default(&mut self, _value: Cow<'_, vt::Value>, _site: &OpinionSite<'_>) -> Step {
         Step::Continue
     }
 

@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 
-use openusd::{sdf, tf, usd, usda};
+use openusd::{sdf, tf, usd, usda, vt};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
@@ -488,7 +488,7 @@ fn lower_metadata(model: &Library, by_value: &BTreeMap<&str, &Ident>) -> Result<
                     .type_name
                     .kind()
                     .and_then(types::rust_type)
-                    .unwrap_or_else(|| syn::parse_quote! { ::openusd::sdf::Value }),
+                    .unwrap_or_else(|| syn::parse_quote! { ::openusd::vt::Value }),
                 documentation,
             });
         }
@@ -621,7 +621,7 @@ fn lower_enum(
     if declared.default {
         let fallback = property
             .fallback()
-            .and_then(sdf::Value::try_as_token_ref)
+            .and_then(vt::Value::try_as_token_ref)
             .ok_or_else(|| TokenEnumError::NoFallback {
                 class: class_name.to_owned(),
                 property: property_name.to_owned(),

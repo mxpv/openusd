@@ -22,12 +22,12 @@ use std::io;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use crate::ar;
 use crate::sdf::{self, expr};
 use crate::tf;
 use crate::usda::UsdaFileFormat;
 use crate::usdc::UsdcFileFormat;
 use crate::usdz::UsdzFileFormat;
+use crate::{ar, vt};
 
 static USDA: UsdaFileFormat = UsdaFileFormat;
 static USDC: UsdcFileFormat = UsdcFileFormat;
@@ -492,7 +492,7 @@ impl LayerRegistry {
     pub(crate) fn open_stack(
         &self,
         identifier: &str,
-        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        ancestor_expr_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
@@ -510,7 +510,7 @@ impl LayerRegistry {
     pub(crate) fn open_prepared_stack(
         &self,
         root: PreparedLayer,
-        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        ancestor_expr_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
@@ -558,7 +558,7 @@ impl LayerRegistry {
     pub(crate) fn open_sublayer_tree(
         &self,
         identifier: &str,
-        stack_vars: &HashMap<String, sdf::Value>,
+        stack_vars: &HashMap<String, vt::Value>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
         let Some(layer) = self.open(identifier)? else {
@@ -617,7 +617,7 @@ impl LayerRegistry {
     fn open_sublayers(
         &self,
         layer: PreparedLayer,
-        stack_vars: &HashMap<String, sdf::Value>,
+        stack_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
@@ -783,7 +783,7 @@ pub(crate) mod tests {
         registry: &LayerRegistry,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
-        ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        ancestor_expr_vars: &HashMap<String, vt::Value>,
         layers: &mut Vec<sdf::Layer>,
         visited: &mut HashSet<String>,
     ) -> Result<(), LoadError> {
@@ -828,7 +828,7 @@ pub(crate) mod tests {
                 continue;
             }
             if let Some(value) = data.try_field(&path, sdf::FieldKey::References.as_str())?
-                && let sdf::Value::ReferenceListOp(list_op) = value.as_ref()
+                && let vt::Value::ReferenceListOp(list_op) = value.as_ref()
             {
                 deps.extend(
                     list_op
@@ -839,8 +839,8 @@ pub(crate) mod tests {
             }
             if let Some(value) = data.try_field(&path, sdf::FieldKey::Payload.as_str())? {
                 match value.as_ref() {
-                    sdf::Value::Payload(p) if !p.asset_path.is_empty() => deps.push(p.asset_path.clone()),
-                    sdf::Value::PayloadListOp(list_op) => {
+                    vt::Value::Payload(p) if !p.asset_path.is_empty() => deps.push(p.asset_path.clone()),
+                    vt::Value::PayloadListOp(list_op) => {
                         deps.extend(
                             list_op
                                 .iter()
@@ -852,7 +852,7 @@ pub(crate) mod tests {
                 }
             }
             if let Some(value) = data.try_field(&path, sdf::ChildrenKey::PrimChildren.as_str())?
-                && let sdf::Value::TokenVec(children) = value.into_owned()
+                && let vt::Value::TokenVec(children) = value.into_owned()
             {
                 for name in children.iter().rev() {
                     if let Ok(child) = path.append_path(name.as_str()) {
@@ -861,7 +861,7 @@ pub(crate) mod tests {
                 }
             }
             if let Some(value) = data.try_field(&path, sdf::ChildrenKey::VariantSetChildren.as_str())?
-                && let sdf::Value::TokenVec(set_names) = value.into_owned()
+                && let vt::Value::TokenVec(set_names) = value.into_owned()
             {
                 for set_name in &set_names {
                     // An invalid authored set or variant name cannot address
@@ -870,7 +870,7 @@ pub(crate) mod tests {
                         continue;
                     };
                     if let Some(value) = data.try_field(&set_path, sdf::ChildrenKey::VariantChildren.as_str())?
-                        && let sdf::Value::TokenVec(variant_names) = value.into_owned()
+                        && let vt::Value::TokenVec(variant_names) = value.into_owned()
                     {
                         for variant_name in &variant_names {
                             if let Ok(variant_path) = path.append_variant_selection(set_name, variant_name) {

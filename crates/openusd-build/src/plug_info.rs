@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use openusd::{kind, sdf, tf, usd};
+use openusd::{kind, sdf, tf, usd, vt};
 use serde_json::Value as Json;
 
 use crate::error::Error;
@@ -159,9 +159,9 @@ fn field(name: &str, declaration: &Json) -> Result<MetadataField, String> {
 /// text format, so a default decodes exactly as one authored in a layer would:
 /// a list is an array at the top of an array type and a tuple everywhere else,
 /// so `[0, 1, 0]` is a `double3` and `[[0, 1, 0]]` a `double3[]`.
-fn default_value(type_name: &sdf::ValueTypeName, default: &Json) -> Result<sdf::Value, String> {
+fn default_value(type_name: &sdf::ValueTypeName, default: &Json) -> Result<vt::Value, String> {
     let kind = type_name.kind().ok_or_else(|| "its type takes no default".to_owned())?;
-    let asset = matches!(kind, sdf::ValueKind::AssetPath | sdf::ValueKind::AssetPathVec);
+    let asset = matches!(kind, vt::ValueKind::AssetPath | vt::ValueKind::AssetPathVec);
     let mut literal = String::new();
     spell(default, kind.element_kind().is_some(), asset, &mut literal)?;
 
@@ -294,7 +294,7 @@ mod tests {
 
         let connectability = field("connectability");
         assert_eq!(connectability.applies_to, usd::MetadataTargets::ATTRIBUTES);
-        assert_eq!(connectability.fallback, Some(sdf::Value::token("full")));
+        assert_eq!(connectability.fallback, Some(vt::Value::token("full")));
         assert_eq!(
             connectability.documentation.as_deref(),
             Some("What an input connects to.")
@@ -302,7 +302,7 @@ mod tests {
 
         assert_eq!(
             field("weight").fallback,
-            Some(sdf::Value::Float(0.0)),
+            Some(vt::Value::Float(0.0)),
             "an integer default widens"
         );
         assert_eq!(field("settingsPath").applies_to, usd::MetadataTargets::LAYERS);
@@ -327,28 +327,25 @@ mod tests {
             let plugins = fields(&text).unwrap_or_else(|error| panic!("{ty}: {error}"));
             plugins[0].fields[0].fallback.clone().expect("a default")
         };
-        assert_eq!(
-            declared("double[]", "[0.0, 1.0]"),
-            sdf::Value::DoubleVec(vec![0.0, 1.0])
-        );
-        assert_eq!(declared("float[]", "[0, 1]"), sdf::Value::FloatVec(vec![0.0, 1.0]));
-        assert_eq!(declared("token[]", r#"["a", "b"]"#), sdf::Value::token_vec(["a", "b"]));
+        assert_eq!(declared("double[]", "[0.0, 1.0]"), vt::Value::DoubleVec(vec![0.0, 1.0]));
+        assert_eq!(declared("float[]", "[0, 1]"), vt::Value::FloatVec(vec![0.0, 1.0]));
+        assert_eq!(declared("token[]", r#"["a", "b"]"#), vt::Value::token_vec(["a", "b"]));
         assert_eq!(
             declared("double3", "[0, 1, 0]"),
-            sdf::Value::Vec3d(gf::vec3d(0.0, 1.0, 0.0))
+            vt::Value::Vec3d(gf::vec3d(0.0, 1.0, 0.0))
         );
         assert_eq!(
             declared("float3[]", "[[0, 1, 0], [1, 0, 0]]"),
-            sdf::Value::Vec3fVec(vec![gf::vec3f(0.0, 1.0, 0.0), gf::vec3f(1.0, 0.0, 0.0)])
+            vt::Value::Vec3fVec(vec![gf::vec3f(0.0, 1.0, 0.0), gf::vec3f(1.0, 0.0, 0.0)])
         );
         assert_eq!(
             declared("asset", r#""./a.png""#),
-            sdf::Value::AssetPath("./a.png".into())
+            vt::Value::AssetPath("./a.png".into())
         );
-        assert_eq!(declared("bool", "true"), sdf::Value::Bool(true));
+        assert_eq!(declared("bool", "true"), vt::Value::Bool(true));
         assert_eq!(
             declared("string", r#""say \"hi\"""#),
-            sdf::Value::String("say \"hi\"".to_owned())
+            vt::Value::String("say \"hi\"".to_owned())
         );
     }
 

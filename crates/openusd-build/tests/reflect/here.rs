@@ -54,7 +54,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::sdf::Value::Double(1f64),
+                                    || ::openusd::vt::Value::Double(1f64),
                                 ),
                             ],
                         ),

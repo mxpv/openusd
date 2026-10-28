@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -8,7 +7,11 @@ use strum::{Display, EnumDiscriminants, EnumIs, EnumIter, EnumTryAs, IntoStaticS
 use crate::gf;
 use crate::tf::Token;
 
-use super::*;
+use crate::sdf::{
+    AssetPath, Int64ListOp, IntListOp, LayerOffset, Path, PathExpression, PathListOp, Payload, PayloadListOp,
+    Permission, ReferenceListOp, RelocateList, Specifier, StringListOp, TimeCode, TimeSampleMap, TokenListOp,
+    Uint64ListOp, UintListOp, Variability,
+};
 
 /// A type-erased container for scene description data loaded from a USD file.
 ///
@@ -31,7 +34,7 @@ use super::*;
     derive(Hash, Display, IntoStaticStr, EnumIter),
     doc = "The variant a [`Value`] holds, without its payload — the Rust analog of the C++ type a `VtValue` \
            carries. One kind per variant, so a scene-description value type (`float3`, `float3[]`) maps to \
-           exactly one kind, which [`ValueTypeName::kind`](super::ValueTypeName::kind) names. Generated from \
+           exactly one kind, which [`ValueTypeName::kind`](crate::sdf::ValueTypeName::kind) names. Generated from \
            [`Value`] by strum, so the two can never disagree; `ValueKind::from(&value)` reads a value's kind."
 )]
 pub enum Value {
@@ -145,7 +148,7 @@ pub enum Value {
     Relocates(RelocateList),
     VariantSelectionMap(HashMap<String, String>),
     /// A sample map, ordered as a
-    /// [`TimeSampleMap`](super::TimeSampleMap) is.
+    /// [`TimeSampleMap`](TimeSampleMap) is.
     TimeSamples(TimeSampleMap),
 
     LayerOffsetVec(Vec<LayerOffset>),
@@ -173,8 +176,8 @@ pub enum Value {
 
     TimeCode(TimeCode),
     TimeCodeVec(Vec<TimeCode>),
-    PathExpression(super::PathExpression),
-    PathExpressionVec(Vec<super::PathExpression>),
+    PathExpression(PathExpression),
+    PathExpressionVec(Vec<PathExpression>),
 }
 
 #[cfg(feature = "serde")]
@@ -349,224 +352,6 @@ impl Value {
             value => value.attribute_array_len(),
         }
     }
-
-    /// Whether this value carries `asset` paths, and so needs anchoring and
-    /// expression evaluation before it is handed to a reader.
-    ///
-    /// The single source of truth for the asset-bearing variants, so a value
-    /// resolver and its callers cannot disagree about which values to resolve.
-    /// Asset paths nested inside a dictionary are not counted: resolution does
-    /// not recurse into one. The one dictionary whose asset paths are reached is
-    /// `clips`, which `pcp` walks field by field with the schema in hand rather
-    /// than by recursion — see `PrimIndex::resolve_clip_sets`.
-    pub fn is_asset_valued(&self) -> bool {
-        matches!(self, Value::AssetPath(_) | Value::AssetPathVec(_))
-    }
-
-    /// This value read as a path expression, or `None` for a kind that is not
-    /// one. Borrowed where the value already is one, parsed where it spells
-    /// one.
-    ///
-    /// A `string` or `token` parses leniently into the expression it spells,
-    /// which is what lets a collection be read from a layer no schema declared
-    /// the property in — and what value resolution composes such an opinion
-    /// as. The single source of truth for that reading, so a read and a
-    /// composition cannot disagree about which opinions are expressions.
-    pub fn as_path_expression(&self) -> Option<Cow<'_, PathExpression>> {
-        match self {
-            Value::PathExpression(expr) => Some(Cow::Borrowed(expr)),
-            Value::String(text) => Some(Cow::Owned(PathExpression::parse(text))),
-            Value::Token(text) => Some(Cow::Owned(PathExpression::parse(text.as_str()))),
-            _ => None,
-        }
-    }
-
-    /// [`as_path_expression`](Self::as_path_expression) taking ownership, which
-    /// the expression a value already holds is handed over for.
-    pub fn into_path_expression(self) -> Option<PathExpression> {
-        match self {
-            Value::PathExpression(expr) => Some(expr),
-            other => other.as_path_expression().map(Cow::into_owned),
-        }
-    }
-
-    /// Whether this value holds a time coordinate that
-    /// [`LayerOffset::apply_to_value`](super::LayerOffset::apply_to_value)
-    /// retimes: a `timecode` at any depth — including inside a dictionary or a
-    /// heterogeneous array — or a sample map, whose keys are times whatever the
-    /// samples themselves hold.
-    ///
-    /// The single source of truth for the time-bearing variants, so the
-    /// retiming and the callers that decide whether to pay for it cannot
-    /// disagree. Checking it lets a borrowed value skip the clone a retiming
-    /// would need.
-    pub fn holds_time_codes(&self) -> bool {
-        match self {
-            Value::TimeCode(_) | Value::TimeCodeVec(_) | Value::TimeSamples(_) => true,
-            Value::Dictionary(entries) => entries.values().any(Value::holds_time_codes),
-            Value::ValueVec(values) => values.iter().any(Value::holds_time_codes),
-            _ => false,
-        }
-    }
-
-    /// Whether this value embeds a path expression that authoring anchors and
-    /// maps through [`map_path_expressions`](Self::map_path_expressions): a
-    /// `PathExpression` or `PathExpressionVec` at any depth that traversal
-    /// reaches. Checking it lets the common write skip the anchor path and
-    /// the walk.
-    pub fn holds_path_expressions(&self) -> bool {
-        match self {
-            Value::PathExpression(_) | Value::PathExpressionVec(_) => true,
-            Value::Dictionary(entries) => entries.values().any(Value::holds_path_expressions),
-            Value::ValueVec(values) => values.iter().any(Value::holds_path_expressions),
-            Value::TimeSamples(samples) => samples.iter().any(|(_, value)| value.holds_path_expressions()),
-            _ => false,
-        }
-    }
-
-    /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
-    /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
-    /// connections, `inheritPaths`, `specializes`), `Relocates`,
-    /// `ReferenceListOp` / `PayloadListOp` (whose internal entries target this
-    /// layer's own namespace), and `PathExpression` / `PathExpressionVec`
-    /// (pattern prefixes and expression-reference paths). The single source of
-    /// truth a copy value policy checks before remapping, so the set of
-    /// path-bearing variants lives only here.
-    pub fn has_embedded_paths(&self) -> bool {
-        matches!(
-            self,
-            Value::PathVec(_)
-                | Value::PathListOp(_)
-                | Value::Relocates(_)
-                | Value::ReferenceListOp(_)
-                | Value::PayloadListOp(_)
-                | Value::PathExpression(_)
-                | Value::PathExpressionVec(_)
-        )
-    }
-
-    /// Returns this value with every path expression it holds rewritten
-    /// through `f`: a `PathExpression` or `PathExpressionVec` itself, and any
-    /// nested inside a dictionary, a heterogeneous array, or a time-sample map
-    /// (the reach of C++ `VtValueTryTransform`). List ops, references,
-    /// payloads and relocates are left alone: authoring never transforms them,
-    /// only [`remap_paths`](Self::remap_paths) does, for copies.
-    pub fn map_path_expressions(self, f: &mut impl FnMut(super::PathExpression) -> super::PathExpression) -> Value {
-        match self {
-            Value::PathExpression(expr) => Value::PathExpression(f(expr)),
-            Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(f).collect()),
-            Value::Dictionary(entries) => Value::Dictionary(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, value.map_path_expressions(f)))
-                    .collect(),
-            ),
-            Value::ValueVec(values) => {
-                Value::ValueVec(values.into_iter().map(|value| value.map_path_expressions(f)).collect())
-            }
-            Value::TimeSamples(samples) => Value::TimeSamples(
-                samples
-                    .into_iter()
-                    .map(|(time, value)| (time, value.map_path_expressions(f)))
-                    .collect(),
-            ),
-            other => other,
-        }
-    }
-
-    /// Returns this value with every `asset` path it holds rewritten through
-    /// `f`: an `AssetPath` or `AssetPathVec` itself, and any nested inside a
-    /// dictionary, a heterogeneous array, or a time-sample map — the same
-    /// reach as [`map_path_expressions`](Self::map_path_expressions).
-    ///
-    /// That reach is wider than [`is_asset_valued`](Self::is_asset_valued)
-    /// admits, which counts only the two top-level forms because resolution
-    /// does not recurse. A caller rewriting paths rather than resolving them
-    /// wants the nested ones too, which is what flattening a stage needs.
-    pub fn map_asset_paths(self, f: &mut impl FnMut(super::AssetPath) -> super::AssetPath) -> Value {
-        match self {
-            Value::AssetPath(asset) => Value::AssetPath(f(asset)),
-            Value::AssetPathVec(assets) => Value::AssetPathVec(assets.into_iter().map(&mut *f).collect()),
-            Value::Dictionary(entries) => Value::Dictionary(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, value.map_asset_paths(f)))
-                    .collect(),
-            ),
-            Value::ValueVec(values) => {
-                Value::ValueVec(values.into_iter().map(|value| value.map_asset_paths(f)).collect())
-            }
-            Value::TimeSamples(samples) => Value::TimeSamples(
-                samples
-                    .into_iter()
-                    .map(|(time, value)| (time, value.map_asset_paths(f)))
-                    .collect(),
-            ),
-            other => other,
-        }
-    }
-
-    /// Returns a copy of this value with every embedded namespace path rewritten
-    /// through `remap`. Paths live in `PathVec`, `PathListOp` (relationship
-    /// targets, attribute connections, `inheritPaths`, `specializes`),
-    /// `Relocates` (source/target pairs), and the prim paths of internal
-    /// (same-layer) `ReferenceListOp` / `PayloadListOp` entries. An external
-    /// reference or payload carries its prim path in the referenced layer's
-    /// namespace, and an empty prim path is the defaultPrim selector — both
-    /// are left untouched; every other value kind is cloned unchanged.
-    ///
-    /// The path-rewriting core behind [`copy_spec`](crate::sdf::copy_spec),
-    /// exposed so callers building a custom copy value policy (flatten, namespace
-    /// editing, rename) can remap paths with their own mapping rather than the
-    /// default root-to-root prefix swap.
-    pub fn remap_paths(&self, remap: impl Fn(&Path) -> Path) -> Value {
-        self.filter_map_paths(|path| Some(remap(path)))
-    }
-
-    /// Returns a copy of this value with every embedded namespace path mapped
-    /// through `remap`, dropping any path it maps to `None`. The dropping form
-    /// of [`remap_paths`](Self::remap_paths): namespace-edit deletion fixup maps
-    /// the targets/connections/internal references that point at a removed object
-    /// to `None` so the entries vanish, while moves map to `Some(new_path)`.
-    ///
-    /// A `PathVec` element or list-op item that maps to `None` is removed. An
-    /// external reference or payload (whose prim path lives in the referenced
-    /// layer's namespace) is never offered to `remap` and is always kept; a
-    /// relocate pair is dropped when its source maps to `None`; a
-    /// `PathExpression` atom whose path maps to `None` collapses to the empty
-    /// expression.
-    pub fn filter_map_paths(&self, remap: impl Fn(&Path) -> Option<Path>) -> Value {
-        let remap = &remap;
-        match self {
-            Value::PathVec(paths) => Value::PathVec(paths.iter().filter_map(remap).collect()),
-            Value::PathListOp(op) => Value::PathListOp(op.clone().convert(|_, p| remap(&p))),
-            Value::Relocates(relocates) => Value::Relocates(
-                relocates
-                    .iter()
-                    // Drop a pair whose source maps away; a target that maps away
-                    // keeps its original (a relocate must keep both endpoints).
-                    .filter_map(|(s, t)| remap(s).map(|s| (s, remap(t).unwrap_or_else(|| t.clone()))))
-                    .collect(),
-            ),
-            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().convert(|_, mut reference| {
-                if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
-                    reference.prim_path = remap(&reference.prim_path)?;
-                }
-                Some(reference)
-            })),
-            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().convert(|_, mut payload| {
-                if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
-                    payload.prim_path = remap(&payload.prim_path)?;
-                }
-                Some(payload)
-            })),
-            Value::PathExpression(expr) => Value::PathExpression(expr.clone().map_paths(remap)),
-            Value::PathExpressionVec(exprs) => {
-                Value::PathExpressionVec(exprs.iter().map(|e| e.clone().map_paths(remap)).collect())
-            }
-            other => other.clone(),
-        }
-    }
 }
 
 // Exact extraction: owned conversions that move data out of `Value` without
@@ -622,7 +407,7 @@ impl_try_from_value!(f64, Double, "Double");
 impl_try_from_value!(u8, Uchar, "Uchar");
 impl_try_from_value!(f16, Half, "Half");
 impl_try_from_value!(TimeCode, TimeCode, "TimeCode");
-impl_try_from_value!(super::PathExpression, PathExpression, "PathExpression");
+impl_try_from_value!(PathExpression, PathExpression, "PathExpression");
 impl_try_from_value!(Specifier, Specifier, "Specifier");
 impl_try_from_value!(Variability, Variability, "Variability");
 impl_try_from_value!(ReferenceListOp, ReferenceListOp, "ReferenceListOp");
@@ -699,7 +484,7 @@ impl_try_from_value!(Vec<f16>, HalfVec, "HalfVec");
 impl_try_from_value!(Vec<f32>, FloatVec, "FloatVec");
 impl_try_from_value!(Vec<f64>, DoubleVec, "DoubleVec");
 impl_try_from_value!(Vec<TimeCode>, TimeCodeVec, "TimeCodeVec");
-impl_try_from_value!(Vec<super::PathExpression>, PathExpressionVec, "PathExpressionVec");
+impl_try_from_value!(Vec<PathExpression>, PathExpressionVec, "PathExpressionVec");
 
 // `gf` vector/quaternion variants as fixed-size arrays, via the type's `Into`.
 // Coercing across element precisions is [`Value::cast`]'s job.
@@ -883,7 +668,7 @@ pub trait FromValueCast: Sized {
 /// value that won.
 ///
 /// The crate's own decode types implement it, as do token enums through
-/// [`impl_token_value!`](crate::sdf::impl_token_value). A downstream type
+/// [`impl_token_value!`](crate::vt::impl_token_value). A downstream type
 /// implements it next to its `TryFrom<Value>`.
 pub trait FromValue: TryFrom<Value> {
     /// Whether this type accepts a value stored as `kind`.

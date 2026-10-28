@@ -26,7 +26,8 @@
 //! for a "blocked" sample.
 
 use crate::gf;
-use crate::sdf::{self, Value};
+use crate::sdf;
+use crate::vt::Value;
 
 /// Stage-level interpolation mode for time-sampled attributes.
 ///
@@ -135,7 +136,7 @@ fn clean(v: Value) -> Option<Value> {
 /// `t` is f64 throughout; f32-sample paths narrow once at the call
 /// site so we don't double-cast f64 → f32 → f64.
 fn lerp_value(a: &Value, b: &Value, t: f64) -> Option<Value> {
-    use crate::sdf::Value as V;
+    use crate::vt::Value as V;
     let t32 = t as f32;
     Some(match (a, b) {
         (V::Half(x), V::Half(y)) => V::Half(gf::lerp_half(*x, *y, t32)),

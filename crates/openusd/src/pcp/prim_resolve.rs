@@ -12,7 +12,8 @@ use rustc_hash::FxHashSet;
 
 use crate::gf;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
+use crate::sdf::{self, LayerOffset, Path, Specifier};
+use crate::vt::Value;
 
 use super::asset_resolve::{self, AssetSite};
 use super::clip;
@@ -1525,9 +1526,10 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
 mod tests {
     use super::*;
     use crate::tf;
+    use crate::vt;
 
     fn dict(key: &str) -> Value {
-        let mut d = sdf::Dictionary::new();
+        let mut d = vt::Dictionary::new();
         d.insert(key.to_string(), Value::Int(1));
         Value::Dictionary(d)
     }

@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::{fmt, mem};
 
-use crate::{pcp, sdf, tf};
+use crate::{pcp, sdf, tf, vt};
 
 use super::attribute::AttributeAuthoringPlan;
 use super::{
@@ -908,7 +908,7 @@ pub(super) enum PropertyWrite {
     /// planned for it.
     Attribute {
         value: AttributeWrite,
-        metadata: Vec<(&'static str, sdf::Value)>,
+        metadata: Vec<(&'static str, vt::Value)>,
     },
     /// A relationship declared, and its targets replaced where the caller gave
     /// some.
@@ -1025,7 +1025,7 @@ pub(super) fn update_metadata<P: PropertySpecKind>(
     stage: &Stage,
     path: &sdf::Path,
     key: &'static str,
-    f: impl FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+    f: impl FnOnce(Option<vt::Value>) -> Option<vt::Value>,
 ) -> Result<(), StageAuthoringError> {
     check_reserved(P::KIND, key)?;
     // Resolved before the transaction, consulted only when there is a value
@@ -1269,14 +1269,14 @@ pub(super) fn schema_definition(
 /// Everything a schema states about an object (a property's type and
 /// variability, the display metadata of either) lives on that declaration,
 /// whether or not any layer authors a spec.
-pub(super) fn schema_field(stage: &Stage, path: &sdf::Path, key: &str) -> Result<Option<sdf::Value>, pcp::QueryError> {
+pub(super) fn schema_field(stage: &Stage, path: &sdf::Path, key: &str) -> Result<Option<vt::Value>, pcp::QueryError> {
     let schema = stage.prim_type_info_composed(path.prim_path())?;
     Ok(schema_field_in(&schema, path, key))
 }
 
 /// [`schema_field`] read from `schema`, the schema of the prim `path` names
 /// or hangs off.
-pub(super) fn schema_field_in(schema: &PrimTypeInfo, path: &sdf::Path, key: &str) -> Option<sdf::Value> {
+pub(super) fn schema_field_in(schema: &PrimTypeInfo, path: &sdf::Path, key: &str) -> Option<vt::Value> {
     let name = path.split_property().map_or("", |(_, name)| name);
     let definition = schema.prim_definition();
     match name {
@@ -1293,17 +1293,17 @@ pub(super) fn schema_field_in(schema: &PrimTypeInfo, path: &sdf::Path, key: &str
 /// dictionary, or the schema's declaration where no layer authors the field.
 pub(super) fn metadata<T>(stage: &Stage, path: &sdf::Path, key: &str) -> crate::Result<Option<T>>
 where
-    T: TryFrom<sdf::Value>,
+    T: TryFrom<vt::Value>,
     T::Error: Into<crate::Error>,
 {
-    let authored = match stage.field::<sdf::Value>(path, key)? {
-        Some(sdf::Value::Dictionary(mut dict)) => {
+    let authored = match stage.field::<vt::Value>(path, key)? {
+        Some(vt::Value::Dictionary(mut dict)) => {
             // TODO(perf): this clones the declared dictionary on every read; a
             // borrowing compose would copy only the keys no layer authors.
-            if let Some(sdf::Value::Dictionary(declared)) = schema_field(stage, path, key)? {
+            if let Some(vt::Value::Dictionary(declared)) = schema_field(stage, path, key)? {
                 dict.over(declared);
             }
-            sdf::Value::Dictionary(dict)
+            vt::Value::Dictionary(dict)
         }
         Some(authored) => authored,
         // Schema metadata parses untyped, so a declaration may hold a variant
@@ -1536,6 +1536,7 @@ pub(super) fn missing_spec(path: &sdf::Path, kind: sdf::SpecType) -> StageAuthor
 mod tests {
     use crate::usd::stage::tests::{authored, scene, stage};
     use crate::usd::{EditTarget, Stage, StageAuthoringError, TimeCode, UndoStage};
+    use crate::vt;
     use crate::{Result, sdf, tf};
 
     /// An edit target on the same layer that maps `/World` into a variant, so
@@ -2303,9 +2304,9 @@ mod tests {
             stage.layer_mut(&root).expect("the root layer").edit(|layer| {
                 layer.pseudo_root_mut().expect("a pseudo-root").set(
                     "fallbackPrimTypes",
-                    sdf::Value::Dictionary(sdf::Dictionary::from([(
+                    vt::Value::Dictionary(vt::Dictionary::from([(
                         "MyLight".to_owned(),
-                        sdf::Value::token_vec(["DistantLight"]),
+                        vt::Value::token_vec(["DistantLight"]),
                     )])),
                 );
                 Ok(())

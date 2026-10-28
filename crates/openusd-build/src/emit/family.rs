@@ -12,7 +12,7 @@
 //! Rust model rather than from these declarations, so neither can reinterpret
 //! the other's half.
 
-use openusd::{sdf, tf, usd};
+use openusd::{tf, usd, vt};
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -189,16 +189,16 @@ fn field(schema: &str, field: &usd::Field<'_>) -> Result<TokenStream, Error> {
     let name = field.name();
     let value = field.value();
     Ok(match &value {
-        sdf::Value::String(text) => quote! { ::openusd::usd::Field::string(#name, #text) },
-        sdf::Value::StringVec(texts) => {
+        vt::Value::String(text) => quote! { ::openusd::usd::Field::string(#name, #text) },
+        vt::Value::StringVec(texts) => {
             let texts = texts.iter().map(String::as_str);
             quote! { ::openusd::usd::Field::strings(#name, &[#(#texts),*]) }
         }
-        sdf::Value::Token(token) => {
+        vt::Value::Token(token) => {
             let token = token.as_str();
             quote! { ::openusd::usd::Field::token(#name, #token) }
         }
-        sdf::Value::TokenVec(tokens) => {
+        vt::Value::TokenVec(tokens) => {
             let tokens = tokens.iter().map(tf::Token::as_str);
             quote! { ::openusd::usd::Field::tokens(#name, &[#(#tokens),*]) }
         }

@@ -2,7 +2,7 @@
 //! prims to be constrained to.
 
 use openusd::usd;
-use openusd::{Result, gf, sdf, tf};
+use openusd::{Result, gf, sdf, tf, vt};
 
 use super::{AttributeMetadata, XformCache, declared_type};
 use crate::SchemaError;
@@ -155,7 +155,7 @@ impl ConstraintTarget {
 /// `true` when `type_name` is that of one matrix of four rows, under
 /// whichever of the names that spell one.
 pub(super) fn holds_matrix(type_name: &sdf::ValueTypeName) -> bool {
-    type_name.kind() == Some(sdf::ValueKind::Matrix4d)
+    type_name.kind() == Some(vt::ValueKind::Matrix4d)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::{fs, io};
 
 use openusd::usd::{SchemaRegistry, SchemaRegistryBuilder};
-use openusd::{sdf, tf};
+use openusd::{tf, vt};
 use openusd_build::Views;
 use serde_json::Value as Json;
 
@@ -105,17 +105,17 @@ fn plug_info_matches(registry: &SchemaRegistry, path: &Path) -> usize {
             let Some(identifier) = entry["schemaIdentifier"].as_str() else {
                 continue;
             };
-            let expected: BTreeMap<&str, sdf::Value> = entry
+            let expected: BTreeMap<&str, vt::Value> = entry
                 .as_object()
                 .expect("a type entry is an object")
                 .iter()
                 .filter(|(key, _)| !GENERATED.contains(&key.as_str()))
                 .map(|(key, value)| {
                     let flag = value.as_bool().unwrap_or_else(|| panic!("{cpp_name}.{key} is a bool"));
-                    (key.as_str(), sdf::Value::Bool(flag))
+                    (key.as_str(), vt::Value::Bool(flag))
                 })
                 .collect();
-            let actual: BTreeMap<&str, sdf::Value> = registry
+            let actual: BTreeMap<&str, vt::Value> = registry
                 .schema_info(&tf::Token::from(identifier))
                 .unwrap_or_else(|| panic!("{identifier} is registered"))
                 .plug_info()

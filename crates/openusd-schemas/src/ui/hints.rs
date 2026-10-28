@@ -3,7 +3,7 @@
 
 use openusd::Result;
 use openusd::usd::{self, StageAuthoringError};
-use openusd::{sdf, tf};
+use openusd::{sdf, tf, vt};
 
 use hint_keys::{
     DISPLAY_GROUP, DISPLAY_GROUPS_EXPANDED, DISPLAY_GROUPS_SHOWN_IF, DISPLAY_NAME, HIDDEN, SHOWN_IF, UI_HINTS,
@@ -47,7 +47,7 @@ impl<O: usd::Object> Hints<O> {
     /// the hint nor the `displayName` field is authored (C++
     /// `UsdUIObjectHints::GetDisplayName`).
     pub fn display_name(&self) -> Result<Option<String>> {
-        match self.hint(DISPLAY_NAME, sdf::Value::try_as_string)? {
+        match self.hint(DISPLAY_NAME, vt::Value::try_as_string)? {
             Some(name) => Ok(Some(name)),
             None => self.object.display_name(),
         }
@@ -57,17 +57,13 @@ impl<O: usd::Object> Hints<O> {
     /// (C++ `UsdUIObjectHints::SetDisplayName`). These are two layer edits,
     /// and when the second fails the first stays committed.
     pub fn set_display_name(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_with_field(
-            DISPLAY_NAME,
-            sdf::FieldKey::DisplayName,
-            sdf::Value::String(name.into()),
-        )
+        self.set_with_field(DISPLAY_NAME, sdf::FieldKey::DisplayName, vt::Value::String(name.into()))
     }
 
     /// Whether the object is hidden, `false` where neither the hint nor the
     /// `hidden` field says so (C++ `UsdUIObjectHints::GetHidden`).
     pub fn is_hidden(&self) -> Result<bool> {
-        match self.hint(HIDDEN, sdf::Value::try_as_bool)? {
+        match self.hint(HIDDEN, vt::Value::try_as_bool)? {
             Some(hidden) => Ok(hidden),
             None => self.object.is_hidden(),
         }
@@ -77,17 +73,17 @@ impl<O: usd::Object> Hints<O> {
     /// `UsdUIObjectHints::SetHidden`). These are two layer edits, and when
     /// the second fails the first stays committed.
     pub fn set_hidden(self, hidden: bool) -> Result<Self, StageAuthoringError> {
-        self.set_with_field(HIDDEN, sdf::FieldKey::Hidden, sdf::Value::Bool(hidden))
+        self.set_with_field(HIDDEN, sdf::FieldKey::Hidden, vt::Value::Bool(hidden))
     }
 
     /// The hint at `key_path` decoded by `decode`, `None` where it is absent
     /// or holds a value of another type.
-    fn hint<T>(&self, key_path: &str, decode: fn(sdf::Value) -> Option<T>) -> Result<Option<T>> {
+    fn hint<T>(&self, key_path: &str, decode: fn(vt::Value) -> Option<T>) -> Result<Option<T>> {
         Ok(self.object.metadata_by_key(UI_HINTS, key_path)?.and_then(decode))
     }
 
     /// Author `value` as the hint at `key_path`.
-    fn set_hint(self, key_path: &str, value: sdf::Value) -> Result<Self, StageAuthoringError> {
+    fn set_hint(self, key_path: &str, value: vt::Value) -> Result<Self, StageAuthoringError> {
         let object = self.object.set_metadata_by_key(UI_HINTS, key_path, value)?;
         Ok(Self { object })
     }
@@ -98,7 +94,7 @@ impl<O: usd::Object> Hints<O> {
         self,
         key_path: &str,
         field: sdf::FieldKey,
-        value: sdf::Value,
+        value: vt::Value,
     ) -> Result<Self, StageAuthoringError> {
         let object = self.set_hint(key_path, value.clone())?.object;
         Ok(Self {
@@ -112,7 +108,7 @@ impl<O: usd::Property> Hints<O> {
     /// the hint nor the `displayGroup` field is authored (C++
     /// `UsdUIPropertyHints::GetDisplayGroup`).
     pub fn display_group(&self) -> Result<Option<String>> {
-        match self.hint(DISPLAY_GROUP, sdf::Value::try_as_string)? {
+        match self.hint(DISPLAY_GROUP, vt::Value::try_as_string)? {
             Some(group) => Ok(Some(group)),
             None => self.object.display_group(),
         }
@@ -125,20 +121,20 @@ impl<O: usd::Property> Hints<O> {
         self.set_with_field(
             DISPLAY_GROUP,
             sdf::FieldKey::DisplayGroup,
-            sdf::Value::String(group.into()),
+            vt::Value::String(group.into()),
         )
     }
 
     /// The expression that decides whether the property is shown (C++
     /// `UsdUIPropertyHints::GetShownIf`).
     pub fn shown_if(&self) -> Result<Option<String>> {
-        self.hint(SHOWN_IF, sdf::Value::try_as_string)
+        self.hint(SHOWN_IF, vt::Value::try_as_string)
     }
 
     /// Author the shown-if expression hint (C++
     /// `UsdUIPropertyHints::SetShownIf`).
     pub fn set_shown_if(self, expr: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        self.set_hint(SHOWN_IF, sdf::Value::String(expr.into()))
+        self.set_hint(SHOWN_IF, vt::Value::String(expr.into()))
     }
 }
 
@@ -146,9 +142,9 @@ impl Hints<usd::Prim> {
     /// Whether each display group on the prim starts expanded, keyed by the
     /// group's full `:`-joined name, as the dictionary holds it, entries of
     /// another type included (C++ `UsdUIPrimHints::GetDisplayGroupsExpanded`).
-    pub fn groups_expanded(&self) -> Result<sdf::Dictionary> {
+    pub fn groups_expanded(&self) -> Result<vt::Dictionary> {
         Ok(self
-            .hint(DISPLAY_GROUPS_EXPANDED, sdf::Value::try_as_dictionary)?
+            .hint(DISPLAY_GROUPS_EXPANDED, vt::Value::try_as_dictionary)?
             .unwrap_or_default())
     }
 
@@ -161,9 +157,9 @@ impl Hints<usd::Prim> {
     ) -> Result<Self, StageAuthoringError> {
         let dict = expanded
             .into_iter()
-            .map(|(group, expanded)| (group.into(), sdf::Value::Bool(expanded)))
+            .map(|(group, expanded)| (group.into(), vt::Value::Bool(expanded)))
             .collect();
-        self.set_hint(DISPLAY_GROUPS_EXPANDED, sdf::Value::Dictionary(dict))
+        self.set_hint(DISPLAY_GROUPS_EXPANDED, vt::Value::Dictionary(dict))
     }
 
     /// Whether the display group `group` starts expanded, `false` where the
@@ -175,7 +171,7 @@ impl Hints<usd::Prim> {
     pub fn group_expanded(&self, group: &str) -> Result<bool> {
         Ok(matches!(
             self.groups_expanded()?.get(group),
-            Some(sdf::Value::Bool(true))
+            Some(vt::Value::Bool(true))
         ))
     }
 
@@ -194,16 +190,16 @@ impl Hints<usd::Prim> {
                 entry: entry.clone(),
             });
         }
-        dict.insert(group.into(), sdf::Value::Bool(expanded));
-        Ok(self.set_hint(DISPLAY_GROUPS_EXPANDED, sdf::Value::Dictionary(dict))?)
+        dict.insert(group.into(), vt::Value::Bool(expanded));
+        Ok(self.set_hint(DISPLAY_GROUPS_EXPANDED, vt::Value::Dictionary(dict))?)
     }
 
     /// The expression that decides whether each display group on the prim is
     /// shown, keyed by group, as the dictionary holds it, entries of another
     /// type included (C++ `UsdUIPrimHints::GetDisplayGroupsShownIf`).
-    pub fn groups_shown_if(&self) -> Result<sdf::Dictionary> {
+    pub fn groups_shown_if(&self) -> Result<vt::Dictionary> {
         Ok(self
-            .hint(DISPLAY_GROUPS_SHOWN_IF, sdf::Value::try_as_dictionary)?
+            .hint(DISPLAY_GROUPS_SHOWN_IF, vt::Value::try_as_dictionary)?
             .unwrap_or_default())
     }
 
@@ -220,9 +216,9 @@ impl Hints<usd::Prim> {
     ) -> Result<Self, StageAuthoringError> {
         let dict = shown_if
             .into_iter()
-            .map(|(group, expr)| (group.into(), sdf::Value::String(expr.into())))
+            .map(|(group, expr)| (group.into(), vt::Value::String(expr.into())))
             .collect();
-        self.set_hint(DISPLAY_GROUPS_SHOWN_IF, sdf::Value::Dictionary(dict))
+        self.set_hint(DISPLAY_GROUPS_SHOWN_IF, vt::Value::Dictionary(dict))
     }
 
     /// The expression that decides whether the display group `group` is
@@ -231,7 +227,7 @@ impl Hints<usd::Prim> {
     /// `group` extends the dictionary's key path, and a `:` in it nests (C++
     /// `_MakeKeyPath`).
     pub fn group_shown_if(&self, group: &str) -> Result<Option<String>> {
-        self.hint(&key_path(DISPLAY_GROUPS_SHOWN_IF, group), sdf::Value::try_as_string)
+        self.hint(&key_path(DISPLAY_GROUPS_SHOWN_IF, group), vt::Value::try_as_string)
     }
 
     /// Author the expression that decides whether the display group `group`
@@ -241,7 +237,7 @@ impl Hints<usd::Prim> {
     pub fn set_group_shown_if(self, group: &str, expr: impl Into<String>) -> Result<Self, StageAuthoringError> {
         self.set_hint(
             &key_path(DISPLAY_GROUPS_SHOWN_IF, group),
-            sdf::Value::String(expr.into()),
+            vt::Value::String(expr.into()),
         )
     }
 }
@@ -250,24 +246,24 @@ impl Hints<usd::Attribute> {
     /// The named values the attribute offers, keyed by label, as the
     /// dictionary holds them whatever their types, and empty where it is not
     /// authored (C++ `UsdUIAttributeHints::GetValueLabels`).
-    pub fn value_labels(&self) -> Result<sdf::Dictionary> {
+    pub fn value_labels(&self) -> Result<vt::Dictionary> {
         Ok(self
-            .hint(VALUE_LABELS, sdf::Value::try_as_dictionary)?
+            .hint(VALUE_LABELS, vt::Value::try_as_dictionary)?
             .unwrap_or_default())
     }
 
     /// Author the named values the attribute offers, replacing the edit
     /// target's dictionary (C++ `UsdUIAttributeHints::SetValueLabels`). The
     /// values are authored as given, whatever the attribute's type.
-    pub fn set_value_labels(self, labels: sdf::Dictionary) -> Result<Self, StageAuthoringError> {
-        self.set_hint(VALUE_LABELS, sdf::Value::Dictionary(labels))
+    pub fn set_value_labels(self, labels: vt::Dictionary) -> Result<Self, StageAuthoringError> {
+        self.set_hint(VALUE_LABELS, vt::Value::Dictionary(labels))
     }
 
     /// The order the value labels are shown in, empty where it is not
     /// authored (C++ `UsdUIAttributeHints::GetValueLabelsOrder`).
     pub fn value_labels_order(&self) -> Result<Vec<tf::Token>> {
         Ok(self
-            .hint(VALUE_LABELS_ORDER, sdf::Value::try_as_token_vec)?
+            .hint(VALUE_LABELS_ORDER, vt::Value::try_as_token_vec)?
             .unwrap_or_default())
     }
 
@@ -277,7 +273,7 @@ impl Hints<usd::Attribute> {
         self,
         order: impl IntoIterator<Item = impl Into<tf::Token>>,
     ) -> Result<Self, StageAuthoringError> {
-        self.set_hint(VALUE_LABELS_ORDER, sdf::Value::token_vec(order))
+        self.set_hint(VALUE_LABELS_ORDER, vt::Value::token_vec(order))
     }
 
     /// Author the value labelled `label` as the attribute's default value

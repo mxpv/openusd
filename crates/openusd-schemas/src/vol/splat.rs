@@ -7,8 +7,8 @@
 //! read off the data itself.
 
 use openusd::Result;
-use openusd::sdf::Value;
 use openusd::usd::{Attribute, TimeCode};
+use openusd::vt::Value;
 
 use super::{ParticleField3DGaussianSplat, ParticleField3DGaussianSplatSchema};
 

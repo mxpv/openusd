@@ -4,8 +4,9 @@
 use std::slice;
 
 use openusd::gf::{self, Vec3f};
-use openusd::sdf::{self, Value};
+use openusd::sdf;
 use openusd::usd::{self, PrimPredicate, SchemaBase, Stage, TimeCode};
+use openusd::vt::Value;
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{PointBasedSchema, XformCache};
 use openusd_schemas::skel::{

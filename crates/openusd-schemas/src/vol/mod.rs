@@ -34,7 +34,7 @@
 //! use std::collections::BTreeMap;
 //!
 //! use openusd_schemas::vol::{self, VolumeFieldAssetSchema, VolumeSchema};
-//! use openusd::{sdf, usd};
+//! use openusd::{sdf, usd, vt};
 //!
 //! let stage = usd::Stage::builder()
 //!     .schema_registry(openusd_schemas::schema_registry())
@@ -43,8 +43,8 @@
 //! // A field is a file-backed grid prim; `create_file_path_attr` is inherited
 //! // from `VolumeFieldAssetSchema`, the trait carrying the shared attributes.
 //! let field = vol::OpenVDBAsset::define(&stage, "/Smoke/density").unwrap();
-//! field.create_file_path_attr().unwrap().set(sdf::Value::AssetPath("./smoke.vdb".into())).unwrap();
-//! field.create_field_name_attr().unwrap().set(sdf::Value::token("density")).unwrap();
+//! field.create_file_path_attr().unwrap().set(vt::Value::AssetPath("./smoke.vdb".into())).unwrap();
+//! field.create_field_name_attr().unwrap().set(vt::Value::token("density")).unwrap();
 //!
 //! // A Volume binds named fields through `field:<name>` relationships.
 //! let volume = vol::Volume::define(&stage, "/Smoke").unwrap()

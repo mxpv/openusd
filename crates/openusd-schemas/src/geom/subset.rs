@@ -13,7 +13,7 @@ use std::{iter, mem};
 
 use openusd::Result;
 use openusd::usd::{self, SchemaBase};
-use openusd::{sdf, tf};
+use openusd::{sdf, tf, vt};
 
 use super::curves::non_negative;
 use super::{BasisCurves, CurvesSchema, ElementType, ImageableSchema, Mesh, MeshSchema, PointBasedSchema};
@@ -54,7 +54,7 @@ impl FamilyType {
     }
 }
 
-sdf::impl_token_value!(FamilyType);
+vt::impl_token_value!(FamilyType);
 
 impl Subset {
     /// Define the subset named `subset_name` under `geom` and author its
@@ -161,7 +161,7 @@ impl Subset {
     /// An authored token that names no family type is an error.
     pub fn family_type(geom: &impl ImageableSchema, family_name: &str) -> Result<FamilyType> {
         match family_type_token(geom.prim(), family_name)? {
-            Some(token) => Ok(FamilyType::try_from(sdf::Value::Token(token))?),
+            Some(token) => Ok(FamilyType::try_from(vt::Value::Token(token))?),
             None => Ok(FamilyType::Unrestricted),
         }
     }

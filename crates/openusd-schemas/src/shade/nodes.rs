@@ -17,6 +17,7 @@ mod tests {
     use openusd::sdf;
     use openusd::tf;
     use openusd::usd::SchemaBase;
+    use openusd::vt;
 
     /// A defined node is a `Shader` authoring its id, and reads back as the
     /// node through the id alone.
@@ -79,7 +80,7 @@ mod tests {
         shader
             .node_def()
             .create_id_attr()?
-            .set(sdf::Value::token("ND_standard_surface"))?;
+            .set(vt::Value::token("ND_standard_surface"))?;
         assert!(PreviewSurface::from_shader(shader)?.is_none());
         Ok(())
     }

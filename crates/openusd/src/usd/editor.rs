@@ -41,7 +41,7 @@
 //! In both shapes the structural move is [`copy_spec_within`](crate::sdf::copy_spec_within)
 //! plus [`Layer::remove_spec`](crate::sdf::Layer::remove_spec), and the fixup
 //! remaps embedded paths in place through
-//! [`Value::filter_map_paths`](crate::sdf::Value::filter_map_paths), preserving
+//! [`Value::filter_map_paths`](crate::vt::Value::filter_map_paths), preserving
 //! list-op structure rather than flattening opinions. The local-stack fixup
 //! remaps in stage namespace; the mapped fixup lifts each path to stage
 //! namespace, follows the batch's moves, then maps it back into the target
@@ -50,7 +50,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{EditTarget, Prim, Stage, StageAuthoringError};
-use crate::{Result, pcp, sdf};
+use crate::{Result, pcp, sdf, vt};
 
 /// Batches namespace edits — prim/property renames, reparents, and deletes —
 /// and applies them to a [`Stage`] with full target/connection/reference fixup.
@@ -1554,7 +1554,7 @@ fn fixup_mapped_paths(
 fn embedded_path_rewrites(
     data: &dyn sdf::AbstractData,
     rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
-) -> Result<Vec<(sdf::Path, String, sdf::Value)>, NamespaceEditError> {
+) -> Result<Vec<(sdf::Path, String, vt::Value)>, NamespaceEditError> {
     // `filter_map_paths` takes a `Fn` that cannot itself fail, so a rejected
     // path is parked here and surfaced after the rewrite.
     let failed: std::cell::Cell<Option<NamespaceEditError>> = std::cell::Cell::new(None);
@@ -1843,7 +1843,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Other").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: path("/A").unwrap(),
                     ..Default::default()
                 }])),
@@ -1880,7 +1880,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Other.rel").unwrap(),
                 FieldKey::TargetPaths.as_str(),
-                sdf::Value::PathListOp(sdf::PathListOp::prepended([path("/A").unwrap()])),
+                vt::Value::PathListOp(sdf::PathListOp::prepended([path("/A").unwrap()])),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -2048,7 +2048,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2371,7 +2371,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2446,13 +2446,13 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["model.usda".into()]),
+                vt::Value::StringVec(vec!["model.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2503,7 +2503,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2519,7 +2519,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Model/B.rel").unwrap(),
                 FieldKey::TargetPaths.as_str(),
-                sdf::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
+                vt::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
             );
         });
         let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
@@ -2590,7 +2590,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2605,7 +2605,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Model").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "deep.usda".into(),
                     prim_path: path("/Deep").unwrap(),
                     ..Default::default()
@@ -2693,7 +2693,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2708,7 +2708,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Model").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: path("/Deep").unwrap(),
                     ..Default::default()
                 }])),
@@ -2753,7 +2753,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2765,7 +2765,7 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["model_sub.usda".into()]),
+                vt::Value::StringVec(vec!["model_sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
@@ -2820,7 +2820,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2832,7 +2832,7 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["model_sub.usda".into()]),
+                vt::Value::StringVec(vec!["model_sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
@@ -2904,7 +2904,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -2917,7 +2917,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Model").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "deep.usda".into(),
                     prim_path: path("/Deep").unwrap(),
                     ..Default::default()
@@ -3003,7 +3003,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3015,7 +3015,7 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["model_sub.usda".into()]),
+                vt::Value::StringVec(vec!["model_sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
@@ -3026,7 +3026,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Model/B.rel").unwrap(),
                 FieldKey::TargetPaths.as_str(),
-                sdf::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
+                vt::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
             );
         });
         let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, pcp::Diagnostics::default());
@@ -3055,7 +3055,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3216,7 +3216,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3276,7 +3276,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3441,7 +3441,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3505,7 +3505,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3539,7 +3539,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3642,7 +3642,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3703,7 +3703,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3740,7 +3740,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3781,7 +3781,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3878,13 +3878,13 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".into()]),
+                vt::Value::StringVec(vec!["sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3930,13 +3930,13 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".into()]),
+                vt::Value::StringVec(vec!["sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -3976,7 +3976,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4013,7 +4013,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4103,13 +4103,13 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".into()]),
+                vt::Value::StringVec(vec!["sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4189,7 +4189,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4231,13 +4231,13 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".into()]),
+                vt::Value::StringVec(vec!["sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4273,13 +4273,13 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".into()]),
+                vt::Value::StringVec(vec!["sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4353,7 +4353,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model/Geom").unwrap(),
                     ..Default::default()
@@ -4391,7 +4391,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/A").unwrap(),
                 FieldKey::Relocates.as_str(),
-                sdf::Value::Relocates(vec![(path("/A/X").unwrap(), path("/A/Y").unwrap())]),
+                vt::Value::Relocates(vec![(path("/A/X").unwrap(), path("/A/Y").unwrap())]),
             );
         });
         let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
@@ -4476,7 +4476,7 @@ mod tests {
             e.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
-                sdf::Value::StringVec(vec!["sub.usda".into(), "sub.usda".into()]),
+                vt::Value::StringVec(vec!["sub.usda".into(), "sub.usda".into()]),
             );
             sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
         });
@@ -4528,7 +4528,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4591,7 +4591,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4606,7 +4606,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Model").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "deep.usda".into(),
                     prim_path: path("/Deep").unwrap(),
                     ..Default::default()
@@ -4652,7 +4652,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()
@@ -4697,7 +4697,7 @@ mod tests {
             e.data_mut().set_field(
                 &path("/Ref").unwrap(),
                 FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     asset_path: "model.usda".into(),
                     prim_path: path("/Model").unwrap(),
                     ..Default::default()

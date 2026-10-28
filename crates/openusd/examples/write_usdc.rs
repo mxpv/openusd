@@ -2,8 +2,9 @@
 //!
 //! Usage: `cargo run -p openusd --example write_usdc -- out.usdc`
 
-use openusd::sdf::{self, ChildrenKey, FieldKey, SpecType, Specifier, Value};
+use openusd::sdf::{self, ChildrenKey, FieldKey, SpecType, Specifier};
 use openusd::usdc::CrateWriter;
+use openusd::vt::Value;
 
 fn main() -> openusd::Result<()> {
     let out = std::env::args().nth(1).unwrap_or_else(|| "out.usdc".to_string());

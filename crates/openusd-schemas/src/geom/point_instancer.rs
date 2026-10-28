@@ -9,7 +9,7 @@ use std::iter;
 
 use openusd::Result;
 use openusd::usd::{self, SchemaBase};
-use openusd::{gf, sdf};
+use openusd::{gf, sdf, vt};
 
 use super::extent;
 use super::sampling::{Held, Motion, per_element, position_after, time_delta};
@@ -299,7 +299,7 @@ impl PointInstancer {
     /// (C++ `ActivateAllIds`).
     pub fn activate_all_ids(&self) -> Result<()> {
         let none = sdf::Int64ListOp::explicit([]);
-        self.prim().clone().set_inactive_ids(sdf::Value::Int64ListOp(none))?;
+        self.prim().clone().set_inactive_ids(vt::Value::Int64ListOp(none))?;
         Ok(())
     }
 
@@ -769,7 +769,7 @@ impl PointInstancer {
     /// attribute where the edit target lacks it, as one edit.
     fn set_invisible_ids(&self, ids: Vec<i64>, time: Option<usd::TimeCode>) -> Result<()> {
         self.invisible_ids_attr_builder()
-            .set_at(sdf::Value::Int64Vec(ids), time)
+            .set_at(vt::Value::Int64Vec(ids), time)
             .build()?;
         Ok(())
     }
@@ -822,8 +822,8 @@ fn quats<Q: Into<[f64; 4]>>(orientations: Vec<Q>) -> Vec<gf::Quatd> {
 fn held_quats<Q>(attr: &usd::Attribute, base_time: Option<usd::TimeCode>) -> Result<Option<Held<Vec<gf::Quatd>>>>
 where
     Q: Into<[f64; 4]>,
-    Vec<Q>: sdf::FromValue,
-    <Vec<Q> as TryFrom<sdf::Value>>::Error: Into<openusd::Error>,
+    Vec<Q>: vt::FromValue,
+    <Vec<Q> as TryFrom<vt::Value>>::Error: Into<openusd::Error>,
 {
     Ok(Held::<Vec<Q>>::read(attr, base_time)?.map(|held| held.map(quats)))
 }
@@ -832,8 +832,8 @@ where
 fn quats_at<Q>(attr: &usd::Attribute, time: Option<usd::TimeCode>) -> Result<Option<Vec<gf::Quatd>>>
 where
     Q: Into<[f64; 4]>,
-    Vec<Q>: sdf::FromValue,
-    <Vec<Q> as TryFrom<sdf::Value>>::Error: Into<openusd::Error>,
+    Vec<Q>: vt::FromValue,
+    <Vec<Q> as TryFrom<vt::Value>>::Error: Into<openusd::Error>,
 {
     Ok(attr.get_at::<Vec<Q>>(time)?.map(quats))
 }
@@ -853,7 +853,7 @@ fn merge_inactive_ids(prim: &usd::Prim, proposed: sdf::Int64ListOp) -> Result<()
         let merged = proposed
             .combined_with(&canonical(current))
             .expect("one op states a fold of ops that add nothing");
-        Some(sdf::Value::Int64ListOp(merged))
+        Some(vt::Value::Int64ListOp(merged))
     })?;
     Ok(())
 }
@@ -873,6 +873,7 @@ fn canonical(op: sdf::Int64ListOp) -> sdf::Int64ListOp {
 #[cfg(test)]
 mod tests {
     use openusd::usd::{SchemaBase, Stage, TimeCode};
+    use openusd::vt;
     use openusd::{gf, sdf};
 
     use super::{InstanceArrays, MaskApplication, ProtoXformInclusion, canonical};
@@ -1409,7 +1410,7 @@ def PointInstancer "TimeSampledAndDefaultIndices"
         let one = TimeCode::new(1.0);
         instancer
             .create_invisible_ids_attr()?
-            .set_at(sdf::Value::ValueBlock, one)?;
+            .set_at(vt::Value::ValueBlock, one)?;
         let commits = crate::tests::commits(instancer.stage());
         instancer.invis_id(1, one)?;
         instancer.vis_id(1, one)?;
@@ -1682,10 +1683,10 @@ def PointInstancer "TimeSampledAndDefaultIndices"
         assert_eq!(attr, instancer.orientations_attr());
 
         let orientationsf = instancer.create_orientationsf_attr()?;
-        let orientationsf = orientationsf.set(sdf::Value::QuatfVec(Vec::new()))?;
+        let orientationsf = orientationsf.set(vt::Value::QuatfVec(Vec::new()))?;
         assert!(!instancer.uses_orientationsf()?.0);
 
-        orientationsf.set_at(sdf::Value::QuatfVec(vec![gf::Quatf::IDENTITY]), TimeCode::new(5.0))?;
+        orientationsf.set_at(vt::Value::QuatfVec(vec![gf::Quatf::IDENTITY]), TimeCode::new(5.0))?;
         let (uses, attr) = instancer.uses_orientationsf()?;
         assert!(uses);
         assert_eq!(attr, instancer.orientationsf_attr());

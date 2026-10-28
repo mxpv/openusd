@@ -468,6 +468,7 @@ mod tests {
     use openusd::sdf;
     use openusd::tf;
     use openusd::usd::{self, SchemaBase};
+    use openusd::vt;
 
     use super::{ImageableExt, PurposeInfo};
     use crate::SchemaError;
@@ -882,7 +883,7 @@ mod tests {
             .define_prim("/foo/props")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/_prototype")?,
                     ..Default::default()
                 }])),
@@ -1083,7 +1084,7 @@ def Xform "World"
             .clone()
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/_prototype")?,
                     ..Default::default()
                 }])),

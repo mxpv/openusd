@@ -31,10 +31,9 @@ use num_traits::{NumCast, ToPrimitive};
 
 use crate::gf::f16;
 
-use super::value::{
-    CastError, Value, ValueKind, cast_numeric, finite_checked, vec2_as_f64, vec3_as_f64, vec4_as_f64, widen,
-};
-use super::{AssetPath, TimeCode};
+use super::value::{cast_numeric, finite_checked, vec2_as_f64, vec3_as_f64, vec4_as_f64, widen};
+use super::{CastError, Value, ValueKind};
+use crate::sdf::{AssetPath, TimeCode};
 
 impl Value {
     /// Coerces this value to `target`, keeping its shape.

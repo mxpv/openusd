@@ -6,7 +6,7 @@
 //! declared properties — works on a stage.
 
 use openusd::usd::{self, ColorSpaceAPI, ColorSpaceDefinitionAPI};
-use openusd::{sdf, tf};
+use openusd::{tf, vt};
 
 fn stage() -> usd::Stage {
     usd::Stage::builder()
@@ -25,7 +25,7 @@ fn color_space_applies() {
     let api = ColorSpaceAPI::apply(&prim).expect("applies");
     api.create_color_space_name_attr()
         .expect("authors")
-        .set(sdf::Value::token("lin_rec709_scene"))
+        .set(vt::Value::token("lin_rec709_scene"))
         .expect("sets");
 
     let found = ColorSpaceAPI::get(&stage, "/World").expect("a read").expect("applied");

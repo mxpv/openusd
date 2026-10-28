@@ -12,10 +12,10 @@
 //! a pre-order walk. Where C++ orders differently, by a path-ordered map or
 //! by reporting shapes and joints kind by kind, the field docs say so.
 
-use openusd::gf;
-use openusd::sdf::{self, Path, PathSet};
+use openusd::sdf::{Path, PathSet};
 use openusd::tf;
 use openusd::usd::{self, PrimPredicate};
+use openusd::{gf, vt};
 
 use super::tokens::{
     PHYSICS_ARTICULATION_ROOT_API, PHYSICS_COLLISION_API, PHYSICS_COLLISION_GROUP, PHYSICS_DISTANCE_JOINT,
@@ -360,7 +360,7 @@ const SENTINEL: f32 = 0.5e38;
 /// a fallback; no value at all is a defect in the schema data.
 fn read<T>(attribute: &usd::Attribute) -> Result<T, SchemaError>
 where
-    T: sdf::FromValue,
+    T: vt::FromValue,
     T::Error: Into<openusd::Error>,
 {
     attribute.get::<T>()?.ok_or_else(|| SchemaError::NoValue {

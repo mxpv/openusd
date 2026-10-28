@@ -1,6 +1,6 @@
 //! Integration tests for the UsdMedia schema views against a fixture.
 
-use openusd::Result;
+use openusd::{Result, vt};
 
 use openusd::sdf;
 use openusd::tf::Token;
@@ -17,8 +17,8 @@ fn spatial_audio_from_fixture() -> Result<()> {
     let a = SpatialAudio::get(&stage, sdf::path("/World/Ambient")?)?.expect("SpatialAudio");
 
     assert_eq!(
-        a.file_path_attr().get::<sdf::Value>()?,
-        Some(sdf::Value::AssetPath("./ambient.wav".into()))
+        a.file_path_attr().get::<vt::Value>()?,
+        Some(vt::Value::AssetPath("./ambient.wav".into()))
     );
     assert_eq!(
         a.aural_mode_attr()

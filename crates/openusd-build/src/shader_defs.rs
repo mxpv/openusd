@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use openusd::usd::Object;
-use openusd::{sdf, tf};
+use openusd::{sdf, tf, vt};
 
 use crate::Builder;
 use crate::error::Error;
@@ -53,7 +53,7 @@ pub struct Port {
     /// The value type it is declared with.
     pub type_name: sdf::ValueTypeName,
     /// The value a renderer uses where a shader authors none.
-    pub fallback: Option<sdf::Value>,
+    pub fallback: Option<vt::Value>,
     /// What the definition says it is for.
     pub documentation: Option<String>,
     /// The values it admits, where the definition restricts them.
@@ -103,10 +103,10 @@ pub fn read(builder: &Builder, name: &str, path: &Path) -> Result<NodeLibrary, E
             ports.push(Port {
                 base_name: base_name.to_owned(),
                 type_name,
-                fallback: stage.field::<sdf::Value>(attr.path(), sdf::FieldKey::Default)?,
+                fallback: stage.field::<vt::Value>(attr.path(), sdf::FieldKey::Default)?,
                 documentation: attr.doc()?,
                 allowed_tokens: model::allowed_tokens(
-                    attr.metadata::<sdf::Value>(sdf::FieldKey::AllowedTokens.as_str())?
+                    attr.metadata::<vt::Value>(sdf::FieldKey::AllowedTokens.as_str())?
                         .as_ref(),
                 ),
                 interface_only: attr.metadata::<tf::Token>("connectability")?.as_deref() == Some("interfaceOnly"),

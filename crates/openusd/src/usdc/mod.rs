@@ -15,7 +15,7 @@ pub use writer::CrateWriter;
 
 use rustc_hash::FxBuildHasher;
 
-use crate::{ar, sdf, tf};
+use crate::{ar, sdf, tf, vt};
 
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
@@ -147,18 +147,18 @@ struct Spec {
     /// Fields authored after load, layered over the crate fields in authored
     /// order. `Some` sets or overrides a field; `None` tombstones one so it
     /// reads as absent even when the crate holds it.
-    authored: Vec<(String, Option<sdf::Value>)>,
+    authored: Vec<(String, Option<vt::Value>)>,
 }
 
 impl Spec {
     /// Returns the authored override for `field`: `Some(&Some(value))` when set,
     /// `Some(&None)` when tombstoned, `None` when the crate fields alone decide.
-    fn authored(&self, field: &str) -> Option<&Option<sdf::Value>> {
+    fn authored(&self, field: &str) -> Option<&Option<vt::Value>> {
         self.authored.iter().find(|(k, _)| k == field).map(|(_, v)| v)
     }
 
     /// Sets the authored override for `field`, replacing any prior one.
-    fn set_authored(&mut self, field: &str, value: Option<sdf::Value>) {
+    fn set_authored(&mut self, field: &str, value: Option<vt::Value>) {
         if let Some(slot) = self.authored.iter_mut().find(|(k, _)| k == field) {
             slot.1 = value;
         } else {
@@ -270,7 +270,7 @@ impl sdf::AbstractData for CrateData {
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>, sdf::DataError> {
+    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, vt::Value>>, sdf::DataError> {
         let Some(spec) = self.data.get(path) else {
             return Ok(None);
         };
@@ -337,7 +337,7 @@ impl sdf::AbstractData for CrateData {
         self.data.remove(path);
     }
 
-    fn set_field(&mut self, path: &sdf::Path, field: &str, value: sdf::Value) {
+    fn set_field(&mut self, path: &sdf::Path, field: &str, value: vt::Value) {
         match self.data.get_mut(path) {
             Some(spec) => spec.set_authored(field, Some(value)),
             None => debug_assert!(false, "set_field on absent spec at {path}"),
@@ -513,10 +513,10 @@ mod tests {
     /// deeper is refused by the writer, as the reader would refuse it.
     #[test]
     fn nesting_limit() -> Result<()> {
-        fn nested(depth: usize) -> sdf::Value {
-            let mut value = sdf::Value::Int(1);
+        fn nested(depth: usize) -> vt::Value {
+            let mut value = vt::Value::Int(1);
             for _ in 0..depth {
-                value = sdf::Value::Dictionary(sdf::Dictionary::from([("inner".to_owned(), value)]));
+                value = vt::Value::Dictionary(vt::Dictionary::from([("inner".to_owned(), value)]));
             }
             value
         }
@@ -626,8 +626,8 @@ mod tests {
         // Erasing an absent field is a no-op, and re-authoring a field appends
         // it in authored order rather than reusing an earlier slot.
         data.erase_field(&path, "alpha");
-        data.set_field(&path, "beta", sdf::Value::Token("b".into()));
-        data.set_field(&path, "alpha", sdf::Value::Token("a".into()));
+        data.set_field(&path, "beta", vt::Value::Token("b".into()));
+        data.set_field(&path, "alpha", vt::Value::Token("a".into()));
 
         assert_eq!(data.list_fields(&path).unwrap(), ["beta", "alpha"]);
     }
@@ -659,7 +659,7 @@ mod tests {
         );
 
         data.erase_field(&root, "customLayerData");
-        data.set_field(&root, "added", sdf::Value::Token("a".into()));
+        data.set_field(&root, "added", vt::Value::Token("a".into()));
         assert_eq!(data.field_mask(&root, &fields), 0b0100);
         assert_eq!(data.field_mask(&sdf::path("/nowhere").unwrap(), &fields), 0);
     }
@@ -1120,8 +1120,8 @@ mod tests {
         let keys = samples.iter().map(|(d, _)| d).copied().collect::<Vec<_>>();
         assert_eq!(keys, vec![4.0, 5.0]);
 
-        assert!(matches!(&samples[0].1, sdf::Value::Double(x) if *x == 40.0_f64));
-        assert!(matches!(samples[1].1, sdf::Value::ValueBlock));
+        assert!(matches!(&samples[0].1, vt::Value::Double(x) if *x == 40.0_f64));
+        assert!(matches!(samples[1].1, vt::Value::ValueBlock));
 
         Ok(())
     }
@@ -1154,8 +1154,8 @@ mod tests {
             .into_owned()
             .try_as_time_samples()
             .expect("time samples");
-        let values: Vec<sdf::Value> = samples.into_iter().map(|(_, value)| value).collect();
-        assert_eq!(values, vec![sdf::Value::Int64(-5), sdf::Value::Int64(5)]);
+        let values: Vec<vt::Value> = samples.into_iter().map(|(_, value)| value).collect();
+        assert_eq!(values, vec![vt::Value::Int64(-5), vt::Value::Int64(5)]);
 
         Ok(())
     }

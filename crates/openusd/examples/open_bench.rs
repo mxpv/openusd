@@ -71,7 +71,7 @@ use std::time::Instant;
 use std::{env, fs};
 
 use openusd::usd::{EditTarget, InitialLoadSet, LoadPolicy, PrimPredicate, Stage, TimeCode};
-use openusd::{Error, Result, ar, sdf, usdz};
+use openusd::{Error, Result, ar, sdf, usdz, vt};
 
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
@@ -141,7 +141,7 @@ fn main() -> Result<()> {
         let (mut arrays, mut decoded) = (0usize, 0usize);
         for path in &prims {
             for attribute in stage.prim(path.clone())?.attributes()? {
-                if let Some(value) = attribute.get_at::<sdf::Value>(time)?
+                if let Some(value) = attribute.get_at::<vt::Value>(time)?
                     && let Some(bytes) = array_bytes(&value)
                 {
                     arrays += 1;
@@ -514,8 +514,8 @@ fn mib(bytes: usize) -> String {
 /// The bytes the elements of an array `value` occupy, `None` for a scalar.
 /// Element types that own further heap (strings, tokens, paths, nested
 /// values) count their inline size only.
-fn array_bytes(value: &sdf::Value) -> Option<usize> {
-    use sdf::Value as V;
+fn array_bytes(value: &vt::Value) -> Option<usize> {
+    use vt::Value as V;
     let bytes = match value {
         V::BoolVec(v) => mem::size_of_val(v.as_slice()),
         V::UcharVec(v) => mem::size_of_val(v.as_slice()),

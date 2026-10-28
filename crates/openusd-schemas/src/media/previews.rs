@@ -3,8 +3,9 @@
 
 use openusd::Result;
 use openusd::ar;
-use openusd::sdf::{self, Value};
+use openusd::sdf;
 use openusd::usd::{self, Object, SchemaBase};
+use openusd::vt::{self, Value};
 
 use super::AssetPreviewsAPI;
 use super::tokens;
@@ -40,7 +41,7 @@ impl AssetPreviewsAPI {
     /// in the edit target is replaced whole, keys beside `defaultImage`
     /// included. The prim need not have the API applied, as in C++.
     pub fn set_default_thumbnails(self, thumbnails: &Thumbnails) -> Result<Self> {
-        let dictionary = sdf::Dictionary::from([(
+        let dictionary = vt::Dictionary::from([(
             tokens::DEFAULT_IMAGE.to_string(),
             Value::AssetPath(thumbnails.default_image.clone()),
         )]);
@@ -113,11 +114,11 @@ mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         let a = SpatialAudio::define(&stage, "/World/Audio")?;
         a.create_file_path_attr()?
-            .set(sdf::Value::AssetPath("./ambient.wav".into()))?;
+            .set(vt::Value::AssetPath("./ambient.wav".into()))?;
         a.create_aural_mode_attr()?
-            .set(sdf::Value::Token(AuralMode::NonSpatial.as_token().into()))?;
+            .set(vt::Value::Token(AuralMode::NonSpatial.as_token().into()))?;
         a.create_playback_mode_attr()?
-            .set(sdf::Value::Token(PlaybackMode::LoopFromStartToEnd.as_token().into()))?;
+            .set(vt::Value::Token(PlaybackMode::LoopFromStartToEnd.as_token().into()))?;
         a.create_start_time_attr()?.set(sdf::TimeCode(24.0))?;
         a.create_end_time_attr()?.set(sdf::TimeCode(48.0))?;
         a.create_media_offset_attr()?.set(2.5_f64)?;
@@ -125,8 +126,8 @@ mod tests {
 
         let a = SpatialAudio::get(&stage, "/World/Audio")?.expect("SpatialAudio");
         assert_eq!(
-            a.file_path_attr().get::<sdf::Value>()?,
-            Some(sdf::Value::AssetPath("./ambient.wav".into()))
+            a.file_path_attr().get::<vt::Value>()?,
+            Some(vt::Value::AssetPath("./ambient.wav".into()))
         );
         assert_eq!(a.start_time()?, Some(sdf::TimeCode(24.0)));
         assert_eq!(a.media_offset()?, Some(2.5));

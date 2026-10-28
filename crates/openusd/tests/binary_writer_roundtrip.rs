@@ -7,13 +7,14 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
-use openusd::sdf::{self, AbstractData, ChildrenKey, Data, FieldKey, SpecType, Specifier, Value, path};
+use openusd::sdf::{self, AbstractData, ChildrenKey, Data, FieldKey, SpecType, Specifier, path};
 use openusd::usdc::{CrateData, CrateWriter};
+use openusd::vt::{self, Value};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
-    let mut out: BTreeMap<String, BTreeMap<String, sdf::Value>> = BTreeMap::new();
+    let mut out: BTreeMap<String, BTreeMap<String, vt::Value>> = BTreeMap::new();
     for path in data.spec_paths() {
-        let mut fields: BTreeMap<String, sdf::Value> = BTreeMap::new();
+        let mut fields: BTreeMap<String, vt::Value> = BTreeMap::new();
         if let Some(names) = data.list_fields(&path) {
             for name in names {
                 let v = data.field(&path, &name).unwrap().into_owned();
@@ -173,7 +174,7 @@ fn unregistered_values_roundtrip() {
 
     let list_op =
         sdf::ListOp::<String>::prepended(["1, 2".to_owned()]).with(sdf::ListOpType::Deleted, ["3".to_owned()]);
-    let dictionary = sdf::Dictionary::from([("myKey".to_owned(), Value::Int(8))]);
+    let dictionary = vt::Dictionary::from([("myKey".to_owned(), Value::Int(8))]);
     let fields = [
         ("madeUpField", Value::UnregisteredValue("1.50".to_owned())),
         ("madeUpList", Value::UnregisteredValueListOp(list_op)),

@@ -7,7 +7,7 @@
 //! built on, over the generated views.
 
 use openusd::usd::{Prim, Relationship, SchemaBase, TimeCode};
-use openusd::{Result, gf, sdf};
+use openusd::{Result, gf, sdf, vt};
 
 use super::anim_query::transform_components;
 use super::skinning::{decompose_transforms, make_transforms};
@@ -198,7 +198,7 @@ impl BindingAPI {
                 sdf::ValueTypeName::INT_ARRAY,
             );
             influences(indices, true, Some(1))
-                .set(sdf::Value::IntVec(vec![index]))
+                .set(vt::Value::IntVec(vec![index]))
                 .build()?;
             let weights = PrimvarBuilder::in_edit(
                 &prim,
@@ -206,7 +206,7 @@ impl BindingAPI {
                 sdf::ValueTypeName::FLOAT_ARRAY,
             );
             influences(weights, true, Some(1))
-                .set(sdf::Value::FloatVec(vec![weight]))
+                .set(vt::Value::FloatVec(vec![weight]))
                 .build()?;
             Ok::<_, SchemaError>(())
         })
@@ -249,10 +249,10 @@ impl Animation {
         self.stage().edit(|edit| -> Result<(), SchemaError> {
             let components = [
                 self.translations_attr_builder()
-                    .set_at(sdf::Value::Vec3fVec(translations), time),
+                    .set_at(vt::Value::Vec3fVec(translations), time),
                 self.rotations_attr_builder()
-                    .set_at(sdf::Value::QuatfVec(rotations), time),
-                self.scales_attr_builder().set_at(sdf::Value::Vec3hVec(scales), time),
+                    .set_at(vt::Value::QuatfVec(rotations), time),
+                self.scales_attr_builder().set_at(vt::Value::Vec3hVec(scales), time),
             ];
             for component in components {
                 component.in_edit(edit).build()?;
@@ -312,7 +312,7 @@ fn inherited<T>(binding: &BindingAPI, bound: fn(&BindingAPI) -> Result<Bound<T>>
 #[cfg(test)]
 mod tests {
     use openusd::Result;
-    use openusd::sdf::Value;
+    use openusd::vt::Value;
 
     use super::*;
     use crate::skel::{BindingAPI, SkinningMethod};

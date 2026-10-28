@@ -165,7 +165,7 @@ handle.",
             let reads = if *stage {
                 quote! {
                     self.stage_metadata(#token)?
-                        .map(<#rust_type as ::std::convert::TryFrom<::openusd::sdf::Value>>::try_from)
+                        .map(<#rust_type as ::std::convert::TryFrom<::openusd::vt::Value>>::try_from)
                         .transpose()
                         .map_err(::std::convert::Into::into)
                 }
@@ -263,7 +263,7 @@ fn token_enum(generated: &RustEnum) -> TokenStream {
             }
         }
 
-        ::openusd::sdf::impl_token_value!(#name);
+        ::openusd::vt::impl_token_value!(#name);
     }
 }
 

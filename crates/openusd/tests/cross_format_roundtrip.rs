@@ -5,14 +5,14 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
-use openusd::sdf::{self, AbstractData};
-use openusd::usda;
+use openusd::sdf::AbstractData;
 use openusd::usdc::{CrateData, CrateWriter};
+use openusd::{usda, vt};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
-    let mut out: BTreeMap<String, BTreeMap<String, sdf::Value>> = BTreeMap::new();
+    let mut out: BTreeMap<String, BTreeMap<String, vt::Value>> = BTreeMap::new();
     for path in data.spec_paths() {
-        let mut fields: BTreeMap<String, sdf::Value> = BTreeMap::new();
+        let mut fields: BTreeMap<String, vt::Value> = BTreeMap::new();
         if let Some(names) = data.list_fields(&path) {
             for name in names {
                 let v = data.field(&path, &name).unwrap().into_owned();

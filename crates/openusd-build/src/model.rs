@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
-use openusd::{sdf, tf, usd};
+use openusd::{sdf, tf, usd, vt};
 
 use crate::plug_info::Plugin;
 
@@ -99,7 +99,7 @@ pub struct MetadataField {
     /// The specs it may be authored on.
     pub applies_to: usd::MetadataTargets,
     /// What a stage reads where no layer authors it, converted to the type.
-    pub fallback: Option<sdf::Value>,
+    pub fallback: Option<vt::Value>,
     /// What the declaration says the field is for.
     pub documentation: Option<String>,
 }
@@ -161,7 +161,7 @@ pub struct Class {
     /// schema's definition — `hidden`, `assetInfo`, `propertyOrder` — so they
     /// travel whole exactly as a property's fields do, and the schematics
     /// writer is the one place that narrows them.
-    pub fields: BTreeMap<String, sdf::Value>,
+    pub fields: BTreeMap<String, vt::Value>,
     /// The `typeName` as authored, before a parent declaring the same one
     /// clears it.
     pub authored_type_name: Option<tf::Token>,
@@ -258,7 +258,7 @@ pub struct Metadata {
     /// The entries C++ `usdGenSchema` copies from `extraPlugInfo` into the
     /// type's `plugInfo.json` entry, which the registry hands back
     /// uninterpreted.
-    pub plug_info: BTreeMap<String, sdf::Value>,
+    pub plug_info: BTreeMap<String, vt::Value>,
 
     /// The Rust type name, which defaults to the identifier in proper case.
     pub class_name: String,
@@ -305,7 +305,7 @@ pub struct Property {
     /// What its `customData` asked the generator for.
     pub api: PropertyApi,
     /// Every field authored on it, composed over the layers that declare it.
-    pub fields: BTreeMap<String, sdf::Value>,
+    pub fields: BTreeMap<String, vt::Value>,
     /// Where it was declared.
     pub origin: Origin,
 }
@@ -492,7 +492,7 @@ impl Property {
     }
 
     /// The fallback a stage resolves when nothing is authored.
-    pub fn fallback(&self) -> Option<&sdf::Value> {
+    pub fn fallback(&self) -> Option<&vt::Value> {
         self.fields.get(sdf::FieldKey::Default.as_str())
     }
 
@@ -570,10 +570,10 @@ pub fn is_root(name: &tf::Token) -> bool {
 /// to type the field holds a list of quoted names as strings.
 ///
 /// TODO: type it in the parser instead, which would let this be one read.
-pub fn allowed_tokens(value: Option<&sdf::Value>) -> Vec<tf::Token> {
+pub fn allowed_tokens(value: Option<&vt::Value>) -> Vec<tf::Token> {
     match value {
-        Some(sdf::Value::TokenVec(tokens)) => tokens.clone(),
-        Some(sdf::Value::StringVec(texts)) => texts.iter().map(|text| tf::Token::from(text.as_str())).collect(),
+        Some(vt::Value::TokenVec(tokens)) => tokens.clone(),
+        Some(vt::Value::StringVec(texts)) => texts.iter().map(|text| tf::Token::from(text.as_str())).collect(),
         _ => Vec::new(),
     }
 }

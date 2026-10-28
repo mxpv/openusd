@@ -29,10 +29,19 @@ source of truth for specifics.
   `tf::Token`, the interned-identifier string behind every `TfToken`-equivalent
   API. It is the single file `tf.rs`.
 
+- **`vt/`** - Value Types (C++ `Vt`): `vt::Value` (C++ `VtValue`), the value
+  an attribute or metadata field holds, and `vt::Dictionary` (C++
+  `VtDictionary`), with the casts out of a value (`FromValue`, `CastError`,
+  and `vt/coerce.rs`, C++ `VtValue::CastToTypeid`), the scalar and array
+  kinds (`vt/array.rs`), and the text C++ streams for one
+  (`vt/stream_out.rs`, C++ `VtStreamOut`).
+  `Value` is a closed enum, so it names the `sdf` value types it holds. Start
+  at `vt/mod.rs`.
+
 - **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model.
   `AbstractData` is the unified read/write backend interface the text, binary,
-  and archive readers all implement; `Value`, `Path`, and `Layer` (C++
-  `SdfLayer`) are the everyday types. A `Layer`'s edits run through
+  and archive readers all implement; `Path` and `Layer` (C++ `SdfLayer`) are
+  the everyday types. A `Layer`'s edits run through
   `Layer::edit` (a closure over a `LayerEdit` view) as atomic copy-on-write
   transactions that derive a `ChangeList` for composition invalidation and fire
   per-layer `LayerSink`s at the commit seam (`sdf/layer.rs`, `sdf/change.rs`,
@@ -106,7 +115,7 @@ source of truth for specifics.
   `openusd::Error` and `openusd::Result` (`src/error.rs`), the crate-wide error
   enum every module error nests into. A `#[macro_export]` macro necessarily
   binds at the root too: `impl_token_value` is `#[doc(hidden)]` there and
-  documented as `sdf::impl_token_value`, the module that owns what it is about,
+  documented as `vt::impl_token_value`, the module that owns what it is about,
   and `include_schema!` is the one macro documented at the root itself.
 
 - **`usd_utils/`** - Utilities over layers and stages (C++ `UsdUtils`):
@@ -144,7 +153,7 @@ source of truth for specifics.
 
 - **`gf/`** - Graphics Foundations (C++ `Gf`): `bytemuck::Pod` vector /
   quaternion / matrix types for bulk binary serialization, row-major /
-  row-vector convention, each bridging to `sdf::Value` via `From` / `TryFrom`;
+  row-vector convention, each bridging to `vt::Value` via `From` / `TryFrom`;
   `gf::Rotation` (C++ `GfRotation`), the axis-and-angle rotation the xformOp
   rotations are built through; `gf::DualQuatd` (C++ `GfDualQuatd`), the
   rigid transform dual-quaternion skinning blends; `gf::Interval` (C++

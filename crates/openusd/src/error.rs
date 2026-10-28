@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 use std::{error, io, mem, result};
 
-use crate::{pcp, sdf, usd, usd_utils, usda, usdc, usdz};
+use crate::{pcp, sdf, usd, usd_utils, usda, usdc, usdz, vt};
 
 /// Largest module error nested directly in [`enum@Error`]; anything bigger is
 /// boxed so the enum stays within the size the assertion below pins. The
@@ -41,10 +41,10 @@ pub enum Error {
 
     /// A value does not cast to the requested type.
     #[error(transparent)]
-    Cast(#[from] sdf::CastError),
+    Cast(#[from] vt::CastError),
 
     /// A value conversion outside the crate's own types failed. The home a
-    /// downstream `TryFrom<sdf::Value>` error converts into (via
+    /// downstream `TryFrom<vt::Value>` error converts into (via
     /// [`Error::convert`]) so extension value types satisfy the generic
     /// accessors' `T::Error: Into<Error>` bound.
     #[error(transparent)]
@@ -130,7 +130,7 @@ pub type Result<T, E = Error> = result::Result<T, E>;
 const _: () = assert!(mem::size_of::<Error>() <= INLINE_ERROR_BUDGET + mem::size_of::<usize>());
 
 /// An infallible conversion can never produce an error; the impl exists so
-/// generic `TryFrom<sdf::Value>` bounds accept the reflexive conversion.
+/// generic `TryFrom<vt::Value>` bounds accept the reflexive conversion.
 impl From<Infallible> for Error {
     fn from(error: Infallible) -> Self {
         match error {}

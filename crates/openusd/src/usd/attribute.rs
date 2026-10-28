@@ -19,6 +19,7 @@ use crate::pcp;
 use crate::pcp::AttributeValueSource;
 use crate::sdf;
 use crate::tf;
+use crate::vt;
 
 /// An attribute to author, and everything it is authored with.
 ///
@@ -49,7 +50,7 @@ pub struct AttributeBuilder<'a> {
     /// Whether the edit target's own value opinions are removed first.
     clear: bool,
     /// The metadata fields to author in the same edit, in the order given.
-    metadata: Vec<(&'static str, sdf::Value)>,
+    metadata: Vec<(&'static str, vt::Value)>,
     /// The transaction to join, where the builder came from one.
     batch: Option<&'a StageEdit>,
 }
@@ -58,7 +59,7 @@ pub struct AttributeBuilder<'a> {
 #[derive(Debug)]
 enum BuilderValue {
     /// Values, each with when it is for, one at most for each time.
-    Set(Vec<(sdf::Value, Option<super::TimeCode>)>),
+    Set(Vec<(vt::Value, Option<super::TimeCode>)>),
     /// A block of every weaker value opinion.
     Block,
 }
@@ -114,7 +115,7 @@ impl<'a> AttributeBuilder<'a> {
     /// Recorded rather than written: the value is checked against the
     /// declaration at [`build`](Self::build), which is the only place that
     /// knows which declaration won.
-    pub fn set(self, value: impl Into<sdf::Value>) -> Self {
+    pub fn set(self, value: impl Into<vt::Value>) -> Self {
         self.set_at(value, None)
     }
 
@@ -123,7 +124,7 @@ impl<'a> AttributeBuilder<'a> {
     /// The builder authors every value it is given, one for each time. A
     /// second value at a time replaces the first, and a value replaces a
     /// [`block`](Self::block).
-    pub fn set_at(mut self, value: impl Into<sdf::Value>, time: impl Into<Option<super::TimeCode>>) -> Self {
+    pub fn set_at(mut self, value: impl Into<vt::Value>, time: impl Into<Option<super::TimeCode>>) -> Self {
         let (value, time) = (value.into(), time.into());
         match &mut self.value {
             Some(BuilderValue::Set(values)) => match values.iter_mut().find(|(_, at)| *at == time) {
@@ -147,7 +148,7 @@ impl<'a> AttributeBuilder<'a> {
     /// Blocks every weaker value opinion in the same edit, as
     /// [`Attribute::block`] does: the edit target's own samples are erased and
     /// its `default` becomes a value block. Replaces the values given through
-    /// [`set_at`](Self::set_at), which authoring a [`sdf::Value::ValueBlock`]
+    /// [`set_at`](Self::set_at), which authoring a [`vt::Value::ValueBlock`]
     /// does not match, since that leaves the target's samples standing.
     pub fn block(mut self) -> Self {
         self.value = Some(BuilderValue::Block);
@@ -157,7 +158,7 @@ impl<'a> AttributeBuilder<'a> {
     /// A metadata field to author in the same edit: [`Attribute::set_metadata`]
     /// as part of the creating edit, on the same terms. A field with a
     /// dedicated setter is refused at [`build`](Self::build).
-    pub fn metadata(mut self, key: &'static str, value: impl Into<sdf::Value>) -> Self {
+    pub fn metadata(mut self, key: &'static str, value: impl Into<vt::Value>) -> Self {
         match authoring::check_reserved(sdf::SpecType::Attribute, key) {
             Ok(()) => self.metadata.push((key, value.into())),
             // The first failure is the one `build` reports.
@@ -321,7 +322,7 @@ impl Attribute {
     /// local opinion entirely.
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
         self.edit(|spec| {
-            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v));
+            spec.set(sdf::FieldKey::Variability.as_str(), vt::Value::Variability(v));
             Ok(())
         })
     }
@@ -330,14 +331,14 @@ impl Attribute {
     /// opinion (see [`Attribute::set_variability`] for the rationale).
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
         self.edit(|spec| {
-            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom));
+            spec.set(sdf::FieldKey::Custom.as_str(), vt::Value::Bool(custom));
             Ok(())
         })
     }
 
     /// Set the attribute's default value. The convenience spelling of
     /// `set_at(value, None)`; mirrors C++ `UsdAttribute::Set(value)`.
-    pub fn set(self, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+    pub fn set(self, value: impl Into<vt::Value>) -> Result<Self, StageAuthoringError> {
         self.set_at(value, None)
     }
 
@@ -370,7 +371,7 @@ impl Attribute {
     /// unchanged.
     pub fn set_at(
         self,
-        value: impl Into<sdf::Value>,
+        value: impl Into<vt::Value>,
         time: impl Into<Option<super::TimeCode>>,
     ) -> Result<Self, StageAuthoringError> {
         let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
@@ -473,7 +474,7 @@ impl Attribute {
     /// `typeName`, `connectionPaths`, `variability`, `custom` — is refused as
     /// [`ReservedField`](StageAuthoringError::ReservedField): those setters
     /// validate what they write, and this call must not bypass them.
-    pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+    pub fn set_metadata(self, key: &'static str, value: impl Into<vt::Value>) -> Result<Self, StageAuthoringError> {
         authoring::check_reserved(sdf::SpecType::Attribute, key)?;
         let value = self.stage.map_to_spec_value(&self.path, value);
         self.edit(|spec| {
@@ -518,7 +519,7 @@ impl Attribute {
     /// [`set_metadata`](Self::set_metadata).
     pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+        F: FnOnce(Option<vt::Value>) -> Option<vt::Value>,
     {
         authoring::update_metadata::<Self>(&self.stage, &self.path, key, f)?;
         Ok(self)
@@ -615,7 +616,7 @@ impl Attribute {
     pub fn has_authored_connections(&self) -> Result<bool> {
         Ok(self
             .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::ConnectionPaths)?
+            .field::<vt::Value>(&self.path, sdf::FieldKey::ConnectionPaths)?
             .is_some())
     }
 
@@ -746,8 +747,8 @@ impl Attribute {
         }
         Ok(self
             .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::TypeName)?
-            .and_then(sdf::Value::try_as_token))
+            .field::<vt::Value>(&self.path, sdf::FieldKey::TypeName)?
+            .and_then(vt::Value::try_as_token))
     }
 
     /// The composed value type an attribute authored under `ensure` has: the
@@ -780,7 +781,7 @@ impl Attribute {
     /// that one case reads it.
     fn plan_authoring(
         &self,
-        values: Vec<(sdf::Value, Option<super::TimeCode>)>,
+        values: Vec<(vt::Value, Option<super::TimeCode>)>,
         clear: bool,
         fallback: Option<authoring::PropertyDeclaration>,
         schema: &PrimTypeInfo,
@@ -814,12 +815,12 @@ impl Attribute {
     /// Composed default value decoded to `T`. The convenience spelling of
     /// `get_at(None)`; mirrors C++ `UsdAttribute::Get`.
     ///
-    /// `T` is any [`sdf::FromValue`]: a scalar (`get::<f32>()`), an array
-    /// (`get::<Vec<f32>>()`), a token enum, or [`sdf::Value`] itself
-    /// (`get::<sdf::Value>()`) for the raw value.
+    /// `T` is any [`vt::FromValue`]: a scalar (`get::<f32>()`), an array
+    /// (`get::<Vec<f32>>()`), a token enum, or [`vt::Value`] itself
+    /// (`get::<vt::Value>()`) for the raw value.
     pub fn get<T>(&self) -> Result<Option<T>>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<crate::Error>,
     {
         self.get_at(None)
@@ -845,7 +846,7 @@ impl Attribute {
     /// [`InterpolationType`]: super::InterpolationType
     pub fn get_at<T>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<T>>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<crate::Error>,
     {
         super::decode_value(self.value_at::<T>(time)?)
@@ -858,12 +859,12 @@ impl Attribute {
     /// For a caller that transforms the value before decoding it, such as an
     /// array that is reindexed, and has to transform the same opinion a typed
     /// read would return.
-    pub fn value_at<T: sdf::FromValue>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<sdf::Value>> {
+    pub fn value_at<T: vt::FromValue>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<vt::Value>> {
         let time = time.into().map(|time| time.value());
         let value = self.stage.resolve_at(&self.path, time, Some(T::accepts_kind))?;
         Ok(self
             .finish_composition(value)?
-            .filter(|value| T::accepts_kind(sdf::ValueKind::from(value))))
+            .filter(|value| T::accepts_kind(vt::ValueKind::from(value))))
     }
 
     /// Closes what the authored sources composed against the schema tier,
@@ -882,7 +883,7 @@ impl Attribute {
     /// A value withheld at the queried time, such as a blocked sample, is no
     /// value at all: C++ `UsdAttribute::Get` fails there rather than reading
     /// the fallback.
-    fn finish_composition(&self, value: pcp::TimedValue) -> Result<Option<sdf::Value>> {
+    fn finish_composition(&self, value: pcp::TimedValue) -> Result<Option<vt::Value>> {
         let mut composing = match value {
             pcp::TimedValue::Value(value) => pcp::Composing::resumed(value),
             pcp::TimedValue::NoValue => return Ok(None),
@@ -906,7 +907,7 @@ impl Attribute {
     ///
     /// An `asset` fallback is anchored against the schematics that declared
     /// it, at wherever that layer resolved from.
-    pub fn fallback_value(&self) -> Result<Option<sdf::Value>> {
+    pub fn fallback_value(&self) -> Result<Option<vt::Value>> {
         let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
         };
@@ -1084,8 +1085,8 @@ impl Attribute {
         })
     }
 
-    /// Retrieves the composed default [`sdf::Value`] and casts it to `T` via the
-    /// registered coercions ([`sdf::Value::cast`]).
+    /// Retrieves the composed default [`vt::Value`] and casts it to `T` via the
+    /// registered coercions ([`vt::Value::cast`]).
     ///
     /// Unlike [`get`](Attribute::get) — a strict fetch that requires the exact
     /// held variant (`get::<String>()` reads a `Value::String` but not a
@@ -1093,8 +1094,8 @@ impl Attribute {
     /// range-checked, `token` ↔ `string`, vector/quaternion precision) and
     /// returns an error if no conversion to `T` applies. `None` when no layer
     /// authored an opinion.
-    pub fn cast<T: sdf::FromValueCast>(&self) -> Result<Option<T>> {
-        match self.get::<sdf::Value>()? {
+    pub fn cast<T: vt::FromValueCast>(&self) -> Result<Option<T>> {
+        match self.get::<vt::Value>()? {
             Some(value) => Ok(Some(value.cast::<T>()?)),
             None => Ok(None),
         }
@@ -1109,10 +1110,10 @@ impl Attribute {
     /// schema-layered fields it authors (UsdGeom's `interpolation` /
     /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …). Decode to
     /// the field's type (`metadata::<i32>("elementSize")`) or to
-    /// [`sdf::Value`] for the raw value.
+    /// [`vt::Value`] for the raw value.
     pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: TryFrom<vt::Value>,
         T::Error: Into<crate::Error>,
     {
         // `typeName`, `variability` and `custom` each resolve by their own rule
@@ -1127,15 +1128,15 @@ impl Attribute {
 
     /// The value of a field whose resolution is not plain composition, or
     /// `None` when `key` is an ordinary metadata field.
-    fn special_metadata(&self, key: &str) -> Result<Option<sdf::Value>> {
+    fn special_metadata(&self, key: &str) -> Result<Option<vt::Value>> {
         if key == sdf::FieldKey::TypeName.as_str() {
-            return Ok(self.declared_type_token()?.map(sdf::Value::Token));
+            return Ok(self.declared_type_token()?.map(vt::Value::Token));
         }
         if key == sdf::FieldKey::Variability.as_str() {
-            return Ok(self.variability()?.map(sdf::Value::Variability));
+            return Ok(self.variability()?.map(vt::Value::Variability));
         }
         if key == sdf::FieldKey::Custom.as_str() {
-            return Ok(Some(sdf::Value::Bool(self.is_custom()?)));
+            return Ok(Some(vt::Value::Bool(self.is_custom()?)));
         }
         Ok(None)
     }
@@ -1317,7 +1318,7 @@ impl Attribute {
 pub(super) struct AttributeAuthoringPlan {
     effective: Option<sdf::ValueTypeName>,
     ensure: authoring::EnsurePlan,
-    values: Vec<(sdf::Value, Option<f64>)>,
+    values: Vec<(vt::Value, Option<f64>)>,
     clear: bool,
 }
 
@@ -1377,7 +1378,7 @@ impl AttributeAuthoringPlan {
     pub(super) fn block(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
         let mut spec = self.prepare(data, path)?;
         spec.erase(sdf::FieldKey::TimeSamples.as_str());
-        spec.set_default_raw(sdf::Value::ValueBlock);
+        spec.set_default_raw(vt::Value::ValueBlock);
         Ok(())
     }
 }
@@ -1474,7 +1475,7 @@ impl AttributeQuery {
     /// `get_at(None)`; mirrors C++ `UsdAttributeQuery::Get()`.
     pub fn get<T>(&self) -> Result<Option<T>>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<crate::Error>,
     {
         self.get_at(None)
@@ -1491,7 +1492,7 @@ impl AttributeQuery {
     /// field. Both are typed as [`Attribute::get_at`] is.
     pub fn get_at<T>(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<T>>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<crate::Error>,
     {
         match time.into() {
@@ -1624,20 +1625,20 @@ mod tests {
     #[error("not a length")]
     struct NotALength;
 
-    impl TryFrom<sdf::Value> for Meters {
+    impl TryFrom<vt::Value> for Meters {
         type Error = NotALength;
 
-        fn try_from(value: sdf::Value) -> std::result::Result<Self, Self::Error> {
+        fn try_from(value: vt::Value) -> std::result::Result<Self, Self::Error> {
             match value {
-                sdf::Value::Double(v) if v >= 0.0 => Ok(Meters(v)),
+                vt::Value::Double(v) if v >= 0.0 => Ok(Meters(v)),
                 _ => Err(NotALength),
             }
         }
     }
 
-    impl sdf::FromValue for Meters {
-        fn accepts_kind(kind: sdf::ValueKind) -> bool {
-            kind == sdf::ValueKind::Double
+    impl vt::FromValue for Meters {
+        fn accepts_kind(kind: vt::ValueKind) -> bool {
+            kind == vt::ValueKind::Double
         }
     }
 
@@ -1676,7 +1677,7 @@ mod tests {
         Attribute, AttributeQuery, CommittedChange, EditTarget, EditTargetArc, ExpansionRule, ListPosition,
         ResolveInfoSource, Stage, StageAuthoringError, TimeCode, TypeConflict,
     };
-    use crate::{gf, sdf, tf};
+    use crate::{gf, sdf, tf, vt};
 
     /// An attribute's name is its property name, namespaces included, and
     /// two handles to one attribute are equal.
@@ -1832,7 +1833,7 @@ mod tests {
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         stage
             .create_attribute("/Sun.inputs:intensity", "float")?
-            .set(sdf::Value::ValueBlock)?;
+            .set(vt::Value::ValueBlock)?;
 
         // Blocking removes the authored opinion; resolution then reaches the
         // schema, per spec 12.3.6.
@@ -1853,7 +1854,7 @@ mod tests {
         stage
             .create_attribute("/Sun.inputs:intensity", "float")?
             .set_at(2.0_f32, TimeCode::new(1.0))?
-            .set_at(sdf::Value::ValueBlock, TimeCode::new(2.0))?
+            .set_at(vt::Value::ValueBlock, TimeCode::new(2.0))?
             .set_at(4.0_f32, TimeCode::new(3.0))?;
 
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
@@ -2019,10 +2020,10 @@ class Marker "Marker"
         // spec. Property metadata parses untyped, so the token list reads back
         // as a string array.
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        let allowed = rule.metadata::<sdf::Value>("allowedTokens")?;
+        let allowed = rule.metadata::<vt::Value>("allowedTokens")?;
         assert_eq!(
             allowed,
-            Some(sdf::Value::StringVec(vec![
+            Some(vt::Value::StringVec(vec![
                 "explicitOnly".into(),
                 "expandPrims".into(),
                 "expandPrimsAndProperties".into(),
@@ -2076,7 +2077,7 @@ class Marker "Marker"
         // Every handle `attributes()` hands back can be written, not just the
         // authored ones.
         for attr in stage.prim("/Sun")?.attributes()? {
-            if let Some(sdf::Value::Float(value)) = attr.get::<sdf::Value>()? {
+            if let Some(vt::Value::Float(value)) = attr.get::<vt::Value>()? {
                 attr.set(value * 2.0)?;
             }
         }
@@ -2094,7 +2095,7 @@ class Marker "Marker"
         // may fail just because only the schema declares the attribute.
         stage
             .attribute("/Sun.inputs:angle")?
-            .set_metadata("displayGroup", sdf::Value::String("Basic".into()))?;
+            .set_metadata("displayGroup", vt::Value::String("Basic".into()))?;
         assert_eq!(
             stage
                 .attribute("/Sun.inputs:angle")?
@@ -2223,7 +2224,7 @@ class Marker "Marker"
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         let unknown = stage.attribute("/Sun.notASchemaProperty")?;
-        assert_eq!(unknown.get::<sdf::Value>()?, None);
+        assert_eq!(unknown.get::<vt::Value>()?, None);
         assert_eq!(unknown.resolve_info()?.source(), ResolveInfoSource::None);
         Ok(())
     }
@@ -2253,7 +2254,7 @@ class Marker "Marker"
         // The default process registry carries the core `usd` family alone,
         // which declares no `DistantLight`.
         let intensity = stage.attribute("/Sun.inputs:intensity")?;
-        assert_eq!(intensity.get::<sdf::Value>()?, None);
+        assert_eq!(intensity.get::<vt::Value>()?, None);
         assert_eq!(intensity.resolve_info()?.source(), ResolveInfoSource::None);
         Ok(())
     }
@@ -2266,12 +2267,12 @@ class Marker "Marker"
             .set_type_name("Sphere")?
             .attribute_builder("radius", "double")
             .variability(sdf::Variability::Uniform)
-            .set(sdf::Value::Double(1.5))
+            .set(vt::Value::Double(1.5))
             .build()?;
-        assert_eq!(radius.get()?, Some(sdf::Value::Double(1.5)));
+        assert_eq!(radius.get()?, Some(vt::Value::Double(1.5)));
         assert_eq!(
-            stage.field::<sdf::Value>(radius.path(), sdf::FieldKey::Custom)?,
-            Some(sdf::Value::Bool(true)),
+            stage.field::<vt::Value>(radius.path(), sdf::FieldKey::Custom)?,
+            Some(vt::Value::Bool(true)),
         );
         assert_eq!(radius.path().as_str(), "/Sphere.radius");
         assert_eq!(radius.prim().path().as_str(), "/Sphere");
@@ -2304,10 +2305,10 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
         // Linear interpolation default → halfway = 2.0.
-        assert_eq!(attr.get_at(TimeCode::new(5.0))?, Some(sdf::Value::Double(2.0)));
+        assert_eq!(attr.get_at(TimeCode::new(5.0))?, Some(vt::Value::Double(2.0)));
         let samples = attr.time_samples()?.expect("samples");
         assert_eq!(samples.len(), 2);
         Ok(())
@@ -2321,8 +2322,8 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
 
         assert_eq!(attr.num_time_samples()?, 2);
         assert_eq!(attr.time_sample_times()?, vec![0.0, 10.0]);
@@ -2354,9 +2355,9 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(2.0), TimeCode::new(5.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(2.0), TimeCode::new(5.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
 
         let map = attr.time_samples()?.expect("samples");
         let keys: Vec<f64> = map.iter().map(|(t, _)| *t).collect();
@@ -2374,12 +2375,12 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
         root_edit(&stage, |e| {
             e.attribute_mut(attr.path())?
                 .expect("the attribute spec is on the root layer")
-                .set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock);
+                .set(sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock);
             Ok(())
         })?;
         assert!(attr.time_samples()?.is_none());
@@ -2396,11 +2397,11 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set(sdf::Value::Double(1.0))?
+            .set(vt::Value::Double(1.0))?
             .block()?;
         // ValueBlock resolves to None through the default and time-sample paths.
-        assert_eq!(attr.get::<sdf::Value>()?, None);
-        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(0.0))?, None);
+        assert_eq!(attr.get::<vt::Value>()?, None);
+        assert_eq!(attr.get_at::<vt::Value>(TimeCode::new(0.0))?, None);
         Ok(())
     }
 
@@ -2414,12 +2415,12 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?
             .block()?;
-        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(0.0))?, None);
-        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(5.0))?, None);
-        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(10.0))?, None);
+        assert_eq!(attr.get_at::<vt::Value>(TimeCode::new(0.0))?, None);
+        assert_eq!(attr.get_at::<vt::Value>(TimeCode::new(5.0))?, None);
+        assert_eq!(attr.get_at::<vt::Value>(TimeCode::new(10.0))?, None);
         Ok(())
     }
 
@@ -2570,14 +2571,11 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
         let q = attr.query();
         for t in [-5.0, 0.0, 5.0, 10.0, 100.0] {
-            assert_eq!(
-                q.get_at::<sdf::Value>(TimeCode::new(t))?,
-                attr.get_at(TimeCode::new(t))?
-            );
+            assert_eq!(q.get_at::<vt::Value>(TimeCode::new(t))?, attr.get_at(TimeCode::new(t))?);
         }
         assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(2.0));
         Ok(())
@@ -2592,7 +2590,7 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set(sdf::Value::Double(7.0))?;
+            .set(vt::Value::Double(7.0))?;
         let q = attr.query();
         assert_eq!(q.get::<f64>()?, Some(7.0));
         assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(7.0));
@@ -2610,13 +2608,13 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
         let q = attr.query();
         assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(2.0));
 
         // Re-author the t=10 sample; the next query must reflect it.
-        let _attr = attr.set_at(sdf::Value::Double(5.0), TimeCode::new(10.0))?;
+        let _attr = attr.set_at(vt::Value::Double(5.0), TimeCode::new(10.0))?;
         assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(3.0));
         Ok(())
     }
@@ -2631,19 +2629,19 @@ class Marker "Marker"
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?;
         let bystander = stage
             .define_prim("/B")?
             .set_type_name("Xform")?
             .create_attribute("y", "double")?
-            .set_at(sdf::Value::Double(2.0), TimeCode::new(0.0))?;
+            .set_at(vt::Value::Double(2.0), TimeCode::new(0.0))?;
 
         let edited_query = edited.query();
         let bystander_query = bystander.query();
         assert_eq!(edited_query.get_at::<f64>(TimeCode::new(0.0))?, Some(1.0));
         assert_eq!(bystander_query.get_at::<f64>(TimeCode::new(0.0))?, Some(2.0));
 
-        edited.set_at(sdf::Value::Double(9.0), TimeCode::new(0.0))?;
+        edited.set_at(vt::Value::Double(9.0), TimeCode::new(0.0))?;
 
         assert!(
             !edited_query.memo_is_current(),
@@ -2668,7 +2666,7 @@ class Marker "Marker"
         let q = stage.attribute("/A.x")?.query();
         assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, None);
 
-        prim.create_attribute("x", "double")?.set(sdf::Value::Double(4.0))?;
+        prim.create_attribute("x", "double")?.set(vt::Value::Double(4.0))?;
         assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(4.0));
         Ok(())
     }
@@ -2683,12 +2681,12 @@ class Marker "Marker"
             .define_prim("/Source/Child")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set(sdf::Value::Double(1.0))?;
+            .set(vt::Value::Double(1.0))?;
         stage
             .define_prim("/Inst")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     ..Default::default()
                 }])),
@@ -2702,7 +2700,7 @@ class Marker "Marker"
         let q = stage.attribute("/Inst/Child.x")?.query();
         assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(1.0));
 
-        let _source = source.set(sdf::Value::Double(2.0))?;
+        let _source = source.set(vt::Value::Double(2.0))?;
         assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(2.0));
         Ok(())
     }
@@ -2715,11 +2713,11 @@ class Marker "Marker"
         stage
             .define_prim("/Source")?
             .create_attribute("x", "double")?
-            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
-            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+            .set_at(vt::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(vt::Value::Double(3.0), TimeCode::new(10.0))?;
         stage.define_prim("/Prim")?.set_metadata(
             sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                 prim_path: sdf::path("/Source")?,
                 layer_offset: sdf::LayerOffset::new(10.0, 1.0),
                 ..Default::default()
@@ -2730,10 +2728,7 @@ class Marker "Marker"
         let q = attr.query();
         // Sample at source 0/10 reads back at stage 10/20 through the offset.
         for t in [10.0, 15.0, 20.0] {
-            assert_eq!(
-                q.get_at::<sdf::Value>(TimeCode::new(t))?,
-                attr.get_at(TimeCode::new(t))?
-            );
+            assert_eq!(q.get_at::<vt::Value>(TimeCode::new(t))?, attr.get_at(TimeCode::new(t))?);
         }
         assert_eq!(q.get_at::<f64>(TimeCode::new(10.0))?, Some(1.0));
         assert_eq!(q.get_at::<f64>(TimeCode::new(20.0))?, Some(3.0));
@@ -2764,7 +2759,7 @@ class Marker "Marker"
         let stage = stage()?;
         stage
             .define_prim("/P")?
-            .set_metadata("documentation", sdf::Value::String("keep".into()))?;
+            .set_metadata("documentation", vt::Value::String("keep".into()))?;
 
         let _ = stage.attribute("/P")?.clear_metadata("documentation");
 
@@ -2838,7 +2833,7 @@ class Marker "Marker"
     }
 
     /// The raw `field` of the spec at `path` on the layer `layer_id`.
-    fn layer_field(stage: &Stage, layer_id: &str, path: &str, field: &str) -> Option<sdf::Value> {
+    fn layer_field(stage: &Stage, layer_id: &str, path: &str, field: &str) -> Option<vt::Value> {
         let layer = stage.layer(layer_id).expect("layer is live");
         layer
             .data()
@@ -2848,7 +2843,7 @@ class Marker "Marker"
     }
 
     /// The raw `field` of the spec at `path` on the root layer.
-    fn root_field(stage: &Stage, path: &str, field: &str) -> Option<sdf::Value> {
+    fn root_field(stage: &Stage, path: &str, field: &str) -> Option<vt::Value> {
         let root_id = stage.root_layer().identifier().to_string();
         layer_field(stage, &root_id, path, field)
     }
@@ -2904,12 +2899,12 @@ class Marker "Marker"
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        assert!(rule.metadata::<sdf::Value>("allowedTokens")?.is_some());
+        assert!(rule.metadata::<vt::Value>("allowedTokens")?.is_some());
         assert!(!rule.has_authored_metadata("allowedTokens")?);
 
         let mine = stage.create_attribute("/Sun.mine", "double")?;
         assert!(!mine.has_authored_metadata("elementSize")?);
-        let mine = mine.set_metadata("elementSize", sdf::Value::Int(2))?;
+        let mine = mine.set_metadata("elementSize", vt::Value::Int(2))?;
         assert!(mine.has_authored_metadata("elementSize")?);
         Ok(())
     }
@@ -2933,9 +2928,9 @@ class Marker "Marker"
         let (commits, _token) = counted(&stage);
         let attr = stage
             .attribute_builder("/A.x", "float[]")
-            .metadata("interpolation", sdf::Value::Token(tf::Token::from("vertex")))
-            .metadata("elementSize", sdf::Value::Int(2))
-            .set(sdf::Value::FloatVec(vec![1.0, 2.0]))
+            .metadata("interpolation", vt::Value::Token(tf::Token::from("vertex")))
+            .metadata("elementSize", vt::Value::Int(2))
+            .set(vt::Value::FloatVec(vec![1.0, 2.0]))
             .build()?;
 
         assert_eq!(commits.get(), 1);
@@ -2955,7 +2950,7 @@ class Marker "Marker"
         stage.define_prim("/A")?;
         let error = stage
             .attribute_builder("/A.x", "double")
-            .metadata("custom", sdf::Value::Bool(true))
+            .metadata("custom", vt::Value::Bool(true))
             .set(1.0_f64)
             .build()
             .expect_err("`custom` has its own setter");
@@ -2977,7 +2972,7 @@ class Marker "Marker"
 
         let attr = stage.attribute_builder("/A.x", "double").block().build()?;
         assert_eq!(root_field(&stage, "/A.x", "timeSamples"), None);
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::ValueBlock));
         assert!(!attr.has_authored_value()?);
         Ok(())
     }
@@ -3043,7 +3038,7 @@ class Marker "Marker"
 
         let attr = stage
             .attribute_builder("/A.x", "double")
-            .set(sdf::Value::ValueBlock)
+            .set(vt::Value::ValueBlock)
             .build()?;
         assert!(root_field(&stage, "/A.x", "timeSamples").is_some());
         assert!(attr.has_authored_value()?);
@@ -3059,7 +3054,7 @@ class Marker "Marker"
         stage.edit(|edit| {
             let prim = edit.prim("/A")?;
             prim.attribute_builder("x", "float[]")
-                .metadata("elementSize", sdf::Value::Int(3))
+                .metadata("elementSize", vt::Value::Int(3))
                 .build()?;
             prim.attribute_builder("x:indices", "int[]").block().build()?;
             Ok::<_, StageAuthoringError>(())
@@ -3108,7 +3103,7 @@ class Marker "Marker"
         let stage = stage()?;
         let builder = stage
             .attribute_builder("not a path", "double")
-            .metadata("custom", sdf::Value::Bool(true));
+            .metadata("custom", vt::Value::Bool(true));
         assert_eq!(builder.declared_type()?, None);
         assert!(matches!(builder.build(), Err(StageAuthoringError::Parse(_))));
         Ok(())
@@ -3184,7 +3179,7 @@ class Marker "Marker"
             error,
             StageAuthoringError::ValueType(sdf::ValueTypeError::Mismatch { .. })
         ));
-        assert_eq!(attr.get::<sdf::Value>()?, None);
+        assert_eq!(attr.get::<vt::Value>()?, None);
         Ok(())
     }
 
@@ -3193,7 +3188,7 @@ class Marker "Marker"
         let stage = stage()?;
         stage.define_prim("/A")?;
         let attr = stage.create_attribute("/A.x", "double3d[]")?;
-        attr.clone().set(sdf::Value::ValueBlock)?;
+        attr.clone().set(vt::Value::ValueBlock)?;
         assert!(attr.resolve_info()?.value_is_blocked());
         let error = attr.set(1.0_f64).expect_err("no value fits an unknown type");
         assert!(matches!(
@@ -3208,14 +3203,14 @@ class Marker "Marker"
         let stage = stage()?;
         stage.define_prim("/A")?;
         let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::OPAQUE)?;
-        for value in [sdf::Value::Opaque, sdf::Value::Float(1.0)] {
+        for value in [vt::Value::Opaque, vt::Value::Float(1.0)] {
             let error = attr.clone().set(value).expect_err("opaque holds no value");
             assert!(matches!(
                 error,
                 StageAuthoringError::ValueType(sdf::ValueTypeError::Opaque)
             ));
         }
-        attr.set(sdf::Value::ValueBlock)?;
+        attr.set(vt::Value::ValueBlock)?;
         Ok(())
     }
 
@@ -3278,11 +3273,11 @@ class Marker "Marker"
         stage.attribute("/A.x")?.set(gf::Vec3f::from([1.0, 0.5, 0.0]))?;
         assert_eq!(
             root_field(&stage, "/A.x", "default"),
-            Some(sdf::Value::Vec3f(gf::Vec3f::from([1.0, 0.5, 0.0])))
+            Some(vt::Value::Vec3f(gf::Vec3f::from([1.0, 0.5, 0.0])))
         );
         assert_eq!(
             root_field(&stage, "/A.x", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("float3"))),
+            Some(vt::Value::Token(tf::Token::from("float3"))),
             "the local declaration is untouched"
         );
         Ok(())
@@ -3326,7 +3321,7 @@ class Marker "Marker"
         root_edit(&stage, |e| {
             e.attribute_mut("/A.x")?
                 .expect("root spec")
-                .set("typeName", sdf::Value::Int(3));
+                .set("typeName", vt::Value::Int(3));
             Ok(())
         })?;
         let error = stage
@@ -3352,16 +3347,16 @@ class Marker "Marker"
             .set(1.0_f32)
             .expect_err("an unknown local type agrees with nothing");
         assert_eq!(type_conflict(error).local, tf::Token::from("double3d[]"));
-        stage.attribute("/A.x")?.set(sdf::Value::ValueBlock)?;
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        stage.attribute("/A.x")?.set(vt::Value::ValueBlock)?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::ValueBlock));
         Ok(())
     }
 
     #[test]
     fn block_over_conflict() -> Result<()> {
         let (_dir, stage) = stack("float x", "double x", "")?;
-        stage.attribute("/A.x")?.set(sdf::Value::ValueBlock)?;
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        stage.attribute("/A.x")?.set(vt::Value::ValueBlock)?;
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::ValueBlock));
         Ok(())
     }
 
@@ -3372,9 +3367,9 @@ class Marker "Marker"
         stage.attribute("/A.x")?.set(1.0_f32)?;
         assert_eq!(
             root_field(&stage, "/A.x", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("float")))
+            Some(vt::Value::Token(tf::Token::from("float")))
         );
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::Float(1.0)));
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::Float(1.0)));
         Ok(())
     }
 
@@ -3403,7 +3398,7 @@ class Marker "Marker"
         root_edit(&stage, |e| {
             e.attribute_mut("/A.x")?
                 .expect("root spec")
-                .set("typeName", sdf::Value::Int(3));
+                .set("typeName", vt::Value::Int(3));
             Ok(())
         })?;
         let error = stage
@@ -3422,7 +3417,7 @@ class Marker "Marker"
         let stage = stage()?;
         stage.define_prim("/A")?;
         stage.create_attribute("/A.x", "double3d[]")?.block()?;
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::ValueBlock));
         Ok(())
     }
 
@@ -3434,7 +3429,7 @@ class Marker "Marker"
         root_edit(&stage, |e| {
             e.attribute_mut("/A.x")?
                 .expect("root spec")
-                .set("timeSamples", sdf::Value::String("junk".into()));
+                .set("timeSamples", vt::Value::String("junk".into()));
             Ok(())
         })?;
         attr.block()?;
@@ -3443,7 +3438,7 @@ class Marker "Marker"
             None,
             "the field is erased whole"
         );
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::ValueBlock));
         Ok(())
     }
 
@@ -3457,7 +3452,7 @@ class Marker "Marker"
             .set_at(3.0_f32, TimeCode::new(10.0))?
             .block()?;
         assert_eq!(root_field(&stage, "/A.x", "timeSamples"), None);
-        assert_eq!(root_field(&stage, "/A.x", "default"), Some(sdf::Value::ValueBlock));
+        assert_eq!(root_field(&stage, "/A.x", "default"), Some(vt::Value::ValueBlock));
         assert_eq!(attr.num_time_samples()?, 0);
         assert_eq!(attr.get_at::<f32>(TimeCode::new(0.0))?, None);
         Ok(())
@@ -3487,14 +3482,14 @@ class Marker "Marker"
             .set_at(2.0_f32, TimeCode::new(0.0))?
             .set_at(3.0_f32, TimeCode::new(10.0))?
             .clear_at(TimeCode::new(0.0))?;
-        assert_eq!(attr.time_samples()?, Some(vec![(10.0, sdf::Value::Float(3.0))]));
+        assert_eq!(attr.time_samples()?, Some(vec![(10.0, vt::Value::Float(3.0))]));
         let attr = attr.clear_at(None)?;
         assert_eq!(root_field(&stage, "/A.x", "default"), None);
 
         root_edit(&stage, |e| {
             e.attribute_mut("/A.x")?
                 .expect("root spec")
-                .set("timeSamples", sdf::Value::String("junk".into()));
+                .set("timeSamples", vt::Value::String("junk".into()));
             Ok(())
         })?;
         let error = attr
@@ -3543,7 +3538,7 @@ class Marker "Marker"
         let attr = attr.clear_default()?.set_type_name(sdf::ValueTypeName::FLOAT)?;
         assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
 
-        let attr = attr.set(sdf::Value::ValueBlock)?.set_type_name("double3d[]")?;
+        let attr = attr.set(vt::Value::ValueBlock)?.set_type_name("double3d[]")?;
         assert_eq!(attr.type_name()?, None, "blocks fit even an unknown type");
         let attr = attr.set_type_name(sdf::ValueTypeName::FLOAT)?.set(1.0_f32)?;
         let error = attr
@@ -3569,7 +3564,7 @@ class Marker "Marker"
             StageAuthoringError::ValueType(sdf::ValueTypeError::Opaque)
         ));
         let attr = attr
-            .set(sdf::Value::ValueBlock)?
+            .set(vt::Value::ValueBlock)?
             .set_type_name(sdf::ValueTypeName::OPAQUE)?;
         assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::OPAQUE));
         Ok(())
@@ -3596,7 +3591,7 @@ class Marker "Marker"
         assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
         assert_eq!(
             root_field(&stage, "/Sun.inputs:intensity", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("float"))),
+            Some(vt::Value::Token(tf::Token::from("float"))),
             "the schema's declaration is stamped"
         );
         assert!(!attr.is_custom()?);
@@ -3610,7 +3605,7 @@ class Marker "Marker"
         stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
         assert_eq!(
             root_field(&stage, "/A.x", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("double"))),
+            Some(vt::Value::Token(tf::Token::from("double"))),
             "the sublayer's declaration is copied"
         );
         assert_eq!(root_field(&stage, "/A.x", "custom"), None, "absent means not custom");
@@ -3625,7 +3620,7 @@ class Marker "Marker"
         let attr = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
         assert_eq!(attr.type_name()?, Some(sdf::ValueTypeName::FLOAT));
         assert!(attr.is_custom()?);
-        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(sdf::Value::Bool(true)));
+        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(vt::Value::Bool(true)));
         assert_eq!(root_field(&stage, "/A.x", "variability"), None, "absent means varying");
         Ok(())
     }
@@ -3763,7 +3758,7 @@ class Marker "Marker"
             .set_type_name(sdf::ValueTypeName::DOUBLE)?;
         assert_eq!(
             root_field(&stage, "/Sun.inputs:intensity", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("double")))
+            Some(vt::Value::Token(tf::Token::from("double")))
         );
         assert_eq!(
             root_field(&stage, "/Sun.inputs:intensity", "custom"),
@@ -3801,7 +3796,7 @@ class Marker "Marker"
         // The local attribute spec is used even though the schema declares a
         // relationship of that name.
         stage.attribute(path)?.set(1.0_f32)?;
-        assert_eq!(root_field(&stage, path, "default"), Some(sdf::Value::Float(1.0)));
+        assert_eq!(root_field(&stage, path, "default"), Some(vt::Value::Float(1.0)));
         Ok(())
     }
 
@@ -3831,7 +3826,7 @@ class Marker "Marker"
 
     #[test]
     fn strongest_declaration_malformed() -> Result<()> {
-        for (bad, kind) in [(None, "missing"), (Some(sdf::Value::Int(3)), "not a token")] {
+        for (bad, kind) in [(None, "missing"), (Some(vt::Value::Int(3)), "not a token")] {
             let (_dir, stage) = stack("", "float x", "double x")?;
             root_edit(&stage, |e| {
                 let mut spec = e.attribute_mut("/A.x")?.expect("root spec");
@@ -3906,7 +3901,7 @@ class Marker "Marker"
         root_edit(&stage, |e| {
             e.attribute_mut("/A.x")?
                 .expect("root spec")
-                .set("timeSamples", sdf::Value::ValueBlock);
+                .set("timeSamples", vt::Value::ValueBlock);
             Ok(())
         })?;
         Ok((stage, attr))
@@ -3916,7 +3911,7 @@ class Marker "Marker"
     fn retype_over_field_block() -> Result<()> {
         let (stage, attr) = field_blocked()?;
         attr.set_type_name(sdf::ValueTypeName::DOUBLE)?;
-        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), Some(sdf::Value::ValueBlock));
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), Some(vt::Value::ValueBlock));
         Ok(())
     }
 
@@ -3926,7 +3921,7 @@ class Marker "Marker"
         attr.set_at(1.0_f32, TimeCode::new(1.0))?;
         assert_eq!(
             root_field(&stage, "/A.x", "timeSamples"),
-            Some(sdf::Value::TimeSamples(vec![(1.0, sdf::Value::Float(1.0))]))
+            Some(vt::Value::TimeSamples(vec![(1.0, vt::Value::Float(1.0))]))
         );
         Ok(())
     }
@@ -3935,7 +3930,7 @@ class Marker "Marker"
     fn clear_at_field_block() -> Result<()> {
         let (stage, attr) = field_blocked()?;
         attr.clear_at(TimeCode::new(1.0))?;
-        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), Some(sdf::Value::ValueBlock));
+        assert_eq!(root_field(&stage, "/A.x", "timeSamples"), Some(vt::Value::ValueBlock));
         Ok(())
     }
 
@@ -3944,12 +3939,12 @@ class Marker "Marker"
         let (_dir, stage) = stack("", "", "custom double x")?;
         stage
             .attribute("/A.x")?
-            .update_metadata("documentation", |_| Some(sdf::Value::String("doc".into())))?;
+            .update_metadata("documentation", |_| Some(vt::Value::String("doc".into())))?;
         assert_eq!(
             root_field(&stage, "/A.x", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("double")))
+            Some(vt::Value::Token(tf::Token::from("double")))
         );
-        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(sdf::Value::Bool(true)));
+        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(vt::Value::Bool(true)));
         Ok(())
     }
 
@@ -3959,10 +3954,10 @@ class Marker "Marker"
         assert!(stage.attribute("/A.x")?.remove_connection("/A.y")?);
         assert_eq!(
             root_field(&stage, "/A.x", "typeName"),
-            Some(sdf::Value::Token(tf::Token::from("double"))),
+            Some(vt::Value::Token(tf::Token::from("double"))),
             "the sublayer's declaration carries the delete opinion"
         );
-        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(sdf::Value::Bool(true)));
+        assert_eq!(root_field(&stage, "/A.x", "custom"), Some(vt::Value::Bool(true)));
         assert_eq!(stage.attribute("/A.x")?.connections()?, vec![]);
 
         let (_dir, stage) = stack("", "rel x", "custom double x.connect = </A.y>")?;
@@ -3986,7 +3981,7 @@ class Marker "Marker"
             e.attribute_mut("/A.x")?.expect("root spec").erase("typeName");
             Ok(())
         })?;
-        let error = attr.set(sdf::Value::ValueBlock).expect_err("missing local type");
+        let error = attr.set(vt::Value::ValueBlock).expect_err("missing local type");
         assert!(matches!(error, StageAuthoringError::ValueType(_)), "{error:?}");
         Ok(())
     }
@@ -4077,7 +4072,7 @@ class Marker "Marker"
             );
         }
         // An ordinary field still goes through.
-        attr.set_metadata("documentation", sdf::Value::String("doc".into()))?;
+        attr.set_metadata("documentation", vt::Value::String("doc".into()))?;
         Ok(())
     }
 
@@ -4106,7 +4101,7 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage
             .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
-            .set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
+            .set(vt::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "/Source/Child"
@@ -4114,7 +4109,7 @@ class Marker "Marker"
         // The absolute form is anchored in stage namespace, then mapped.
         stage
             .attribute("/World/MyPrim.expr")?
-            .set(sdf::Value::PathExpression(sdf::PathExpression::parse(
+            .set(vt::Value::PathExpression(sdf::PathExpression::parse(
                 "/World/MyPrim/Child//",
             )))?;
         assert_eq!(
@@ -4141,12 +4136,12 @@ class Marker "Marker"
             let mut prim = e.prim_mut("/Prim")?.expect("the prim spec");
             prim.set(
                 sdf::FieldKey::VariantSetNames.as_str(),
-                sdf::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
+                vt::Value::StringListOp(sdf::StringListOp::prepended(["set".to_owned()])),
             );
             prim.set_variant_selection("set", "sel")?;
             Ok(())
         })?;
-        attr.set(sdf::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
+        attr.set(vt::Value::PathExpression(sdf::PathExpression::parse("Child")))?;
         assert_eq!(
             expr_field(&stage, &root, "/Prim{set=sel}.expr", "default"),
             "/Prim{set=sel}Child"
@@ -4159,7 +4154,7 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage
             .create_attribute("/World/MyPrim.exprs", sdf::ValueTypeName::PATH_EXPRESSION_ARRAY)?
-            .set(sdf::Value::PathExpressionVec(vec![
+            .set(vt::Value::PathExpressionVec(vec![
                 sdf::PathExpression::parse("Child"),
                 sdf::PathExpression::parse("/World/MyPrim"),
             ]))?;
@@ -4177,13 +4172,13 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage.prim("/World/MyPrim")?.set_metadata(
             "customExpr",
-            sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+            vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
         )?;
         assert_eq!(expr_field(&stage, &layer_id, "/Source", "customExpr"), "/Source/Child");
 
         stage.create_relationship("/World/MyPrim.rel")?.set_metadata(
             "customExpr",
-            sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+            vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
         )?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.rel", "customExpr"),
@@ -4194,7 +4189,7 @@ class Marker "Marker"
             .create_attribute("/World/MyPrim.x", sdf::ValueTypeName::FLOAT)?
             .set_metadata(
                 "customExpr",
-                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+                vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
             )?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.x", "customExpr"),
@@ -4223,9 +4218,9 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage.prim("/World/MyPrim")?.set_metadata(
             "customData",
-            sdf::Value::Dictionary(sdf::Dictionary::from([(
+            vt::Value::Dictionary(vt::Dictionary::from([(
                 "expr".to_string(),
-                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+                vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
             )])),
         )?;
         let dict = layer_field(&stage, &layer_id, "/Source", "customData").expect("authored");
@@ -4244,7 +4239,7 @@ class Marker "Marker"
         stage
             .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
             .set_at(
-                sdf::Value::PathExpression(sdf::PathExpression::parse("Child")),
+                vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
                 TimeCode::new(1.0),
             )?;
         let samples = layer_field(&stage, &layer_id, "/Source.expr", "timeSamples").expect("authored");
@@ -4263,7 +4258,7 @@ class Marker "Marker"
         let (stage, layer_id) = referenced_target()?;
         stage
             .create_attribute("/World/MyPrim.expr", sdf::ValueTypeName::PATH_EXPRESSION)?
-            .set(sdf::Value::PathExpression(sdf::PathExpression::parse("%:lights Child")))?;
+            .set(vt::Value::PathExpression(sdf::PathExpression::parse("%:lights Child")))?;
         assert_eq!(
             expr_field(&stage, &layer_id, "/Source.expr", "default"),
             "%:lights /Source/Child",
@@ -4295,7 +4290,7 @@ class Marker "Marker"
 
         assert_eq!(attr.get::<f32>()?, Some(3.0));
         assert_eq!(attr.get::<f64>()?, Some(2.0));
-        assert_eq!(attr.get::<sdf::Value>()?, Some(sdf::Value::Double(2.0)));
+        assert_eq!(attr.get::<vt::Value>()?, Some(vt::Value::Double(2.0)));
         assert_eq!(AttributeQuery::new(&attr).get::<f32>()?, Some(3.0));
         Ok(())
     }
@@ -4383,9 +4378,9 @@ class Marker "Marker"
                 ("weak.usda", &format!("def \"P\"\n{{\n    {weak}\n}}")),
             ])?;
             let attr = stage.attribute("/P.e")?;
-            let untyped = attr.get::<sdf::Value>()?.expect("the expression composes");
+            let untyped = attr.get::<vt::Value>()?.expect("the expression composes");
             let typed = attr.get::<sdf::PathExpression>()?.expect("the expression composes");
-            assert_eq!(sdf::Value::PathExpression(typed.clone()), untyped, "{weak}");
+            assert_eq!(vt::Value::PathExpression(typed.clone()), untyped, "{weak}");
             assert!(typed.to_string().contains("/Target"), "{weak}: {typed}");
         }
         Ok(())
@@ -4463,21 +4458,21 @@ class Marker "Marker"
     struct Recorded;
 
     thread_local! {
-        static SEEN: RefCell<Vec<sdf::Value>> = const { RefCell::new(Vec::new()) };
+        static SEEN: RefCell<Vec<vt::Value>> = const { RefCell::new(Vec::new()) };
     }
 
-    impl TryFrom<sdf::Value> for Recorded {
+    impl TryFrom<vt::Value> for Recorded {
         type Error = NotALength;
 
-        fn try_from(value: sdf::Value) -> std::result::Result<Self, Self::Error> {
+        fn try_from(value: vt::Value) -> std::result::Result<Self, Self::Error> {
             SEEN.with(|seen| seen.borrow_mut().push(value));
             Ok(Recorded)
         }
     }
 
-    impl sdf::FromValue for Recorded {
-        fn accepts_kind(kind: sdf::ValueKind) -> bool {
-            kind == sdf::ValueKind::AssetPath
+    impl vt::FromValue for Recorded {
+        fn accepts_kind(kind: vt::ValueKind) -> bool {
+            kind == vt::ValueKind::AssetPath
         }
     }
 
@@ -4510,7 +4505,7 @@ def \"M\"
         SEEN.with(|seen| seen.borrow_mut().clear());
         attr.get::<Recorded>()?.expect("the type accepts the asset's kind");
         let seen = SEEN.with(|seen| seen.take());
-        let finalized = attr.get::<sdf::Value>()?;
+        let finalized = attr.get::<vt::Value>()?;
         assert_eq!(seen.len(), 1, "one conversion: {seen:?}");
         let asset = seen[0].clone().try_as_asset_path().expect("the winning asset");
         assert!(asset.resolved_path().is_some(), "resolved before conversion: {asset:?}");
@@ -4701,7 +4696,7 @@ def \"P\" (
         stage.layer_mut(&strong).expect("the layer is live").edit(|edit| {
             edit.attribute_mut(&path)?
                 .expect("the attribute spec is on the layer")
-                .set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock);
+                .set(sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock);
             Ok(())
         })?;
         target_layer(&stage, "weak.usda")?;

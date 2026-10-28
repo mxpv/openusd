@@ -13,8 +13,9 @@ use std::hash::Hash;
 
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
+use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference};
 use crate::tf::Token;
+use crate::vt::Value;
 
 use super::diagnostics::Diagnostics;
 use super::layer_stack::LayerStackId;

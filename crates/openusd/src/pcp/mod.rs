@@ -362,7 +362,8 @@ mod relocates;
 pub(crate) mod value_resolve;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, Path, Value};
+use crate::sdf::{self, Path};
+use crate::vt::{self, Value};
 
 pub(crate) use change::{ApplyOutcome, Changes, LayerChanges};
 pub(crate) use diagnostics::Diagnostics;
@@ -512,7 +513,7 @@ pub enum QueryError {
 
     /// A composed metadata value does not hold the type the query requires.
     #[error(transparent)]
-    Cast(Box<sdf::CastError>),
+    Cast(Box<vt::CastError>),
 
     /// Synthesizing an in-memory layer (a generated clip manifest) failed.
     #[error(transparent)]
@@ -531,7 +532,7 @@ pub enum QueryError {
 const _: () = assert!(mem::size_of::<QueryError>() <= 16);
 
 /// An infallible conversion can never produce an error; the impl exists so
-/// generic `TryFrom<sdf::Value>` bounds accept the reflexive conversion.
+/// generic `TryFrom<vt::Value>` bounds accept the reflexive conversion.
 impl From<Infallible> for QueryError {
     fn from(error: Infallible) -> Self {
         match error {}
@@ -550,8 +551,8 @@ impl From<sdf::PathParseError> for QueryError {
     }
 }
 
-impl From<sdf::CastError> for QueryError {
-    fn from(error: sdf::CastError) -> Self {
+impl From<vt::CastError> for QueryError {
+    fn from(error: vt::CastError) -> Self {
         Self::Cast(Box::new(error))
     }
 }

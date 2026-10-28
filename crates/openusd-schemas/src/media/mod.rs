@@ -29,7 +29,7 @@
 //!
 //! ```
 //! use openusd_schemas::media::{AuralMode, SpatialAudio, SpatialAudioSchema};
-//! use openusd::sdf;
+//! use openusd::{sdf, vt};
 //! use openusd::usd::Stage;
 //!
 //! let stage = Stage::builder()
@@ -38,8 +38,8 @@
 //!
 //! // Author a non-spatial ambient track that loops from frame 24 to 48.
 //! let audio = SpatialAudio::define(&stage, "/World/Ambient").unwrap();
-//! audio.create_file_path_attr().unwrap().set(sdf::Value::AssetPath("./ambient.wav".into())).unwrap();
-//! audio.create_aural_mode_attr().unwrap().set(sdf::Value::Token(AuralMode::NonSpatial.as_token().into())).unwrap();
+//! audio.create_file_path_attr().unwrap().set(vt::Value::AssetPath("./ambient.wav".into())).unwrap();
+//! audio.create_aural_mode_attr().unwrap().set(vt::Value::Token(AuralMode::NonSpatial.as_token().into())).unwrap();
 //! audio.create_start_time_attr().unwrap().set(sdf::TimeCode(24.0)).unwrap();
 //! audio.create_end_time_attr().unwrap().set(sdf::TimeCode(48.0)).unwrap();
 //! audio.create_gain_attr().unwrap().set(0.5_f64).unwrap();
@@ -49,7 +49,7 @@
 //! assert_eq!(audio.start_time().unwrap(), Some(sdf::TimeCode(24.0)));
 //! let mode = audio
 //!     .aural_mode_attr()
-//!     .get::<sdf::Value>().unwrap()
+//!     .get::<vt::Value>().unwrap()
 //!     .and_then(|v| v.try_as_token())
 //!     .and_then(AuralMode::from_token);
 //! assert_eq!(mode, Some(AuralMode::NonSpatial));

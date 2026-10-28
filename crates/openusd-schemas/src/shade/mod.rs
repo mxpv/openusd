@@ -62,14 +62,14 @@
 //!
 //! ```
 //! use openusd_schemas::shade::{self, Connectable};
-//! use openusd::{sdf, usd};
+//! use openusd::{usd, vt};
 //!
 //! let stage = usd::Stage::builder()
 //!     .schema_registry(openusd_schemas::schema_registry())
 //!     .in_memory("scene.usda").unwrap();
 //!
 //! let surface = shade::Shader::define(&stage, "/Mat/Surface").unwrap();
-//! surface.node_def().create_id_attr().unwrap().set(sdf::Value::token("UsdPreviewSurface")).unwrap();
+//! surface.node_def().create_id_attr().unwrap().set(vt::Value::token("UsdPreviewSurface")).unwrap();
 //! surface.create_input("roughness", "float").unwrap().set(0.4_f32).unwrap();
 //! let terminal = surface.create_output("surface", "token").unwrap();
 //!
@@ -173,7 +173,7 @@ macro_rules! impl_shading_attribute {
             /// Author this attribute's default value.
             pub fn set(
                 self,
-                value: impl Into<$crate::openusd::sdf::Value>,
+                value: impl Into<$crate::openusd::vt::Value>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
                 self.attribute.set(value).map(Self::new)
             }
@@ -181,7 +181,7 @@ macro_rules! impl_shading_attribute {
             /// Author this attribute's value at a numeric time code.
             pub fn set_at(
                 self,
-                value: impl Into<$crate::openusd::sdf::Value>,
+                value: impl Into<$crate::openusd::vt::Value>,
                 time: impl Into<Option<$crate::openusd::usd::TimeCode>>,
             ) -> Result<Self, $crate::openusd::usd::StageAuthoringError> {
                 self.attribute.set_at(value, time).map(Self::new)
@@ -480,4 +480,4 @@ impl BindingStrength {
 
 // `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
 // `Attribute::set` / `get::<Enum>()`.
-openusd::sdf::impl_token_value!(Connectability, BindingStrength);
+openusd::vt::impl_token_value!(Connectability, BindingStrength);

@@ -321,7 +321,7 @@ impl CurveBasis {
 
 // Bidirectional `From`/`TryFrom<Value>` for each token enum, so they pass
 // straight to `Attribute::set` / `get::<Enum>()`. See the macro's own docs.
-openusd::sdf::impl_token_value!(Interpolation, CurveBasis);
+openusd::vt::impl_token_value!(Interpolation, CurveBasis);
 
 /// The value type `attr` is declared with, whatever its spelling, or `None`
 /// where nothing declares the attribute.
@@ -361,7 +361,7 @@ pub(crate) fn nearest<V, T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openusd::sdf::Value;
+    use openusd::vt::Value;
 
     #[test]
     fn token_value_round_trip() {

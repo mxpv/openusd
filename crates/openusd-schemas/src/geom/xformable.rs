@@ -10,7 +10,7 @@
 //! [`openusd::usd::AttributeQuery::get_at`]. Time-sampled ops interpolate per
 //! AOUSD §12.5.
 
-use openusd::Result;
+use openusd::{Result, vt};
 
 use crate::SchemaError;
 
@@ -163,7 +163,7 @@ pub trait XformableExt: XformableSchema {
         S: Into<String>,
     {
         let order: Vec<String> = order.into_iter().map(Into::into).collect();
-        self.create_xform_op_order_attr()?.set(sdf::Value::token_vec(order))?;
+        self.create_xform_op_order_attr()?.set(vt::Value::token_vec(order))?;
         Ok(self)
     }
 
@@ -198,7 +198,7 @@ pub trait XformableExt: XformableSchema {
             (false, Some(last)) => order[last + 1..].to_vec(),
         };
         self.xform_op_order_attr_builder()
-            .set(sdf::Value::TokenVec(order))
+            .set(vt::Value::TokenVec(order))
             .build()?;
         Ok(self)
     }
@@ -285,7 +285,7 @@ pub trait XformableExt: XformableSchema {
         self,
         op: &str,
         precision: XformOpPrecision,
-        value: impl Into<sdf::Value>,
+        value: impl Into<vt::Value>,
     ) -> Result<Self, SchemaError>
     where
         Self: Sized,
@@ -557,7 +557,7 @@ pub(super) struct OpWrite {
     /// The type the op is declared as where nothing declares it yet.
     pub new_type: sdf::ValueTypeName,
     /// The value to author on it, if any.
-    pub value: Option<sdf::Value>,
+    pub value: Option<vt::Value>,
 }
 
 /// Op attributes and an `xformOpOrder` to author on a prim as one edit,
@@ -572,7 +572,7 @@ pub(super) struct OpWrite {
 pub(super) struct StackEdit {
     /// Each op to author: its name, the type it is declared as, and the
     /// value to give it, if any.
-    ops: Vec<(tf::Token, sdf::ValueTypeName, Option<sdf::Value>)>,
+    ops: Vec<(tf::Token, sdf::ValueTypeName, Option<vt::Value>)>,
     /// What replaces `xformOpOrder`, where the edit changes it.
     order: Option<Vec<tf::Token>>,
     /// The time the values are authored at.
@@ -627,7 +627,7 @@ impl StackEdit {
         let write = OpWrite {
             name: name.clone(),
             new_type: XformOpKind::Transform.value_type(XformOpPrecision::Double),
-            value: matrix.map(sdf::Value::from),
+            value: matrix.map(vt::Value::from),
         };
         Self::prepare(prim, vec![write], Some(vec![name]), time)
     }
@@ -646,7 +646,7 @@ impl StackEdit {
         if let Some(order) = self.order {
             Xformable::from_prim_unchecked(prim.clone())
                 .xform_op_order_attr_builder()
-                .set(sdf::Value::TokenVec(order))
+                .set(vt::Value::TokenVec(order))
                 .in_edit(edit)
                 .build()?;
         }
@@ -712,6 +712,7 @@ pub(crate) mod tests {
     use openusd::gf;
     use openusd::sdf;
     use openusd::usd;
+    use openusd::vt;
 
     /// An asset that declares an op at another precision keeps it: the
     /// setter converts the value rather than failing on the mismatch.
@@ -729,8 +730,8 @@ pub(crate) mod tests {
             "the declared precision survives"
         );
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:scale", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Vec3d(gf::vec3d(2.0, 2.0, 2.0)))
+            stage.field::<vt::Value>("/X.xformOp:scale", sdf::FieldKey::Default)?,
+            Some(vt::Value::Vec3d(gf::vec3d(2.0, 2.0, 2.0)))
         );
         Ok(())
     }
@@ -753,18 +754,18 @@ pub(crate) mod tests {
         assert_eq!(declared("/X.xformOp:transform")?, Some(sdf::ValueTypeName::MATRIX4D));
 
         // Each value converted to the precision its op was created at.
-        let default = |path: &str| stage.field::<sdf::Value>(path, sdf::FieldKey::Default);
+        let default = |path: &str| stage.field::<vt::Value>(path, sdf::FieldKey::Default);
         assert_eq!(
             default("/X.xformOp:scale")?,
-            Some(sdf::Value::Vec3d(gf::vec3d(2.0, 2.0, 2.0)))
+            Some(vt::Value::Vec3d(gf::vec3d(2.0, 2.0, 2.0)))
         );
         assert_eq!(
             default("/X.xformOp:rotateX")?,
-            Some(sdf::Value::Half(gf::f16::from_f32(90.0)))
+            Some(vt::Value::Half(gf::f16::from_f32(90.0)))
         );
         assert_eq!(
             default("/X.xformOp:orient")?,
-            Some(sdf::Value::Quatd(gf::Quatd::IDENTITY)),
+            Some(vt::Value::Quatd(gf::Quatd::IDENTITY)),
             "a quaternion converts component-wise in (w, x, y, z) order"
         );
         Ok(())
@@ -806,7 +807,7 @@ pub(crate) mod tests {
         }
         assert_eq!(x.xform_op_order()?, None, "nothing was appended to the stack");
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:bogusOp", sdf::FieldKey::Default)?,
+            stage.field::<vt::Value>("/X.xformOp:bogusOp", sdf::FieldKey::Default)?,
             None,
             "and nothing was authored for it"
         );
@@ -838,7 +839,7 @@ pub(crate) mod tests {
             .unwrap_or_else(|| panic!("the unregistered declaration was accepted"));
         assert!(matches!(error, SchemaError::Core(_)), "{error:?}");
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:scale", sdf::FieldKey::Default)?,
+            stage.field::<vt::Value>("/X.xformOp:scale", sdf::FieldKey::Default)?,
             None,
             "no value was authored"
         );
@@ -862,7 +863,7 @@ pub(crate) mod tests {
             .unwrap_or_else(|| panic!("the out-of-range value was accepted"));
         assert!(matches!(error, SchemaError::Core(_)), "{error:?}");
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:scale", sdf::FieldKey::TypeName)?,
+            stage.field::<vt::Value>("/X.xformOp:scale", sdf::FieldKey::TypeName)?,
             None,
             "no declaration was left behind"
         );
@@ -889,8 +890,8 @@ pub(crate) mod tests {
         )?;
         assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
+            stage.field::<vt::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
+            Some(vt::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
         );
         Ok(())
     }
@@ -911,8 +912,8 @@ pub(crate) mod tests {
         let x = Xform::define(&stage, "/X")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
         assert_eq!(x.xform_op_order()?.expect("authored"), vec!["xformOp:translate"]);
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
+            stage.field::<vt::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
+            Some(vt::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
         );
         Ok(())
     }
@@ -957,8 +958,8 @@ pub(crate) mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         Xform::define(&stage, "/X")?.set_rotate_xyz(gf::vec3f(30.0, 45.0, 60.0))?;
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:rotateXYZ", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Vec3f(gf::vec3f(30.0, 45.0, 60.0)))
+            stage.field::<vt::Value>("/X.xformOp:rotateXYZ", sdf::FieldKey::Default)?,
+            Some(vt::Value::Vec3f(gf::vec3f(30.0, 45.0, 60.0)))
         );
         Ok(())
     }
@@ -968,8 +969,8 @@ pub(crate) mod tests {
         let stage = crate::tests::stage("anon.usda")?;
         Xform::define(&stage, "/X")?.set_orient(gf::quatf(1.0, 0.0, 0.0, 0.0))?;
         assert_eq!(
-            stage.field::<sdf::Value>("/X.xformOp:orient", sdf::FieldKey::Default)?,
-            Some(sdf::Value::quatf(1.0, 0.0, 0.0, 0.0))
+            stage.field::<vt::Value>("/X.xformOp:orient", sdf::FieldKey::Default)?,
+            Some(vt::Value::quatf(1.0, 0.0, 0.0, 0.0))
         );
         Ok(())
     }
@@ -984,8 +985,8 @@ pub(crate) mod tests {
             5.0, 0.0, 0.0, 1.0,
         ]);
         Xform::define(&stage, "/X")?.set_transform(m)?;
-        match stage.field::<sdf::Value>("/X.xformOp:transform", sdf::FieldKey::Default)? {
-            Some(sdf::Value::Matrix4d(v)) => assert_eq!(v[12], 5.0),
+        match stage.field::<vt::Value>("/X.xformOp:transform", sdf::FieldKey::Default)? {
+            Some(vt::Value::Matrix4d(v)) => assert_eq!(v[12], 5.0),
             other => panic!("expected gf::Mat4d, got {other:?}"),
         }
         Ok(())
@@ -1291,8 +1292,8 @@ class PivotXform "PivotXform"
         // The value converts to the declared precision.
         op.set(gf::vec3d(1.0, 2.0, 3.0))?;
         assert_eq!(
-            op.attribute().get::<sdf::Value>()?,
-            Some(sdf::Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0)))
+            op.attribute().get::<vt::Value>()?,
+            Some(vt::Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0)))
         );
         Ok(())
     }

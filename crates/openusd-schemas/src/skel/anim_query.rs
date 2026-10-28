@@ -24,8 +24,8 @@ use std::sync::Arc;
 use openusd::Result;
 
 use openusd::gf;
-use openusd::sdf::{self, Value};
 use openusd::usd::{Attribute, TimeCode};
+use openusd::vt::{self, Value};
 
 use super::skinning::{JointTransformComponents, make_transforms};
 use super::{Animation, AnimationSchema};
@@ -202,7 +202,7 @@ pub(super) fn transform_components(
 
 fn array_at<T>(attribute: &Attribute, time: Option<TimeCode>) -> Result<Option<Vec<T>>>
 where
-    Vec<T>: sdf::FromValueCast,
+    Vec<T>: vt::FromValueCast,
 {
     Ok(attribute
         .get_at::<Value>(time)?

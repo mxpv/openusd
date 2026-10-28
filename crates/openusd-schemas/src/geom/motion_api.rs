@@ -1,8 +1,7 @@
 //! What `UsdGeomMotionAPI` answers beyond its own properties.
 
-use openusd::sdf;
 use openusd::usd::{self, SchemaBase};
-use openusd::{Error, Result};
+use openusd::{Error, Result, vt};
 
 use super::{MotionAPI, nearest, tokens};
 use crate::authored_at;
@@ -69,7 +68,7 @@ impl MotionAPI {
     /// with the prim's own fallback, as it does in C++.
     fn inherited<T>(&self, name: &str, time: Option<usd::TimeCode>, fallback: T) -> Result<T>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<Error>,
     {
         let supplied = nearest(self.prim(), MotionAPI::from_prim, |api| {
@@ -82,7 +81,8 @@ impl MotionAPI {
 #[cfg(test)]
 mod tests {
     use openusd::Result;
-    use openusd::sdf;
+    use openusd::vt;
+
     use openusd::usd::{SchemaBase, Stage, TimeCode};
 
     use crate::geom::{Mesh, MotionAPI, Xform};
@@ -189,7 +189,7 @@ mod tests {
         let mesh = MotionAPI::apply(Mesh::define(&stage, "/root/mesh")?.prim())?;
         mesh.create_motion_blur_scale_attr()?
             .set_at(2.0_f32, TimeCode::new(1.0))?
-            .set_at(sdf::Value::ValueBlock, TimeCode::new(2.0))?
+            .set_at(vt::Value::ValueBlock, TimeCode::new(2.0))?
             .set_at(4.0_f32, TimeCode::new(3.0))?;
 
         assert_eq!(mesh.compute_motion_blur_scale(TimeCode::new(1.0))?, 2.0);

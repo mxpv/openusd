@@ -29,9 +29,10 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::Result;
-use crate::sdf::{self, Path, Value};
+use crate::sdf::{self, Path};
 use crate::tf;
 use crate::usd::{Attribute, Prim, PrimPredicate, SchemaBase, Stage};
+use crate::vt::Value;
 
 use super::collection_expr::{CollectionEvaluator, CollectionSearcher, complete_membership_expression};
 use super::{CollectionAPI, CollectionMode, ExpansionRule, tokens};

@@ -309,7 +309,7 @@ fn collider_mass(
 #[cfg(test)]
 mod tests {
     use openusd::usd::{self, SchemaBase};
-    use openusd::{gf, sdf};
+    use openusd::{gf, sdf, vt};
 
     use super::{BodyMass, MassInformation};
     use crate::SchemaError;
@@ -706,7 +706,7 @@ mod tests {
             .define_prim("/World/Body/collisions")?
             .set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Prototype_Collisions")?,
                     ..Default::default()
                 }])),

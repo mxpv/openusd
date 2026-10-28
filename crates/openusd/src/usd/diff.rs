@@ -50,7 +50,7 @@
 //! ```
 use std::borrow::Cow;
 
-use crate::{Result, pcp, sdf, tf};
+use crate::{Result, pcp, sdf, tf, vt};
 
 use super::sink::{CommittedChange, PendingChange};
 use super::stage::{EditTarget, Stage, StageAuthoringError};
@@ -112,7 +112,7 @@ pub enum Edit {
         /// The field's name.
         field: tf::Token,
         /// The authored value.
-        value: sdf::Value,
+        value: vt::Value,
     },
     /// The edit erased one field while its spec survives (e.g. clearing an
     /// attribute's connections); a replay applies it with
@@ -149,7 +149,7 @@ pub struct FieldValue {
     /// The field's name.
     pub field: tf::Token,
     /// The authored value.
-    pub value: sdf::Value,
+    pub value: vt::Value,
 }
 
 /// How [`Stage::apply_diff`] interprets a [`Diff`]'s paths.
@@ -435,12 +435,12 @@ impl Stage {
 pub(super) fn apply_edits_verbatim(layer: &mut sdf::LayerEdit<'_>, edits: &[Edit]) -> Result<(), sdf::AuthoringError> {
     for edit in edits {
         if !matches!(edit, Edit::RemoveSpec { .. }) {
-            apply_edit(layer, edit.path(), edit, &sdf::Value::clone)?;
+            apply_edit(layer, edit.path(), edit, &vt::Value::clone)?;
         }
     }
     for edit in edits {
         if matches!(edit, Edit::RemoveSpec { .. }) {
-            apply_edit(layer, edit.path(), edit, &sdf::Value::clone)?;
+            apply_edit(layer, edit.path(), edit, &vt::Value::clone)?;
         }
     }
     Ok(())
@@ -460,7 +460,7 @@ fn apply_edit(
     layer: &mut sdf::LayerEdit<'_>,
     dst: &sdf::Path,
     edit: &Edit,
-    translate: &impl Fn(&sdf::Value) -> sdf::Value,
+    translate: &impl Fn(&vt::Value) -> vt::Value,
 ) -> Result<(), sdf::AuthoringError> {
     match edit {
         Edit::Create { spec_type, fields, .. } => {
@@ -632,7 +632,7 @@ fn apply_translated_diff(
     target: &EditTarget,
     translated: &TranslatedDiff<'_>,
 ) -> Result<(), sdf::AuthoringError> {
-    let translate = |value: &sdf::Value| {
+    let translate = |value: &vt::Value| {
         translate_value(value, diff, target, translated.time_offset).unwrap_or_else(|| value.clone())
     };
     for (dst, edit) in &translated.edits {
@@ -649,8 +649,8 @@ fn apply_translated_diff(
 /// [`StageAuthoringError::OutsideEditTarget`] on the first path that is not.
 /// The pure validation half of [`translate_value`], run by [`translate_diff`]
 /// before any mutation.
-fn validate_value(diff: &Diff, target: &EditTarget, value: &sdf::Value) -> Result<(), StageAuthoringError> {
-    if let sdf::Value::TimeSamples(samples) = value {
+fn validate_value(diff: &Diff, target: &EditTarget, value: &vt::Value) -> Result<(), StageAuthoringError> {
+    if let vt::Value::TimeSamples(samples) = value {
         for (_, sample) in samples {
             validate_value(diff, target, sample)?;
         }
@@ -695,14 +695,14 @@ fn translate_value_path(diff: &Diff, target: &EditTarget, path: &sdf::Path) -> O
 /// replayed across a composition arc with a layer offset resolves to the stage
 /// values it captured.
 fn translate_value(
-    value: &sdf::Value,
+    value: &vt::Value,
     diff: &Diff,
     target: &EditTarget,
     time_offset: sdf::LayerOffset,
-) -> Option<sdf::Value> {
+) -> Option<vt::Value> {
     let retime = !time_offset.is_identity() && value.holds_time_codes();
     let holds_paths = match value {
-        sdf::Value::TimeSamples(samples) => samples.iter().any(|(_, sample)| sample.has_embedded_paths()),
+        vt::Value::TimeSamples(samples) => samples.iter().any(|(_, sample)| sample.has_embedded_paths()),
         other => other.has_embedded_paths(),
     };
     if !retime && !holds_paths {
@@ -712,7 +712,7 @@ fn translate_value(
     // Only the path rewriting recurses per sample; the retiming below reaches
     // the keys and the samples in one pass, so the recursion leaves time alone.
     let mut translated = match value {
-        sdf::Value::TimeSamples(samples) => sdf::Value::TimeSamples(
+        vt::Value::TimeSamples(samples) => vt::Value::TimeSamples(
             samples
                 .iter()
                 .map(|(time, sample)| {
@@ -1203,7 +1203,7 @@ mod tests {
             stage.define_prim("/Source")?.create_attribute("x", "double")?;
             stage.define_prim("/Prim")?.set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     layer_offset: sdf::LayerOffset::new(10.0, 1.0),
                     ..Default::default()
@@ -1221,7 +1221,7 @@ mod tests {
             let target = a.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
             let _ctx = a.edit_context(target)?;
             a.attribute("/Prim.x")?
-                .set_at(sdf::Value::Double(42.0), TimeCode::new(15.0))?;
+                .set_at(vt::Value::Double(42.0), TimeCode::new(15.0))?;
         }
 
         // An identity consumer lifts the key through the producer's offset:
@@ -1234,7 +1234,7 @@ mod tests {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
         let local = b.attribute("/Prim.x")?.time_samples()?.expect("samples");
-        assert_eq!(local, vec![(15.0, sdf::Value::Double(42.0))]);
+        assert_eq!(local, vec![(15.0, vt::Value::Double(42.0))]);
 
         // An arc consumer maps it back into the source's time frame: keyed at
         // source time 5, reading back at stage time 15 through the offset.
@@ -1247,7 +1247,7 @@ mod tests {
             }
         }
         let source = c.attribute("/Source.x")?.time_samples()?.expect("samples");
-        assert_eq!(source, vec![(5.0, sdf::Value::Double(42.0))]);
+        assert_eq!(source, vec![(5.0, vt::Value::Double(42.0))]);
         assert_eq!(c.attribute("/Prim.x")?.get_at::<f64>(TimeCode::new(15.0))?, Some(42.0));
         Ok(())
     }
@@ -1263,7 +1263,7 @@ mod tests {
             stage.define_prim("/Source")?.create_attribute("t", "timecode")?;
             stage.define_prim("/Prim")?.set_metadata(
                 sdf::FieldKey::References.as_str(),
-                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
                     prim_path: sdf::path("/Source")?,
                     layer_offset: sdf::LayerOffset::new(10.0, 1.0),
                     ..Default::default()
@@ -1271,7 +1271,7 @@ mod tests {
             )?;
             Ok(stage)
         };
-        let stage_value = Some(sdf::Value::TimeCode(sdf::TimeCode(20.0)));
+        let stage_value = Some(vt::Value::TimeCode(sdf::TimeCode(20.0)));
 
         // The producer authors stage value 20 through its own arc target, so
         // the diff carries `/Source.t` holding source-frame 10.
@@ -1280,9 +1280,9 @@ mod tests {
         {
             let target = a.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
             let _ctx = a.edit_context(target)?;
-            a.attribute("/Prim.t")?.set(sdf::Value::TimeCode(sdf::TimeCode(20.0)))?;
+            a.attribute("/Prim.t")?.set(vt::Value::TimeCode(sdf::TimeCode(20.0)))?;
         }
-        assert_eq!(a.attribute("/Prim.t")?.get::<sdf::Value>()?, stage_value);
+        assert_eq!(a.attribute("/Prim.t")?.get::<vt::Value>()?, stage_value);
 
         // An identity consumer lifts the value through the producer's offset,
         // landing stage-frame 20 on the local `/Prim.t` override.
@@ -1291,7 +1291,7 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
-        assert_eq!(b.attribute("/Prim.t")?.get::<sdf::Value>()?, stage_value);
+        assert_eq!(b.attribute("/Prim.t")?.get::<vt::Value>()?, stage_value);
 
         // An arc consumer maps it back into the source's frame, where
         // composition re-applies the offset to reach the captured value.
@@ -1304,10 +1304,10 @@ mod tests {
             }
         }
         assert_eq!(
-            c.attribute("/Source.t")?.get::<sdf::Value>()?,
-            Some(sdf::Value::TimeCode(sdf::TimeCode(10.0)))
+            c.attribute("/Source.t")?.get::<vt::Value>()?,
+            Some(vt::Value::TimeCode(sdf::TimeCode(10.0)))
         );
-        assert_eq!(c.attribute("/Prim.t")?.get::<sdf::Value>()?, stage_value);
+        assert_eq!(c.attribute("/Prim.t")?.get::<vt::Value>()?, stage_value);
         Ok(())
     }
 

@@ -66,7 +66,7 @@ impl TinySurface {
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<Self> {
         let shader = crate::shade::Shader::define(stage, path)?;
-        shader.node_def().create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
+        shader.node_def().create_id_attr()?.set(::openusd::vt::Value::token(Self::ID))?;
         ::std::result::Result::Ok(Self(shader))
     }
     /// The `Shader` this node is.
@@ -90,9 +90,9 @@ impl TinySurface {
             }
             ::std::option::Option::None => {
                 <::openusd::gf::Vec3f as ::std::convert::TryFrom<
-                    ::openusd::sdf::Value,
+                    ::openusd::vt::Value,
                 >>::try_from(
-                        ::openusd::sdf::Value::Vec3f(
+                        ::openusd::vt::Value::Vec3f(
                             ::openusd::gf::vec3f(0.5f32, 0.5f32, 0.5f32),
                         ),
                     )
@@ -117,8 +117,8 @@ impl TinySurface {
             }
             ::std::option::Option::None => {
                 <::openusd::tf::Token as ::std::convert::TryFrom<
-                    ::openusd::sdf::Value,
-                >>::try_from(::openusd::sdf::Value::token("matte"))
+                    ::openusd::vt::Value,
+                >>::try_from(::openusd::vt::Value::token("matte"))
                     .map(::std::option::Option::Some)
                     .map_err(::std::convert::Into::into)
             }
@@ -174,7 +174,7 @@ impl TinyReaderFloat2 {
         path: impl ::openusd::sdf::IntoPath,
     ) -> ::openusd::Result<Self> {
         let shader = crate::shade::Shader::define(stage, path)?;
-        shader.node_def().create_id_attr()?.set(::openusd::sdf::Value::token(Self::ID))?;
+        shader.node_def().create_id_attr()?.set(::openusd::vt::Value::token(Self::ID))?;
         ::std::result::Result::Ok(Self(shader))
     }
     /// The `Shader` this node is.
@@ -208,9 +208,9 @@ impl TinyReaderFloat2 {
             }
             ::std::option::Option::None => {
                 <::openusd::gf::Vec2f as ::std::convert::TryFrom<
-                    ::openusd::sdf::Value,
+                    ::openusd::vt::Value,
                 >>::try_from(
-                        ::openusd::sdf::Value::Vec2f(::openusd::gf::vec2f(0f32, 0f32)),
+                        ::openusd::vt::Value::Vec2f(::openusd::gf::vec2f(0f32, 0f32)),
                     )
                     .map(::std::option::Option::Some)
                     .map_err(::std::convert::Into::into)

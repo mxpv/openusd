@@ -66,7 +66,7 @@ use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use openusd::usd::{self, SchemaRegistry};
-use openusd::{sdf, tf};
+use openusd::{sdf, tf, vt};
 
 // The macros below generate paths into the core crate. Reaching it through
 // `$crate::openusd` keeps them bound to this crate's dependency rather than
@@ -622,8 +622,8 @@ impl From<sdf::PathParseError> for SchemaError {
 }
 
 /// Cast failures route through [`SchemaError::Core`] likewise.
-impl From<sdf::CastError> for SchemaError {
-    fn from(error: sdf::CastError) -> Self {
+impl From<vt::CastError> for SchemaError {
+    fn from(error: vt::CastError) -> Self {
         Self::Core(error.into())
     }
 }
@@ -788,7 +788,7 @@ pub fn connectable_registry() -> &'static shade::BehaviorRegistry {
 #[cfg(feature = "geom")]
 pub(crate) fn authored_at<T>(attr: &usd::Attribute, time: Option<usd::TimeCode>) -> openusd::Result<Option<T>>
 where
-    T: sdf::FromValue,
+    T: vt::FromValue,
     T::Error: Into<openusd::Error>,
 {
     match attr.has_authored_value()? {

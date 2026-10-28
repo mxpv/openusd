@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use bitflags::bitflags;
 use openusd::usd::{self, Attribute, EditTarget, Prim, PrimPredicate, SchemaBase, StageAuthoringError, TimeCode};
-use openusd::{gf, sdf, tf};
+use openusd::{gf, sdf, tf, vt};
 
 use super::skinning::normal_transform;
 use super::{
@@ -791,7 +791,7 @@ impl<'a> PrimAdapter<'a> {
         if self.flags.intersects(Deform::MODIFIES_POINTS) {
             let points = points
                 .into_iter()
-                .map(|(time, points)| (time, sdf::Value::Vec3fVec(points)));
+                .map(|(time, points)| (time, vt::Value::Vec3fVec(points)));
             outputs.push((
                 tf::Token::new(geom::tokens::POINTS),
                 sdf::ValueTypeName::POINT3F_ARRAY,
@@ -802,7 +802,7 @@ impl<'a> PrimAdapter<'a> {
         if self.flags.intersects(Deform::MODIFIES_NORMALS) {
             let normals = normals
                 .into_iter()
-                .map(|(time, normals)| (time, sdf::Value::Vec3fVec(normals)));
+                .map(|(time, normals)| (time, vt::Value::Vec3fVec(normals)));
             outputs.push((
                 tf::Token::new(geom::tokens::NORMALS),
                 sdf::ValueTypeName::NORMAL3F_ARRAY,
@@ -813,7 +813,7 @@ impl<'a> PrimAdapter<'a> {
         if self.extent {
             let extents = extents
                 .into_iter()
-                .map(|(time, extent)| (time, sdf::Value::Vec3fVec(extent.to_vec())));
+                .map(|(time, extent)| (time, vt::Value::Vec3fVec(extent.to_vec())));
             outputs.push((
                 tf::Token::new(geom::tokens::EXTENT),
                 sdf::ValueTypeName::FLOAT3_ARRAY,
@@ -829,13 +829,13 @@ impl<'a> PrimAdapter<'a> {
             };
             let xforms = xforms
                 .into_iter()
-                .map(|(time, xform)| (time, sdf::Value::Matrix4d(xform)));
+                .map(|(time, xform)| (time, vt::Value::Matrix4d(xform)));
             outputs.push((op, sdf::ValueTypeName::MATRIX4D, varying, xforms.collect()));
             outputs.push((
                 tf::Token::new(geom::tokens::XFORM_OP_ORDER),
                 sdf::ValueTypeName::TOKEN_ARRAY,
                 sdf::Variability::Uniform,
-                vec![(None, sdf::Value::TokenVec(order))],
+                vec![(None, vt::Value::TokenVec(order))],
             ));
         }
         outputs
@@ -843,7 +843,7 @@ impl<'a> PrimAdapter<'a> {
 }
 
 /// One output's values, each with the time it was baked at.
-type Values = Vec<(Option<TimeCode>, sdf::Value)>;
+type Values = Vec<(Option<TimeCode>, vt::Value)>;
 
 /// One attribute the bake writes.
 struct Write {
@@ -931,7 +931,7 @@ fn bake_extents(stage: &usd::Stage, layers: &[EditTarget], followups: &[Followup
         let mut values = Vec::new();
         for &time in &followup.extent_times {
             if let Some(extent) = extents.shape_extent(&followup.prim, time, None)? {
-                values.push((time, sdf::Value::Vec3fVec(extent.to_vec())));
+                values.push((time, vt::Value::Vec3fVec(extent.to_vec())));
             }
         }
         if !values.is_empty() {

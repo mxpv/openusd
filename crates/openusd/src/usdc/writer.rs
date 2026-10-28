@@ -18,8 +18,9 @@ use num_traits::{AsPrimitive, PrimInt};
 
 use crate::{
     ar, gf, sdf,
-    sdf::{AbstractData, FormatError, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
+    sdf::{AbstractData, FormatError, LayerOffset, ListOp, Path, PathElement, Payload, Reference},
     tf,
+    vt::Value,
 };
 
 use super::coding;

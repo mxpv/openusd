@@ -15,7 +15,8 @@
 use std::collections::HashMap;
 
 use crate::ar;
-use crate::sdf::{self, Path, Value};
+use crate::sdf::{self, Path};
+use crate::vt::Value;
 
 use super::diagnostics::Diagnostics;
 use super::layer_graph::LayerGraph;

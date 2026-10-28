@@ -8,6 +8,7 @@ use std::io::Cursor;
 use openusd::sdf::{self, AbstractData};
 use openusd::usdc::{CrateData, CrateWriter};
 use openusd::usdz::{Archive, ArchiveWriter};
+use openusd::vt;
 use zip::ZipArchive;
 
 /// Produce a minimal valid USDC payload by taking an existing fixture.
@@ -111,11 +112,11 @@ fn emitted_archive_roundtrips_through_openusd() {
     let mut data = sdf::Data::new();
     let root = sdf::Path::abs_root();
     let ps = data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
-    ps.add("primChildren", sdf::Value::TokenVec(vec!["Foo".into()]));
+    ps.add("primChildren", vt::Value::TokenVec(vec!["Foo".into()]));
     let foo = sdf::path("/Foo").unwrap();
     let sp = data.create_spec(foo.clone(), sdf::SpecType::Prim);
-    sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-    sp.add("typeName", sdf::Value::Token("Xform".into()));
+    sp.add("specifier", vt::Value::Specifier(sdf::Specifier::Def));
+    sp.add("typeName", vt::Value::Token("Xform".into()));
 
     let mut usdc_buf = Vec::new();
     {
@@ -141,6 +142,6 @@ fn emitted_archive_roundtrips_through_openusd() {
     assert_eq!(layer.spec_type(&foo), Some(sdf::SpecType::Prim));
     assert_eq!(
         layer.field(&foo, "typeName").unwrap().into_owned(),
-        sdf::Value::Token("Xform".into())
+        vt::Value::Token("Xform".into())
     );
 }

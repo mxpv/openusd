@@ -8,7 +8,7 @@
 
 use super::{ListPosition, Prim, SpecSite, Stage, StageAuthoringError, StageEdit, authoring, list_edit};
 use crate::Result;
-use crate::{pcp, sdf};
+use crate::{pcp, sdf, vt};
 
 /// A relationship to author, and everything it is authored with.
 ///
@@ -186,7 +186,7 @@ impl Relationship {
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
         self.edit(|spec| {
-            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v));
+            spec.set(sdf::FieldKey::Variability.as_str(), vt::Value::Variability(v));
             Ok(())
         })
     }
@@ -197,7 +197,7 @@ impl Relationship {
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
         self.edit(|spec| {
-            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom));
+            spec.set(sdf::FieldKey::Custom.as_str(), vt::Value::Bool(custom));
             Ok(())
         })
     }
@@ -285,7 +285,7 @@ impl Relationship {
     /// [`set_metadata`](Self::set_metadata).
     pub fn metadata<T>(&self, key: &str) -> Result<Option<T>>
     where
-        T: TryFrom<sdf::Value>,
+        T: TryFrom<vt::Value>,
         T::Error: Into<crate::Error>,
     {
         authoring::metadata(&self.stage, &self.path, key)
@@ -305,7 +305,7 @@ impl Relationship {
     /// edit target's own time frame (C++ `_StageValueToFieldXf`).
     ///
     /// [`Attribute::set_metadata`]: crate::usd::Attribute::set_metadata
-    pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+    pub fn set_metadata(self, key: &'static str, value: impl Into<vt::Value>) -> Result<Self, StageAuthoringError> {
         authoring::check_reserved(sdf::SpecType::Relationship, key)?;
         let value = self.stage.map_to_spec_value(&self.path, value);
         self.edit(|spec| {
@@ -322,7 +322,7 @@ impl Relationship {
     /// are in the target layer's own time frame.
     pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
     where
-        F: FnOnce(Option<sdf::Value>) -> Option<sdf::Value>,
+        F: FnOnce(Option<vt::Value>) -> Option<vt::Value>,
     {
         authoring::update_metadata::<Self>(&self.stage, &self.path, key, f)?;
         Ok(self)
@@ -370,7 +370,7 @@ impl Relationship {
     pub fn has_authored_targets(&self) -> Result<bool> {
         Ok(self
             .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::TargetPaths)?
+            .field::<vt::Value>(&self.path, sdf::FieldKey::TargetPaths)?
             .is_some())
     }
 
@@ -458,6 +458,7 @@ mod tests {
     use crate::sdf::path::tests::strings;
     use crate::usd::stage::tests::{authored, reference_scene, stage};
     use crate::usd::{ListPosition, Object, Property, Stage, StageAuthoringError};
+    use crate::vt;
 
     #[test]
     fn relationship_chain() -> Result<()> {
@@ -472,8 +473,8 @@ mod tests {
         assert!(binding.remove_target(&sdf::Path::new("/World/Material2")?)?);
         assert_eq!(stage.spec_type(binding.path())?, Some(sdf::SpecType::Relationship));
         assert_eq!(
-            stage.field::<sdf::Value>(binding.path(), sdf::FieldKey::Custom)?,
-            Some(sdf::Value::Bool(true)),
+            stage.field::<vt::Value>(binding.path(), sdf::FieldKey::Custom)?,
+            Some(vt::Value::Bool(true)),
         );
         Ok(())
     }

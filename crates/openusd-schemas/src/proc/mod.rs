@@ -14,7 +14,7 @@
 //! ```
 //! // A view's own accessors live on its `<Class>Schema` trait.
 //! use openusd_schemas::proc::{GenerativeProcedural, GenerativeProceduralSchema};
-//! use openusd::sdf;
+//! use openusd::vt;
 //! use openusd::usd::Stage;
 //!
 //! // The registry is what makes the prim a `GenerativeProcedural`.
@@ -24,13 +24,13 @@
 //!     .unwrap();
 //!
 //! let proc = GenerativeProcedural::define(&stage, "/World/Scatter").unwrap();
-//! proc.create_procedural_system_attr().unwrap().set(sdf::Value::Token("Houdini".into())).unwrap();
+//! proc.create_procedural_system_attr().unwrap().set(vt::Value::Token("Houdini".into())).unwrap();
 //!
 //! // Read it back through a typed view.
 //! let proc = GenerativeProcedural::get(&stage, "/World/Scatter").unwrap().expect("GenerativeProcedural");
 //! assert_eq!(
-//!     proc.procedural_system_attr().get::<sdf::Value>().unwrap(),
-//!     Some(sdf::Value::Token("Houdini".into()))
+//!     proc.procedural_system_attr().get::<vt::Value>().unwrap(),
+//!     Some(vt::Value::Token("Houdini".into()))
 //! );
 //! ```
 

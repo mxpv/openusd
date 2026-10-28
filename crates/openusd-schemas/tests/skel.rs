@@ -6,8 +6,9 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use openusd::Result;
 use openusd::gf::{self, Mat4d, Quatf, Vec3f};
-use openusd::sdf::{self, Value};
+use openusd::sdf;
 use openusd::usd::{Attribute, PrimPredicate, SchemaBase, Stage, TimeCode};
+use openusd::vt::Value;
 use openusd_schemas::SchemaError;
 use openusd_schemas::geom::{
     BBoxCache, BoundableExt, BoundableSchema, Extent, Interpolation, Mesh, Primvar, Purpose, XformCache, XformableExt,

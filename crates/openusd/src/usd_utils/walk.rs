@@ -7,7 +7,8 @@ use std::mem;
 
 use super::DependencyError;
 use crate::pcp::clip::{self, keys};
-use crate::sdf::{self, AbstractData, FieldKey, Value};
+use crate::sdf::{self, AbstractData, FieldKey};
+use crate::vt::{self, Value};
 use crate::{Error, Result, ar};
 
 /// Rewrites every asset path `layer` authors with `modify`, as C++
@@ -311,7 +312,7 @@ impl Walk<'_> {
 
     /// Visits the entries of `entries` in key order, except `skip`, removing
     /// the emptied ones, and returns whether that emptied the dictionary.
-    fn dictionary(&mut self, entries: &mut sdf::Dictionary, skip: Option<&str>) -> Result<bool> {
+    fn dictionary(&mut self, entries: &mut vt::Dictionary, skip: Option<&str>) -> Result<bool> {
         let had = !entries.is_empty();
         let mut keys: Vec<_> = entries
             .keys()

@@ -33,8 +33,9 @@ use std::mem;
 use crate::ar::ResolvedPath;
 use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
+use crate::sdf::{self, LayerOffset, Path, RelocateList};
 use crate::tf;
+use crate::vt::Value;
 
 use super::compose_site::{EvaluatedExpression, evaluate_expression};
 use super::diagnostics::Diagnostics;

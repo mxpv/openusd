@@ -3,7 +3,7 @@
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use crate::sdf;
+use crate::{sdf, vt};
 
 use super::{Prim, Stage, StageAuthoringError};
 
@@ -50,7 +50,7 @@ pub enum ListPosition {
 
 impl<T: ListItem> ListEdit<T>
 where
-    sdf::ListOp<T>: Into<sdf::Value> + TryFrom<sdf::Value>,
+    sdf::ListOp<T>: Into<vt::Value> + TryFrom<vt::Value>,
 {
     /// The editor over `field` of `prim`, which the prim's own accessor
     /// hands out.
@@ -392,11 +392,11 @@ mod tests {
         let child = stage.define_prim("/Child")?;
         child
             .clone()
-            .set_metadata(sdf::FieldKey::InheritPaths.as_str(), sdf::Value::Int(1))?;
+            .set_metadata(sdf::FieldKey::InheritPaths.as_str(), vt::Value::Int(1))?;
         assert!(child.inherits().add("/A").is_err());
         assert_eq!(
-            authored::<sdf::Value>(&stage.root_layer(), "/Child", sdf::FieldKey::InheritPaths),
-            Some(sdf::Value::Int(1))
+            authored::<vt::Value>(&stage.root_layer(), "/Child", sdf::FieldKey::InheritPaths),
+            Some(vt::Value::Int(1))
         );
         Ok(())
     }

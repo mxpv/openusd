@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 
 use openusd::usd::Object;
-use openusd::{Error, Result};
+use openusd::{Error, Result, vt};
 use openusd::{gf, sdf, tf, usd};
 
 use super::{Interpolation, PRIMVARS_NAMESPACE, tokens};
@@ -29,6 +29,7 @@ use crate::{PrimvarIndexError, SchemaError};
 ///
 /// ```
 /// use openusd::usd::{self, SchemaBase};
+/// use openusd::vt;
 /// use openusd::sdf;
 /// use openusd_schemas::geom;
 ///
@@ -41,7 +42,7 @@ use crate::{PrimvarIndexError, SchemaError};
 /// let heat = geom::PrimvarsAPI::from_prim_unchecked(mesh.prim().clone())
 ///     .primvar_builder("heat", "float[]")
 ///     .interpolation(geom::Interpolation::Vertex)
-///     .set(sdf::Value::FloatVec(vec![20.0, 35.0]))
+///     .set(vt::Value::FloatVec(vec![20.0, 35.0]))
 ///     .indices(vec![0, 1, 1, 0])
 ///     .build()?;
 ///
@@ -166,8 +167,8 @@ impl Primvar {
     /// metadata holds no token (C++ `GetInterpolation`).
     /// [`interpolation`](Self::interpolation) answers the decoded token.
     pub fn interpolation_token(&self) -> Result<tf::Token> {
-        Ok(match self.attribute.metadata::<sdf::Value>(tokens::INTERPOLATION)? {
-            Some(sdf::Value::Token(token)) => token,
+        Ok(match self.attribute.metadata::<vt::Value>(tokens::INTERPOLATION)? {
+            Some(vt::Value::Token(token)) => token,
             _ => tf::Token::new(tokens::CONSTANT),
         })
     }
@@ -193,7 +194,7 @@ impl Primvar {
         Ok(Self {
             attribute: self
                 .attribute
-                .set_metadata(tokens::ELEMENT_SIZE, sdf::Value::Int(element_size))?,
+                .set_metadata(tokens::ELEMENT_SIZE, vt::Value::Int(element_size))?,
         })
     }
 
@@ -232,7 +233,7 @@ impl Primvar {
         Ok(Self {
             attribute: self
                 .attribute
-                .set_metadata(tokens::UNAUTHORED_VALUES_INDEX, sdf::Value::Int(index))?,
+                .set_metadata(tokens::UNAUTHORED_VALUES_INDEX, vt::Value::Int(index))?,
         })
     }
 
@@ -257,7 +258,7 @@ impl Primvar {
     pub fn set_indices(&self, indices: Vec<i32>, time: impl Into<Option<usd::TimeCode>>) -> Result<(), SchemaError> {
         self.require_array()?;
         self.indices_builder()
-            .set_at(sdf::Value::IntVec(indices), time)
+            .set_at(vt::Value::IntVec(indices), time)
             .build()?;
         Ok(())
     }
@@ -292,7 +293,7 @@ impl Primvar {
     /// attribute's own value.
     pub fn get_at<T>(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Option<T>>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<Error>,
     {
         self.read::<T>(time.into())?
@@ -305,7 +306,7 @@ impl Primvar {
     /// `ComputeFlattened`): for each index, the
     /// [`element_size`](Self::element_size) values it selects, in the order
     /// the indices list them. `T` is the array type to decode to, or
-    /// [`sdf::Value`] for whatever the primvar holds.
+    /// [`vt::Value`] for whatever the primvar holds.
     ///
     /// `None` where the primvar reads no value. A value that is not an
     /// array, and the value of a primvar that is not indexed, come back as
@@ -323,7 +324,7 @@ impl Primvar {
     /// samples.
     pub fn flattened<T>(&self, time: impl Into<Option<usd::TimeCode>>) -> Result<Option<T>, SchemaError>
     where
-        T: sdf::FromValue,
+        T: vt::FromValue,
         T::Error: Into<Error>,
     {
         let time = time.into();
@@ -360,10 +361,10 @@ impl Primvar {
     /// An index that is negative, or that selects values past the end, is a
     /// [`PrimvarIndexError`].
     pub fn flatten(
-        values: sdf::Value,
+        values: vt::Value,
         indices: &[i32],
         element_size: NonZeroUsize,
-    ) -> Result<sdf::Value, PrimvarIndexError> {
+    ) -> Result<vt::Value, PrimvarIndexError> {
         let Some(len) = values.array_len() else {
             return Ok(values);
         };
@@ -476,16 +477,16 @@ impl Primvar {
     /// The value at `time` that `T` reads, undecoded: the id target's where
     /// the primvar has one and `T` reads strings, else the attribute's, with
     /// the opinion chosen as a typed read of `T` chooses it.
-    fn read<T: sdf::FromValue>(&self, time: Option<usd::TimeCode>) -> Result<Option<sdf::Value>> {
-        let reads_strings = T::accepts_kind(sdf::ValueKind::String) || T::accepts_kind(sdf::ValueKind::StringVec);
+    fn read<T: vt::FromValue>(&self, time: Option<usd::TimeCode>) -> Result<Option<vt::Value>> {
+        let reads_strings = T::accepts_kind(vt::ValueKind::String) || T::accepts_kind(vt::ValueKind::StringVec);
         if reads_strings && let Some((relationship, is_array)) = self.id_target()? {
             let targets = relationship.forwarded_targets()?;
             let value = match (is_array, targets.as_slice()) {
-                (false, [only]) => Some(sdf::Value::String(only.as_str().to_owned())),
-                (true, [first, ..]) => Some(sdf::Value::StringVec(vec![first.as_str().to_owned()])),
+                (false, [only]) => Some(vt::Value::String(only.as_str().to_owned())),
+                (true, [first, ..]) => Some(vt::Value::StringVec(vec![first.as_str().to_owned()])),
                 _ => None,
             };
-            return Ok(value.filter(|value| T::accepts_kind(sdf::ValueKind::from(value))));
+            return Ok(value.filter(|value| T::accepts_kind(vt::ValueKind::from(value))));
         }
         self.attribute.value_at::<T>(time)
     }
@@ -588,6 +589,7 @@ fn element_start(index: i32, stride: usize, len: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use openusd::vt;
     use std::fs;
     use std::num::NonZeroUsize;
 
@@ -612,7 +614,7 @@ mod tests {
     fn floats(values: &[f32]) -> Result<Primvar> {
         mesh()?
             .primvar_builder("x", "float[]")
-            .set(sdf::Value::FloatVec(values.to_vec()))
+            .set(vt::Value::FloatVec(values.to_vec()))
             .build()
     }
 
@@ -736,7 +738,7 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_metadata(tokens::ELEMENT_SIZE, sdf::Value::Float(2.0))?;
+            .set_metadata(tokens::ELEMENT_SIZE, vt::Value::Float(2.0))?;
         assert!(primvar.element_size().is_err());
         Ok(())
     }
@@ -969,8 +971,8 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0, 2.0]), one)?
-            .set_at(sdf::Value::FloatVec(vec![3.0, 4.0]), two)?;
+            .set_at(vt::Value::FloatVec(vec![1.0, 2.0]), one)?
+            .set_at(vt::Value::FloatVec(vec![3.0, 4.0]), two)?;
         primvar.set_indices(vec![1, 0], one)?;
         primvar.set_indices(Vec::new(), two)?;
 
@@ -985,13 +987,13 @@ mod tests {
         let tokens = |names: &[&str]| names.iter().copied().map(tf::Token::from).collect::<Vec<_>>();
         let primvar = mesh()?
             .primvar_builder("t", "token[]")
-            .set(sdf::Value::TokenVec(tokens(&["a", "b"])))
+            .set(vt::Value::TokenVec(tokens(&["a", "b"])))
             .indices(vec![1, 1, 0])
             .build()?;
 
         assert_eq!(
-            primvar.flattened::<sdf::Value>(None)?,
-            Some(sdf::Value::TokenVec(tokens(&["b", "b", "a"])))
+            primvar.flattened::<vt::Value>(None)?,
+            Some(vt::Value::TokenVec(tokens(&["b", "b", "a"])))
         );
         assert_eq!(
             primvar.flattened::<Vec<tf::Token>>(None)?,
@@ -1030,15 +1032,12 @@ mod tests {
     #[test]
     fn flatten_free() {
         let pairs = NonZeroUsize::new(2).expect("two");
-        let values = sdf::Value::IntVec(vec![1, 2, 3, 4]);
+        let values = vt::Value::IntVec(vec![1, 2, 3, 4]);
         assert_eq!(
             Primvar::flatten(values.clone(), &[1, 0, 1], pairs),
-            Ok(sdf::Value::IntVec(vec![3, 4, 1, 2, 3, 4]))
+            Ok(vt::Value::IntVec(vec![3, 4, 1, 2, 3, 4]))
         );
-        assert_eq!(
-            Primvar::flatten(sdf::Value::Int(7), &[3], pairs),
-            Ok(sdf::Value::Int(7))
-        );
+        assert_eq!(Primvar::flatten(vt::Value::Int(7), &[3], pairs), Ok(vt::Value::Int(7)));
 
         let error = Primvar::flatten(values, &[0, 2, -1], pairs).expect_err("indices 2 and -1");
         assert_eq!((error.invalid, error.len, error.element_size), (2, 4, 2));
@@ -1063,7 +1062,7 @@ mod tests {
         let primvar = floats(&[1.0, 2.0])?;
         let (one, two) = (TimeCode::new(1.0), TimeCode::new(2.0));
         primvar.set_indices(vec![1], one)?;
-        primvar.indices_attr().set_at(sdf::Value::ValueBlock, two)?;
+        primvar.indices_attr().set_at(vt::Value::ValueBlock, two)?;
 
         assert_eq!(primvar.flattened::<Vec<f32>>(one)?, Some(vec![2.0]));
         assert!(matches!(
@@ -1081,7 +1080,7 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_metadata(tokens::ELEMENT_SIZE, sdf::Value::Int(0))?;
+            .set_metadata(tokens::ELEMENT_SIZE, vt::Value::Int(0))?;
         assert!(matches!(
             flat(&primvar),
             Err(SchemaError::InvalidElementSize { element_size: 0, .. })
@@ -1109,7 +1108,7 @@ mod tests {
         assert_eq!(flat(&primvar)?, Some(vec![3.0, 1.0]));
         // Read as a value, the stronger array of two answers, and index 2
         // reaches past it.
-        let error = primvar.flattened::<sdf::Value>(None).expect_err("index 2 of 2 values");
+        let error = primvar.flattened::<vt::Value>(None).expect_err("index 2 of 2 values");
         assert_eq!(out_of_range(error).len, 2);
         Ok(())
     }
@@ -1122,8 +1121,8 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0]), at(1.0))?
-            .set_at(sdf::Value::FloatVec(vec![2.0]), at(2.0))?;
+            .set_at(vt::Value::FloatVec(vec![1.0]), at(1.0))?
+            .set_at(vt::Value::FloatVec(vec![2.0]), at(2.0))?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0, 2.0]);
 
         primvar.set_indices(vec![0], at(0.0))?;
@@ -1141,7 +1140,7 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0]), TimeCode::new(1.0))?;
+            .set_at(vt::Value::FloatVec(vec![1.0]), TimeCode::new(1.0))?;
         primvar.set_indices(vec![0], TimeCode::new(5.0))?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0, 5.0]);
 
@@ -1169,7 +1168,7 @@ mod tests {
         primvar
             .attribute()
             .clone()
-            .set_at(sdf::Value::FloatVec(vec![1.0]), one)?;
+            .set_at(vt::Value::FloatVec(vec![1.0]), one)?;
         primvar.set_indices(vec![0], one)?;
         assert_eq!(primvar.time_sample_times()?, vec![1.0]);
         assert!(!primvar.might_be_time_varying()?);
@@ -1177,7 +1176,7 @@ mod tests {
     }
 
     /// The string primvar `id` on a mesh, holding `authored`.
-    fn id_primvar(type_name: &str, authored: sdf::Value) -> Result<Primvar> {
+    fn id_primvar(type_name: &str, authored: vt::Value) -> Result<Primvar> {
         mesh()?.primvar_builder("id", type_name).set(authored).build()
     }
 
@@ -1208,8 +1207,8 @@ mod tests {
         assert!(primvar.is_id_target()?);
         assert_eq!(primvar.get_at::<String>(None)?, Some("/my/string/path".to_owned()));
         assert_eq!(
-            primvar.get_at::<sdf::Value>(None)?,
-            Some(sdf::Value::String("/my/string/path".to_owned()))
+            primvar.get_at::<vt::Value>(None)?,
+            Some(vt::Value::String("/my/string/path".to_owned()))
         );
         Ok(())
     }
@@ -1225,7 +1224,7 @@ mod tests {
 
     #[test]
     fn id_target_beats_value() -> Result {
-        let primvar = id_primvar("string", sdf::Value::String("authored".to_owned()))?;
+        let primvar = id_primvar("string", vt::Value::String("authored".to_owned()))?;
         assert_eq!(primvar.get_at::<String>(None)?, Some("authored".to_owned()));
         primvar.set_id_target(&sdf::path("/Target")?)?;
         assert_eq!(primvar.get_at::<String>(None)?, Some("/Target".to_owned()));
@@ -1236,7 +1235,7 @@ mod tests {
     /// and the authored string does not answer in their place.
     #[test]
     fn two_targets_no_value() -> Result {
-        let primvar = id_primvar("string", sdf::Value::String("authored".to_owned()))?;
+        let primvar = id_primvar("string", vt::Value::String("authored".to_owned()))?;
         primvar.set_id_target(&sdf::path("/One")?)?;
         id_relationship(&primvar).add_target("/Two")?;
         assert_eq!(primvar.get_at::<String>(None)?, None);
@@ -1249,7 +1248,7 @@ mod tests {
     /// A string array primvar reads its first target, one or several.
     #[test]
     fn id_target_array() -> Result {
-        let primvar = id_primvar("string[]", sdf::Value::StringVec(vec!["authored".to_owned()]))?;
+        let primvar = id_primvar("string[]", vt::Value::StringVec(vec!["authored".to_owned()]))?;
         primvar.set_id_target(&sdf::path("/One")?)?;
         assert_eq!(primvar.get_at::<Vec<String>>(None)?, Some(vec!["/One".to_owned()]));
 
@@ -1264,7 +1263,7 @@ mod tests {
     /// Flattening reads through the id target as a plain read does.
     #[test]
     fn flatten_reads_id_target() -> Result {
-        let primvar = id_primvar("string", sdf::Value::String("authored".to_owned()))?;
+        let primvar = id_primvar("string", vt::Value::String("authored".to_owned()))?;
         primvar.set_id_target(&sdf::path("/Target")?)?;
         assert_eq!(primvar.flattened::<String>(None)?, Some("/Target".to_owned()));
         Ok(())

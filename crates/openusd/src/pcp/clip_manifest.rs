@@ -11,7 +11,8 @@
 use std::collections::HashSet;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AttributeSpec, AttributeSpecMut, Path, Value, Variability};
+use crate::sdf::{self, AttributeSpec, AttributeSpecMut, Path, Variability};
+use crate::vt::Value;
 
 use super::QueryError;
 

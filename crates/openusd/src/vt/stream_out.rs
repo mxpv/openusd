@@ -9,10 +9,11 @@ use bytemuck::Pod;
 
 use crate::{gf, tf};
 
-use super::{
-    AssetPath, Dictionary, LayerOffset, ListOp, Path, Payload, Permission, Reference, Specifier, TimeCode, Value,
-    Variability,
+use crate::sdf::{
+    AssetPath, LayerOffset, ListOp, Path, Payload, Permission, Reference, Specifier, TimeCode, Variability,
 };
+
+use super::{Dictionary, Value};
 
 /// The text C++ writes for the `VtValue` this value converts to, through
 /// `VtStreamOut` (`vt/streamOut.h`), as C++ `TfStringify` makes it of one.

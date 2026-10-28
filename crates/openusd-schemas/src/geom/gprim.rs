@@ -14,7 +14,7 @@ use crate::SchemaError;
 /// # Example
 ///
 /// ```
-/// use openusd::usd;
+/// use openusd::{usd, vt};
 /// use openusd::{gf, sdf};
 /// use openusd_schemas::geom::{self, GprimExt, Interpolation};
 ///
@@ -27,7 +27,7 @@ use crate::SchemaError;
 /// let color = mesh.create_display_color_primvar(Interpolation::Uniform, None)?;
 /// color
 ///     .into_attribute()
-///     .set(sdf::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 0.0, 1.0)]))?;
+///     .set(vt::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 0.0, 1.0)]))?;
 ///
 /// assert_eq!(mesh.display_color_primvar().interpolation()?, Interpolation::Uniform);
 /// // Opacity is declared by the schema and authored by nothing.
