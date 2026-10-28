@@ -63,8 +63,8 @@ impl Subset {
     /// A subset already defined under that name is the one authored on. With
     /// a non-empty `family_name` and a `family_type`, the family's type is
     /// authored on `geom` as [`set_family_type`](Self::set_family_type) does.
-    /// The properties, the family type included, are one edit, which follows
-    /// the edit that defines a new subset prim.
+    /// The definition and the properties, the family type included, are one
+    /// edit.
     pub fn create(
         geom: &impl ImageableSchema,
         subset_name: &str,
@@ -734,9 +734,7 @@ fn is_paired(element_type: ElementType) -> bool {
 /// its properties and its family's type on `geom` as one edit.
 ///
 /// A family name that makes no attribute name is refused before anything is
-/// authored. When the property edit fails, a prim spec the definition added
-/// to the edit target is removed again; one the target already held stays,
-/// defined as a `GeomSubset`.
+/// authored, and a failure anywhere in the edit authors none of it.
 fn author(
     geom: &usd::Prim,
     path: sdf::Path,
@@ -749,24 +747,10 @@ fn author(
     if family_type.is_some() && !family_name.is_empty() {
         geom.path().append_property(family_type_attr_name(family_name))?;
     }
-    let existing = stage.prim(&path)?;
-    let target = stage.edit_target();
-    let spec_path = target.map_to_spec_path(&path);
-    let held = existing
-        .prim_stack()?
-        .iter()
-        .any(|site| site.layer == target.layer_identifier() && Some(&site.path) == spec_path.as_ref());
-    // TODO: the define and the property edit are two commits because
-    // `usd::StageEdit` cannot define a prim. A prim definition queued in the
-    // transaction would make subset creation atomic, with no spec to look
-    // for beforehand and none to remove on failure.
-    let defined = existing.is_defined()? && existing.type_name()?.as_deref() == Some(tokens::GEOM_SUBSET);
-    let subset = match defined {
-        true => Subset::from_prim_unchecked(existing),
-        false => Subset::define(stage, &path)?,
-    };
-    let authored = stage.edit(|edit| -> Result<()> {
-        let prim = edit.prim(&path)?;
+    stage.edit(|edit| -> Result<()> {
+        // A subset already defined as one is left as it is (C++
+        // `UsdStage::DefinePrim`).
+        let prim = edit.define_typed_prim(&path, tokens::GEOM_SUBSET)?;
         prim.attribute_builder(tokens::ELEMENT_TYPE, sdf::ValueTypeName::TOKEN)
             .custom(false)
             .variability(sdf::Variability::Uniform)
@@ -790,14 +774,8 @@ fn author(
             typing(builder, family_type).build()?;
         }
         Ok(())
-    });
-    if let Err(error) = authored {
-        if !held {
-            stage.remove_prim(&path)?;
-        }
-        return Err(error);
-    }
-    Ok(subset)
+    })?;
+    Ok(Subset::from_prim_unchecked(stage.prim(&path)?))
 }
 
 /// The `GeomSubset` children of `prim` that are active, loaded, not abstract
@@ -1772,10 +1750,10 @@ mod tests {
         let unassigned = |name: &str| Subset::unassigned_indices(&mesh, Face, name, EARLIEST);
         let in_family = || Subset::in_family(&mesh, Some(Face), Some("testFamily"));
 
-        // A new subset is its definition and then its properties.
+        // A new subset's definition and properties are one commit.
         let commits = crate::tests::commits(&stage);
         let subset = Subset::create(&mesh, "testSubset", Face, &[], "", None)?;
-        assert_eq!(commits.get(), 2);
+        assert_eq!(commits.get(), 1);
         assert_eq!(subset.element_type()?, Some(Face));
         assert_eq!(subset.family_name()?.as_deref(), Some(""));
         subset.family_name_attr().set(tf::Token::from("testFamily"))?;
@@ -1938,11 +1916,10 @@ mod tests {
         Ok(())
     }
 
-    /// A property edit that fails takes back the prim spec the call added,
-    /// and leaves a prim the edit target already held, which the definition
-    /// has typed a `GeomSubset` by then.
+    /// A property that fails to author leaves no subset behind: neither a new
+    /// prim nor the retyping of one the edit target already held.
     #[test]
-    fn create_failure_rollback() -> Result {
+    fn create_failure_atomic() -> Result {
         let stage = crate::tests::stage("anon.usda")?;
         let mesh = grid(&stage, "/Mesh", 1)?;
         // A relationship where the family type goes, and one where a
@@ -1959,7 +1936,7 @@ mod tests {
         assert!(!stage.prim("/Mesh/fresh")?.is_valid()?);
 
         assert!(Subset::create(&mesh, "taken", ElementType::Face, &[0], "", None).is_err());
-        assert_eq!(taken.type_name()?.as_deref(), Some("GeomSubset"));
+        assert_eq!(taken.type_name()?.as_deref(), Some("Xform"));
         assert!(stage.prim("/Mesh/taken/child")?.is_valid()?);
         Ok(())
     }
