@@ -832,7 +832,8 @@ impl Value {
     ///
     /// An asset path may be authored as a plain string or token, so reading
     /// one coerces across all three (the borrowing counterpart to the owned
-    /// [`TryFrom<Value>`] for [`String`]).
+    /// [`TryFrom<Value>`] for [`String`]). For an `asset` this is the authored
+    /// text; its evaluated and resolved paths are on the [`AssetPath`] itself.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),

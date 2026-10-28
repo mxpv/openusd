@@ -83,7 +83,10 @@ fn reads_preview_surface_channels_from_fixture() -> Result<(), SchemaError> {
     let ps = shade::read_preview_surface(&stage, &sdf::path("/World/Looks/BrickMat")?)?.expect("UsdPreviewSurface");
 
     // diffuseColor is driven by a UsdUVTexture.
-    assert_eq!(ps.diffuse_color.texture(), Some("./textures/brick_albedo.png"));
+    assert_eq!(
+        ps.diffuse_color.texture(),
+        Some(&sdf::AssetPath::new("./textures/brick_albedo.png"))
+    );
     // metallic / roughness / opacity are scalars.
     assert_eq!(ps.roughness.value(), Some(&0.8));
     assert_eq!(ps.metallic.value(), Some(&0.0));
@@ -174,7 +177,7 @@ fn author_then_read_back_roundtrip() -> Result<(), SchemaError> {
 
     // Read everything back.
     let ps = shade::read_preview_surface(&stage, &sdf::path("/World/Looks/M")?)?.expect("UsdPreviewSurface");
-    assert_eq!(ps.diffuse_color.texture(), Some("./wood.png"));
+    assert_eq!(ps.diffuse_color.texture(), Some(&sdf::AssetPath::new("./wood.png")));
     assert_eq!(ps.metallic.value(), Some(&1.0));
     assert_eq!(ps.roughness.value(), Some(&0.3));
 
@@ -220,6 +223,75 @@ def Shader "Source"
     assert_eq!(asset.authored_path, "./shader.osl");
     let resolved = source_path.canonicalize()?;
     assert_eq!(asset.resolved_path(), Some(resolved.to_string_lossy().as_ref()));
+    Ok(())
+}
+
+#[test]
+fn preview_texture_anchored() -> Result<(), SchemaError> {
+    // The material and its textures sit in a directory of their own. The
+    // diffuse texture's path is authored in the material layer and resolves
+    // only when anchored there. The roughness texture's path comes from an
+    // interface input the scene layer authors and resolves only when anchored
+    // at the scene layer.
+    let material = r#"#usda 1.0
+def Material "Mat"
+{
+    asset inputs:roughnessFile
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Albedo.outputs:rgb>
+        float inputs:roughness.connect = </Mat/Rough.outputs:r>
+        token outputs:surface
+    }
+
+    def Shader "Albedo"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./albedo.png@
+        float3 outputs:rgb
+    }
+
+    def Shader "Rough"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file.connect = </Mat.inputs:roughnessFile>
+        float outputs:r
+    }
+}
+"#;
+    let scene = r#"#usda 1.0
+def "World" (
+    references = @./looks/material.usda@</Mat>
+)
+{
+    asset inputs:roughnessFile = @./looks/rough.png@
+}
+"#;
+    let (dir, stage) = common::open_files(
+        &[
+            ("scene.usda", scene),
+            ("looks/material.usda", material),
+            ("looks/albedo.png", ""),
+            ("looks/rough.png", ""),
+        ],
+        "scene.usda",
+    )?;
+    let ps = shade::read_preview_surface(&stage, &sdf::path("/World")?)?.expect("UsdPreviewSurface");
+    for (channel, authored, file) in [
+        (ps.diffuse_color.texture(), "./albedo.png", "looks/albedo.png"),
+        (ps.roughness.texture(), "./looks/rough.png", "looks/rough.png"),
+    ] {
+        let texture = channel.expect("a texture");
+        assert_eq!(texture, &sdf::AssetPath::new(authored));
+        let resolved = texture.resolved_path().expect("a resolved path");
+        assert_eq!(
+            fs::canonicalize(resolved).expect("the resolved path exists"),
+            fs::canonicalize(dir.path().join(file)).expect("the texture exists")
+        );
+    }
     Ok(())
 }
 

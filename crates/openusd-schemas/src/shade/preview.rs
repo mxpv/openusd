@@ -4,7 +4,8 @@
 //! understands. [`read_preview_surface`] resolves a [`Material`]'s surface
 //! shader, checks it is a `UsdPreviewSurface`, and harvests each channel as
 //! either a scalar default or — when the input connects to a `UsdUVTexture` —
-//! the texture's `inputs:file` asset path. Renderer-specific shader dialects
+//! the texture's `inputs:file` asset path, anchored at the layer that authored
+//! it and resolved when the asset is found. Renderer-specific shader dialects
 //! (MDL / OmniPBR / MaterialX `standard_surface`) are intentionally out of
 //! scope; consumers that need them dispatch on
 //! [`NodeDefAPI::shader_id`](super::NodeDefAPI::shader_id).
@@ -28,9 +29,9 @@ pub enum Channel<T> {
     Unset,
     /// A constant value authored directly on the input.
     Value(T),
-    /// The input connects to a `UsdUVTexture`; carries its `inputs:file` asset
-    /// path.
-    Texture(String),
+    /// The input connects to a `UsdUVTexture`; carries its `inputs:file` value,
+    /// resolved when the asset is found.
+    Texture(sdf::AssetPath),
 }
 
 impl<T> Channel<T> {
@@ -41,9 +42,9 @@ impl<T> Channel<T> {
         }
     }
 
-    pub fn texture(&self) -> Option<&str> {
+    pub fn texture(&self) -> Option<&sdf::AssetPath> {
         match self {
-            Channel::Texture(p) => Some(p.as_str()),
+            Channel::Texture(p) => Some(p),
             _ => None,
         }
     }
@@ -58,7 +59,7 @@ impl<T> Channel<T> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReadPreviewSurface {
     /// Shader prim path this was read from.
-    pub shader: String,
+    pub shader: sdf::Path,
     pub diffuse_color: Channel<gf::Vec3f>,
     pub emissive_color: Channel<gf::Vec3f>,
     pub specular_color: Channel<gf::Vec3f>,
@@ -112,7 +113,7 @@ impl ConnectableContext {
         };
 
         Ok(Some(ReadPreviewSurface {
-            shader: shader.path().as_str().to_string(),
+            shader: shader.path().clone(),
             diffuse_color: read_color_channel(self, &surface.diffuse_color_input())?,
             emissive_color: read_color_channel(self, &surface.emissive_color_input())?,
             specular_color: read_color_channel(self, &surface.specular_color_input())?,
@@ -159,7 +160,7 @@ fn resolve_surface_terminal(
 /// The input is resolved to the shader output that produces it, so a texture
 /// reached through a NodeGraph interface is found the same as one wired
 /// directly.
-fn connected_texture_file(context: &ConnectableContext, input: &Input) -> Result<Option<String>, SchemaError> {
+fn connected_texture_file(context: &ConnectableContext, input: &Input) -> Result<Option<sdf::AssetPath>, SchemaError> {
     let produced = context.value_producing_attributes(input.clone(), ProducerFilter::ShaderOutputsOnly)?;
     let Some(source) = produced.first() else {
         return Ok(None);
@@ -173,24 +174,20 @@ fn connected_texture_file(context: &ConnectableContext, input: &Input) -> Result
     resolve_asset_value(context, &texture.file_input())
 }
 
-/// Resolve an `asset`-typed input to its authored path. When the input is
-/// connected — e.g. a Material interface input that drives the texture's
-/// `inputs:file` — the connection is followed to the property carrying the
-/// value. Returns `None` when no asset value is reachable.
-///
-/// TODO: the returned path is the raw authored token; anchoring it to the layer
-/// that authored the opinion is not yet done.
-fn resolve_asset_value(context: &ConnectableContext, input: &Input) -> Result<Option<String>, SchemaError> {
+/// The asset value of an `asset`-typed input. A connected input, such as a
+/// texture's `inputs:file` driven by a Material interface input, reads the
+/// property its connection reaches. The value is anchored at the layer that
+/// authored that property's opinion. Returns `None` when no asset value is
+/// reachable or the value is the empty path `@@`.
+fn resolve_asset_value(context: &ConnectableContext, input: &Input) -> Result<Option<sdf::AssetPath>, SchemaError> {
     let produced = context.value_producing_attributes(input.clone(), ProducerFilter::Any)?;
     let Some(source) = produced.first() else {
         return Ok(None);
     };
     Ok(source
         .attribute()
-        .get::<sdf::Value>()?
-        .as_ref()
-        .and_then(sdf::Value::as_str)
-        .map(str::to_owned))
+        .get::<sdf::AssetPath>()?
+        .filter(|asset| !asset.is_empty()))
 }
 
 /// A colour channel: the texture feeding `input`, else the value the shader
@@ -246,7 +243,7 @@ mod tests {
             .set_connections(["/Mat/Surface.outputs:surface"])?;
 
         let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("context-only decodes");
-        assert_eq!(ps.shader, "/Mat/Surface");
+        assert_eq!(ps.shader, sdf::path("/Mat/Surface")?);
         assert_eq!(ps.roughness.value(), Some(&0.4));
         Ok(())
     }
@@ -279,8 +276,8 @@ mod tests {
             .set_connections(["/Mat/Surface.outputs:surface"])?;
 
         let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("UsdPreviewSurface");
-        assert_eq!(ps.shader, "/Mat/Surface");
-        assert_eq!(ps.diffuse_color.texture(), Some("./albedo.png"));
+        assert_eq!(ps.shader, sdf::path("/Mat/Surface")?);
+        assert_eq!(ps.diffuse_color.texture(), Some(&sdf::AssetPath::new("./albedo.png")));
         assert_eq!(ps.roughness.value(), Some(&0.4));
         assert_eq!(ps.metallic.value(), Some(&1.0));
         // Unauthored channels stay Unset.
@@ -318,7 +315,7 @@ mod tests {
             .set_connections(["/Mat/Surface.outputs:surface"])?;
 
         let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("UsdPreviewSurface");
-        assert_eq!(ps.diffuse_color.texture(), Some("./albedo.png"));
+        assert_eq!(ps.diffuse_color.texture(), Some(&sdf::AssetPath::new("./albedo.png")));
         Ok(())
     }
 
