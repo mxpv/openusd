@@ -11,7 +11,7 @@ mod package;
 mod walk;
 
 pub use discover::{Dependencies, all_dependencies};
-pub use package::create_usdz_package;
+pub use package::{create_usdz_package, create_usdz_package_from_layer};
 pub use walk::modify_asset_paths;
 
 /// An asset path the dependency walk cannot follow.

@@ -181,6 +181,26 @@ pub(super) fn discover<'a>(graph: &'a pcp::LayerGraph, asset_path: &str, policy:
     let Some(layer) = SourceLayer::open(graph, &identifier)? else {
         return Err(Error::UnresolvedAsset(asset_path.to_owned()));
     };
+    discover_root(graph, identifier, layer, policy)
+}
+
+/// [`discover`] from `layer`, which `graph` need not hold, as the root.
+pub(super) fn discover_layer<'a>(
+    graph: &'a pcp::LayerGraph,
+    layer: &'a sdf::Layer,
+    policy: Discover,
+) -> Result<Discovery<'a>> {
+    let _scope = ar::CacheScope::begin();
+    discover_root(graph, layer.identifier().to_owned(), SourceLayer::Live(layer), policy)
+}
+
+/// Walks from the root `layer`, known by `identifier`.
+fn discover_root<'a>(
+    graph: &'a pcp::LayerGraph,
+    identifier: String,
+    layer: SourceLayer<'a>,
+    policy: Discover,
+) -> Result<Discovery<'a>> {
     let root = Source {
         identifier,
         placement: Placement::Root,

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 
-use super::discover::{Content, Discover, Discovery, Placement, Source, Use, discover};
+use super::discover::{Content, Discover, Discovery, Placement, Source, Use, discover, discover_layer};
 use super::walk::{Visit, apply_edits, visit_asset_paths};
 use crate::sdf::{self, AbstractData};
 use crate::usd::Stage;
@@ -54,11 +54,43 @@ pub fn create_usdz_package(
     first_layer_name: Option<&str>,
 ) -> Result<Vec<String>> {
     let graph = stage.layers();
-    let policy = Discover {
-        inactive: true,
-        open_packages: false,
-    };
-    let discovery = discover(&graph, asset_path, policy)?;
+    let discovery = discover(&graph, asset_path, PACKAGE)?;
+    write_package(&graph, &discovery, usdz_file_path.as_ref(), first_layer_name)
+}
+
+/// [`create_usdz_package`] rooted at `layer`, which `stage` need not hold,
+/// such as a layer a stage was flattened into. C++ packages such a layer by
+/// its identifier, which `SdfLayer::Find` answers while the layer lives.
+///
+/// The root is named `first_layer_name`, or the file name of the location
+/// `layer` was read from; an anonymous root has none and needs the name.
+/// Its dependencies resolve through `stage`, which holds no anonymous root,
+/// so the relative paths of one are anchored against nothing.
+pub fn create_usdz_package_from_layer(
+    stage: &Stage,
+    layer: &sdf::Layer,
+    usdz_file_path: impl AsRef<Path>,
+    first_layer_name: Option<&str>,
+) -> Result<Vec<String>> {
+    let graph = stage.layers();
+    let discovery = discover_layer(&graph, layer, PACKAGE)?;
+    write_package(&graph, &discovery, usdz_file_path.as_ref(), first_layer_name)
+}
+
+/// The discovery a package is written from.
+const PACKAGE: Discover = Discover {
+    inactive: true,
+    open_packages: false,
+};
+
+/// Writes `discovery` into a new package at `usdz_file_path`, as
+/// [`create_usdz_package`] describes, returning the layers left out.
+fn write_package(
+    graph: &pcp::LayerGraph,
+    discovery: &Discovery<'_>,
+    usdz_file_path: &Path,
+    first_layer_name: Option<&str>,
+) -> Result<Vec<String>> {
     let mut skipped = Vec::new();
     for (identifier, kind) in &discovery.unresolved {
         if *kind == super::walk::AssetKind::Asset {
@@ -72,7 +104,7 @@ pub fn create_usdz_package(
         let location = discovery.sources[0]
             .content
             .location()
-            .ok_or_else(|| Error::UnresolvedAsset(asset_path.to_owned()))?;
+            .ok_or_else(|| Error::UnresolvedAsset(discovery.sources[0].identifier.clone()))?;
         ar::split_file_name(location).1.to_owned()
     };
     if !usdz::is_layer_name(&name) {
@@ -82,11 +114,11 @@ pub fn create_usdz_package(
         }
         .into());
     }
-    let entries = assign_entries(&discovery, &name, HashSet::new());
+    let entries = assign_entries(discovery, &name, HashSet::new());
 
-    let mut temp = tf::SafeOutputFile::create(usdz_file_path.as_ref())?;
+    let mut temp = tf::SafeOutputFile::create(usdz_file_path)?;
     let mut archive = usdz::ArchiveWriter::new(temp.file());
-    write_entries(&graph, &discovery, &entries, &mut archive)?;
+    write_entries(graph, discovery, &entries, &mut archive)?;
     archive.finish()?;
     temp.persist()?;
     Ok(skipped)
@@ -574,6 +606,40 @@ def "T"
         assert_eq!(entries(&output).0, ["scene.usdc"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
         assert!(packaged.prim("/Edited")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A layer the stage does not hold is packaged from memory with what it
+    /// names through the stage, under the name it is given. An anonymous one
+    /// has no file name to default to.
+    #[test]
+    fn packages_a_layer_the_stage_does_not_hold() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(dir.path(), "root.usda", "#usda 1.0\ndef \"A\" {\n}\n");
+        write(
+            dir.path(),
+            "part.usda",
+            "#usda 1.0\ndef \"Part\" {\n    int probe = 7\n}\n",
+        );
+        let (_, stage) = open(dir.path(), "root.usda")?;
+        let part = dir.path().join("part.usda");
+        let layer = sdf::Layer::from_bytes(
+            "flattened",
+            format!(
+                "#usda 1.0\ndef \"Flat\" (\n    prepend references = @{}@</Part>\n)\n{{\n}}\n",
+                part.display()
+            )
+            .into_bytes(),
+        )?;
+        let output = dir.path().join("out.usdz");
+        assert!(create_usdz_package_from_layer(&stage, &layer, &output, None).is_err());
+        assert!(!output.exists());
+
+        let skipped = create_usdz_package_from_layer(&stage, &layer, &output, Some("flat.usdc"))?;
+        assert!(skipped.is_empty());
+        assert_eq!(entries(&output).0, ["flat.usdc", "0/part.usda"]);
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/Flat.probe"), Some(sdf::Value::Int(7)));
         Ok(())
     }
 
