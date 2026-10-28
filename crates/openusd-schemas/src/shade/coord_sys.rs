@@ -18,9 +18,21 @@ use openusd::sdf;
 use openusd::tf;
 use openusd::usd::{Prim, Relationship, SchemaBase, Stage};
 
-use super::CoordSysAPI;
+use super::{CoordSysAPI, tokens};
 
 impl CoordSysAPI {
+    /// The name of this instance's binding relationship less its `coordSys`
+    /// namespace, `<name>:binding` (C++ `GetBindingBaseName`).
+    pub fn binding_base_name(&self) -> tf::Token {
+        let rel = self.binding_rel();
+        let name = rel.name();
+        let base = name
+            .strip_prefix(tokens::COORD_SYS)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .unwrap_or(name);
+        tf::Token::from(base)
+    }
+
     /// The binding this instance makes on its prim, read from its binding
     /// relationship whether or not the instance is applied (C++
     /// `GetLocalBinding`). `None` where the relationship targets nothing.
@@ -281,6 +293,19 @@ def Xform "World" (
         assert!(CoordSysAPI::local_bindings(&p)?.is_empty());
         assert!(x.resolve_binding()?.is_none());
         assert!(resolved(&stage, "/P/C")?.is_empty());
+        Ok(())
+    }
+
+    /// An instance's binding base name is its relationship's name less the
+    /// `coordSys` namespace, the instance name kept whole.
+    #[test]
+    fn binding_base_name() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let prim = stage.define_prim("/P")?;
+        for (instance, base) in [("worldSpace", "worldSpace:binding"), ("a:b", "a:b:binding")] {
+            let api = CoordSysAPI::from_prim_unchecked(prim.clone(), instance);
+            assert_eq!(api.binding_base_name().as_str(), base);
+        }
         Ok(())
     }
 
