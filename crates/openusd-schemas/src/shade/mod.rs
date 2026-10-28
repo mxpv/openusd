@@ -335,9 +335,7 @@ macro_rules! impl_shading_attribute {
             }
 
             /// Whether this shading attribute's composed `sdrMetadata`
-            /// dictionary contains `key`, regardless of the entry's value type.
-            /// An aggregate value has no text rendering, so a key holding one
-            /// reports here but reads back as absent from the value queries.
+            /// dictionary contains `key`, whatever the entry's value type.
             pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> $crate::openusd::Result<bool> {
                 $crate::shade::node_def::attribute_has_sdr_metadata_by_key(&self.attribute, key.as_ref())
             }

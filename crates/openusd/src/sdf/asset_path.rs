@@ -73,11 +73,14 @@ impl AssetPath {
         &self.authored_path
     }
 
-    /// The path used as input to asset resolution: the evaluated path if value
-    /// resolution has substituted an expression, otherwise the authored path
+    /// The path used as input to asset resolution: the evaluated path where
+    /// value resolution has set a non-empty one, otherwise the authored path
     /// (C++ `GetAssetPath`).
     pub fn asset_path(&self) -> &str {
-        self.evaluated_path.as_deref().unwrap_or(&self.authored_path)
+        self.evaluated_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .unwrap_or(&self.authored_path)
     }
 
     /// The authored path with its variable expression evaluated, if value
@@ -379,9 +382,10 @@ fn resolve_path(
     errors: &mut Vec<AssetExpressionFailure>,
 ) -> (AssetPath, AssetOutcome) {
     let (mut asset, outcome) = evaluate_path(variables, asset, errors);
-    // An expression that yielded no path has none to anchor: resolving the
-    // authored spelling would treat the expression itself as a file name.
-    if asset.is_empty() || outcome != AssetOutcome::Evaluated {
+    // An expression that yields no path, or the empty one, has nothing to
+    // anchor. C++ resolves `GetAssetPath` here, which is the expression text
+    // when the evaluated path is empty; that text is not a file name.
+    if asset.is_empty() || asset.evaluated_path() == Some("") || outcome != AssetOutcome::Evaluated {
         return (asset, outcome);
     }
     let identifier = registry.create_identifier(asset.asset_path(), anchor);
@@ -432,6 +436,24 @@ mod tests {
         let asset = value.try_as_asset_path().expect("an asset value stays one");
         assert_eq!(asset.as_str(), "`${A}`");
         assert_eq!(asset.evaluated_path(), None);
+        assert_eq!(asset.resolved_path(), None);
+        assert!(errors.is_empty());
+    }
+
+    /// An expression that evaluates to the empty path is not resolved, and its
+    /// asset path falls back to the authored text as C++ `GetAssetPath` does.
+    #[test]
+    fn empty_evaluation_unresolved() {
+        let registry = sdf::LayerRegistry::default();
+        let mut errors = Vec::new();
+        let variables = HashMap::from([("A".to_string(), sdf::Value::from(""))]);
+        let value = sdf::Value::AssetPath(AssetPath::new("`${A}`"));
+
+        let value = resolve_asset_paths(&registry, None, Some(&variables), value, &mut errors);
+
+        let asset = value.try_as_asset_path().expect("an asset value stays one");
+        assert_eq!(asset.evaluated_path(), Some(""));
+        assert_eq!(asset.asset_path(), "`${A}`");
         assert_eq!(asset.resolved_path(), None);
         assert!(errors.is_empty());
     }

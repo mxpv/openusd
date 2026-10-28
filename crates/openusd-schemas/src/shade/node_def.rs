@@ -232,9 +232,7 @@ impl Shader {
     }
 
     /// Whether the composed shader-level `sdrMetadata` dictionary contains
-    /// `key`, regardless of the entry's value type. An aggregate value has no
-    /// text rendering, so a key holding one reports here but reads back as
-    /// absent from the value queries.
+    /// `key`, whatever the entry's value type.
     pub fn has_sdr_metadata_by_key(&self, key: impl AsRef<str>) -> Result<bool> {
         Ok(metadata_has_key(self.metadata(tokens::SDR_METADATA)?, key.as_ref()))
     }
@@ -346,23 +344,25 @@ fn source_type<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
     (!source_type.is_empty() && found == suffix).then_some(source_type)
 }
 
-/// Converts a composed metadata dictionary to its public map.
+/// Converts a composed metadata dictionary to its public map, each value as
+/// the text C++ `TfStringify` makes of it (C++ `_GetSdrMetadata`,
+/// `nodeDefAPI.cpp:383-395`).
 pub(super) fn metadata_map(value: Option<sdf::Value>) -> SdrMetadata {
     let Some(sdf::Value::Dictionary(dictionary)) = value else {
         return SdrMetadata::new();
     };
     dictionary
         .into_iter()
-        .filter_map(|(key, value)| stringify(value).map(|value| (tf::Token::from(key), value)))
+        .map(|(key, value)| (tf::Token::from(key), value.to_string()))
         .collect()
 }
 
-/// Extracts one metadata entry.
+/// Extracts one metadata entry, as [`metadata_map`] renders it.
 pub(super) fn metadata_value(value: Option<sdf::Value>, key: &str) -> Option<String> {
     let sdf::Value::Dictionary(mut dictionary) = value? else {
         return None;
     };
-    stringify(dictionary.remove(key)?)
+    Some(dictionary.remove(key)?.to_string())
 }
 
 /// Tests one composed dictionary key without interpreting its value.
@@ -451,35 +451,12 @@ pub(super) fn clear_attribute_sdr_metadata_by_key(
     attribute.update_metadata(tokens::SDR_METADATA, |current| remove_metadata_key(current, key))
 }
 
-/// Renders a metadata value as the string an Sdr consumer reads, the way C++
-/// `TfStringify` does for the scalar types an `sdrMetadata` dictionary carries.
-/// The string-like variants defer to [`sdf::Value::cast`], which owns that
-/// coercion; only the numeric rendering is stated here.
-///
-/// TODO: aggregates (arrays, matrices, nested dictionaries) have no rendering
-/// here and read back as absent. Full `TfStringify` parity needs a shared
-/// value-to-text primitive in `sdf` rather than a wider match here.
-fn stringify(value: sdf::Value) -> Option<String> {
-    Some(match value {
-        sdf::Value::Bool(value) => value.to_string(),
-        sdf::Value::Uchar(value) => value.to_string(),
-        sdf::Value::Int(value) => value.to_string(),
-        sdf::Value::Uint(value) => value.to_string(),
-        sdf::Value::Int64(value) => value.to_string(),
-        sdf::Value::Uint64(value) => value.to_string(),
-        sdf::Value::Half(value) => value.to_string(),
-        sdf::Value::Float(value) => value.to_string(),
-        sdf::Value::Double(value) => value.to_string(),
-        other => other.cast::<String>().ok()?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::shade::Connectable;
-    use openusd::Result;
+    use openusd::{Result, gf};
 
     /// Source types sorted, since the order follows the prim's property order
     /// and that depends on what the schema registry declares for the type.
@@ -732,6 +709,40 @@ mod tests {
         assert!(input.has_sdr_metadata()?);
         assert_eq!(output.sdr_metadata_by_key("role")?.as_deref(), Some("result"));
         assert!(output.has_sdr_metadata_by_key("role")?);
+        Ok(())
+    }
+
+    /// Every entry reads back as the text C++ `TfStringify` makes of it,
+    /// aggregates and C++'s own forms of scalars included.
+    #[test]
+    fn metadata_stringified() -> Result<()> {
+        let stage = crate::tests::stage("anon.usda")?;
+        let shader = Shader::define(&stage, "/Shader")?;
+        let entries: sdf::Dictionary = [
+            ("flag", sdf::Value::Bool(true)),
+            ("big", sdf::Value::Double(1e20)),
+            ("list", sdf::Value::IntVec(vec![1, 2])),
+            ("color", sdf::Value::Vec3f(gf::vec3f(1.0, 0.5, 0.0))),
+            ("file", sdf::Value::AssetPath(sdf::AssetPath::new("a.png"))),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+        shader
+            .prim()
+            .clone()
+            .set_metadata(tokens::SDR_METADATA, sdf::Value::Dictionary(entries))?;
+
+        for (key, text) in [
+            ("flag", "1"),
+            ("big", "1e20"),
+            ("list", "[1, 2]"),
+            ("color", "(1, 0.5, 0)"),
+            ("file", "@a.png@"),
+        ] {
+            assert_eq!(shader.sdr_metadata_by_key(key)?.as_deref(), Some(text), "{key}");
+        }
+        assert_eq!(shader.sdr_metadata()?.len(), 5);
         Ok(())
     }
 

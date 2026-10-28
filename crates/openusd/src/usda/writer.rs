@@ -22,7 +22,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::gf;
+use crate::sdf::stream_out;
 use crate::sdf::{
     self, AbstractData, AssetPath, ChildrenKey, FieldKey, FormatError, LayerOffset, ListOp, Path, Payload, Reference,
     SpecType, Specifier, Value, Variability,
@@ -561,8 +561,8 @@ impl Emitter<'_> {
         let (post_slope, post_width) = side("postTangentSlope", "postTangentWidth");
         let authored = |slope: f64, width: Option<f64>| slope != 0.0 || width.is_some_and(|width| width != 0.0);
         let tangent = |s: &mut String, slope: f64, width: Option<f64>| match width {
-            Some(width) => format_tuple_float(s, &[slope, width]),
-            None => format_tuple_float(s, &[slope]),
+            Some(width) => stream_out::tuple(s, &[slope, width], stream_out::float::<f64>),
+            None => stream_out::tuple(s, &[slope], stream_out::float::<f64>),
         };
 
         let s = &mut self.scratch;
@@ -581,14 +581,14 @@ impl Emitter<'_> {
         // own output never holds such a tangent.
         if incoming == "curve" || authored(pre_slope, pre_width) {
             s.push_str("; pre ");
-            tangent(s, pre_slope, pre_width)?;
+            tangent(s, pre_slope, pre_width);
         }
         let next = interpolation(knot);
         s.push_str("; post ");
         s.push_str(next);
         if next == "curve" || authored(post_slope, post_width) {
             s.push(' ');
-            tangent(s, post_slope, post_width)?;
+            tangent(s, post_slope, post_width);
         }
 
         if let Some(knot_custom) = knot_custom
@@ -1156,11 +1156,8 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
         Value::Uint64(n) => write!(s, "{n}")?,
         Value::Uint64Vec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
 
-        Value::Half(h) => gf::stringify_half(s, *h),
-        Value::HalfVec(v) => format_vec(s, v, |s, h| {
-            gf::stringify_half(s, *h);
-            Ok(())
-        })?,
+        Value::Half(h) => stream_out::half(s, h),
+        Value::HalfVec(v) => format_vec(s, v, each(stream_out::half))?,
         Value::Float(f) => tf::stringify_float(s, *f),
         Value::FloatVec(v) => format_vec(s, v, |s, f| {
             tf::stringify_float(s, *f);
@@ -1180,46 +1177,55 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
         Value::AssetPath(v) => write_asset_path(s, v)?,
         Value::AssetPathVec(v) => format_vec(s, v, |s, p: &AssetPath| write_asset_path(s, p))?,
 
-        Value::Vec2h(a) => format_tuple_half(s, &[a.x, a.y])?,
-        Value::Vec3h(a) => format_tuple_half(s, &[a.x, a.y, a.z])?,
-        Value::Vec4h(a) => format_tuple_half(s, &[a.x, a.y, a.z, a.w])?,
-        Value::Quath(a) => format_tuple_half(s, &[a.w, a.x, a.y, a.z])?,
-        Value::Vec2hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y]))?,
-        Value::Vec3hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y, a.z]))?,
-        Value::Vec4hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y, a.z, a.w]))?,
-        Value::QuathVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.w, a.x, a.y, a.z]))?,
+        Value::Vec2h(a) => stream_out::gf_tuple(s, a, stream_out::half),
+        Value::Vec3h(a) => stream_out::gf_tuple(s, a, stream_out::half),
+        Value::Vec4h(a) => stream_out::gf_tuple(s, a, stream_out::half),
+        Value::Quath(a) => stream_out::gf_tuple(s, a, stream_out::half),
+        Value::Vec2hVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::half)))?,
+        Value::Vec3hVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::half)))?,
+        Value::Vec4hVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::half)))?,
+        Value::QuathVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::half)))?,
 
-        Value::Vec2f(a) => format_tuple_float(s, &[a.x, a.y])?,
-        Value::Vec3f(a) => format_tuple_float(s, &[a.x, a.y, a.z])?,
-        Value::Vec4f(a) => format_tuple_float(s, &[a.x, a.y, a.z, a.w])?,
-        Value::Quatf(a) => format_tuple_float(s, &[a.w, a.x, a.y, a.z])?,
-        Value::Vec2fVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y]))?,
-        Value::Vec3fVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z]))?,
-        Value::Vec4fVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z, a.w]))?,
-        Value::QuatfVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.w, a.x, a.y, a.z]))?,
+        Value::Vec2f(a) => stream_out::gf_tuple(s, a, stream_out::float::<f32>),
+        Value::Vec3f(a) => stream_out::gf_tuple(s, a, stream_out::float::<f32>),
+        Value::Vec4f(a) => stream_out::gf_tuple(s, a, stream_out::float::<f32>),
+        Value::Quatf(a) => stream_out::gf_tuple(s, a, stream_out::float::<f32>),
+        Value::Vec2fVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f32>)))?,
+        Value::Vec3fVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f32>)))?,
+        Value::Vec4fVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f32>)))?,
+        Value::QuatfVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f32>)))?,
 
-        Value::Vec2d(a) => format_tuple_float(s, &[a.x, a.y])?,
-        Value::Vec3d(a) => format_tuple_float(s, &[a.x, a.y, a.z])?,
-        Value::Vec4d(a) => format_tuple_float(s, &[a.x, a.y, a.z, a.w])?,
-        Value::Quatd(a) => format_tuple_float(s, &[a.w, a.x, a.y, a.z])?,
-        Value::Vec2dVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y]))?,
-        Value::Vec3dVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z]))?,
-        Value::Vec4dVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.x, a.y, a.z, a.w]))?,
-        Value::QuatdVec(v) => format_vec(s, v, |s, a| format_tuple_float(s, &[a.w, a.x, a.y, a.z]))?,
+        Value::Vec2d(a) => stream_out::gf_tuple(s, a, stream_out::float::<f64>),
+        Value::Vec3d(a) => stream_out::gf_tuple(s, a, stream_out::float::<f64>),
+        Value::Vec4d(a) => stream_out::gf_tuple(s, a, stream_out::float::<f64>),
+        Value::Quatd(a) => stream_out::gf_tuple(s, a, stream_out::float::<f64>),
+        Value::Vec2dVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f64>)))?,
+        Value::Vec3dVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f64>)))?,
+        Value::Vec4dVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f64>)))?,
+        Value::QuatdVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f64>)))?,
 
-        Value::Vec2i(a) => format_tuple_int(s, &[a.x, a.y])?,
-        Value::Vec3i(a) => format_tuple_int(s, &[a.x, a.y, a.z])?,
-        Value::Vec4i(a) => format_tuple_int(s, &[a.x, a.y, a.z, a.w])?,
-        Value::Vec2iVec(v) => format_vec(s, v, |s, a| format_tuple_int(s, &[a.x, a.y]))?,
-        Value::Vec3iVec(v) => format_vec(s, v, |s, a| format_tuple_int(s, &[a.x, a.y, a.z]))?,
-        Value::Vec4iVec(v) => format_vec(s, v, |s, a| format_tuple_int(s, &[a.x, a.y, a.z, a.w]))?,
+        Value::Vec2i(a) => stream_out::gf_tuple(s, a, stream_out::number),
+        Value::Vec3i(a) => stream_out::gf_tuple(s, a, stream_out::number),
+        Value::Vec4i(a) => stream_out::gf_tuple(s, a, stream_out::number),
+        Value::Vec2iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::number)))?,
+        Value::Vec3iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::number)))?,
+        Value::Vec4iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::number)))?,
 
-        Value::Matrix2d(m) => format_matrix(s, &m.0, 2)?,
-        Value::Matrix3d(m) => format_matrix(s, &m.0, 3)?,
-        Value::Matrix4d(m) => format_matrix(s, &m.0, 4)?,
-        Value::Matrix2dVec(v) => format_vec(s, v, |s, m| format_matrix(s, &m.0, 2))?,
-        Value::Matrix3dVec(v) => format_vec(s, v, |s, m| format_matrix(s, &m.0, 3))?,
-        Value::Matrix4dVec(v) => format_vec(s, v, |s, m| format_matrix(s, &m.0, 4))?,
+        Value::Matrix2d(m) => stream_out::matrix(s, &m.0, 2),
+        Value::Matrix3d(m) => stream_out::matrix(s, &m.0, 3),
+        Value::Matrix4d(m) => stream_out::matrix(s, &m.0, 4),
+        Value::Matrix2dVec(v) => format_vec(s, v, |s, m| {
+            stream_out::matrix(s, &m.0, 2);
+            Ok(())
+        })?,
+        Value::Matrix3dVec(v) => format_vec(s, v, |s, m| {
+            stream_out::matrix(s, &m.0, 3);
+            Ok(())
+        })?,
+        Value::Matrix4dVec(v) => format_vec(s, v, |s, m| {
+            stream_out::matrix(s, &m.0, 4);
+            Ok(())
+        })?,
 
         Value::Specifier(sp) => s.push_str(specifier_keyword(*sp)),
         Value::Permission(p) => s.push_str(match p {
@@ -1286,7 +1292,10 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
         }
 
         Value::LayerOffsetVec(offsets) => {
-            format_vec(s, offsets, |s, o| format_tuple_float(s, &[o.offset, o.scale]))?;
+            format_vec(s, offsets, |s, o| {
+                stream_out::tuple(s, &[o.offset, o.scale], stream_out::float::<f64>);
+                Ok(())
+            })?;
         }
 
         Value::ValueVec(v) => format_vec(s, v, |s, v| format_value(s, v, indent))?,
@@ -1328,6 +1337,14 @@ where
     }
     s.push(']');
     Ok(())
+}
+
+/// A [`format_vec`] item writer over `item`, which cannot fail.
+fn each<'o, T>(item: impl Fn(&mut String, &T)) -> impl FnMut(&mut ValueText<'o>, &T) -> Result<(), FormatError> {
+    move |s, v| {
+        item(s, v);
+        Ok(())
+    }
 }
 
 /// An item of a list op, which knows whether it can be written without the
@@ -1423,57 +1440,6 @@ where
         return format_vec(s, &items, fmt_item);
     }
     format_vec(s, op.explicit_items(), fmt_item)
-}
-
-fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) -> Result<(), FormatError> {
-    s.push('(');
-    for (i, v) in a.iter().enumerate() {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        gf::stringify_half(s, *v);
-    }
-    s.push(')');
-    Ok(())
-}
-
-/// `values` as a parenthesized, comma-separated tuple: `(1, 0.5, 2)`.
-fn format_tuple_float<F: zmij::Float + Into<f64>>(s: &mut String, values: &[F]) -> Result<(), FormatError> {
-    s.push('(');
-    for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        tf::stringify_float(s, *v);
-    }
-    s.push(')');
-    Ok(())
-}
-
-fn format_tuple_int<const N: usize>(s: &mut String, a: &[i32; N]) -> Result<(), FormatError> {
-    s.push('(');
-    for (i, v) in a.iter().enumerate() {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        write!(s, "{v}")?;
-    }
-    s.push(')');
-    Ok(())
-}
-
-/// A matrix as C++ streams one (`operator<<(std::ostream&, GfMatrix4d)`):
-/// `( (a, b), (c, d) )`.
-fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<(), FormatError> {
-    s.push_str("( ");
-    for row in 0..dim {
-        if row > 0 {
-            s.push_str(", ");
-        }
-        format_tuple_float(s, &m[row * dim..][..dim])?;
-    }
-    s.push_str(" )");
-    Ok(())
 }
 
 /// Looks up `key` in `dict` and returns its `Double` value, defaulting to `0.0`

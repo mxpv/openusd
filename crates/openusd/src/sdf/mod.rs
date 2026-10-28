@@ -28,6 +28,7 @@ mod path_table;
 pub mod schema;
 pub mod sink;
 mod spec;
+pub(crate) mod stream_out;
 mod token_value;
 mod unit;
 mod value;

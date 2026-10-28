@@ -15,7 +15,7 @@ use std::iter;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::str::FromStr;
+use std::str::{self, FromStr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// An immutable identifier string.
@@ -463,6 +463,44 @@ pub(crate) fn stringify_float<F: zmij::Float + Into<f64>>(s: &mut String, v: F) 
     write!(s, "e{exponent}").expect("writing to a String cannot fail");
 }
 
+/// Writes `v` as C++ `std::ostream` writes a double at its default precision
+/// (`%g`): six significant digits, in exponent form below 1e-4 and from 1e6,
+/// with a signed exponent of at least two digits and no zeros ending a
+/// fraction. C++ writes a half, a time code and a layer offset this way.
+pub(crate) fn stringify_general(s: &mut String, v: f64) {
+    if !v.is_finite() {
+        return stringify_float(s, v);
+    }
+    // `{:.5e}` rounds to the six significant digits `%g` keeps, in both of
+    // its forms, and gives the exponent `%g` chooses the form by.
+    let mut scientific = [0u8; 16];
+    let mut unwritten = &mut scientific[..];
+    io::Write::write_fmt(&mut unwritten, format_args!("{v:.5e}")).expect("six digits and an exponent fit");
+    let unused = unwritten.len();
+    let scientific = str::from_utf8(&scientific[..scientific.len() - unused]).expect("formatting writes UTF-8");
+    let (mantissa, exponent) = scientific.split_once('e').expect("{:e} writes an exponent");
+    let exponent: i32 = exponent.parse().expect("{:e} writes an integer exponent");
+    let (sign, mantissa) = mantissa.strip_prefix('-').map_or(("", mantissa), |m| ("-", m));
+    s.push_str(sign);
+    let digits = || mantissa.bytes().filter(u8::is_ascii_digit).map(char::from);
+    let n = digits().count() - digits().rev().take_while(|&d| d == '0').count();
+    if (-4..6).contains(&exponent) {
+        if exponent < 0 {
+            s.push_str("0.");
+            s.extend(iter::repeat_n('0', exponent.unsigned_abs() as usize - 1));
+            s.extend(digits().take(n));
+        } else {
+            let point = exponent as usize + 1;
+            push_digits(s, digits().take(n), point);
+            s.extend(iter::repeat_n('0', point.saturating_sub(n)));
+        }
+    } else {
+        push_digits(s, digits().take(n.max(1)), 1);
+        let sign = if exponent < 0 { '-' } else { '+' };
+        write!(s, "e{sign}{:02}", exponent.abs()).expect("writing to a String cannot fail");
+    }
+}
+
 /// Writes `digits` with a decimal point before the one at `point`, where any
 /// digit follows it.
 pub(crate) fn push_digits(s: &mut String, digits: impl Iterator<Item = char>, point: usize) {
@@ -638,6 +676,36 @@ mod tests {
         let name: &str = "Xform";
         assert!(KIND == name);
         assert!(name == KIND);
+    }
+
+    /// Doubles as C++ `std::ostream` writes them at its default precision,
+    /// halves among them as OpenUSD 26.11 writes them in a `half[]`.
+    #[test]
+    fn general_layout() {
+        let half = |v: f64| half::f16::from_f64(v).to_f64();
+        for (v, written) in [
+            (half(0.5), "0.5"),
+            (half(1e-3), "0.0010004"),
+            (half(1e-4), "0.000100017"),
+            (half(1e-5), "1.00136e-05"),
+            (half(6e-8), "5.96046e-08"),
+            (half(65504.0), "65504"),
+            (half(0.333), "0.333008"),
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (-2.5, "-2.5"),
+            (1.0, "1"),
+            (1234.0, "1234"),
+            (999_999.0, "999999"),
+            (1e6, "1e+06"),
+            (1_234_567.0, "1.23457e+06"),
+            (1e300, "1e+300"),
+            (-1.5e-300, "-1.5e-300"),
+        ] {
+            let mut text = String::new();
+            stringify_general(&mut text, v);
+            assert_eq!(text, written, "{v}");
+        }
     }
 
     /// `v` as [`stringify_float`] writes it.
