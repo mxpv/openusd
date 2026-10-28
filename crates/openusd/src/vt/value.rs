@@ -352,6 +352,45 @@ impl Value {
             value => value.attribute_array_len(),
         }
     }
+
+    /// Returns this value with every value it holds rewritten through `f`
+    /// (C++ `VtValueTryTransform`). The entries of a dictionary, the elements
+    /// of a heterogeneous array and the samples of a time-sample map are
+    /// walked to any depth, and `f` is handed every other value it reaches,
+    /// this one included when it is not such a container. The walk reaches a
+    /// heterogeneous array's elements, where C++, which registers no transform
+    /// for a `std::vector<VtValue>`, does not.
+    pub fn transform(self, f: &mut impl FnMut(Value) -> Value) -> Value {
+        match self {
+            Value::Dictionary(entries) => Value::Dictionary(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, value.transform(f)))
+                    .collect(),
+            ),
+            Value::ValueVec(values) => Value::ValueVec(values.into_iter().map(|value| value.transform(f)).collect()),
+            Value::TimeSamples(samples) => Value::TimeSamples(
+                samples
+                    .into_iter()
+                    .map(|(time, value)| (time, value.transform(f)))
+                    .collect(),
+            ),
+            value => f(value),
+        }
+    }
+
+    /// Whether `pred` holds for this value or for any value it holds, at the
+    /// reach of [`transform`](Self::transform). `pred` is asked about each
+    /// container as well as what it holds.
+    pub fn holds(&self, pred: &impl Fn(&Value) -> bool) -> bool {
+        pred(self)
+            || match self {
+                Value::Dictionary(entries) => entries.values().any(|value| value.holds(pred)),
+                Value::ValueVec(values) => values.iter().any(|value| value.holds(pred)),
+                Value::TimeSamples(samples) => samples.iter().any(|(_, value)| value.holds(pred)),
+                _ => false,
+            }
+    }
 }
 
 // Exact extraction: owned conversions that move data out of `Value` without
@@ -1080,9 +1119,39 @@ impl<'a> IntoIterator for &'a Dictionary {
         self.0.iter()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transform reaches through dictionaries, heterogeneous arrays and
+    /// sample maps to every other value, and `holds` asks the same values.
+    #[test]
+    fn transform_reach() {
+        let nested = Value::Dictionary(Dictionary::from([(
+            "k".to_string(),
+            Value::ValueVec(vec![Value::Int(1), Value::TimeSamples(vec![(0.0, Value::Int(2))])]),
+        )]));
+        let mut seen = Vec::new();
+        let doubled = nested.clone().transform(&mut |value| {
+            seen.push(value.clone());
+            match value {
+                Value::Int(n) => Value::Int(n * 2),
+                other => other,
+            }
+        });
+        assert_eq!(seen, [Value::Int(1), Value::Int(2)]);
+        let expected = Value::Dictionary(Dictionary::from([(
+            "k".to_string(),
+            Value::ValueVec(vec![Value::Int(2), Value::TimeSamples(vec![(0.0, Value::Int(4))])]),
+        )]));
+        assert_eq!(doubled, expected);
+
+        assert!(nested.holds(&|value| *value == Value::Int(2)));
+        assert!(nested.holds(&|value| matches!(value, Value::TimeSamples(_))));
+        assert!(!nested.holds(&|value| *value == Value::Int(3)));
+        assert_eq!(Value::Float(1.0).transform(&mut |_| Value::Int(0)), Value::Int(0));
+    }
 
     /// A key path walks nested dictionaries: a set makes the steps it needs,
     /// replacing a value that is not a dictionary, an erase drops the

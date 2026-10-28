@@ -332,12 +332,10 @@ fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Va
 // here unresolved and stays that way, losing the directory it was authored
 // against. C++ anchors those too, over every value it copies.
 fn bake_asset_paths(value: vt::Value) -> vt::Value {
-    value.map_asset_paths(
-        &mut |asset| match asset.resolved_path().or_else(|| asset.evaluated_path()) {
-            Some(resolved) => sdf::AssetPath::with_resolved_path(resolved, resolved),
-            None => asset,
-        },
-    )
+    value.map_asset_paths(|asset| match asset.resolved_path().or_else(|| asset.evaluated_path()) {
+        Some(resolved) => sdf::AssetPath::with_resolved_path(resolved, resolved),
+        None => asset,
+    })
 }
 
 /// Whether a field is one flattening writes down rather than resolves away.

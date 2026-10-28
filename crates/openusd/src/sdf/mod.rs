@@ -219,9 +219,9 @@ impl LayerOffset {
     /// retimes the value itself just as [`apply`](Self::apply) retimes the times
     /// a sample map is keyed by: an attribute authoring `timecode t = 5` in a
     /// layer sublayered with `(offset = 10; scale = 2)` resolves to `20` on the
-    /// stage. Dictionaries and sample maps are recursed into, either being able
-    /// to carry a timecode at any depth; every other value is left as it stands,
-    /// as is any value at all under the identity offset.
+    /// stage. Dictionaries, heterogeneous arrays and sample maps are recursed
+    /// into, each able to carry a timecode at any depth; every other value is
+    /// left as it stands, as is any value at all under the identity offset.
     ///
     /// [`Value::holds_time_codes`] answers in advance whether this would rewrite
     /// anything, for a caller holding the value behind a borrow.
@@ -501,21 +501,21 @@ pub type LayerData = Box<dyn AbstractData>;
 impl Value {
     /// Whether this value holds a time coordinate that
     /// [`LayerOffset::apply_to_value`](LayerOffset::apply_to_value)
-    /// retimes: a `timecode` at any depth — including inside a dictionary or a
-    /// heterogeneous array — or a sample map, whose keys are times whatever the
-    /// samples themselves hold.
+    /// retimes: a `timecode` or `timecode[]` at the reach of
+    /// [`holds`](Self::holds), or a sample map, whose keys are times whatever
+    /// the samples themselves hold.
     ///
     /// The single source of truth for the time-bearing variants, so the
     /// retiming and the callers that decide whether to pay for it cannot
     /// disagree. Checking it lets a borrowed value skip the clone a retiming
     /// would need.
     pub fn holds_time_codes(&self) -> bool {
-        match self {
-            Value::TimeCode(_) | Value::TimeCodeVec(_) | Value::TimeSamples(_) => true,
-            Value::Dictionary(entries) => entries.values().any(Value::holds_time_codes),
-            Value::ValueVec(values) => values.iter().any(Value::holds_time_codes),
-            _ => false,
-        }
+        self.holds(&|value| {
+            matches!(
+                value,
+                Value::TimeCode(_) | Value::TimeCodeVec(_) | Value::TimeSamples(_)
+            )
+        })
     }
 }
 

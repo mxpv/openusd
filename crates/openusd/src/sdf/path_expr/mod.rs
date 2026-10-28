@@ -551,46 +551,24 @@ impl Value {
 
     /// Whether this value embeds a path expression that authoring anchors and
     /// maps through [`map_path_expressions`](Self::map_path_expressions): a
-    /// `PathExpression` or `PathExpressionVec` at any depth that traversal
-    /// reaches. Checking it lets the common write skip the anchor path and
-    /// the walk.
+    /// `PathExpression` or `PathExpressionVec` at the reach of
+    /// [`holds`](Self::holds). Checking it lets the common write skip the
+    /// anchor path and the rewrite.
     pub fn holds_path_expressions(&self) -> bool {
-        match self {
-            Value::PathExpression(_) | Value::PathExpressionVec(_) => true,
-            Value::Dictionary(entries) => entries.values().any(Value::holds_path_expressions),
-            Value::ValueVec(values) => values.iter().any(Value::holds_path_expressions),
-            Value::TimeSamples(samples) => samples.iter().any(|(_, value)| value.holds_path_expressions()),
-            _ => false,
-        }
+        self.holds(&|value| matches!(value, Value::PathExpression(_) | Value::PathExpressionVec(_)))
     }
 
-    /// Returns this value with every path expression it holds rewritten
-    /// through `f`: a `PathExpression` or `PathExpressionVec` itself, and any
-    /// nested inside a dictionary, a heterogeneous array, or a time-sample map
-    /// (the reach of C++ `VtValueTryTransform`). List ops, references,
+    /// Returns this value with every path expression it holds, a
+    /// `PathExpression` or `PathExpressionVec`, rewritten through `f` at the
+    /// reach of [`transform`](Self::transform). List ops, references,
     /// payloads and relocates are left alone: authoring never transforms them,
     /// only [`remap_paths`](Self::remap_paths) does, for copies.
-    pub fn map_path_expressions(self, f: &mut impl FnMut(PathExpression) -> PathExpression) -> Value {
-        match self {
+    pub fn map_path_expressions(self, mut f: impl FnMut(PathExpression) -> PathExpression) -> Value {
+        self.transform(&mut |value| match value {
             Value::PathExpression(expr) => Value::PathExpression(f(expr)),
-            Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(f).collect()),
-            Value::Dictionary(entries) => Value::Dictionary(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, value.map_path_expressions(f)))
-                    .collect(),
-            ),
-            Value::ValueVec(values) => {
-                Value::ValueVec(values.into_iter().map(|value| value.map_path_expressions(f)).collect())
-            }
-            Value::TimeSamples(samples) => Value::TimeSamples(
-                samples
-                    .into_iter()
-                    .map(|(time, value)| (time, value.map_path_expressions(f)))
-                    .collect(),
-            ),
+            Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(&mut f).collect()),
             other => other,
-        }
+        })
     }
 }
 

@@ -570,7 +570,7 @@ impl<'a> Parser<'a> {
         let mut value = types::parse_value(&mut self.cursor, &type_name)?;
         if value.holds_path_expressions() {
             let anchor = current_path.nearest_prim_path();
-            value = value.map_path_expressions(&mut |expression| expression.make_absolute(&anchor));
+            value = value.map_path_expressions(|expression| expression.make_absolute(&anchor));
         }
         let path = current_path.append_property(name)?;
 

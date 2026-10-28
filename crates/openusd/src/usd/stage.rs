@@ -451,7 +451,7 @@ impl EditTarget {
             return value;
         }
         let anchor_prim = object_path.prim_path();
-        value.map_path_expressions(&mut |expr| {
+        value.map_path_expressions(|expr| {
             expr.make_absolute(&anchor_prim)
                 .map_paths(|path| self.mapping.map_target_to_source(path))
         })
