@@ -1585,6 +1585,18 @@ fn parse_prim_path(
     Ok(())
 }
 
+/// The specs [`ensure_prim_chain`] makes sure of for `target`, root-most
+/// first, each with the spec type it creates where the layer holds none: a
+/// prim, a variant set or a variant. What an authoring plan predicts a prim
+/// write will create, read from the rule that creates it.
+pub(crate) fn prim_chain(
+    target: &sdf::Path,
+) -> Result<impl DoubleEndedIterator<Item = (sdf::Path, sdf::SpecType)>, sdf::AuthoringError> {
+    Ok(namespace_chain(target)?
+        .into_iter()
+        .map(|element| (element.path, element.spec_type)))
+}
+
 /// Decompose `target` — a prim path that may contain `{set=sel}` variant
 /// selections — into the ordered chain of specs that must exist for it to be
 /// authorable. Validation and grammar live in [`parse_prim_path`].

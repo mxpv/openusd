@@ -842,6 +842,8 @@ impl Changes {
         // every authoring and layer-stack edit passes through, so a value-only
         // change that drops no index still clears what it may have fixed.
         cache.retire_query_errors();
+        // Every applied change moves what the stage composes.
+        cache.bump_edit_epoch();
         // Schema identities are composed from fields no path-keyed tier can
         // scope — the root's `fallbackPrimTypes` reaches every prim — so the
         // memo of them is retired wholesale, once per batch that moved one.

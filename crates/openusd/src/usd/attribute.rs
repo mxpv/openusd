@@ -187,8 +187,12 @@ impl<'a> AttributeBuilder<'a> {
         let Ok((stage, path)) = &self.site else {
             return Ok(None);
         };
-        let ensure = authoring::plan_property_spec(stage, path, sdf::SpecType::Attribute, Some(self.declaration()))?;
-        Attribute::new(stage, path.clone()).composed_type(&ensure).map(Some)
+        let schema = authoring::property_schema(stage, self.batch, path.prim_path())?;
+        let ensure =
+            authoring::plan_property_spec(stage, path, sdf::SpecType::Attribute, Some(self.declaration()), &schema)?;
+        Attribute::new(stage, path.clone())
+            .composed_type(&ensure, &schema)
+            .map(Some)
     }
 
     /// What the attribute is declared as where it is new to the stage.
@@ -211,7 +215,7 @@ impl<'a> AttributeBuilder<'a> {
         if let Some(batch) = batch {
             batch.holds_target()?;
         }
-        let planned = self.plan()?;
+        let planned = self.plan(batch)?;
         let (stage, path) = match batch {
             Some(batch) => batch.queue(planned)?,
             None => planned.commit()?,
@@ -220,10 +224,13 @@ impl<'a> AttributeBuilder<'a> {
     }
 
     /// Resolves everything the write depends on against composed state, so all
-    /// the transaction has left to do is stamp the spec and write.
-    fn plan(self) -> Result<authoring::PlannedProperty, StageAuthoringError> {
+    /// the transaction has left to do is stamp the spec and write. The owning
+    /// prim's schema is the one `batch` plans against, where the builder joins
+    /// one.
+    fn plan(self, batch: Option<&StageEdit>) -> Result<authoring::PlannedProperty, StageAuthoringError> {
         let declaration = self.declaration();
         let (stage, path) = self.site?;
+        let schema = authoring::property_schema(&stage, batch, path.prim_path())?;
         let metadata = self
             .metadata
             .into_iter()
@@ -239,17 +246,18 @@ impl<'a> AttributeBuilder<'a> {
                 &attribute.path,
                 sdf::SpecType::Attribute,
                 Some(declaration),
+                &schema,
             )?),
             (None, true) => {
-                let plan = attribute.plan_authoring(Vec::new(), true, Some(declaration))?;
+                let plan = attribute.plan_authoring(Vec::new(), true, Some(declaration), &schema)?;
                 authoring::AttributeWrite::Set(Box::new(plan))
             }
             (Some(BuilderValue::Set(values)), clear) => {
-                let plan = attribute.plan_authoring(values, clear, Some(declaration))?;
+                let plan = attribute.plan_authoring(values, clear, Some(declaration), &schema)?;
                 authoring::AttributeWrite::Set(Box::new(plan))
             }
             (Some(BuilderValue::Block), _) => {
-                let plan = attribute.plan_authoring(Vec::new(), false, Some(declaration))?;
+                let plan = attribute.plan_authoring(Vec::new(), false, Some(declaration), &schema)?;
                 authoring::AttributeWrite::Block(Box::new(plan))
             }
         };
@@ -258,6 +266,7 @@ impl<'a> AttributeBuilder<'a> {
             stage,
             path,
             authoring::PropertyWrite::Attribute { value, metadata },
+            schema.id().clone(),
         ))
     }
 }
@@ -364,7 +373,8 @@ impl Attribute {
         value: impl Into<sdf::Value>,
         time: impl Into<Option<super::TimeCode>>,
     ) -> Result<Self, StageAuthoringError> {
-        let plan = self.plan_authoring(vec![(value.into(), time.into())], false, None)?;
+        let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
+        let plan = self.plan_authoring(vec![(value.into(), time.into())], false, None, &schema)?;
         self.stage
             .with_target_layer_at(&self.path, |layer, spec_path| plan.write(layer.data_mut(), &spec_path))?;
         Ok(self)
@@ -377,7 +387,8 @@ impl Attribute {
     /// lacks it, its local declaration read fallibly — and the `timeSamples`
     /// field is erased whole, without decoding samples the block discards.
     pub fn block(self) -> Result<Self, StageAuthoringError> {
-        let plan = self.plan_authoring(Vec::new(), false, None)?;
+        let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
+        let plan = self.plan_authoring(Vec::new(), false, None, &schema)?;
         self.stage
             .with_target_layer_at(&self.path, |layer, spec_path| plan.block(layer.data_mut(), &spec_path))?;
         Ok(self)
@@ -723,7 +734,14 @@ impl Attribute {
     /// [`type_name`](Self::type_name), [`role`](Self::role) and the value
     /// checks; it never feeds spec creation.
     fn declared_type_token(&self) -> Result<Option<tf::Token>, pcp::QueryError> {
-        if let Some(declared) = authoring::schema_field(&self.stage, &self.path, sdf::FieldKey::TypeName.as_str())? {
+        let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
+        self.declared_type_in(&schema)
+    }
+
+    /// [`declared_type_token`](Self::declared_type_token) with the schema
+    /// declaration read from `schema`, the owning prim's.
+    fn declared_type_in(&self, schema: &PrimTypeInfo) -> Result<Option<tf::Token>, pcp::QueryError> {
+        if let Some(declared) = authoring::schema_field_in(schema, &self.path, sdf::FieldKey::TypeName.as_str()) {
             return Ok(declared.try_as_token());
         }
         Ok(self
@@ -736,11 +754,15 @@ impl Attribute {
     /// declaration the plan stamps, which composition already chose, or the
     /// composed declaration where the edit target holds the spec and the plan
     /// stamps nothing.
-    fn composed_type(&self, ensure: &authoring::EnsurePlan) -> Result<sdf::ValueTypeName, StageAuthoringError> {
+    fn composed_type(
+        &self,
+        ensure: &authoring::EnsurePlan,
+        schema: &PrimTypeInfo,
+    ) -> Result<sdf::ValueTypeName, StageAuthoringError> {
         match ensure.attribute_type() {
             Some(declared) => Ok(declared.clone()),
             None => Ok(sdf::ValueTypeName::from(
-                self.declared_type_token()?.ok_or(sdf::ValueTypeError::Empty)?,
+                self.declared_type_in(schema)?.ok_or(sdf::ValueTypeError::Empty)?,
             )),
         }
     }
@@ -761,12 +783,14 @@ impl Attribute {
         values: Vec<(sdf::Value, Option<super::TimeCode>)>,
         clear: bool,
         fallback: Option<authoring::PropertyDeclaration>,
+        schema: &PrimTypeInfo,
     ) -> Result<AttributeAuthoringPlan, StageAuthoringError> {
-        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, fallback)?;
+        let ensure =
+            authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, fallback, schema)?;
         let effective = if values.iter().all(|(value, _)| value.is_value_block()) {
             None
         } else {
-            let declared = self.composed_type(&ensure)?;
+            let declared = self.composed_type(&ensure, schema)?;
             for (value, _) in &values {
                 declared.validate(value)?;
             }

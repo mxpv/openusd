@@ -66,6 +66,7 @@ pub use schema::{
     ANY_TYPE, ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, layer_field_type,
     registered_field_type, schema_field_type,
 };
+pub(crate) use spec::prim_chain;
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,

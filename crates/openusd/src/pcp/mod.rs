@@ -55,6 +55,7 @@
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
 //! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. A child prim's graph shares its parent's node data. |
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
+//! | `overlay` | — | Prim opinions an authoring batch has queued, composed into a prim's existence, specifier and type before they are written. |
 //! | `value_resolve` | `UsdStage::_GetResolvedValueAtTimeImpl` | The shared attribute-value walk: `ResolveMode`, the `OpinionResolver` seam every value query runs through, and the `Resolution` they answer with. |
 //! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` provenance: the `AssetSite` every value source supplies, projected onto the anchor and variable scope the `sdf` resolution tail takes. Shared by the composed-opinion path and the clip cache, whose layers stand outside the graph. |
 //! | `clip` | `Usd_Clips` / `Usd_ClipSet` | Value clips (spec 12.3.4): the `ClipSet` metadata model with its stage-to-clip timing, and the `ClipCache` holding the clip and manifest layers that stay outside the composition graph. |
@@ -351,6 +352,7 @@ pub(crate) mod layer_graph;
 pub(crate) mod layer_stack;
 pub(crate) mod load_rules;
 mod mapping;
+pub(crate) mod overlay;
 pub(crate) mod population_mask;
 pub(crate) mod prim_graph;
 pub(crate) mod prim_index;
@@ -375,6 +377,7 @@ pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub use load_rules::{LoadRules, Rule};
 pub use mapping::MapFunction;
+pub(crate) use overlay::{Overlay, Planned, PrimFields};
 pub use population_mask::{PopulationMask, PopulationMaskError};
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub(crate) use prim_index::Demand;

@@ -127,6 +127,8 @@ pub struct IndexCache {
     /// Advanced once per change batch that authored a schema-identity opinion —
     /// see [`Self::type_opinion_epoch`].
     type_opinion_epoch: u64,
+    /// Advanced by every change the stage applies — see [`Self::edit_epoch`].
+    edit_epoch: u64,
     /// Node copies made by every build so far ([`Self::graph_stats`]).
     copies: u64,
     /// Nodes those copies held.
@@ -1201,6 +1203,7 @@ impl IndexCache {
             records: sdf::PathMap::default(),
             population_epoch: 0,
             type_opinion_epoch: 0,
+            edit_epoch: 0,
             copies: 0,
             nodes_copied: 0,
             collection_diagnostics,
@@ -1364,6 +1367,23 @@ impl IndexCache {
     /// alone covers the other.
     pub(crate) fn type_opinion_epoch(&self) -> u64 {
         self.type_opinion_epoch
+    }
+
+    /// The current edit epoch, which advances with every change the stage
+    /// applies to what it composes: a batch of committed layer edits, a muting
+    /// change, a load-rule change, a failed target that now loads. Loading a
+    /// layer a composition demanded for the first time does not advance it,
+    /// since that reveals what was already authored.
+    ///
+    /// An answer derived from composed state stays current while the epoch
+    /// holds, whatever else its stamp would say.
+    pub(crate) fn edit_epoch(&self) -> u64 {
+        self.edit_epoch
+    }
+
+    /// Records that the stage applied a change ([`Self::edit_epoch`]).
+    pub(super) fn bump_edit_epoch(&mut self) {
+        self.edit_epoch = self.edit_epoch.checked_add(1).expect("edit epoch exhausted");
     }
 
     /// Records that a change batch moved a schema-identity opinion.
@@ -2065,6 +2085,8 @@ impl IndexCache {
         // The prims beneath one composed without the target too, and
         // recompose with it.
         self.store.remove_subtrees(&failed);
+        // A target that now loads changes what those prims compose.
+        self.bump_edit_epoch();
         self.retire_query_errors();
         // A target that failed to read hid whatever it would have composed, so
         // repairing it can reveal prims — and instances — the population never
@@ -2171,6 +2193,7 @@ impl IndexCache {
     /// Returns everything the toggle dropped — the indices above and the
     /// prototype roots retired with them — for a caller to report as-is.
     pub(crate) fn invalidate_muting(&mut self, change: &MuteChange) -> Vec<Path> {
+        self.bump_edit_epoch();
         self.retire_query_errors();
         self.invalidate_population();
         let victims = self

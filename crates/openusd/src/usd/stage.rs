@@ -52,6 +52,7 @@ use crate::{Result, ar, pcp, sdf};
 
 use super::composition::{self, PendingEdit, StageComposition};
 
+use super::authoring::{Operation, PlanStamp, PlanState, PrimOp};
 use super::interp::{self, InterpolationType};
 use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, keep_ancestors};
 use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics, StagePopulationMask};
@@ -698,6 +699,35 @@ pub enum StageAuthoringError {
         path: sdf::Path,
     },
 
+    /// A prim operation queued in a [`StageEdit`](super::StageEdit) would
+    /// change the schema of a prim a queued property was planned against, or
+    /// a property was planned against a schema the batch has since changed.
+    /// The property's declaration came from the schema the commit would not
+    /// leave.
+    #[error("a queued property under {path} was planned against a schema the batch changes")]
+    PlannedTypeChanged {
+        /// The prim whose schema changed.
+        path: sdf::Path,
+    },
+
+    /// A [`StageEdit`](super::StageEdit) cannot tell what the prim at `path`
+    /// composes to: a spec the batch queued revives a culled arc target its
+    /// composition reads, which only rebuilding the prim's index answers.
+    #[error("the effect of the batch's queued specs on {path} cannot be planned")]
+    PlannedEffectUnknown {
+        /// The prim the batch cannot plan against.
+        path: sdf::Path,
+    },
+
+    /// A change made outside a [`StageEdit`](super::StageEdit) while it was
+    /// open — a commit, a muting or load-rule change — moved a prim the batch
+    /// had read, so its plans no longer hold.
+    #[error("{path} changed while the batch was open")]
+    PlanStale {
+        /// The prim that changed.
+        path: sdf::Path,
+    },
+
     /// A [`StageEdit`](super::StageEdit) was given the same property twice.
     /// Each queued property resolves its declaration before the batch opens, so
     /// a second plan for one property would be resolved against a stage the
@@ -1276,6 +1306,16 @@ impl Stage {
         Ok(())
     }
 
+    /// Refuses a prim operation at `scene_path` that the current edit target
+    /// could not author: one it does not map, or one instancing makes
+    /// meaningless ([`validate_edit_prim`](Self::validate_edit_prim)). What a
+    /// plan checks before deciding the operation; the transaction checks
+    /// again.
+    pub(super) fn validate_target_prim(&self, scene_path: &sdf::Path) -> Result<(), StageAuthoringError> {
+        let (identifier, _) = self.target_spec_path(scene_path)?;
+        self.validate_edit_prim(scene_path, &identifier)
+    }
+
     /// Whether the layer `identifier` names is in the stage's root layer stack
     /// (C++ `UsdStage::HasLocalLayer`).
     fn is_local_layer(&self, identifier: &str) -> bool {
@@ -1303,12 +1343,19 @@ impl Stage {
         scene_path: &sdf::Path,
         read: impl FnOnce(&sdf::Layer, &sdf::Path) -> T,
     ) -> Result<T, StageAuthoringError> {
+        let (id, spec_path) = self.target_site(scene_path)?;
+        Ok(read(self.layers().layer(id), &spec_path))
+    }
+
+    /// The current edit target's layer and the spec path `scene_path` maps to
+    /// on it: the site an authoring plan records the opinions it queues at.
+    pub(super) fn target_site(&self, scene_path: &sdf::Path) -> Result<(pcp::LayerId, sdf::Path), StageAuthoringError> {
         let (identifier, spec_path) = self.target_spec_path(scene_path)?;
-        let layers = self.layers();
-        let id = layers
+        let id = self
+            .layers()
             .id_of(&identifier)
             .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
-        Ok(read(layers.layer(id), &spec_path))
+        Ok((id, spec_path))
     }
 
     /// The kind of spec the current edit target's layer holds at the mapped
@@ -1513,74 +1560,48 @@ impl Stage {
         type_name: impl Into<String>,
     ) -> Result<super::Prim, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
-        let type_name = type_name.into();
-        // The ancestors to define, root-most first, then the prim (C++
-        // `_DefinePrim`, which defines the parent before the prim). With
-        // its parent defined, a prim is defined by its own specifier.
-        let mut paths: Vec<sdf::Path> = Vec::new();
-        for ancestor in path.strict_ancestors_below_root() {
-            if !self.defining(&ancestor)? {
-                paths.push(ancestor);
-            }
-        }
-        paths.reverse();
-        let retype = !type_name.is_empty()
-            && self
-                .field::<Token>(&path, sdf::FieldKey::TypeName)?
-                .as_ref()
-                .map(Token::as_str)
-                != Some(&type_name);
-        let define = retype || !self.defining(&path)?;
-        // The prim's path goes along whether or not it is written: the
-        // batch validates every path it is given (C++
-        // `_IsValidPathForCreatingPrim`), a prototype or proxy path among
-        // them whatever its specifier.
-        paths.push(path.clone());
-        self.with_target_layer_at_each(&paths, |layer, mut spec_paths| {
-            // An idempotent call (an existing def of that type) records
-            // nothing because deriving the change skips the no-op write.
-            // Each spec is created as `over`, then made a `def` (C++
-            // `SdfCreatePrimInLayer` and `SetSpecifier`), so a path a variant
-            // edit target maps to `/Prim{set=sel}` defines the variant spec.
-            let mut def = |path, type_name: &str| -> Result<(), StageAuthoringError> {
-                let mut spec = sdf::PrimSpec::over(layer.data_mut(), path)?;
-                spec.set_specifier(sdf::Specifier::Def);
-                if !type_name.is_empty() {
-                    spec.set_type_name(type_name);
-                }
-                Ok(())
-            };
-            let prim = spec_paths.pop().expect("the prim itself");
-            for ancestor in spec_paths {
-                def(ancestor, "")?;
-            }
-            if define {
-                def(prim, &type_name)?;
-            }
-            Ok(())
-        })?;
-        Ok(super::Prim::new(self, path))
+        let type_name = Token::from(type_name.into());
+        self.author_prim(path, PrimOp::Define { type_name })
     }
 
-    /// Whether the prim at `path` has a defining specifier, `def` or
-    /// `class`, as the stage holds it: `false` for one it does not hold.
-    fn defining(&self, path: &sdf::Path) -> Result<bool, pcp::QueryError> {
-        Ok(self
-            .masked_opinions(path, |graph, cache| cache.own_status(graph, path))?
-            .is_some_and(|own| own.defining))
-    }
-
-    /// Ensure a prim spec exists at `path` and return a [`Prim`](super::Prim)
-    /// handle. Mirrors C++ `UsdStage::OverridePrim`. If a spec already exists at
-    /// `path` its specifier is left untouched — `override_prim` does not
-    /// downgrade an existing `def` or `class` to `over`. Chain fluent
-    /// setters on the returned handle to author additional fields.
+    /// Return the prim at `path`, authoring an `over` spec for it on the edit
+    /// target's layer only where the stage holds no prim there (C++
+    /// `UsdStage::OverridePrim`). A prim some layer already composes is
+    /// returned as it is, with no spec added: a later write through the
+    /// handle creates the spec it needs on the edit target. An `over` is
+    /// authored with `over` ancestors where they have no spec there. Chain
+    /// fluent setters on the returned handle to author additional fields.
     pub fn override_prim(&self, path: impl sdf::IntoPath) -> Result<super::Prim, StageAuthoringError> {
         let path = sdf::try_into_path(path)?;
-        self.with_target_layer_at(&path, |layer, layer_path| {
-            sdf::PrimSpec::over(layer.data_mut(), layer_path)?;
-            Ok(())
-        })?;
+        self.author_prim(path, PrimOp::Override)
+    }
+
+    /// Plans the prim operation `op` at `path` on its own and commits it, the
+    /// decision a [`StageEdit`](super::StageEdit) makes for the same request.
+    ///
+    /// A define whose own writes leave an ancestor's composition unknown to
+    /// the plan (a spec that revives an arc only a rebuild composes) defines
+    /// the parent on its own first, as C++ commits each prim of the chain,
+    /// and is decided again against what that commit composes.
+    fn author_prim(&self, path: sdf::Path, op: PrimOp) -> Result<super::Prim, StageAuthoringError> {
+        let mut plan = PlanState::untracked();
+        match plan.admit(
+            self,
+            Operation::Prim {
+                path: path.clone(),
+                op: op.clone(),
+            },
+        ) {
+            Err(StageAuthoringError::PlannedEffectUnknown { .. })
+                if matches!(op, PrimOp::Define { .. }) && !path.parent().is_none_or(|parent| parent.is_abs_root()) =>
+            {
+                self.define_prim(path.parent().expect("checked above"))?;
+                plan = PlanState::untracked();
+                plan.admit(self, Operation::Prim { path: path.clone(), op })?;
+            }
+            admitted => admitted?,
+        }
+        plan.commit(self)?;
         Ok(super::Prim::new(self, path))
     }
     /// Author an attribute spec at a property path on the edit target's layer,
@@ -1641,20 +1662,27 @@ impl Stage {
         Ok((self.clone(), sdf::try_into_path(path)?))
     }
 
-    /// Author several properties as one transaction.
+    /// Author several prims and properties as one transaction.
     ///
     /// `f` receives the transaction: [`StageEdit`](super::StageEdit) offers the
-    /// same authoring entry points this stage does, and the property builders
-    /// they hand out queue their property rather than committing it. The queue
-    /// is stamped and written together when `f` returns — all of it, or on any
-    /// error none of it — and `f`'s own value comes back once it commits, so
-    /// the handle a caller wants returns through it.
+    /// same authoring entry points this stage does, and the prim operations and
+    /// property builders it hands out queue their writes rather than committing
+    /// them. The queue is written together when `f` returns — all of it, or on
+    /// any error none of it — and `f`'s own value comes back once it commits,
+    /// so the handle a caller wants returns through it.
     ///
-    /// Reads inside `f` see the stage as it stands, not what the batch has
-    /// queued. A builder taken from the stage or a [`Prim`](super::Prim) still
-    /// commits on its own unless it is handed to the transaction with
+    /// Each operation is planned against the stage with the prims the batch has
+    /// queued so far composed in, and for every batch it accepts, the commit
+    /// authors what the same calls made one after another would author. The
+    /// sequences it cannot plan, and refuses, are listed on
+    /// [`StageEdit`](super::StageEdit). Ordinary reads inside `f` see the stage
+    /// as it stands. A builder taken from the stage or a [`Prim`](super::Prim)
+    /// still commits on its own unless it is handed to the transaction with
     /// [`AttributeBuilder::in_edit`](super::AttributeBuilder::in_edit) or
-    /// [`RelationshipBuilder::in_edit`](super::RelationshipBuilder::in_edit).
+    /// [`RelationshipBuilder::in_edit`](super::RelationshipBuilder::in_edit),
+    /// and such a commit, or a muting or load-rule change, that moves what the
+    /// batch planned against makes the batch
+    /// [`PlanStale`](StageAuthoringError::PlanStale).
     ///
     /// The batch is tied to the edit target it opened on, and moving that
     /// target inside `f` is [`StageAuthoringError::EditTargetMoved`]: a queued
@@ -3048,6 +3076,29 @@ impl Stage {
         (cache.prim_revision(path), cache.population_epoch())
     }
 
+    /// The stamp an authoring plan rechecks a prim it read against: the
+    /// prim's revision (`None` when no index is cached there) and the
+    /// population and type-opinion epochs, the three a prim's composed fields
+    /// and schema can move with. Read from one settled cache borrow, as
+    /// [`value_stamp`](Self::value_stamp) is.
+    pub(super) fn plan_stamp(&self, path: &sdf::Path) -> PlanStamp {
+        let cache = self.composition.settled_cache();
+        PlanStamp {
+            revision: cache.prim_revision(path),
+            population: cache.population_epoch(),
+            type_opinions: cache.type_opinion_epoch(),
+        }
+    }
+
+    /// The composition's edit epoch ([`pcp::IndexCache::edit_epoch`]): an
+    /// authoring plan tells from it whether anything changed what the stage
+    /// composes while it was open. Drains first, so a queued direct edit
+    /// counts.
+    pub(super) fn edit_epoch(&self) -> u64 {
+        self.process_pending();
+        self.composition.settled_cache().edit_epoch()
+    }
+
     /// The schemas this stage resolves against (C++
     /// `UsdStage::GetSchemaRegistry` is a global; here it is per stage).
     pub fn schema_registry(&self) -> &Arc<SchemaRegistry> {
@@ -3080,13 +3131,26 @@ impl Stage {
         // is what the definition this identity selects reports back
         // (C++ `_ComposeAuthoredAppliedSchemas`).
         let prim = super::Prim::new(self, path.prim_path());
-        let mut id = PrimTypeId::new(prim.type_name_composed()?, prim.authored_api_schemas_composed()?);
+        let info = self.prim_type_info_for(prim.type_name_composed()?, prim.authored_api_schemas_composed()?)?;
+        self.prim_types.borrow_mut().remember(epochs, path, info.clone());
+        Ok(info)
+    }
+
+    /// The schema type of a prim typed `type_name` with the authored applied
+    /// schemas `applied`, the root layer's `fallbackPrimTypes` standing in for
+    /// a type the registry does not know: the identity
+    /// [`prim_type_info_composed`](Self::prim_type_info_composed) resolves a
+    /// composed prim to, for a type and list given rather than composed.
+    pub(super) fn prim_type_info_for(
+        &self,
+        type_name: Option<Token>,
+        applied: Vec<Token>,
+    ) -> Result<Arc<PrimTypeInfo>, pcp::QueryError> {
+        let mut id = PrimTypeId::new(type_name, applied);
         if let Some(mapped) = self.fallback_prim_type(id.type_name())? {
             id = id.with_mapped_type_name(mapped);
         }
-        let info = self.schema_registry.prim_type_info(id);
-        self.prim_types.borrow_mut().remember(epochs, path, info.clone());
-        Ok(info)
+        Ok(self.schema_registry.prim_type_info(id))
     }
 
     /// The registered type to use in place of `type_name`, when the stage's

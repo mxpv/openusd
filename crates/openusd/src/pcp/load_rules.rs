@@ -439,6 +439,7 @@ impl IndexCache {
         if touched.is_empty() {
             return Vec::new();
         }
+        self.bump_edit_epoch();
         self.retire_query_errors();
         // A rule change can expose or hide a payload's whole subtree.
         self.invalidate_population();

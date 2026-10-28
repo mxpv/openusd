@@ -101,7 +101,7 @@ impl<'a> RelationshipBuilder<'a> {
         if let Some(batch) = batch {
             batch.holds_target()?;
         }
-        let planned = self.plan()?;
+        let planned = self.plan(batch)?;
         let (stage, path) = match batch {
             Some(batch) => batch.queue(planned)?,
             None => planned.commit()?,
@@ -110,9 +110,12 @@ impl<'a> RelationshipBuilder<'a> {
     }
 
     /// Resolves everything the write depends on against composed state, so all
-    /// the transaction has left to do is stamp the spec and write.
-    fn plan(self) -> Result<authoring::PlannedProperty, StageAuthoringError> {
+    /// the transaction has left to do is stamp the spec and write. The owning
+    /// prim's schema is the one `batch` plans against, where the builder joins
+    /// one.
+    fn plan(self, batch: Option<&StageEdit>) -> Result<authoring::PlannedProperty, StageAuthoringError> {
         let (stage, path) = self.site?;
+        let schema = authoring::property_schema(&stage, batch, path.prim_path())?;
         let targets = self
             .targets
             .map(|targets| authoring::targets_for_authoring(&stage, &path, targets))
@@ -121,11 +124,13 @@ impl<'a> RelationshipBuilder<'a> {
             variability: sdf::Variability::Uniform,
             custom: self.custom,
         };
-        let ensure = authoring::plan_property_spec(&stage, &path, sdf::SpecType::Relationship, Some(declaration))?;
+        let ensure =
+            authoring::plan_property_spec(&stage, &path, sdf::SpecType::Relationship, Some(declaration), &schema)?;
         Ok(authoring::PlannedProperty::new(
             stage,
             path,
             authoring::PropertyWrite::Relationship { ensure, targets },
+            schema.id().clone(),
         ))
     }
 }

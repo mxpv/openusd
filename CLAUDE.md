@@ -80,8 +80,9 @@ source of truth for specifics.
   delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`,
   `Relationship`, and the schema views are `Clone` value types over it, and
   stage-tier authoring routes through the current `EditTarget`, with
-  `Stage::edit` batching several property writes into one layer transaction and
-  `Stage::batch_edit` for atomic multi-layer edits. Notable sub-surfaces:
+  `Stage::edit` batching several prim and property writes into one layer
+  transaction and `Stage::batch_edit` for atomic multi-layer edits. Notable
+  sub-surfaces:
   `usd/schema_registry.rs` + `usd/prim_definition.rs` + `usd/prim_type_info.rs`
   (C++ `UsdSchemaRegistry` / `UsdPrimDefinition` / `UsdPrimTypeInfo` — the
   schema type table and the property fallbacks it supplies, built from

@@ -1370,14 +1370,8 @@ impl PrimIndex {
         Ok(saw_opinion.then_some(Value::Bool(false)))
     }
 
-    /// Specifier resolution per spec 12.2.1.
-    ///
-    /// `over` is undefining; `def` and `class` are defining. The composed
-    /// specifier is `def` if the strongest defining opinion is `def`, or if
-    /// the strongest defining opinion not from a direct inherit is `def`.
-    /// It is `class` if the strongest defining opinion not from a direct
-    /// inherit is `class`, or if every defining opinion is `class`. It is
-    /// `over` only when every authored opinion is `over`.
+    /// Specifier resolution per spec 12.2.1, over the opinions in strength
+    /// order up to the first block ([`compose_specifier`]).
     fn resolve_specifier(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Specifier.as_str();
         let mut specs: Vec<(Specifier, ArcType)> = Vec::new();
@@ -1390,35 +1384,47 @@ impl PrimIndex {
                 specs.push((s, node.arc()));
             }
         }
-        if specs.is_empty() {
-            return Ok(None);
-        }
-
-        let strongest_defining = specs.iter().find(|(s, _)| *s != Specifier::Over).map(|(s, _)| *s);
-        let Some(strongest) = strongest_defining else {
-            // All authored opinions are `over`.
-            return Ok(Some(Value::Specifier(Specifier::Over)));
-        };
-
-        let strongest_non_inherit_defining = specs
-            .iter()
-            .find(|(s, arc)| *s != Specifier::Over && *arc != ArcType::Inherit)
-            .map(|(s, _)| *s);
-
-        if strongest == Specifier::Def || strongest_non_inherit_defining == Some(Specifier::Def) {
-            return Ok(Some(Value::Specifier(Specifier::Def)));
-        }
-
-        let all_defining_class = specs
-            .iter()
-            .filter(|(s, _)| *s != Specifier::Over)
-            .all(|(s, _)| *s == Specifier::Class);
-        if strongest_non_inherit_defining == Some(Specifier::Class) || all_defining_class {
-            return Ok(Some(Value::Specifier(Specifier::Class)));
-        }
-
-        Ok(Some(Value::Specifier(strongest)))
+        Ok(compose_specifier(&specs).map(Value::Specifier))
     }
+}
+
+/// The composed specifier of `specs`, opinions in strength order with the arc
+/// each came through, per spec 12.2.1; `None` for no opinion.
+///
+/// `over` is undefining; `def` and `class` are defining. The composed
+/// specifier is `def` if the strongest defining opinion is `def`, or if the
+/// strongest defining opinion not from a direct inherit is `def`. It is
+/// `class` if the strongest defining opinion not from a direct inherit is
+/// `class`, or if every defining opinion is `class`. It is `over` only when
+/// every authored opinion is `over`.
+pub(crate) fn compose_specifier(specs: &[(Specifier, ArcType)]) -> Option<Specifier> {
+    if specs.is_empty() {
+        return None;
+    }
+    let strongest_defining = specs.iter().find(|(s, _)| *s != Specifier::Over).map(|(s, _)| *s);
+    let Some(strongest) = strongest_defining else {
+        // All authored opinions are `over`.
+        return Some(Specifier::Over);
+    };
+
+    let strongest_non_inherit_defining = specs
+        .iter()
+        .find(|(s, arc)| *s != Specifier::Over && *arc != ArcType::Inherit)
+        .map(|(s, _)| *s);
+
+    if strongest == Specifier::Def || strongest_non_inherit_defining == Some(Specifier::Def) {
+        return Some(Specifier::Def);
+    }
+
+    let all_defining_class = specs
+        .iter()
+        .filter(|(s, _)| *s != Specifier::Over)
+        .all(|(s, _)| *s == Specifier::Class);
+    if strongest_non_inherit_defining == Some(Specifier::Class) || all_defining_class {
+        return Some(Specifier::Class);
+    }
+
+    Some(strongest)
 }
 
 /// Where a clip set's expression-valued asset fields were authored, one site

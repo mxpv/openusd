@@ -260,9 +260,10 @@ pub fn apply_collection(stage: &Stage, prim: impl sdf::IntoPath, name: impl Into
     if registry.schema_info(&schema).is_some() && !registry.is_allowed_instance_name(&schema, &name) {
         return Err(super::ApplyApiError::InstanceNameNotAllowed { schema, instance: name }.into());
     }
-    // Author an `over` when the prim has no spec on the edit-target layer yet,
-    // mirroring C++ `UsdCollectionAPI::Apply` (which authors the spec as
-    // needed). `override_prim` is idempotent when a spec already exists.
+    // The prim to apply to, with an `over` authored only where the stage
+    // holds none (C++ `UsdStage::OverridePrim`); applying the schema then
+    // authors the edit-target spec it needs, as C++ `UsdCollectionAPI::Apply`
+    // does.
     CollectionAPI::apply(&stage.override_prim(prim)?, name)
 }
 
