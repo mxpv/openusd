@@ -327,6 +327,11 @@ impl Builder {
     /// is named with [`declaration_family`](Self::declaration_family), and one
     /// file may hold plugins of both sorts. A plugin that is neither is an
     /// error when [`generate`](Self::generate) runs.
+    ///
+    /// The plugins' `Types` blocks are not read. A schema's
+    /// [`SchemaInfo::plug_info`](openusd::usd::SchemaInfo::plug_info) comes
+    /// from its class's `customData.extraPlugInfo`, which C++ `usdGenSchema`
+    /// writes those entries from.
     #[must_use]
     pub fn plug_info(mut self, path: impl Into<PathBuf>) -> Self {
         self.plug_infos.push(path.into());

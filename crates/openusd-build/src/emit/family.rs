@@ -68,6 +68,12 @@ fn schema(decl: &usd::SchemaDecl<'_>) -> Result<TokenStream, Error> {
         .iter()
         .map(|property| self::property(identifier, property))
         .collect::<Result<Vec<_>, Error>>()?;
+    // Named by where the entry was written: an unwritable value reads as
+    // `Schema.customData.extraPlugInfo.key`.
+    let plug_info = fields(
+        &format!("{identifier}.customData.extraPlugInfo"),
+        decl.declared_plug_info(),
+    )?;
     let fields = fields(identifier, decl.declared_fields())?;
 
     let list = |names: &[&str]| (!names.is_empty()).then(|| quote! { &[#(#names),*] });
@@ -95,6 +101,7 @@ fn schema(decl: &usd::SchemaDecl<'_>) -> Result<TokenStream, Error> {
 
     let properties = (!properties.is_empty()).then(|| quote! { .properties(&[#(#properties),*]) });
     let fields = (!fields.is_empty()).then(|| quote! { .fields(&[#(#fields),*]) });
+    let plug_info = (!plug_info.is_empty()).then(|| quote! { .plug_info(&[#(#plug_info),*]) });
 
     Ok(quote! {
         ::openusd::usd::SchemaDecl::new(#identifier, #kind)
@@ -107,6 +114,7 @@ fn schema(decl: &usd::SchemaDecl<'_>) -> Result<TokenStream, Error> {
             #restrictions
             #instance_names
             #fallbacks
+            #plug_info
             #properties
             #fields
     })

@@ -377,6 +377,21 @@ impl CustomData {
         self.0.get(key).and_then(sdf::Value::try_as_bool_ref).copied()
     }
 
+    /// One entry as a dictionary, by key, empty when it is absent. An entry
+    /// holding something else is the kind it holds.
+    pub fn dictionary(&self, key: &str) -> Result<BTreeMap<String, sdf::Value>, sdf::ValueKind> {
+        let Some(value) = self.0.get(key) else {
+            return Ok(BTreeMap::new());
+        };
+        let dictionary = value
+            .try_as_dictionary_ref()
+            .ok_or_else(|| sdf::ValueKind::from(value))?;
+        Ok(dictionary
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
     /// One entry as a token list, empty when it is absent.
     ///
     /// Written either as `token[]` or as `string[]`: `customData` is untyped

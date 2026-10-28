@@ -16,6 +16,15 @@ class "Marked" (
         string version = "1"
         double[] weights = [0.5, 1]
     }
+    customData = {
+        dictionary extraPlugInfo = {
+            bool providesUsdShadeConnectableAPIBehavior = 1
+            string note = "kept"
+            dictionary nested = {
+                int depth = 2
+            }
+        }
+    }
 ) {
     double blocked = None
     rel plain

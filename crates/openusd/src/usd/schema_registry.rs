@@ -123,10 +123,11 @@ impl MetadataField {
 /// What is known about one registered schema, independent of its properties
 /// (C++ `UsdSchemaRegistry::SchemaInfo`).
 ///
-/// This is the cheap tier: identity, kind, and inheritance, all of it read
-/// from the family manifest. The properties and fallback values a schema
+/// This is the cheap tier: identity, kind, inheritance, how the schema
+/// applies, and its [`plug_info`](Self::plug_info), read from the family's
+/// manifest or declarations. The properties and fallback values a schema
 /// defines live in its [`PrimDefinition`](super::PrimDefinition).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchemaInfo {
     identifier: tf::Token,
     family: tf::Token,
@@ -141,6 +142,7 @@ pub struct SchemaInfo {
     /// [`can_only_apply_to`](Self::can_only_apply_to) with.
     instance_can_only_apply_to: HashMap<tf::Token, Vec<tf::Token>>,
     allowed_instance_names: Vec<tf::Token>,
+    plug_info: sdf::Dictionary,
 }
 
 /// One family's parsed schematics — the class prims that define what each
@@ -290,6 +292,14 @@ pub enum SchemaRegistryError {
     UnknownSchemaKind {
         /// The unrecognized kind token.
         kind: tf::Token,
+    },
+
+    /// A manifest entry's `customData.extraPlugInfo` is not a dictionary, so
+    /// the plug info it carries cannot be read.
+    #[error("customData.extraPlugInfo must be a dictionary, not a {kind}")]
+    PlugInfoNotDictionary {
+        /// The kind of value the entry holds.
+        kind: sdf::ValueKind,
     },
 
     /// A schema identifier is not a legal `family` or `family_N` name.
@@ -1142,6 +1152,7 @@ struct Declared {
     can_only_apply_to: Vec<tf::Token>,
     instance_can_only_apply_to: HashMap<tf::Token, Vec<tf::Token>>,
     allowed_instance_names: Vec<tf::Token>,
+    plug_info: sdf::Dictionary,
 }
 
 impl SchemaInfo {
@@ -1173,6 +1184,7 @@ impl SchemaInfo {
                 _ => HashMap::new(),
             },
             allowed_instance_names: declared.allowed_instance_names,
+            plug_info: declared.plug_info,
         }
     }
 
@@ -1236,6 +1248,18 @@ impl SchemaInfo {
     /// Whether this schema is applied through a prim's `apiSchemas` list.
     pub fn is_applied_api(&self) -> bool {
         self.kind.is_applied_api()
+    }
+
+    /// The extra entries the schema's plugin declares for its type, by key,
+    /// which the registry carries without reading: those C++
+    /// `PlugRegistry::GetDataFromPluginMetaData` answers for the schema's type
+    /// beyond the ones this type's other accessors give. A generated C++
+    /// `plugInfo.json` copies them from the class's `customData.extraPlugInfo`,
+    /// as in `providesUsdShadeConnectableAPIBehavior` or
+    /// `implementsComputeExtent`. They belong to this schema alone: a derived
+    /// schema does not inherit them.
+    pub fn plug_info(&self) -> &sdf::Dictionary {
+        &self.plug_info
     }
 }
 
@@ -1517,6 +1541,12 @@ impl SchemaRegistryBuilder {
     /// `apiSchemaAutoApplyTo` auto-applies the declaring API schema to the
     /// named target schemas, under the same rules as a declaration registered
     /// through [`auto_apply`](Self::auto_apply).
+    ///
+    /// The prim's `customData.extraPlugInfo` dictionary, when there is one,
+    /// becomes [`SchemaInfo::plug_info`]: the entries a C++ `plugInfo.json`
+    /// records for the schema's type beyond those listed above. An
+    /// `extraPlugInfo` that is not a dictionary is
+    /// [`PlugInfoNotDictionary`](SchemaRegistryError::PlugInfoNotDictionary).
     ///
     /// The layers are read here and not retained, so both may be dropped as
     /// soon as this returns. A failure is held for [`build`](Self::build), and
@@ -1991,10 +2021,10 @@ impl PendingDefinition {
 fn override_property_names(schematics: &Schematics, class_prim: &sdf::Path) -> Vec<tf::Token> {
     const OVERRIDE_NAMES: &str = "apiSchemaOverridePropertyNames";
 
-    prim_field(schematics.data(), class_prim, sdf::FieldKey::CustomData)
-        .and_then(|value| value.clone().try_as_dictionary())
-        .and_then(|mut custom_data| custom_data.remove(OVERRIDE_NAMES))
-        .and_then(sdf::Value::try_as_token_vec)
+    custom_data(schematics.data(), class_prim)
+        .and_then(|custom| custom.get(OVERRIDE_NAMES))
+        .and_then(sdf::Value::try_as_token_vec_ref)
+        .cloned()
         .unwrap_or_default()
 }
 
@@ -2119,6 +2149,11 @@ fn schema_info(decl: &SchemaDecl<'_>, identifier: &tf::Token) -> SchemaInfo {
                 .map(|(instance, allowed)| (tf::Token::from(*instance), tokens(allowed)))
                 .collect(),
             allowed_instance_names: tokens(decl.allowed_instance_names),
+            plug_info: decl
+                .plug_info
+                .iter()
+                .map(|entry| (entry.name.to_owned(), entry.value()))
+                .collect(),
         },
     )
 }
@@ -2129,6 +2164,16 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
 
     let kind = manifest_token(manifest, &prim, "schemaKind").ok_or(SchemaRegistryError::MissingSchemaKind)?;
     let kind = SchemaKind::from_token(kind.as_str()).ok_or_else(|| SchemaRegistryError::UnknownSchemaKind { kind })?;
+    let plug_info = custom_data(manifest, &prim)
+        .and_then(|custom| custom.get("extraPlugInfo"))
+        .map(|value| {
+            value
+                .try_as_dictionary_ref()
+                .cloned()
+                .ok_or_else(|| SchemaRegistryError::PlugInfoNotDictionary { kind: value.into() })
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     Ok(SchemaInfo::new(
         identifier.clone(),
@@ -2140,8 +2185,14 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
             can_only_apply_to: manifest_token_vec(manifest, &prim, "apiSchemaCanOnlyApplyTo"),
             instance_can_only_apply_to: manifest_instance_restrictions(manifest, &prim),
             allowed_instance_names: manifest_token_vec(manifest, &prim, "allowedInstanceNames"),
+            plug_info,
         },
     ))
+}
+
+/// The `customData` dictionary of a prim in a family's parsed text.
+fn custom_data<'a>(data: &'a sdf::Data, prim: &sdf::Path) -> Option<&'a sdf::Dictionary> {
+    prim_field(data, prim, sdf::FieldKey::CustomData).and_then(sdf::Value::try_as_dictionary_ref)
 }
 
 /// Reads a multiple-apply schema's per-instance `apiSchemaCanOnlyApplyTo`
@@ -2149,8 +2200,7 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
 /// An empty list is not recorded, as C++ `UsdSchemaRegistry`'s plugin loader
 /// stores none, so the instance keeps the schema-wide restriction.
 fn manifest_instance_restrictions(manifest: &sdf::Data, prim: &sdf::Path) -> HashMap<tf::Token, Vec<tf::Token>> {
-    prim_field(manifest, prim, sdf::FieldKey::CustomData)
-        .and_then(sdf::Value::try_as_dictionary_ref)
+    custom_data(manifest, prim)
         .and_then(|custom| custom.get("apiSchemaInstances"))
         .and_then(sdf::Value::try_as_dictionary_ref)
         .into_iter()
@@ -2429,6 +2479,134 @@ mod tests {
         assert!(collection.auto_apply_to().is_empty());
 
         assert!(registry.schema_info(&tf::Token::new("Nonexistent")).is_none());
+    }
+
+    /// A family of `Marker`, whose manifest entry's `customData` authors
+    /// `extra_plug_info`, and `Plain`, which derives from it.
+    fn plug_info_family(extra_plug_info: &str) -> Result<Arc<SchemaRegistry>, SchemaRegistryError> {
+        const SCHEMATICS: &str = r#"#usda 1.0
+
+class "Typed"
+{
+}
+
+class Marker "Marker"
+{
+}
+
+class Plain "Plain"
+{
+}
+"#;
+        let manifest = format!(
+            r#"#usda 1.0
+
+def "Typed"
+{{
+    uniform token schemaKind = "abstractBase"
+}}
+
+def "Marker" (
+    customData = {{
+        {extra_plug_info}
+    }}
+)
+{{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Typed"]
+}}
+
+def "Plain"
+{{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Marker"]
+}}
+"#
+        );
+        SchemaRegistryBuilder::empty()
+            .family(FamilySource {
+                name: "test",
+                manifest: &SchemaRegistry::test_layer(&manifest),
+                schematics: &SchemaRegistry::test_layer(SCHEMATICS),
+            })
+            .build()
+    }
+
+    /// A manifest prim's `customData.extraPlugInfo` is the schema's plug
+    /// info, kept whole and uninterpreted, and a schema without one has
+    /// none.
+    #[test]
+    fn plug_info_from_manifest() -> Result<(), SchemaRegistryError> {
+        let registry = plug_info_family(
+            "dictionary extraPlugInfo = {
+            bool providesUsdShadeConnectableAPIBehavior = 1
+            string note = \"kept\"
+            dictionary nested = {
+                int depth = 2
+            }
+        }",
+        )?;
+        let marker = registry.schema_info(&tf::Token::new("Marker")).expect("Marker");
+        let info = marker.plug_info();
+        assert_eq!(info.len(), 3);
+        assert_eq!(
+            info.get("providesUsdShadeConnectableAPIBehavior"),
+            Some(&sdf::Value::Bool(true))
+        );
+        assert_eq!(info.get("note"), Some(&sdf::Value::String("kept".into())));
+        let nested = info
+            .get("nested")
+            .and_then(sdf::Value::try_as_dictionary_ref)
+            .expect("a nested dictionary");
+        assert_eq!(nested.get("depth"), Some(&sdf::Value::Int(2)));
+
+        // A derived schema does not inherit its base's entries.
+        let plain = registry.schema_info(&tf::Token::new("Plain")).expect("Plain");
+        assert!(plain.plug_info().is_empty());
+        Ok(())
+    }
+
+    /// A manifest `extraPlugInfo` that is not a dictionary fails the family's
+    /// registration.
+    #[test]
+    fn plug_info_not_dictionary() {
+        let error = plug_info_family("string extraPlugInfo = \"providesUsdShadeConnectableAPIBehavior\"")
+            .expect_err("extraPlugInfo is a dictionary");
+        let SchemaRegistryError::Schema { cause, .. } = error else {
+            panic!("expected a schema entry failure, got {error}");
+        };
+        assert!(
+            matches!(
+                *cause,
+                SchemaRegistryError::PlugInfoNotDictionary {
+                    kind: sdf::ValueKind::String
+                }
+            ),
+            "{cause}"
+        );
+    }
+
+    /// A declaration's plug info entries are the schema's plug info.
+    #[test]
+    fn plug_info_from_decl() -> Result<(), SchemaRegistryError> {
+        static MINE: &SchemaFamily<'_> = &SchemaFamily::new(
+            "mine",
+            &[SchemaDecl::new("Widget", SchemaKind::ConcreteTyped)
+                .bases(&["Typed"])
+                .plug_info(&[
+                    Field::new("isUsdShadeContainer", || sdf::Value::Bool(true)),
+                    Field::string("note", "kept"),
+                ])],
+        );
+        let registry = SchemaRegistry::builder().register(MINE).build()?;
+        let info = registry
+            .schema_info(&tf::Token::new("Widget"))
+            .expect("Widget")
+            .plug_info();
+        assert_eq!(info.len(), 2);
+        assert_eq!(info.get("isUsdShadeContainer"), Some(&sdf::Value::Bool(true)));
+        assert_eq!(info.get("note"), Some(&sdf::Value::String("kept".into())));
+        Ok(())
     }
 
     #[test]

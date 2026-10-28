@@ -85,6 +85,14 @@ pub enum Violation {
         spelling: String,
     },
 
+    /// An `extraPlugInfo` that is not a dictionary, whose entries the
+    /// registry could not carry.
+    #[error("customData.extraPlugInfo must be a dictionary, not a {kind}")]
+    ExtraPlugInfoNotDictionary {
+        /// The value type the schema wrote.
+        kind: &'static str,
+    },
+
     /// Metadata that contradicts the kind of schema it sits on.
     #[error("{key} does not apply to a {kind} schema")]
     KindMismatch {
@@ -869,6 +877,44 @@ class "Varied" (
                 ..
             } => assert_eq!(field, sdf::ChildrenKey::VariantSetChildren.as_str()),
             other => panic!("{other}"),
+        }
+    }
+
+    /// An `extraPlugInfo` that is not a dictionary is refused. The entries it
+    /// was meant to carry would otherwise vanish from the schema's plug info.
+    #[test]
+    fn plug_info_not_dictionary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = read_source(
+            dir.path(),
+            r#"#usda 1.0
+
+def "GLOBAL" (
+    customData = {
+        string libraryName = "testPlugInfo"
+    }
+)
+{
+}
+
+class "Typed" {}
+
+class "Flagged" (
+    inherits = </Typed>
+    customData = {
+        string extraPlugInfo = "providesUsdShadeConnectableAPIBehavior"
+    }
+) {}
+"#,
+        )
+        .expect_err("extraPlugInfo is a dictionary");
+
+        match error {
+            Error::Definition {
+                violation: Violation::ExtraPlugInfoNotDictionary { kind },
+                ..
+            } => assert_eq!(kind, "String"),
+            other => panic!("expected ExtraPlugInfoNotDictionary, got {other}"),
         }
     }
 

@@ -62,6 +62,26 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 ::openusd::usd::SchemaKind::AbstractTyped,
             )
             .bases(&["Typed"])
+            .plug_info(
+                &[
+                    ::openusd::usd::Field::new(
+                        "nested",
+                        || ::openusd::sdf::Value::Dictionary(
+                            ::openusd::sdf::Dictionary::from([
+                                (
+                                    ::std::string::String::from("depth"),
+                                    ::openusd::sdf::Value::Int(2i32),
+                                ),
+                            ]),
+                        ),
+                    ),
+                    ::openusd::usd::Field::string("note", "kept"),
+                    ::openusd::usd::Field::new(
+                        "providesUsdShadeConnectableAPIBehavior",
+                        || ::openusd::sdf::Value::Bool(true),
+                    ),
+                ],
+            )
             .properties(
                 &[
                     ::openusd::usd::PropertyDecl::attribute("blocked", "double")

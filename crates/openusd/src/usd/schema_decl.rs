@@ -128,6 +128,7 @@ pub struct SchemaDecl<'a> {
     pub(super) instance_restrictions: &'a [InstanceRestriction<'a>],
     pub(super) allowed_instance_names: &'a [&'a str],
     pub(super) fallback_types: &'a [&'a str],
+    pub(super) plug_info: &'a [Field<'a>],
 }
 
 /// One property of a schema, under the name the schematics records it by — for
@@ -309,6 +310,7 @@ impl<'a> SchemaDecl<'a> {
             instance_restrictions: &[],
             allowed_instance_names: &[],
             fallback_types: &[],
+            plug_info: &[],
         }
     }
 
@@ -390,6 +392,16 @@ impl<'a> SchemaDecl<'a> {
         self
     }
 
+    /// The entries the schema's plugin declares for its type, each a
+    /// [`Field`] named by its key: what a C++ `plugInfo.json` records in the
+    /// type's entry, which a generated one copies from the class's
+    /// `customData.extraPlugInfo`. The registry keeps them uninterpreted, and
+    /// [`SchemaInfo::plug_info`](super::SchemaInfo::plug_info) hands them back.
+    pub const fn plug_info(mut self, entries: &'a [Field<'a>]) -> Self {
+        self.plug_info = entries;
+        self
+    }
+
     /// What the schema is called, which is what a registry looks it up by.
     pub const fn identifier(&self) -> &'a str {
         self.identifier
@@ -455,6 +467,11 @@ impl<'a> SchemaDecl<'a> {
     /// What [`fallback_types`](Self::fallback_types) declared.
     pub const fn declared_fallback_types(&self) -> &'a [&'a str] {
         self.fallback_types
+    }
+
+    /// What [`plug_info`](Self::plug_info) declared.
+    pub const fn declared_plug_info(&self) -> &'a [Field<'a>] {
+        self.plug_info
     }
 }
 

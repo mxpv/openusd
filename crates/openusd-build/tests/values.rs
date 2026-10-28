@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use openusd::sdf;
+use openusd::{sdf, tf, usd};
 use openusd_build::Views;
 
 mod common;
@@ -97,4 +97,34 @@ fn compiled_values_match_the_model() {
     ] {
         assert!(kinds.contains(&expected), "the fixture declares a {expected:?}");
     }
+}
+
+/// The compiled table registers the plug info the schema's `extraPlugInfo`
+/// declares. The class prims [`fields`] reads do not carry it, and it reaches
+/// a registry only through the declaration. The comparison is therefore
+/// between two registries.
+#[test]
+fn compiled_plug_info_matches() {
+    let output = openusd_build::configure()
+        .search_path(fixture())
+        .build_library(fixture().join("schema.usda"), Views::Skip)
+        .expect("the values fixture builds");
+    let marked = tf::Token::from("Marked");
+    let plug_info = |family: &usd::SchemaFamily<'_>| {
+        // Empty: the fixture declares `Typed`, which the core family owns.
+        let registry = usd::SchemaRegistryBuilder::empty()
+            .register(family)
+            .build()
+            .expect("the family registers");
+        registry
+            .schema_info(&marked)
+            .expect("the fixture declares Marked")
+            .plug_info()
+            .clone()
+    };
+
+    let from_model = output.with_family(plug_info);
+    let from_table = plug_info(generated::SCHEMAS);
+    assert_eq!(from_table, from_model);
+    assert_eq!(from_table.len(), 3, "a bool, a string and a nested dictionary");
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use openusd::Result;
 use openusd::usd::{SchemaBase, SchemaKind};
-use openusd::{tf, usd};
+use openusd::{sdf, tf, usd};
 
 use super::tokens;
 use super::{ConnectableAPI, Input, Output};
@@ -123,12 +123,20 @@ pub enum Refusal {
 /// declared elsewhere, and a [`ConnectableContext`] over it answers the
 /// connection queries with them.
 ///
-/// TODO: C++ also gives a behavior to a schema that registers no code but
-/// declares `providesUsdShadeConnectableAPIBehavior`, `isUsdShadeContainer`
-/// and `requiresUsdShadeEncapsulation` in its plug metadata
-/// (`connectableAPIBehavior.cpp:480-502`). That needs the class's
-/// `extraPlugInfo` read into `usd::SchemaInfo`; until then such a schema has
-/// a behavior only where a crate registers one for it.
+/// A schema that registers no behavior still has one when its
+/// [`plug_info`](usd::SchemaInfo::plug_info) sets
+/// `providesUsdShadeConnectableAPIBehavior` to `true`. That behavior follows
+/// the [`NodeKind::Basic`] rules, and its flags come from
+/// `isUsdShadeContainer` (`false` when absent or not a bool) and
+/// `requiresUsdShadeEncapsulation` (`true` when absent or not a bool), as
+/// C++ `RegisterPlugConfiguredBehaviorForType` builds it
+/// (`connectableAPIBehavior.cpp:480-502`). A registered behavior wins over
+/// it.
+///
+/// A prim's type and its ancestors take a registered behavior whatever their
+/// plug info says. An applied API schema takes one only where its plug info
+/// sets `providesUsdShadeConnectableAPIBehavior` to `true`, as C++
+/// `_FindBehaviorForApiSchema` asks (`connectableAPIBehavior.cpp:777-802`).
 #[derive(Debug, Clone, Default)]
 pub struct BehaviorRegistry {
     /// Shared between the clones of a registry until one of them registers
@@ -144,6 +152,11 @@ impl BehaviorRegistry {
 
     /// Give the prims of the type or single-apply API schema `schema` the
     /// behavior `behavior`, which replaces one already registered for it.
+    ///
+    /// A prim takes the behavior of an applied API schema only where the
+    /// schema's [`plug_info`](usd::SchemaInfo::plug_info) sets
+    /// `providesUsdShadeConnectableAPIBehavior` to `true`. Registering one
+    /// for an API schema without that entry gives its prims nothing.
     pub fn register(&mut self, schema: impl Into<tf::Token>, behavior: impl Behavior + 'static) -> &mut Self {
         Arc::make_mut(&mut self.behaviors).insert(schema.into(), Arc::new(behavior));
         self
@@ -155,8 +168,8 @@ impl BehaviorRegistry {
     /// (`connectableAPIBehavior.cpp:547-704`), which differs from the
     /// precedence its comment lists (`:536-545`):
     /// 1. The prim's type, then each of its ancestors in the order of
-    ///    [`usd::SchemaRegistry::ancestors`]: the first with a behavior
-    ///    answers.
+    ///    [`usd::SchemaRegistry::ancestors`]: the first with a behavior,
+    ///    registered or configured by its plug info, answers.
     /// 2. Where one did, the first API schema the prim's own `apiSchemas`
     ///    authors that has a behavior overrides it.
     /// 3. Where none did, the first API schema of the prim's definition, the
@@ -166,7 +179,8 @@ impl BehaviorRegistry {
     /// The walk starts from the prim's concrete schema type. A prim whose
     /// `typeName` is abstract or unknown has only its API schemas.
     ///
-    /// Only a single-apply API schema has a behavior.
+    /// Of the API schemas, only a single-apply one whose plug info provides a
+    /// behavior has one.
     pub fn behavior(&self, prim: &usd::Prim) -> Result<Option<Arc<dyn Behavior>>> {
         // TODO(perf): C++ caches the answer by prim type identity. The lookup
         // depends on the identity and this registry alone, and one answer per
@@ -214,22 +228,37 @@ impl BehaviorRegistry {
         if let Some(typed) = schemas
             .ancestors(schema)
             .into_iter()
-            .find_map(|ty| self.behaviors.get(ty))
+            .find_map(|ty| self.own_behavior(schemas, ty))
         {
             let api = authored.iter().find_map(|api| self.api_behavior(schemas, api));
-            return Some(api.unwrap_or_else(|| typed.clone()));
+            return Some(api.unwrap_or(typed));
         }
         applied.iter().find_map(|api| self.api_behavior(schemas, api))
     }
 
-    /// The behavior of the applied API schema named `api`, which only a
-    /// single-apply schema has (C++ `_FindBehaviorForApiSchema`). A name
-    /// carrying an instance names a multiple-apply schema, and is no key of
-    /// the table.
+    /// The behavior of the applied API schema named `api` (C++
+    /// `_FindBehaviorForApiSchema`). Only a single-apply schema whose plug
+    /// info provides a behavior has one: the behavior registered for it, or
+    /// else the one its plug info configures. A name carrying an instance
+    /// names a multiple-apply schema, which the registry does not know by
+    /// that name.
     fn api_behavior(&self, schemas: &usd::SchemaRegistry, api: &tf::Token) -> Option<Arc<dyn Behavior>> {
-        let behavior = self.behaviors.get(api)?;
-        let single = schemas.schema_info(api)?.kind() == SchemaKind::SingleApplyApi;
-        single.then(|| behavior.clone())
+        let info = schemas.schema_info(api)?;
+        if info.kind() != SchemaKind::SingleApplyApi || !provides_behavior(info) {
+            return None;
+        }
+        Some(self.behaviors.get(api).cloned().unwrap_or_else(|| configured(info)))
+    }
+
+    /// The behavior a type in a prim's lineage has of its own (C++
+    /// `_GetBehaviorForPrimTypeId`'s ancestor walk): the one registered for
+    /// it, or else the one its plug info configures where it provides one.
+    fn own_behavior(&self, schemas: &usd::SchemaRegistry, schema: &tf::Token) -> Option<Arc<dyn Behavior>> {
+        if let Some(behavior) = self.behaviors.get(schema) {
+            return Some(behavior.clone());
+        }
+        let info = schemas.schema_info(schema)?;
+        provides_behavior(info).then(|| configured(info))
     }
 }
 
@@ -345,6 +374,25 @@ impl ConnectableAPI {
     }
 }
 
+/// The behavior a schema's plug info configures (C++
+/// `UsdShadeConnectableAPIBehavior(isContainer, requiresEncapsulation)`): its
+/// two flags, and the default [`NodeKind::Basic`] rules.
+#[derive(Debug)]
+struct Configured {
+    container: bool,
+    encapsulation: bool,
+}
+
+impl Behavior for Configured {
+    fn is_container(&self) -> bool {
+        self.container
+    }
+
+    fn requires_encapsulation(&self) -> bool {
+        self.encapsulation
+    }
+}
+
 /// The behavior of a built-in schema of this crate: what is fixed for every
 /// prim of the schema, and the rules its inputs and outputs connect by.
 #[derive(Debug)]
@@ -386,6 +434,43 @@ impl Behavior for BuiltIn {
             false => Ok(Err(Refusal::OutputsNotConnectable)),
         }
     }
+}
+
+/// The plug info entry that gives a schema a behavior with no code behind it.
+const PROVIDES_BEHAVIOR: &str = "providesUsdShadeConnectableAPIBehavior";
+
+/// The plug info entry that makes a configured behavior a container.
+const IS_CONTAINER: &str = "isUsdShadeContainer";
+
+/// The plug info entry that a configured behavior's encapsulation reads.
+const REQUIRES_ENCAPSULATION: &str = "requiresUsdShadeEncapsulation";
+
+/// Whether `info`'s plug info provides a behavior (C++
+/// `_LoadPluginDefiningBehaviorForType`): it holds a bool `true` under
+/// `providesUsdShadeConnectableAPIBehavior`, on a typed or API schema. The
+/// schema's kind answers which it is, as C++ asks `IsA<UsdTyped>` and
+/// `IsA<UsdAPISchemaBase>`.
+fn provides_behavior(info: &usd::SchemaInfo) -> bool {
+    let kind = info.kind();
+    plug_flag(info, PROVIDES_BEHAVIOR) == Some(true) && (kind.is_typed() || kind.is_api())
+}
+
+/// The behavior `info`'s plug info configures (C++
+/// `RegisterPlugConfiguredBehaviorForType`), each flag taking its default
+/// where the entry is absent or not a bool.
+// TODO(perf): C++ registers a configured behavior once, against its type.
+// This builds one per lookup; the per-identity cache noted on
+// `BehaviorRegistry::behavior` would hold it too.
+fn configured(info: &usd::SchemaInfo) -> Arc<dyn Behavior> {
+    Arc::new(Configured {
+        container: plug_flag(info, IS_CONTAINER).unwrap_or(false),
+        encapsulation: plug_flag(info, REQUIRES_ENCAPSULATION).unwrap_or(true),
+    })
+}
+
+/// The bool `info`'s plug info holds under `key`, if it holds one.
+fn plug_flag(info: &usd::SchemaInfo, key: &str) -> Option<bool> {
+    info.plug_info().get(key).and_then(sdf::Value::try_as_bool_ref).copied()
 }
 
 /// Add the behavior of each `UsdShade` schema that has one: NodeGraph
@@ -564,7 +649,7 @@ pub(crate) mod tests {
     use super::*;
 
     use openusd::sdf;
-    use openusd::usd::SchemaDecl;
+    use openusd::usd::{Field, SchemaDecl};
 
     use crate::SchemaError;
     use crate::geom::boundable::tests::stage_with;
@@ -572,7 +657,9 @@ pub(crate) mod tests {
 
     /// A family of a typed schema with a typed child, an abstract type, a
     /// type with a built-in API schema, a type an API schema auto-applies
-    /// to, and three single-apply API schemas.
+    /// to, and three single-apply API schemas. Each API schema's plug info
+    /// provides a behavior, as an API schema's must for a registered one to
+    /// count.
     pub(crate) const FAMILY: &[SchemaDecl<'static>] = &[
         SchemaDecl::new("TestTyped", SchemaKind::ConcreteTyped).bases(&["Typed"]),
         SchemaDecl::new("TestChild", SchemaKind::ConcreteTyped).bases(&["TestTyped"]),
@@ -581,11 +668,17 @@ pub(crate) mod tests {
             .bases(&["Typed"])
             .applied_api_schemas(&["TestApiA"]),
         SchemaDecl::new("TestPlain", SchemaKind::ConcreteTyped).bases(&["Typed"]),
-        SchemaDecl::new("TestApiA", SchemaKind::SingleApplyApi).bases(&["APISchemaBase"]),
-        SchemaDecl::new("TestApiB", SchemaKind::SingleApplyApi).bases(&["APISchemaBase"]),
+        SchemaDecl::new("TestApiA", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[PROVIDES]),
+        SchemaDecl::new("TestApiB", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[PROVIDES]),
         SchemaDecl::new("TestAuto", SchemaKind::SingleApplyApi)
             .bases(&["APISchemaBase"])
-            .auto_apply_to(&["TestPlain"]),
+            .auto_apply_to(&["TestPlain"])
+            .plug_info(&[PROVIDES]),
+        SchemaDecl::new("TestUnflaggedApi", SchemaKind::SingleApplyApi).bases(&["APISchemaBase"]),
     ];
 
     /// A behavior known by its name.
@@ -1021,6 +1114,285 @@ pub(crate) mod tests {
         assert!(!input.can_connect(output.attribute())?);
         let input = input.connect_to(&output)?;
         assert_eq!(input.attribute().connections()?, [output.path().clone()]);
+        Ok(())
+    }
+
+    /// The `testUsdShadeConnectableAPIBehavior` plugin
+    /// (`testenv/testUsdShadeConnectableAPIBehavior/resources/plugins1`):
+    /// schemas whose behaviors come from plug info alone, with no code
+    /// registered for them.
+    const PLUG_FAMILY: &[SchemaDecl<'static>] = &[
+        SchemaDecl::new("AutoApplyDefaultConnectableBehaviorAPI", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .auto_apply_to(&["Material", "UsdShadeTestTypedHasAutoApplyDefault"])
+            .plug_info(&[PROVIDES]),
+        SchemaDecl::new(
+            "AutoApplyConnectableBehaviorContainerSetAPI",
+            SchemaKind::SingleApplyApi,
+        )
+        .bases(&["APISchemaBase"])
+        .auto_apply_to(&["Shader", "UsdShadeTestTypedHasAutoApplyContainer"])
+        .plug_info(&[PROVIDES, CONTAINER]),
+        SchemaDecl::new(
+            "AutoApplyConnectableBehaviorNoRequiresEncapsulationAPI",
+            SchemaKind::SingleApplyApi,
+        )
+        .bases(&["APISchemaBase"])
+        .auto_apply_to(&["Material", "UsdShadeTestTypedHasAutoApplyRequiresEncapsulation"])
+        .plug_info(&[PROVIDES, NO_ENCAPSULATION]),
+        SchemaDecl::new("DefaultConnectableBehaviorAPI", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[PROVIDES]),
+        SchemaDecl::new("ModifiedDefaultConnectableBehaviorAPI", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[PROVIDES, CONTAINER, NO_ENCAPSULATION]),
+        SchemaDecl::new("UsdShadeTestTypedHasAutoApplyDefault", SchemaKind::ConcreteTyped).bases(&["Typed"]),
+        SchemaDecl::new("UsdShadeTestTypedHasAutoApplyContainer", SchemaKind::ConcreteTyped).bases(&["Typed"]),
+        SchemaDecl::new(
+            "UsdShadeTestTypedHasAutoApplyRequiresEncapsulation",
+            SchemaKind::ConcreteTyped,
+        )
+        .bases(&["Typed"]),
+        SchemaDecl::new("UsdShadeTestTyped", SchemaKind::ConcreteTyped).bases(&["Typed"]),
+        SchemaDecl::new("UsdShadeTestPlugConfiguredType", SchemaKind::ConcreteTyped)
+            .bases(&["NodeGraph"])
+            .plug_info(&[PROVIDES, NOT_CONTAINER, NO_ENCAPSULATION]),
+        SchemaDecl::new("UsdShadeTestAncestorConfiguredType", SchemaKind::ConcreteTyped).bases(&["NodeGraph"]),
+        // Beyond the C++ plugin: flags that are not bools, and a schema that
+        // both registers a behavior and configures one.
+        SchemaDecl::new("StringFlagAPI", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[Field::string(PROVIDES_BEHAVIOR, "true")]),
+        SchemaDecl::new("FalseFlagAPI", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[Field::new(PROVIDES_BEHAVIOR, || sdf::Value::Bool(false))]),
+        SchemaDecl::new("IntContainerAPI", SchemaKind::SingleApplyApi)
+            .bases(&["APISchemaBase"])
+            .plug_info(&[PROVIDES, Field::new(IS_CONTAINER, || sdf::Value::Int(1))]),
+        SchemaDecl::new("RegisteredAndConfigured", SchemaKind::ConcreteTyped)
+            .bases(&["Typed"])
+            .plug_info(&[PROVIDES, NO_ENCAPSULATION]),
+        SchemaDecl::new("UntypedConfigured", SchemaKind::AbstractBase)
+            .bases(&["SchemaBase"])
+            .plug_info(&[PROVIDES, CONTAINER]),
+        SchemaDecl::new("UnderUntyped", SchemaKind::ConcreteTyped).bases(&["UntypedConfigured"]),
+    ];
+
+    const PROVIDES: Field<'static> = Field::new(PROVIDES_BEHAVIOR, || sdf::Value::Bool(true));
+    const CONTAINER: Field<'static> = Field::new(IS_CONTAINER, || sdf::Value::Bool(true));
+    const NOT_CONTAINER: Field<'static> = Field::new(IS_CONTAINER, || sdf::Value::Bool(false));
+    const NO_ENCAPSULATION: Field<'static> = Field::new(REQUIRES_ENCAPSULATION, || sdf::Value::Bool(false));
+
+    /// The flags of the behavior the default registry finds for the prim at
+    /// `path`, `(container, encapsulation)`, or `None` where it has none.
+    fn flags(stage: &usd::Stage, path: &str) -> Result<Option<(bool, bool)>> {
+        let behavior = crate::connectable_registry().behavior(&stage.prim(path)?)?;
+        Ok(behavior.map(|behavior| (behavior.is_container(), behavior.requires_encapsulation())))
+    }
+
+    /// Whether `schema` has a behavior with no API schema applied (C++
+    /// `HasConnectableAPI`).
+    fn has_api(stage: &usd::Stage, schema: &str) -> bool {
+        ConnectableAPI::has_connectable_api(stage.schema_registry(), &tf::Token::from(schema))
+    }
+
+    /// A type's own plug info configures its behavior ahead of the ancestor's
+    /// registered one, and a type with none takes the ancestor's (C++
+    /// `test_AncestorAndPlugConfiguredTypedSchema`).
+    #[test]
+    fn plug_configured_type() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+        assert!(has_api(&stage, "UsdShadeTestPlugConfiguredType"));
+        stage
+            .define_prim("/Configured")?
+            .set_type_name("UsdShadeTestPlugConfiguredType")?;
+        assert_eq!(flags(&stage, "/Configured")?, Some((false, false)));
+
+        assert!(has_api(&stage, "UsdShadeTestAncestorConfiguredType"));
+        stage
+            .define_prim("/Ancestor")?
+            .set_type_name("UsdShadeTestAncestorConfiguredType")?;
+        assert_eq!(flags(&stage, "/Ancestor")?, Some((true, true)), "NodeGraph's behavior");
+        Ok(())
+    }
+
+    /// An applied API schema configured by plug info makes a prim
+    /// connectable, and overrides the behavior of its type (C++
+    /// `test_AppliedSchemaWithDefaultBehavior` and
+    /// `test_AppliedSchemaWithOverridingPlugMetadata`).
+    #[test]
+    fn applied_plug_behavior() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+
+        let typeless = stage.define_prim("/Prim")?;
+        assert_eq!(flags(&stage, "/Prim")?, None);
+        typeless.apply_api("ModifiedDefaultConnectableBehaviorAPI")?;
+        assert_eq!(flags(&stage, "/Prim")?, Some((true, false)));
+        assert!(ConnectableAPI::from_prim(stage.prim("/Prim")?)?.is_some());
+
+        // The type has no behavior; the applied schema gives one, with the
+        // default flags.
+        assert!(!has_api(&stage, "UsdShadeTestTyped"));
+        let typed = stage.define_prim("/Typed")?.set_type_name("UsdShadeTestTyped")?;
+        assert_eq!(flags(&stage, "/Typed")?, None);
+        typed.apply_api("DefaultConnectableBehaviorAPI")?;
+        assert_eq!(flags(&stage, "/Typed")?, Some((false, true)));
+        assert!(!has_api(&stage, "UsdShadeTestTyped"));
+
+        // Of two applied schemas, the first authored decides.
+        stage
+            .define_prim("/Both")?
+            .set_type_name("UsdShadeTestTyped")?
+            .apply_api("ModifiedDefaultConnectableBehaviorAPI")?
+            .apply_api("DefaultConnectableBehaviorAPI")?;
+        assert_eq!(flags(&stage, "/Both")?, Some((true, false)));
+
+        // An authored schema overrides a registered type's behavior.
+        Material::define(&stage, "/Mat")?;
+        assert_eq!(flags(&stage, "/Mat")?, Some((true, true)));
+        stage.prim("/Mat")?.apply_api("DefaultConnectableBehaviorAPI")?;
+        assert_eq!(flags(&stage, "/Mat")?, Some((false, true)));
+
+        Material::define(&stage, "/Mat2")?;
+        stage
+            .prim("/Mat2")?
+            .apply_api("ModifiedDefaultConnectableBehaviorAPI")?;
+        assert_eq!(flags(&stage, "/Mat2")?, Some((true, false)));
+
+        Shader::define(&stage, "/Shader")?;
+        assert_eq!(flags(&stage, "/Shader")?, Some((false, true)));
+        stage
+            .prim("/Shader")?
+            .apply_api("ModifiedDefaultConnectableBehaviorAPI")?;
+        assert_eq!(flags(&stage, "/Shader")?, Some((true, false)));
+        Ok(())
+    }
+
+    /// An auto-applied API schema configured by plug info gives a type with
+    /// no behavior one, and leaves a registered type's behavior alone (C++
+    /// `test_AutoAppliedSchemaWithDefaultBehavior` and
+    /// `test_AutoAppliedSchemaWithOverridingPlugMetadata`).
+    #[test]
+    fn auto_applied_plug_behavior() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+        for (path, type_name, expected) in [
+            ("/Default", "UsdShadeTestTypedHasAutoApplyDefault", (false, true)),
+            ("/Container", "UsdShadeTestTypedHasAutoApplyContainer", (true, true)),
+            (
+                "/Loose",
+                "UsdShadeTestTypedHasAutoApplyRequiresEncapsulation",
+                (false, false),
+            ),
+        ] {
+            stage.define_prim(path)?.set_type_name(type_name)?;
+            assert_eq!(flags(&stage, path)?, Some(expected), "{type_name}");
+        }
+
+        // Auto-applied to Material and Shader, which keep their own.
+        Material::define(&stage, "/Mat")?;
+        assert_eq!(flags(&stage, "/Mat")?, Some((true, true)));
+        Shader::define(&stage, "/Shader")?;
+        assert_eq!(flags(&stage, "/Shader")?, Some((false, true)));
+        Ok(())
+    }
+
+    /// No behavior comes from a multiple-apply schema, a schema the registry
+    /// does not know, or a typed schema written as an API schema (C++
+    /// `test_InvalidAppliedSchemaWithDefaultBehavior`).
+    #[test]
+    fn invalid_applied_schemas() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+        // Authored unchecked, as C++ `AddAppliedSchema` does.
+        stage
+            .define_prim("/Multi")?
+            .add_applied_schema("CollectionAPI:fanciness")?;
+        stage
+            .define_prim("/Unknown")?
+            .add_applied_schema("NoSuchLuckInvalidAPISchemaAPI")?;
+        stage.define_prim("/Typed")?.add_applied_schema("Material")?;
+        for path in ["/Multi", "/Unknown", "/Typed"] {
+            assert_eq!(flags(&stage, path)?, None, "{path}");
+            assert!(!ConnectableContext::default().is_container(&stage.prim(path)?)?);
+        }
+        Ok(())
+    }
+
+    /// Only a bool `true` provides a behavior, and a flag that is not a bool
+    /// takes its default, as C++ asks of a `JsValue`.
+    #[test]
+    fn plug_flag_types() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+        stage.define_prim("/String")?.apply_api("StringFlagAPI")?;
+        stage.define_prim("/False")?.apply_api("FalseFlagAPI")?;
+        stage.define_prim("/Int")?.apply_api("IntContainerAPI")?;
+        assert_eq!(flags(&stage, "/String")?, None);
+        assert_eq!(flags(&stage, "/False")?, None);
+        assert_eq!(flags(&stage, "/Int")?, Some((false, true)));
+        Ok(())
+    }
+
+    /// The vendored families carry the flag on the schemas C++ marks, which
+    /// each also register a behavior of their own.
+    #[test]
+    fn vendored_plug_info() {
+        let schemas = crate::schema_registry();
+        let lux: &[&str] = if cfg!(feature = "lux") {
+            &["LightAPI", "LightFilter"]
+        } else {
+            &[]
+        };
+        for &schema in ["NodeGraph", "Material", "Shader"].iter().chain(lux) {
+            let info = schemas.schema_info(&tf::Token::from(schema)).expect(schema);
+            assert_eq!(
+                info.plug_info().get(PROVIDES_BEHAVIOR),
+                Some(&sdf::Value::Bool(true)),
+                "{schema}"
+            );
+            assert!(crate::connectable_registry().behaviors.contains_key(schema), "{schema}");
+        }
+        let scope = schemas.schema_info(&tf::Token::from("Scope")).expect("Scope");
+        assert!(scope.plug_info().get(PROVIDES_BEHAVIOR).is_none());
+    }
+
+    /// Plug info configures a behavior only on a typed or API schema, as
+    /// C++ `_LoadPluginDefiningBehaviorForType` requires
+    /// (`connectableAPIBehavior.cpp:713-716`).
+    #[test]
+    fn untyped_plug_ignored() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+        stage.define_prim("/P")?.set_type_name("UnderUntyped")?;
+        assert_eq!(flags(&stage, "/P")?, None);
+        assert!(!has_api(&stage, "UntypedConfigured"));
+        Ok(())
+    }
+
+    /// An applied API schema whose plug info does not provide a behavior
+    /// adds none, even with one registered; a type takes its registered one
+    /// regardless (C++ `_FindBehaviorForApiSchema`).
+    #[test]
+    fn api_needs_plug_flag() -> Result<(), SchemaError> {
+        let stage = stage_with(FAMILY)?;
+        stage
+            .define_prim("/Typed")?
+            .set_type_name("TestTyped")?
+            .apply_api("TestUnflaggedApi")?;
+        stage.define_prim("/Typeless")?.apply_api("TestUnflaggedApi")?;
+        let registry = registry(&[("TestTyped", "typed"), ("TestUnflaggedApi", "api")]);
+        assert_eq!(named(&registry, &stage, "/Typed")?, name("typed"));
+        assert_eq!(named(&registry, &stage, "/Typeless")?, None);
+        Ok(())
+    }
+
+    /// A registered behavior wins over the one a schema's plug info
+    /// configures.
+    #[test]
+    fn registered_beats_configured() -> Result<(), SchemaError> {
+        let stage = stage_with(PLUG_FAMILY)?;
+        stage.define_prim("/P")?.set_type_name("RegisteredAndConfigured")?;
+        assert_eq!(flags(&stage, "/P")?, Some((false, false)), "the plug info's");
+
+        let registry = registry(&[("RegisteredAndConfigured", "registered")]);
+        assert_eq!(named(&registry, &stage, "/P")?, name("registered"));
         Ok(())
     }
 }

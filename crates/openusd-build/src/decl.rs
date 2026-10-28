@@ -88,6 +88,8 @@ struct Lists<'a> {
     /// Each instance restriction's own list, paired up in [`Nested`].
     instances: Vec<(&'a str, Vec<&'a str>)>,
     fields: Vec<usd::Field<'a>>,
+    /// The `extraPlugInfo` entries, by key.
+    plug_info: Vec<usd::Field<'a>>,
     /// One entry per property, in the class's own property order.
     property_fields: Vec<Vec<usd::Field<'a>>>,
 }
@@ -120,6 +122,12 @@ impl<'a> Lists<'a> {
                 .map(|(instance, allowed)| (instance.as_str(), tokens(allowed)))
                 .collect(),
             fields: fields(&class.fields, sdf::SpecType::Prim),
+            plug_info: class
+                .metadata
+                .plug_info
+                .iter()
+                .map(|(key, value)| usd::Field::borrowed(key, value))
+                .collect(),
             property_fields: class
                 .properties
                 .iter()
@@ -159,7 +167,8 @@ fn declare<'a>(class: &'a Class, lists: &'a Lists<'a>, nested: &'a Nested<'a>) -
         .can_only_apply_to(&lists.can_only_apply_to)
         .instance_restrictions(&nested.instances)
         .allowed_instance_names(&lists.allowed_instance_names)
-        .fallback_types(&lists.fallback_types);
+        .fallback_types(&lists.fallback_types)
+        .plug_info(&lists.plug_info);
 
     if let Some(prefix) = &class.metadata.property_namespace_prefix {
         decl = decl.property_namespace_prefix(prefix.as_str());
