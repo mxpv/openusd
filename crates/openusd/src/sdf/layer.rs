@@ -363,6 +363,28 @@ impl Layer {
     pub(crate) fn anchor_location(&self) -> Option<ar::ResolvedPath> {
         (!self.is_anonymous()).then(|| ar::ResolvedPath::new(self.real_path()))
     }
+
+    /// `asset_path`, authored in this layer, as an identifier anchored to
+    /// the layer's location, so it names the same asset from any other layer
+    /// (C++ `SdfLayer::ComputeAbsolutePath`). The anchoring goes through the
+    /// resolver the layer was read through, or the default resolver for a
+    /// layer that was not read from an asset.
+    ///
+    /// An empty path and an anonymous layer identifier are returned as they
+    /// are, and so is every path an anonymous layer authors, which has no
+    /// location to anchor to.
+    pub fn compute_absolute_path(&self, asset_path: &str) -> String {
+        let Some(anchor) = self.anchor_location() else {
+            return asset_path.to_owned();
+        };
+        if asset_path.is_empty() || Self::is_anonymous_identifier(asset_path) {
+            return asset_path.to_owned();
+        }
+        match &self.resolver {
+            Some(resolver) => resolver.create_identifier(asset_path, Some(&anchor)),
+            None => ar::Resolver::create_identifier(&ar::DefaultResolver::new(), asset_path, Some(&anchor)),
+        }
+    }
 }
 
 impl Layer {
@@ -1261,6 +1283,37 @@ mod tests {
         layer
             .save()
             .expect("a layer that loaded from a file can save back to it");
+        Ok(())
+    }
+
+    /// Paths a layer authors anchor to its directory, while an empty path,
+    /// an anonymous identifier and every path of an anonymous layer stay as
+    /// they are.
+    #[test]
+    fn compute_absolute_path_anchors_to_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        fs::create_dir_all(root.join("scene/textures"))?;
+        fs::write(root.join("scene/scene.usda"), "#usda 1.0\n")?;
+        fs::write(root.join("scene/textures/wood.png"), "")?;
+        fs::write(root.join("shared.usda"), "#usda 1.0\n")?;
+        let layer = Layer::open(root.join("scene/scene.usda").to_string_lossy())?;
+
+        assert_eq!(
+            layer.compute_absolute_path("./textures/wood.png"),
+            root.join("scene/textures/wood.png").to_string_lossy()
+        );
+        assert_eq!(
+            layer.compute_absolute_path("../shared.usda"),
+            root.join("shared.usda").to_string_lossy()
+        );
+        assert_eq!(layer.compute_absolute_path(""), "");
+        let anonymous = Layer::new_anonymous("other.usda");
+        assert_eq!(
+            layer.compute_absolute_path(anonymous.identifier()),
+            anonymous.identifier()
+        );
+        assert_eq!(anonymous.compute_absolute_path("./wood.png"), "./wood.png");
         Ok(())
     }
 
