@@ -902,6 +902,16 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    /// Reads an array of string-table indices. An empty array is stored
+    /// inline with payload 0 rather than as a count at an offset.
+    fn read_string_array(&mut self, value: ValueRep) -> Result<Vec<String>, ReadError> {
+        if value.payload() == 0 {
+            return Ok(Vec::new());
+        }
+        self.stream.seek(value.payload())?;
+        self.read_string_vec()
+    }
+
     fn read_token_vec(&mut self) -> Result<Vec<tf::Token>, ReadError> {
         self.read_indexed_vec(|decoder, index| Ok(indexed(&decoder.file.tokens, index, "token")?.as_str().into()))
     }
@@ -1142,10 +1152,7 @@ impl<'a> Decoder<'a> {
                 sdf::Value::StringVec(self.read_string_vec()?)
             }
 
-            Type::String if value.is_array() => {
-                self.stream.seek(value.payload())?;
-                sdf::Value::StringVec(self.read_string_vec()?)
-            }
+            Type::String if value.is_array() => sdf::Value::StringVec(self.read_string_array(value)?),
 
             Type::String => {
                 corrupt!(!value.is_array());
@@ -1157,8 +1164,7 @@ impl<'a> Decoder<'a> {
                 // Asset arrays (`asset[]`, e.g. value-clip `assetPaths`) are
                 // stored like string arrays — string-table indices, not direct
                 // token indices.
-                self.stream.seek(value.payload())?;
-                sdf::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
+                sdf::Value::AssetPathVec(self.read_string_array(value)?.into_iter().map(Into::into).collect())
             }
             Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?.into()),
 
@@ -1537,9 +1543,8 @@ impl<'a> Decoder<'a> {
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays
                 // (string-table indices), each entry parsed into an expression.
-                self.stream.seek(value.payload())?;
                 sdf::Value::PathExpressionVec(
-                    self.read_string_vec()?
+                    self.read_string_array(value)?
                         .iter()
                         .map(|text| sdf::PathExpression::parse(text))
                         .collect(),
@@ -1934,6 +1939,31 @@ mod tests {
         };
         let error = decoder.decode(samples).expect_err("a self-referencing time sample");
         assert!(format!("{error:?}").contains("recursively"), "{error:?}");
+        Ok(())
+    }
+
+    /// An empty `string[]`, `asset[]` or path-expression array is an array
+    /// rep with payload 0, as C++ writes it, and reads as an empty array
+    /// rather than from offset 0.
+    #[test]
+    fn empty_string_table_arrays() -> Result<()> {
+        let (bytes, _) = compact_paths()?;
+        let file = CrateFile::open(bytes)?;
+        let empty = |ty: Type| ValueRep(((ty as u64) << 48) | (1 << 63));
+        let mut decoder = Decoder {
+            file: &file,
+            stream: Stream::new(&[]),
+            unpacking: Vec::new(),
+        };
+        assert_eq!(decoder.decode(empty(Type::String))?, sdf::Value::StringVec(Vec::new()));
+        assert_eq!(
+            decoder.decode(empty(Type::AssetPath))?,
+            sdf::Value::AssetPathVec(Vec::new())
+        );
+        assert_eq!(
+            decoder.decode(empty(Type::PathExpression))?,
+            sdf::Value::PathExpressionVec(Vec::new())
+        );
         Ok(())
     }
 
