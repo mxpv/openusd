@@ -302,6 +302,17 @@ pub enum SchemaRegistryError {
         kind: vt::ValueKind,
     },
 
+    /// An apply-info entry of a schema's plug info, such as
+    /// `apiSchemaAutoApplyTo`, is not a list of names (a coding error in C++
+    /// `_GetNameListFromMetadata`).
+    #[error("plug info {key} must be a list of names, not a {kind}")]
+    PlugInfoNotNameList {
+        /// The offending key.
+        key: &'static str,
+        /// The kind of value the entry holds.
+        kind: vt::ValueKind,
+    },
+
     /// A schema identifier is not a legal `family` or `family_N` name.
     #[error("Schema identifier {identifier} of family {family} is not a valid identifier")]
     InvalidIdentifier {
@@ -1155,6 +1166,41 @@ struct Declared {
     plug_info: vt::Dictionary,
 }
 
+impl Declared {
+    /// Fills each apply-info list left empty from the plug info key that
+    /// carries it, for the kinds C++ reads that key for: the auto-apply list
+    /// for a single-apply schema, the allowed instance names and per-instance
+    /// restrictions for a multiple-apply one, and the restriction to types for
+    /// either. C++ `Usd_GetAPISchemaPluginApplyToInfoForType` reads them from
+    /// the `plugInfo.json` entry, where `usdGenSchema` leaves the
+    /// `extraPlugInfo` value of a list the schema does not declare.
+    ///
+    /// An instance whose declared list is empty counts as undeclared, since
+    /// [`SchemaInfo::new`] keeps no such instance.
+    fn fill_from_plug_info(&mut self, kind: SchemaKind) -> Result<(), SchemaRegistryError> {
+        if !kind.is_applied_api() {
+            return Ok(());
+        }
+        let plug_info = &self.plug_info;
+        let fill = |list: &mut Vec<tf::Token>, key: &'static str| -> Result<(), SchemaRegistryError> {
+            if list.is_empty() {
+                *list = plug_names(plug_info.get(key), key)?;
+            }
+            Ok(())
+        };
+        fill(&mut self.can_only_apply_to, "apiSchemaCanOnlyApplyTo")?;
+        if kind == SchemaKind::SingleApplyApi {
+            fill(&mut self.auto_apply_to, "apiSchemaAutoApplyTo")?;
+        } else {
+            fill(&mut self.allowed_instance_names, "apiSchemaAllowedInstanceNames")?;
+            if self.instance_can_only_apply_to.values().all(Vec::is_empty) {
+                self.instance_can_only_apply_to = instance_restrictions(plug_info.get("apiSchemaInstances"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl SchemaInfo {
     /// What a schema declares, however it was declared.
     ///
@@ -1164,8 +1210,11 @@ impl SchemaInfo {
     /// splitting the identifier, and an instance restriction is kept only where
     /// it can apply and only where it names something, so an instance the list
     /// does not reach falls back to the schema-wide rule. The plug info loses
-    /// the keys C++ `usdGenSchema` writes over it.
-    fn new(identifier: tf::Token, kind: SchemaKind, declared: Declared) -> Self {
+    /// the keys C++ `usdGenSchema` writes over it, after
+    /// [`Declared::fill_from_plug_info`] has read any apply-info list the
+    /// schema left empty from it.
+    fn new(identifier: tf::Token, kind: SchemaKind, mut declared: Declared) -> Result<Self, SchemaRegistryError> {
+        declared.fill_from_plug_info(kind)?;
         let (family, version) = SchemaRegistry::parse_family_and_version(&identifier);
         let mut info = Self {
             identifier,
@@ -1189,7 +1238,7 @@ impl SchemaInfo {
         };
         let generated = generated_plug_info(&info);
         info.plug_info.retain(|key, _| !generated.contains(&key.as_str()));
-        info
+        Ok(info)
     }
 
     /// The name this schema is registered and referenced under.
@@ -1226,7 +1275,8 @@ impl SchemaInfo {
     }
 
     /// Schema identifiers this API schema is automatically applied to
-    /// (C++ `apiSchemaAutoApplyTo`), from the family manifest and any
+    /// (C++ `apiSchemaAutoApplyTo`), from the family manifest, or its
+    /// `extraPlugInfo` where the manifest lists none, and any
     /// [`SchemaRegistryBuilder::auto_apply`] declaration.
     pub fn auto_apply_to(&self) -> &[tf::Token] {
         &self.auto_apply_to
@@ -1464,7 +1514,11 @@ impl SchemaRegistryBuilder {
 
         for decl in family.schemas {
             let identifier = tf::Token::from(decl.identifier);
-            let info = schema_info(decl, &identifier);
+            let info = schema_info(decl, &identifier).map_err(|cause| SchemaRegistryError::Schema {
+                identifier: identifier.clone(),
+                family: name.clone(),
+                cause: Box::new(cause),
+            })?;
             self.register_schema(identifier, info, &schematics)?;
         }
         for decl in family.metadata {
@@ -1554,6 +1608,14 @@ impl SchemaRegistryBuilder {
     /// `usdGenSchema` writes over it. An `extraPlugInfo` that is not a
     /// dictionary is
     /// [`ExtraPlugInfoNotDictionary`](SchemaRegistryError::ExtraPlugInfoNotDictionary).
+    ///
+    /// An applied API schema that leaves an apply-info list above empty takes
+    /// it from the same key of its `extraPlugInfo` (`apiSchemaAutoApplyTo`,
+    /// `apiSchemaCanOnlyApplyTo`, `apiSchemaAllowedInstanceNames`,
+    /// `apiSchemaInstances`), as C++ reads it from the `plugInfo.json` entry
+    /// `usdGenSchema` leaves it in; the key then leaves the plug info. Such an
+    /// entry that is not a list of names is
+    /// [`PlugInfoNotNameList`](SchemaRegistryError::PlugInfoNotNameList).
     ///
     /// The layers are read here and not retained, so both may be dropped as
     /// soon as this returns. A failure is held for [`build`](Self::build), and
@@ -2139,7 +2201,7 @@ fn authored<T>(family: &tf::Token, result: Result<T, sdf::AuthoringError>) -> Re
 }
 
 /// What a declaration says about how its schema applies.
-fn schema_info(decl: &SchemaDecl<'_>, identifier: &tf::Token) -> SchemaInfo {
+fn schema_info(decl: &SchemaDecl<'_>, identifier: &tf::Token) -> Result<SchemaInfo, SchemaRegistryError> {
     let tokens = |names: &[&str]| names.iter().copied().map(tf::Token::from).collect();
 
     SchemaInfo::new(
@@ -2188,6 +2250,21 @@ fn generated_plug_info(info: &SchemaInfo) -> Vec<&'static str> {
     keys
 }
 
+/// The names the plug info entry `key` holds, as C++
+/// `_GetNameListFromMetadata` reads them: none where the entry is missing,
+/// and an error where it is not a list of names.
+fn plug_names(value: Option<&vt::Value>, key: &'static str) -> Result<Vec<tf::Token>, SchemaRegistryError> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(vt::Value::TokenVec(names)) => Ok(names.clone()),
+        Some(vt::Value::StringVec(names)) => Ok(names.iter().map(|name| tf::Token::from(name.as_str())).collect()),
+        Some(other) => Err(SchemaRegistryError::PlugInfoNotNameList {
+            key,
+            kind: other.into(),
+        }),
+    }
+}
+
 /// Reads one schema's manifest entry from the prim at `/<identifier>`.
 fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<SchemaInfo, SchemaRegistryError> {
     let prim = sdf::Path::abs_root().append_path(identifier.as_str())?;
@@ -2205,7 +2282,7 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
         .transpose()?
         .unwrap_or_default();
 
-    Ok(SchemaInfo::new(
+    SchemaInfo::new(
         identifier.clone(),
         kind,
         Declared {
@@ -2213,11 +2290,11 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
             property_namespace_prefix: manifest_token(manifest, &prim, "propertyNamespacePrefix"),
             auto_apply_to: manifest_token_vec(manifest, &prim, "apiSchemaAutoApplyTo"),
             can_only_apply_to: manifest_token_vec(manifest, &prim, "apiSchemaCanOnlyApplyTo"),
-            instance_can_only_apply_to: manifest_instance_restrictions(manifest, &prim),
+            instance_can_only_apply_to: manifest_instance_restrictions(manifest, &prim)?,
             allowed_instance_names: manifest_token_vec(manifest, &prim, "allowedInstanceNames"),
             plug_info,
         },
-    ))
+    )
 }
 
 /// The `customData` dictionary of a prim in a family's parsed text.
@@ -2229,20 +2306,33 @@ fn custom_data<'a>(data: &'a sdf::Data, prim: &sdf::Path) -> Option<&'a vt::Dict
 /// lists from the manifest prim's `customData.apiSchemaInstances` dictionary.
 /// An empty list is not recorded, as C++ `UsdSchemaRegistry`'s plugin loader
 /// stores none, so the instance keeps the schema-wide restriction.
-fn manifest_instance_restrictions(manifest: &sdf::Data, prim: &sdf::Path) -> HashMap<tf::Token, Vec<tf::Token>> {
-    custom_data(manifest, prim)
-        .and_then(|custom| custom.get("apiSchemaInstances"))
+fn manifest_instance_restrictions(
+    manifest: &sdf::Data,
+    prim: &sdf::Path,
+) -> Result<HashMap<tf::Token, Vec<tf::Token>>, SchemaRegistryError> {
+    instance_restrictions(custom_data(manifest, prim).and_then(|custom| custom.get("apiSchemaInstances")))
+}
+
+/// The per-instance `apiSchemaCanOnlyApplyTo` lists an `apiSchemaInstances`
+/// dictionary holds, keeping only an instance whose list names something.
+fn instance_restrictions(
+    instances: Option<&vt::Value>,
+) -> Result<HashMap<tf::Token, Vec<tf::Token>>, SchemaRegistryError> {
+    let mut restrictions = HashMap::new();
+    let entries = instances
         .and_then(vt::Value::try_as_dictionary_ref)
         .into_iter()
-        .flatten()
-        .filter_map(|(instance, entry)| {
-            let allowed = entry
-                .try_as_dictionary_ref()?
-                .get("apiSchemaCanOnlyApplyTo")?
-                .try_as_token_vec_ref()?;
-            (!allowed.is_empty()).then(|| (tf::Token::from(instance.as_str()), allowed.clone()))
-        })
-        .collect()
+        .flatten();
+    for (instance, entry) in entries {
+        let Some(entry) = entry.try_as_dictionary_ref() else {
+            continue;
+        };
+        let allowed = plug_names(entry.get("apiSchemaCanOnlyApplyTo"), "apiSchemaCanOnlyApplyTo")?;
+        if !allowed.is_empty() {
+            restrictions.insert(tf::Token::from(instance.as_str()), allowed);
+        }
+    }
+    Ok(restrictions)
 }
 
 /// Reads a manifest attribute's default value as a token.
@@ -2535,6 +2625,14 @@ class "APISchemaBase"
 class "FlaggedAPI"
 {
 }
+
+class "ExtraAPI"
+{
+}
+
+class "ExtraInstanceAPI"
+{
+}
 "#;
         let manifest = format!(
             r#"#usda 1.0
@@ -2569,7 +2667,7 @@ def "FlaggedAPI" (
     customData = {{
         dictionary extraPlugInfo = {{
             string apiSchemaAutoApplyTo = "lost"
-            string apiSchemaCanOnlyApplyTo = "kept, the list is empty"
+            bool note = 1
         }}
     }}
 )
@@ -2577,6 +2675,36 @@ def "FlaggedAPI" (
     uniform token schemaKind = "singleApplyAPI"
     uniform token[] bases = ["APISchemaBase"]
     uniform token[] apiSchemaAutoApplyTo = ["Marker"]
+}}
+
+def "ExtraAPI" (
+    customData = {{
+        dictionary extraPlugInfo = {{
+            token[] apiSchemaAutoApplyTo = ["Plain"]
+            string[] apiSchemaCanOnlyApplyTo = ["Plain"]
+        }}
+    }}
+)
+{{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] bases = ["APISchemaBase"]
+}}
+
+def "ExtraInstanceAPI" (
+    customData = {{
+        dictionary extraPlugInfo = {{
+            token[] apiSchemaAllowedInstanceNames = ["one"]
+            dictionary apiSchemaInstances = {{
+                dictionary one = {{
+                    token[] apiSchemaCanOnlyApplyTo = ["Plain"]
+                }}
+            }}
+        }}
+    }}
+)
+{{
+    uniform token schemaKind = "multipleApplyAPI"
+    uniform token[] bases = ["APISchemaBase"]
 }}
 "#
         );
@@ -2640,11 +2768,31 @@ def "FlaggedAPI" (
         keys.sort();
         assert_eq!(keys, ["apiSchemaAutoApplyTo", "note"]);
 
-        // An applied API schema loses the lists it writes and keeps the one it
-        // leaves empty.
+        // An applied API schema loses the lists it writes, whatever the plug
+        // info held for them.
         let flagged = registry.schema_info(&tf::Token::new("FlaggedAPI")).expect("FlaggedAPI");
         let keys: Vec<_> = flagged.plug_info().keys().cloned().collect();
-        assert_eq!(keys, ["apiSchemaCanOnlyApplyTo"]);
+        assert_eq!(keys, ["note"]);
+        Ok(())
+    }
+
+    /// An apply-info list a manifest leaves empty is read from its
+    /// `extraPlugInfo`, which then keeps no entry for it.
+    #[test]
+    fn apply_info_from_plug_info() -> Result<(), SchemaRegistryError> {
+        let registry = plug_info_family("")?;
+        let plain = [tf::Token::new("Plain")];
+        let extra = registry.schema_info(&tf::Token::new("ExtraAPI")).expect("ExtraAPI");
+        assert_eq!(extra.auto_apply_to(), plain);
+        assert_eq!(extra.can_only_apply_to(None), plain);
+        assert!(extra.plug_info().is_empty());
+
+        let instanced = registry
+            .schema_info(&tf::Token::new("ExtraInstanceAPI"))
+            .expect("ExtraInstanceAPI");
+        assert_eq!(instanced.allowed_instance_names(), [tf::Token::new("one")]);
+        assert_eq!(instanced.can_only_apply_to(Some(&tf::Token::new("one"))), plain);
+        assert!(instanced.plug_info().is_empty());
         Ok(())
     }
 
@@ -2666,6 +2814,58 @@ def "FlaggedAPI" (
             ),
             "{cause}"
         );
+    }
+
+    /// An apply-info entry that is not a list of names fails the family's
+    /// registration.
+    #[test]
+    fn plug_info_not_name_list() {
+        static MINE: &SchemaFamily<'_> = &SchemaFamily::new(
+            "mine",
+            &[SchemaDecl::new("WidgetAPI", SchemaKind::SingleApplyApi)
+                .bases(&["APISchemaBase"])
+                .plug_info(&[Field::token("apiSchemaAutoApplyTo", "Mesh")])],
+        );
+        let error = SchemaRegistry::builder()
+            .register(MINE)
+            .build()
+            .expect_err("a list of names");
+        let SchemaRegistryError::Schema { cause, .. } = error else {
+            panic!("a schema error: {error}");
+        };
+        assert!(matches!(
+            *cause,
+            SchemaRegistryError::PlugInfoNotNameList {
+                key: "apiSchemaAutoApplyTo",
+                ..
+            }
+        ));
+    }
+
+    /// A declared instance whose list is empty takes its restriction from
+    /// the plug info.
+    #[test]
+    fn empty_instance_from_plug_info() -> Result<(), SchemaRegistryError> {
+        static MINE: &SchemaFamily<'_> = &SchemaFamily::new(
+            "mine",
+            &[SchemaDecl::new("WidgetAPI", SchemaKind::MultipleApplyApi)
+                .bases(&["APISchemaBase"])
+                .instance_restrictions(&[("one", &[])])
+                .plug_info(&[Field::new("apiSchemaInstances", || {
+                    let one = vt::Dictionary::from([(
+                        "apiSchemaCanOnlyApplyTo".to_string(),
+                        vt::Value::TokenVec(vec![tf::Token::new("Mesh")]),
+                    )]);
+                    vt::Value::Dictionary(vt::Dictionary::from([("one".to_string(), vt::Value::Dictionary(one))]))
+                })])],
+        );
+        let registry = SchemaRegistry::builder().register(MINE).build()?;
+        let info = registry.schema_info(&tf::Token::new("WidgetAPI")).expect("WidgetAPI");
+        assert_eq!(
+            info.can_only_apply_to(Some(&tf::Token::new("one"))),
+            [tf::Token::new("Mesh")]
+        );
+        Ok(())
     }
 
     /// A declaration's plug info entries are the schema's plug info.
