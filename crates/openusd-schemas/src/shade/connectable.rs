@@ -125,7 +125,8 @@ impl ConnectionSource {
     /// `UsdShadeConnectionSourceInfo(stage, sourcePath)`): `path` is a
     /// property path in the `inputs:` or `outputs:` namespace, on a prim the
     /// stage holds. `None` otherwise, where C++ builds an info that is not
-    /// `IsValid`. Nothing is asked of the prim's type.
+    /// `IsValid`. An unparsable `path` is an error. Nothing is asked of the
+    /// prim's type.
     ///
     /// The attribute need not exist yet, and its type name is read where it
     /// does. Connecting to the source's [`attribute`](Self::attribute) then
@@ -392,6 +393,10 @@ mod tests {
         for invalid in ["/Mat/Source.out", "/Mat/Missing.outputs:out", "/Mat/Source"] {
             assert!(ConnectionSource::new(&stage, invalid)?.is_none(), "{invalid}");
         }
+        assert!(
+            ConnectionSource::new(&stage, "/Mat/So urce.outputs:out").is_err(),
+            "an unparsable path"
+        );
         Ok(())
     }
 
