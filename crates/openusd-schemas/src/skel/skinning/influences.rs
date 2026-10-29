@@ -1,5 +1,6 @@
-//! Joint-influence array utilities: normalizing, sorting, resizing and
-//! interleaving the flat `(index, weight)` runs a skinned prim's
+//! Joint influences: the [`Influences`] a skinning function reads, and the
+//! array utilities for normalizing, sorting, resizing and interleaving the
+//! flat `(index, weight)` runs a skinned prim's
 //! `primvars:skel:jointIndices` and `primvars:skel:jointWeights` hold, one
 //! run of `per_component` entries per point (C++ `usdSkel/utils.h`).
 //!
@@ -7,8 +8,65 @@
 //! [`slice::repeat`] (C++ `UsdSkelExpandConstantInfluencesToVarying`).
 
 use std::cmp::Ordering;
+use std::ops::Range;
 
 use openusd::gf;
+
+/// The joint influences a skinning function reads, each a joint index and
+/// its weight, in either layout C++ skins (`_NonInterleavedInfluencesFn` and
+/// `_InterleavedInfluencesFn`).
+#[derive(Debug, Clone, Copy)]
+pub enum Influences<'a> {
+    /// The joint indices, then the weight of each, in parallel arrays, as
+    /// `primvars:skel:jointIndices` and `primvars:skel:jointWeights` hold
+    /// them.
+    Split(&'a [i32], &'a [f32]),
+    /// `(index, weight)` pairs, as [`interleave_influences`] makes them. An
+    /// index truncates toward zero to an `i32`, as C++ `static_cast<int>`
+    /// truncates one in range; outside the range it saturates, and a NaN
+    /// index names no joint.
+    Interleaved(&'a [gf::Vec2f]),
+}
+
+impl<'a> Influences<'a> {
+    /// The number of influences, or `None` for split arrays that differ in
+    /// length.
+    pub(crate) fn len(self) -> Option<usize> {
+        match self {
+            Self::Split(indices, weights) => (indices.len() == weights.len()).then_some(indices.len()),
+            Self::Interleaved(pairs) => Some(pairs.len()),
+        }
+    }
+
+    /// The influences in `range`, in the same layout. The range must lie
+    /// within [`len`](Self::len).
+    pub(crate) fn run(self, range: Range<usize>) -> Self {
+        match self {
+            Self::Split(indices, weights) => Self::Split(&indices[range.clone()], &weights[range]),
+            Self::Interleaved(pairs) => Self::Interleaved(&pairs[range]),
+        }
+    }
+
+    /// Each influence as `(index, weight)`, in order.
+    ///
+    /// TODO(perf): a caller stepping with `next` pays the chain's branches on
+    /// every influence; `fold` and `all` iterate each layout directly.
+    pub(crate) fn iter(self) -> impl Iterator<Item = (i32, f32)> + 'a {
+        // Whichever layout `self` is, as one of two iterators.
+        let (split, pairs) = match self {
+            Self::Split(indices, weights) => (Some(indices.iter().copied().zip(weights.iter().copied())), None),
+            Self::Interleaved(pairs) => (
+                None,
+                Some(
+                    pairs
+                        .iter()
+                        .map(|pair| (if pair.x.is_nan() { -1 } else { pair.x as i32 }, pair.y)),
+                ),
+            ),
+        };
+        split.into_iter().flatten().chain(pairs.into_iter().flatten())
+    }
+}
 
 /// Scale each run of `per_component` weights to sum to one, and set a run
 /// whose sum lies within `eps` of zero to zeros (C++

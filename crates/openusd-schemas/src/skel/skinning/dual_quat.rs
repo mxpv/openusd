@@ -8,7 +8,7 @@ use std::ops::{AddAssign, Mul};
 use openusd::gf;
 
 use super::{
-    blend, face_varying_points, has_vertex_influences, normal_transform, skin_frame, skin_normals_with,
+    Influences, blend, face_varying_points, has_vertex_influences, normal_transform, skin_frame, skin_normals_with,
     skin_points_with,
 };
 use crate::skel::AnimMapper;
@@ -31,22 +31,20 @@ pub(super) struct Joints<R> {
 /// [`skin_points`](super::skin_points) describes it.
 pub(super) fn skin_points_dqs(
     points: &[gf::Vec3f],
-    joint_indices: &[i32],
-    joint_weights: &[f32],
+    influences: Influences<'_>,
     num_influences: usize,
     geom_bind_transform: gf::Mat4d,
     joints: &Joints<gf::DualQuatd>,
 ) -> Option<Vec<gf::Vec3f>> {
-    if !has_vertex_influences(points.len(), joint_indices, joint_weights, num_influences, joints.len()) {
+    if !has_vertex_influences(points.len(), influences, num_influences, joints.len()) {
         return None;
     }
     Some(skin_points_with(
         points,
-        joint_indices,
-        joint_weights,
+        influences,
         num_influences,
         geom_bind_transform,
-        |point, indices, weights| joints.skin(point, indices, weights),
+        |point, run| joints.skin(point, run),
     ))
 }
 
@@ -55,29 +53,21 @@ pub(super) fn skin_points_dqs(
 /// [`skin_normals`](super::skin_normals) describes it.
 pub(super) fn skin_normals_dqs(
     normals: &[gf::Vec3f],
-    joint_indices: &[i32],
-    joint_weights: &[f32],
+    influences: Influences<'_>,
     num_influences: usize,
     geom_bind_transform: gf::Mat4d,
     joints: &Joints<gf::Quatd>,
 ) -> Option<Vec<gf::Vec3f>> {
-    if !has_vertex_influences(
-        normals.len(),
-        joint_indices,
-        joint_weights,
-        num_influences,
-        joints.len(),
-    ) {
+    if !has_vertex_influences(normals.len(), influences, num_influences, joints.len()) {
         return None;
     }
     Some(skin_normals_with(
         normals,
         |normal| normal,
-        joint_indices,
-        joint_weights,
+        influences,
         num_influences,
         geom_bind_transform,
-        |normal, indices, weights| joints.skin(normal, indices, weights),
+        |normal, run| joints.skin(normal, run),
     ))
 }
 
@@ -88,8 +78,7 @@ pub(super) fn skin_normals_dqs(
 pub(super) fn skin_face_varying_normals_dqs(
     normals: &[gf::Vec3f],
     face_vertex_indices: &[i32],
-    joint_indices: &[i32],
-    joint_weights: &[f32],
+    influences: Influences<'_>,
     num_influences: usize,
     geom_bind_transform: gf::Mat4d,
     joints: &Joints<gf::Quatd>,
@@ -97,19 +86,17 @@ pub(super) fn skin_face_varying_normals_dqs(
     let point_of = face_varying_points(
         normals.len(),
         face_vertex_indices,
-        joint_indices,
-        joint_weights,
+        influences,
         num_influences,
         joints.len(),
     )?;
     Some(skin_normals_with(
         normals,
         point_of,
-        joint_indices,
-        joint_weights,
+        influences,
         num_influences,
         geom_bind_transform,
-        |normal, indices, weights| joints.skin(normal, indices, weights),
+        |normal, run| joints.skin(normal, run),
     ))
 }
 
@@ -117,17 +104,17 @@ pub(super) fn skin_face_varying_normals_dqs(
 /// `UsdSkel_SkinTransformDQS`) through `joints`, the [`Joints::rigid`]
 /// factors of its skinning transforms: the frame
 /// [`skin_transform`](super::skin_transform) describes, skinned by one blended
-/// dual quaternion. The influences must agree in length and name only
-/// `joints`, and be other than a lone influence of weight one.
+/// dual quaternion. Split influences must agree in length, every index must
+/// name one of `joints`, and the influences must be other than a lone
+/// influence of weight one.
 pub(super) fn skin_transform_dqs(
-    joint_indices: &[i32],
-    joint_weights: &[f32],
+    influences: Influences<'_>,
     geom_bind_transform: gf::Mat4d,
     joints: &Joints<gf::DualQuatd>,
 ) -> gf::Mat4d {
-    let rigid = joints.blend(joint_indices, joint_weights);
+    let rigid = joints.blend(influences);
     skin_frame(geom_bind_transform, |point| {
-        rigid.transform(joints.scale(point, joint_indices, joint_weights))
+        rigid.transform(joints.scale(point, influences))
     })
 }
 
@@ -207,18 +194,17 @@ impl<R: Rigid> Joints<R> {
 
     /// `point` skinned through one run of influences: carried through the
     /// blended scales, then by the blended rigid transform.
-    fn skin(&self, point: gf::Vec3d, indices: &[i32], weights: &[f32]) -> gf::Vec3d {
-        self.blend(indices, weights)
-            .transform(self.scale(point, indices, weights))
+    fn skin(&self, point: gf::Vec3d, influences: Influences<'_>) -> gf::Vec3d {
+        self.blend(influences).transform(self.scale(point, influences))
     }
 
     /// The rigid transform of one run of influences: the sum of the joints'
     /// rigid parts scaled by weight, each negated where its rotation
     /// lies on the far hemisphere from the most-weighted joint's, normalized.
     /// A zero weight is skipped.
-    fn blend(&self, indices: &[i32], weights: &[f32]) -> R {
-        let pivot = pivot(indices, weights).map_or(gf::Quatd::ZERO, |joint| self.rigid[joint].rotation());
-        blend(indices, weights, &self.rigid, |&joint| {
+    fn blend(&self, influences: Influences<'_>) -> R {
+        let pivot = pivot(influences).map_or(gf::Quatd::ZERO, |joint| self.rigid[joint].rotation());
+        blend(influences, &self.rigid, |&joint| {
             if joint.rotation().dot(pivot) < 0.0 {
                 joint * -1.0
             } else {
@@ -230,9 +216,9 @@ impl<R: Rigid> Joints<R> {
 
     /// `point` through the joints' leftover scales, blended linearly by
     /// weight, or `point` as it is where no joint scales.
-    fn scale(&self, point: gf::Vec3d, indices: &[i32], weights: &[f32]) -> gf::Vec3d {
+    fn scale(&self, point: gf::Vec3d, influences: Influences<'_>) -> gf::Vec3d {
         match &self.scales {
-            Some(scales) => blend(indices, weights, scales, |scale| scale.transform(point)),
+            Some(scales) => blend(influences, scales, |scale| scale.transform(point)),
             None => point,
         }
     }
@@ -289,14 +275,17 @@ impl Rigid for gf::Quatd {
 
 /// The joint of the first influence whose weight no other exceeds, zero
 /// weights included (C++ `_GetPivotJointIndex`). `None` for no influences.
-fn pivot(indices: &[i32], weights: &[f32]) -> Option<usize> {
-    let mut pivot: Option<(usize, f32)> = None;
-    for (&index, &weight) in indices.iter().zip(weights) {
-        if pivot.is_none_or(|(_, max)| max < weight) {
-            pivot = Some((index as usize, weight));
-        }
-    }
-    pivot.map(|(joint, _)| joint)
+fn pivot(influences: Influences<'_>) -> Option<usize> {
+    influences
+        .iter()
+        .fold(None, |pivot: Option<(usize, f32)>, (index, weight)| {
+            if pivot.is_none_or(|(_, max)| max < weight) {
+                Some((index as usize, weight))
+            } else {
+                pivot
+            }
+        })
+        .map(|(joint, _)| joint)
 }
 
 #[cfg(test)]
@@ -312,8 +301,7 @@ mod tests {
     fn transform_dqs(indices: &[i32], weights: &[f32], xforms: &[gf::Mat4d]) -> Option<gf::Mat4d> {
         skin_transform(
             SkinningMethod::DualQuaternion,
-            indices,
-            weights,
+            Influences::Split(indices, weights),
             gf::Mat4d::IDENTITY,
             xforms,
         )
@@ -331,9 +319,16 @@ mod tests {
             * gf::Mat4d::translation([1.0, 0.0, 0.0]);
         let bind = gf::Mat4d::translation([0.0, 0.0, 1.0]);
         let points = [gf::vec3f(1.0, 0.0, 0.0), gf::vec3f(0.0, 2.0, 0.0)];
-        let dqs = skin_points_dqs(&points, &[0, 0], &[1.0, 1.0], 1, bind, &Joints::rigid(&[xform]))
+        let dqs = skin_points_dqs(
+            &points,
+            Influences::Split(&[0, 0], &[1.0, 1.0]),
+            1,
+            bind,
+            &Joints::rigid(&[xform]),
+        )
+        .expect("valid influences");
+        let lbs = skin_points_lbs(&points, Influences::Split(&[0, 0], &[1.0, 1.0]), 1, bind, &[xform])
             .expect("valid influences");
-        let lbs = skin_points_lbs(&points, &[0, 0], &[1.0, 1.0], 1, bind, &[xform]).expect("valid influences");
         for (dqs, lbs) in dqs.into_iter().zip(lbs) {
             assert_near(dqs, lbs.into());
         }
@@ -342,14 +337,14 @@ mod tests {
         let normals = [gf::vec3f(1.0, 1.0, 0.0).normalize()];
         let dqs = skin_normals_dqs(
             &normals,
-            &[0],
-            &[1.0],
+            Influences::Split(&[0], &[1.0]),
             1,
             gf::Mat4d::IDENTITY,
             &Joints::rotations(&skin),
         )
         .expect("valid influences");
-        let lbs = skin_normals_lbs(&normals, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &skin).expect("valid influences");
+        let lbs = skin_normals_lbs(&normals, Influences::Split(&[0], &[1.0]), 1, gf::Mat4d::IDENTITY, &skin)
+            .expect("valid influences");
         assert_near(dqs[0], lbs[0].into());
     }
 
@@ -361,8 +356,7 @@ mod tests {
         let points = [gf::vec3f(0.0, 1.0, 0.0)];
         let dqs = skin_points_dqs(
             &points,
-            &[0, 1],
-            &[0.5, 0.5],
+            Influences::Split(&[0, 1], &[0.5, 0.5]),
             2,
             gf::Mat4d::IDENTITY,
             &Joints::rigid(&skin),
@@ -372,15 +366,21 @@ mod tests {
         assert_near(dqs[0], eighth);
         let normals = skin_normals_dqs(
             &points,
-            &[0, 1],
-            &[0.5, 0.5],
+            Influences::Split(&[0, 1], &[0.5, 0.5]),
             2,
             gf::Mat4d::IDENTITY,
             &Joints::rotations(&skin),
         )
         .expect("valid");
         assert_near(normals[0], eighth);
-        let lbs = skin_points_lbs(&points, &[0, 1], &[0.5, 0.5], 2, gf::Mat4d::IDENTITY, &skin).expect("valid");
+        let lbs = skin_points_lbs(
+            &points,
+            Influences::Split(&[0, 1], &[0.5, 0.5]),
+            2,
+            gf::Mat4d::IDENTITY,
+            &skin,
+        )
+        .expect("valid");
         assert!(lbs[0].length() < 0.8);
 
         // A transform skins rigidly too: the frame turns by the same eighth.
@@ -393,7 +393,8 @@ mod tests {
             gf::Mat4d::translation([0.0, 1.0, 0.0]),
         ];
         let dqs = transform_dqs(&[0, 1], &[0.5, 0.5], &moves).expect("valid");
-        let lbs = skin_transform_lbs(&[0, 1], &[0.5, 0.5], gf::Mat4d::IDENTITY, &moves).expect("valid");
+        let lbs =
+            skin_transform_lbs(Influences::Split(&[0, 1], &[0.5, 0.5]), gf::Mat4d::IDENTITY, &moves).expect("valid");
         assert!(dqs.is_close(lbs, 1e-9), "{dqs:?}");
     }
 
@@ -407,8 +408,7 @@ mod tests {
         let points = [gf::vec3f(0.0, 1.0, 0.0)];
         let dqs = skin_points_dqs(
             &points,
-            &[0, 1],
-            &[0.6, 0.4],
+            Influences::Split(&[0, 1], &[0.6, 0.4]),
             2,
             gf::Mat4d::IDENTITY,
             &Joints::rigid(&skin),
@@ -426,7 +426,13 @@ mod tests {
         // which normalizes to the identity: the point stays where it is.
         let skin = [gf::Mat4d::scale([0.0, 0.0, 0.0])];
         let points = [gf::vec3f(1.0, 2.0, 3.0)];
-        let dqs = skin_points_dqs(&points, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &Joints::rigid(&skin));
+        let dqs = skin_points_dqs(
+            &points,
+            Influences::Split(&[0], &[1.0]),
+            1,
+            gf::Mat4d::IDENTITY,
+            &Joints::rigid(&skin),
+        );
         assert_eq!(dqs, Some(points.to_vec()));
     }
 
@@ -434,26 +440,51 @@ mod tests {
     fn rejects_bad_input() {
         let skin = [gf::Mat4d::IDENTITY];
         let pts = [gf::Vec3f::default(); 2];
-        assert!(skin_points_dqs(&pts, &[0], &[1.0], 1, gf::Mat4d::IDENTITY, &Joints::rigid(&skin)).is_none());
         assert!(
             skin_points_dqs(
                 &pts,
-                &[0, 1],
-                &[1.0, 1.0],
+                Influences::Split(&[0], &[1.0]),
                 1,
                 gf::Mat4d::IDENTITY,
                 &Joints::rigid(&skin)
             )
             .is_none()
         );
-        assert!(skin_points_dqs(&pts, &[], &[], 0, gf::Mat4d::IDENTITY, &Joints::rigid(&skin)).is_none());
-        assert!(skin_normals_dqs(&pts, &[], &[], 0, gf::Mat4d::IDENTITY, &Joints::rotations(&skin)).is_none());
+        assert!(
+            skin_points_dqs(
+                &pts,
+                Influences::Split(&[0, 1], &[1.0, 1.0]),
+                1,
+                gf::Mat4d::IDENTITY,
+                &Joints::rigid(&skin)
+            )
+            .is_none()
+        );
+        assert!(
+            skin_points_dqs(
+                &pts,
+                Influences::Split(&[], &[]),
+                0,
+                gf::Mat4d::IDENTITY,
+                &Joints::rigid(&skin)
+            )
+            .is_none()
+        );
+        assert!(
+            skin_normals_dqs(
+                &pts,
+                Influences::Split(&[], &[]),
+                0,
+                gf::Mat4d::IDENTITY,
+                &Joints::rotations(&skin)
+            )
+            .is_none()
+        );
         assert!(
             skin_face_varying_normals_dqs(
                 &pts,
                 &[0],
-                &[0],
-                &[1.0],
+                Influences::Split(&[0], &[1.0]),
                 1,
                 gf::Mat4d::IDENTITY,
                 &Joints::rotations(&skin)
@@ -473,8 +504,7 @@ mod tests {
         let out = skin_face_varying_normals_dqs(
             &normals,
             &[0, 1, 7],
-            &[0, 1],
-            &[1.0, 1.0],
+            Influences::Split(&[0, 1], &[1.0, 1.0]),
             1,
             gf::Mat4d::IDENTITY,
             &Joints::rotations(&skin),

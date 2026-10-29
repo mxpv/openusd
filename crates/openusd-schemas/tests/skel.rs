@@ -1471,30 +1471,67 @@ def SkelRoot "R" {
     let dual = skinning_query(&stage, "/R", "/R/Dual")?.expect("Dual query");
     let method = SkinningMethod::DualQuaternion;
     let skinned = dual.skinned_points(&pose, &points, None)?.expect("vertex influences");
-    let expected = skinning::skin_points(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    let expected = skinning::skin_points(
+        method,
+        &points,
+        skinning::Influences::Split(&indices, &weights),
+        2,
+        bind,
+        &remapped,
+    )
+    .expect("valid");
     assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
     for (skinned, point) in skinned.iter().zip(points) {
         assert!((skinned.length() - point.length()).abs() < 1e-5, "{skinned:?}");
     }
     let skinned = dual.skinned_normals(&pose, &points, None)?.expect("vertex influences");
-    let expected = skinning::skin_normals(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    let expected = skinning::skin_normals(
+        method,
+        &points,
+        skinning::Influences::Split(&indices, &weights),
+        2,
+        bind,
+        &remapped,
+    )
+    .expect("valid");
     assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
 
     let linear = skinning_query(&stage, "/R", "/R/Linear")?.expect("Linear query");
     let method = SkinningMethod::ClassicLinear;
     let skinned = linear.skinned_points(&pose, &points, None)?.expect("vertex influences");
-    let expected = skinning::skin_points(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    let expected = skinning::skin_points(
+        method,
+        &points,
+        skinning::Influences::Split(&indices, &weights),
+        2,
+        bind,
+        &remapped,
+    )
+    .expect("valid");
     assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
     let skinned = linear
         .skinned_normals(&pose, &points, None)?
         .expect("vertex influences");
-    let expected = skinning::skin_normals(method, &points, &indices, &weights, 2, bind, &remapped).expect("valid");
+    let expected = skinning::skin_normals(
+        method,
+        &points,
+        skinning::Influences::Split(&indices, &weights),
+        2,
+        bind,
+        &remapped,
+    )
+    .expect("valid");
     assert!(near(&skinned, &expected), "{skinned:?} != {expected:?}");
 
     let rigid = skinning_query(&stage, "/R", "/R/Rigid")?.expect("Rigid query");
     let skinned = rigid.skinned_transform(&pose, None)?.expect("constant influences");
-    let expected =
-        skinning::skin_transform(SkinningMethod::DualQuaternion, &[0, 1], &[0.5, 0.3], bind, &remapped).expect("valid");
+    let expected = skinning::skin_transform(
+        SkinningMethod::DualQuaternion,
+        skinning::Influences::Split(&[0, 1], &[0.5, 0.3]),
+        bind,
+        &remapped,
+    )
+    .expect("valid");
     assert!(skinned.is_close(expected, 1e-9), "{skinned:?} != {expected:?}");
     // Through pure rotations the frame stays orthonormal.
     assert!(

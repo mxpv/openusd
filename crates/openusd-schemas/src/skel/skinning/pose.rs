@@ -9,8 +9,8 @@ use super::dual_quat::{
     Joints, Rigid, skin_face_varying_normals_dqs, skin_normals_dqs, skin_points_dqs, skin_transform_dqs,
 };
 use super::{
-    names_joints, normal_transforms, single_joint, skin_face_varying_normals_lbs_with, skin_normals_lbs_with,
-    skin_points_lbs, skin_transform_lbs,
+    Influences, names_joints, normal_transforms, single_joint, skin_face_varying_normals_lbs_with,
+    skin_normals_lbs_with, skin_points_lbs, skin_transform_lbs,
 };
 use crate::skel::{AnimMapper, SkinningMethod};
 
@@ -90,24 +90,21 @@ impl<'a> PrimPose<'a> {
         &self,
         method: SkinningMethod,
         points: &[gf::Vec3f],
-        joint_indices: &[i32],
-        joint_weights: &[f32],
+        influences: Influences<'_>,
         num_influences: usize,
         geom_bind_transform: gf::Mat4d,
     ) -> Option<Vec<gf::Vec3f>> {
         match method {
             SkinningMethod::ClassicLinear => skin_points_lbs(
                 points,
-                joint_indices,
-                joint_weights,
+                influences,
                 num_influences,
                 geom_bind_transform,
                 &self.remap(self.pose.xforms(), gf::Mat4d::IDENTITY),
             ),
             SkinningMethod::DualQuaternion => skin_points_dqs(
                 points,
-                joint_indices,
-                joint_weights,
+                influences,
                 num_influences,
                 geom_bind_transform,
                 &self.remap_joints(self.pose.rigid()),
@@ -121,24 +118,21 @@ impl<'a> PrimPose<'a> {
         &self,
         method: SkinningMethod,
         normals: &[gf::Vec3f],
-        joint_indices: &[i32],
-        joint_weights: &[f32],
+        influences: Influences<'_>,
         num_influences: usize,
         geom_bind_transform: gf::Mat4d,
     ) -> Option<Vec<gf::Vec3f>> {
         match method {
             SkinningMethod::ClassicLinear => skin_normals_lbs_with(
                 normals,
-                joint_indices,
-                joint_weights,
+                influences,
                 num_influences,
                 geom_bind_transform,
                 &self.remap(self.pose.normals(), gf::Mat3d::IDENTITY),
             ),
             SkinningMethod::DualQuaternion => skin_normals_dqs(
                 normals,
-                joint_indices,
-                joint_weights,
+                influences,
                 num_influences,
                 geom_bind_transform,
                 &self.remap_joints(self.pose.rotations()),
@@ -149,14 +143,12 @@ impl<'a> PrimPose<'a> {
     /// Skin face-varying `normals` by `method`, as
     /// [`skin_face_varying_normals`](super::skin_face_varying_normals)
     /// describes.
-    #[allow(clippy::too_many_arguments)] // C++ `UsdSkelSkinFaceVaryingNormals`'s inputs, one per argument.
     pub(crate) fn skin_face_varying_normals(
         &self,
         method: SkinningMethod,
         normals: &[gf::Vec3f],
         face_vertex_indices: &[i32],
-        joint_indices: &[i32],
-        joint_weights: &[f32],
+        influences: Influences<'_>,
         num_influences: usize,
         geom_bind_transform: gf::Mat4d,
     ) -> Option<Vec<gf::Vec3f>> {
@@ -164,8 +156,7 @@ impl<'a> PrimPose<'a> {
             SkinningMethod::ClassicLinear => skin_face_varying_normals_lbs_with(
                 normals,
                 face_vertex_indices,
-                joint_indices,
-                joint_weights,
+                influences,
                 num_influences,
                 geom_bind_transform,
                 &self.remap(self.pose.normals(), gf::Mat3d::IDENTITY),
@@ -173,8 +164,7 @@ impl<'a> PrimPose<'a> {
             SkinningMethod::DualQuaternion => skin_face_varying_normals_dqs(
                 normals,
                 face_vertex_indices,
-                joint_indices,
-                joint_weights,
+                influences,
                 num_influences,
                 geom_bind_transform,
                 &self.remap_joints(self.pose.rotations()),
@@ -187,25 +177,21 @@ impl<'a> PrimPose<'a> {
     pub(crate) fn skin_transform(
         &self,
         method: SkinningMethod,
-        joint_indices: &[i32],
-        joint_weights: &[f32],
+        influences: Influences<'_>,
         geom_bind_transform: gf::Mat4d,
     ) -> Option<gf::Mat4d> {
         let xforms = self.xforms();
         match method {
-            SkinningMethod::ClassicLinear => {
-                skin_transform_lbs(joint_indices, joint_weights, geom_bind_transform, &xforms)
-            }
+            SkinningMethod::ClassicLinear => skin_transform_lbs(influences, geom_bind_transform, &xforms),
             SkinningMethod::DualQuaternion => {
-                if joint_indices.len() != joint_weights.len() || !names_joints(joint_indices, xforms.len()) {
+                if !names_joints(influences, xforms.len()) {
                     return None;
                 }
-                if let Some(xform) = single_joint(joint_indices, joint_weights, geom_bind_transform, &xforms) {
+                if let Some(xform) = single_joint(influences, geom_bind_transform, &xforms) {
                     return Some(xform);
                 }
                 Some(skin_transform_dqs(
-                    joint_indices,
-                    joint_weights,
+                    influences,
                     geom_bind_transform,
                     &self.remap_joints(self.pose.rigid()),
                 ))

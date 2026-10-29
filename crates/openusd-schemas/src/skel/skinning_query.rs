@@ -18,7 +18,7 @@ use super::anim_mapper::AnimMapper;
 use super::anim_query::AnimQuery;
 use super::binding::BindingProperties;
 use super::skeleton_query::SkeletonQuery;
-use super::skinning::{Pose, PrimPose, has_shape, joints_extent};
+use super::skinning::{Influences, Pose, PrimPose, has_shape, joints_extent};
 use super::{InfluenceInterpolation, SkinningMethod};
 use crate::SchemaError;
 use crate::geom::{BoundableSchema, Primvar};
@@ -373,8 +373,7 @@ impl SkinningQuery {
             method,
             normals,
             face_vertex_indices,
-            &indices,
-            &weights,
+            Influences::Split(&indices, &weights),
             self.influences_per_component(),
             self.geom_bind_transform(time)?,
         ))
@@ -406,7 +405,8 @@ impl SkinningQuery {
         let Some((indices, weights)) = self.joint_influences(time)? else {
             return Ok(None);
         };
-        Ok(pose.skin_transform(method, &indices, &weights, self.geom_bind_transform(time)?))
+        let influences = Influences::Split(&indices, &weights);
+        Ok(pose.skin_transform(method, influences, self.geom_bind_transform(time)?))
     }
 
     /// How far the skinned prim may reach past its skeleton's joints at
@@ -453,8 +453,7 @@ impl SkinningQuery {
             &pose,
             method,
             elements,
-            &indices,
-            &weights,
+            Influences::Split(&indices, &weights),
             self.influences_per_component(),
             self.geom_bind_transform(time)?,
         ))
@@ -473,7 +472,7 @@ impl SkinningQuery {
 
 /// [`PrimPose::skin_points`] or [`PrimPose::skin_normals`].
 type SkinFn<'a> =
-    fn(&PrimPose<'a>, SkinningMethod, &[gf::Vec3f], &[i32], &[f32], usize, gf::Mat4d) -> Option<Vec<gf::Vec3f>>;
+    fn(&PrimPose<'a>, SkinningMethod, &[gf::Vec3f], Influences<'_>, usize, gf::Mat4d) -> Option<Vec<gf::Vec3f>>;
 
 /// The joint order of `skeleton` and the blend-shape order of its animation,
 /// shared with them, each empty where there is none: the orders a skinning
