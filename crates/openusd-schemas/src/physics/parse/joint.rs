@@ -7,7 +7,7 @@ use openusd::sdf::Path;
 use openusd::tf;
 use openusd::usd::{self, SchemaRegistry};
 
-use super::{Parser, SENTINEL, read, token_or};
+use super::{Parser, read, token_or};
 use crate::SchemaError;
 use crate::physics::tokens::{
     ACCELERATION, ANGULAR, LINEAR, PHYSICS_COLLISION_API, PHYSICS_DRIVE_API, PHYSICS_LIMIT_API, PHYSICS_RIGID_BODY_API,
@@ -236,10 +236,10 @@ fn limit(api: &LimitAPI) -> Result<desc::Limit, SchemaError> {
     })
 }
 
-/// Whether each bound is a bound: finite and within the sentinel.
+/// Whether each bound is a bound, by [`desc::Limit::SENTINEL`].
 fn bounded(lower: f32, upper: f32) -> (bool, bool) {
     (
-        lower.is_finite() && lower > -SENTINEL,
-        upper.is_finite() && upper < SENTINEL,
+        lower.is_finite() && lower > -desc::Limit::SENTINEL,
+        upper.is_finite() && upper < desc::Limit::SENTINEL,
     )
 }

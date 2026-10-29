@@ -9,13 +9,17 @@ use openusd::gf;
 use openusd::sdf::{Path, PathSet};
 use openusd::usd::{self, PrimPredicate};
 
-use super::{Parser, SENTINEL, read};
+use super::{Parser, read};
 use crate::SchemaError;
 use crate::geom::{self, UpAxis};
 use crate::physics::{CollisionGroup, CollisionGroupSchema, MaterialAPI, Scene, SceneSchema, desc};
 
 /// Earth's gravity in m/s² (C++ `defaultGravity`).
 const DEFAULT_GRAVITY: f32 = 9.81;
+
+/// A gravity magnitude below the negation of this takes
+/// [`DEFAULT_GRAVITY`] (C++ `infSentinel`).
+const INF_SENTINEL: f32 = 0.5e38;
 
 impl Parser<'_> {
     /// `prim`'s scene (C++ `_ParseSceneDesc`): an unauthored gravity
@@ -33,7 +37,7 @@ impl Parser<'_> {
             direction = direction.normalize();
         }
         let mut magnitude: f32 = read(&scene.gravity_magnitude_attr())?;
-        if magnitude < -SENTINEL {
+        if magnitude < -INF_SENTINEL {
             let meters_per_unit = geom::stage_meters_per_unit(self.stage)? as f32;
             magnitude = DEFAULT_GRAVITY / meters_per_unit;
         }

@@ -17,7 +17,7 @@ use openusd_schemas::physics::{
     self, ArticulationRootAPI, CollisionAPI, CollisionGroup, CollisionGroupSchema, CustomTokens, DistanceJoint,
     DistanceJointSchema, Dof, DriveAPI, FilteredPairsAPI, FixedJoint, Joint, JointAxis, JointSchema, LimitAPI,
     MATERIAL_PURPOSE, MaterialAPI, MeshCollisionAPI, ParseDiagnostic, ParseOptions, Parsed, PrismaticJoint,
-    PrismaticJointSchema, RevoluteJoint, RevoluteJointSchema, RigidBodyAPI, Scene, SphericalJoint,
+    PrismaticJointSchema, RevoluteJoint, RevoluteJointSchema, RigidBodyAPI, Scene, SceneSchema, SphericalJoint,
     SphericalJointSchema, desc, tokens,
 };
 use openusd_schemas::shade::{Material, MaterialBindingAPI};
@@ -140,6 +140,20 @@ fn author_api_schemas(prim: &usd::Prim, names: &[&str]) -> Result {
 
 fn paths<'a>(items: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
     items.into_iter().map(ToString::to_string).collect()
+}
+
+/// A gravity magnitude below the negated sentinel takes Earth's gravity, and
+/// one at it is kept as authored.
+#[test]
+fn gravity_sentinel() -> Result {
+    let magnitude = |authored: f32| -> Result<f32> {
+        let stage = new_stage()?;
+        define_scene(&stage)?.create_gravity_magnitude_attr()?.set(authored)?;
+        Ok(parse(&stage)?.scenes[0].gravity_magnitude)
+    };
+    assert!((magnitude(-1e38)? - 981.0).abs() < TOLERANCE);
+    assert_eq!(magnitude(-0.5e38)?, -0.5e38);
+    Ok(())
 }
 
 /// A scene with nothing authored has Earth's gravity along the negative up
@@ -1533,6 +1547,29 @@ fn blocked_limit() -> Result {
     };
     assert!(!limit.enabled);
     assert_eq!((limit.lower, limit.upper), (f32::NEG_INFINITY, f32::INFINITY));
+    Ok(())
+}
+
+/// A finite bound at the sentinel is no bound, and one just inside it is:
+/// either bound of a prismatic joint enables its limit.
+#[test]
+fn sentinel_limit() -> Result {
+    let enabled = |lower: f32, upper: f32| -> Result<bool> {
+        let stage = new_stage()?;
+        let joint = PrismaticJoint::define(&stage, "/joint")?;
+        joint.create_lower_limit_attr()?.set(lower)?;
+        joint.create_upper_limit_attr()?.set(upper)?;
+        let parsed = parse(&stage)?;
+        let desc::JointKind::Prismatic { limit, .. } = &parsed.joints[0].kind else {
+            panic!("a prismatic joint");
+        };
+        Ok(limit.enabled)
+    };
+    let sentinel = desc::Limit::SENTINEL;
+    let inside = sentinel * 0.5;
+    assert!(!enabled(-sentinel, sentinel)?);
+    assert!(enabled(-inside, sentinel)?);
+    assert!(enabled(-sentinel, inside)?);
     Ok(())
 }
 

@@ -267,16 +267,16 @@ pub enum JointKind {
     /// `PhysicsFixedJoint` (C++ `UsdPhysicsFixedJointDesc`).
     Fixed,
     /// `PhysicsRevoluteJoint` (C++ `UsdPhysicsRevoluteJointDesc`): the limit
-    /// is `lowerLimit` / `upperLimit`, enabled when both are finite; the
-    /// drive is the `angular` instance.
+    /// is `lowerLimit` / `upperLimit`, enabled when both are bounds by
+    /// [`Limit::SENTINEL`]; the drive is the `angular` instance.
     Revolute {
         axis: JointAxis,
         limit: Limit,
         drive: Option<Drive>,
     },
     /// `PhysicsPrismaticJoint` (C++ `UsdPhysicsPrismaticJointDesc`): the
-    /// limit is `lowerLimit` / `upperLimit`, enabled when either is finite;
-    /// the drive is the `linear` instance.
+    /// limit is `lowerLimit` / `upperLimit`, enabled when either is a bound
+    /// by [`Limit::SENTINEL`]; the drive is the `linear` instance.
     Prismatic {
         axis: JointAxis,
         limit: Limit,
@@ -318,6 +318,13 @@ pub struct Limit {
     pub lower: f32,
     /// The upper bound, in the units of `lower`.
     pub upper: f32,
+}
+
+impl Limit {
+    /// A lower bound at or below the negation of this, or an upper bound at
+    /// or above it, is no bound, as is an infinite one (C++
+    /// `usdPhysicsSentinelLimit`).
+    pub const SENTINEL: f32 = 0.5e38;
 }
 
 /// A joint drive (C++ `UsdPhysicsJointDrive`), one `PhysicsDriveAPI`

@@ -352,10 +352,6 @@ fn filter_owners(owners: &[Path], parsed: &mut Parsed) {
         .retain(|articulation| articulation.bodies.iter().flatten().all(|body| kept.contains(body)));
 }
 
-/// A finite limit beyond this is no limit (C++ `usdPhysicsSentinelLimit`,
-/// and `infSentinel` for a scene's gravity).
-const SENTINEL: f32 = 0.5e38;
-
 /// The value `attribute` resolves to. Every attribute read this way declares
 /// a fallback; no value at all is a defect in the schema data.
 fn read<T>(attribute: &usd::Attribute) -> Result<T, SchemaError>
