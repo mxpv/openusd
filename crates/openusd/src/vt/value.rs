@@ -5,7 +5,7 @@ use crate::gf::f16;
 use strum::{Display, EnumDiscriminants, EnumIs, EnumIter, EnumTryAs, IntoStaticStr};
 
 use crate::gf;
-use crate::tf::Token;
+use crate::tf;
 
 use crate::sdf::{
     AssetPath, Int64ListOp, IntListOp, LayerOffset, Path, PathExpression, PathListOp, Payload, PayloadListOp,
@@ -72,8 +72,8 @@ pub enum Value {
     String(String),
     StringVec(Vec<String>),
 
-    Token(Token),
-    TokenVec(Vec<Token>),
+    Token(tf::Token),
+    TokenVec(Vec<tf::Token>),
 
     AssetPath(AssetPath),
     AssetPathVec(Vec<AssetPath>),
@@ -500,8 +500,8 @@ impl_try_from_value!(Vec<gf::Mat4d>, Matrix4dVec, "Matrix4dVec");
 // Single-variant string and asset extraction. Coercing `token` → `string`
 // is [`Value::cast`]'s job.
 impl_try_from_value!(String, String, "String");
-impl_try_from_value!(Token, Token, "Token");
-impl_try_from_value!(Vec<Token>, TokenVec, "TokenVec");
+impl_try_from_value!(tf::Token, Token, "Token");
+impl_try_from_value!(Vec<tf::Token>, TokenVec, "TokenVec");
 impl_try_from_value!(Vec<String>, StringVec, "StringVec");
 impl_try_from_value!(AssetPath, AssetPath, "AssetPath");
 impl_try_from_value!(Vec<AssetPath>, AssetPathVec, "AssetPathVec");
@@ -641,15 +641,15 @@ impl Value {
     }
 
     /// Builds a [`Value::Token`] from any string-like value, so callers need not
-    /// name [`Token`] at the construction site (`Value::token("Mesh")`).
-    pub fn token(name: impl Into<Token>) -> Self {
+    /// name [`tf::Token`] at the construction site (`Value::token("Mesh")`).
+    pub fn token(name: impl Into<tf::Token>) -> Self {
         Self::Token(name.into())
     }
 
     /// Builds a [`Value::TokenVec`] from any iterator of string-like items —
     /// the counterpart of [`Value::token`] for name lists such as
     /// `primChildren` and `allowedTokens`.
-    pub fn token_vec(items: impl IntoIterator<Item = impl Into<Token>>) -> Self {
+    pub fn token_vec(items: impl IntoIterator<Item = impl Into<tf::Token>>) -> Self {
         Self::TokenVec(items.into_iter().map(Into::into).collect())
     }
 
@@ -843,12 +843,12 @@ impl FromValueCast for String {
     }
 }
 
-impl FromValueCast for Token {
+impl FromValueCast for tf::Token {
     fn cast_from(value: Value) -> Result<Self, CastError> {
         match value {
             Value::Token(t) => Ok(t),
-            Value::String(s) => Ok(Token::from(s)),
-            other => Err(CastError::mismatch::<Token>((&other).into())),
+            Value::String(s) => Ok(tf::Token::from(s)),
+            other => Err(CastError::mismatch::<tf::Token>((&other).into())),
         }
     }
 }
@@ -1244,7 +1244,7 @@ mod tests {
     fn len_of_arrays() {
         assert_eq!(Value::FloatVec(vec![1.0, 2.0]).array_len(), Some(2));
         assert_eq!(Value::Vec3fVec(Vec::new()).array_len(), Some(0));
-        assert_eq!(Value::TokenVec(vec![Token::from("a")]).array_len(), Some(1));
+        assert_eq!(Value::TokenVec(vec![tf::Token::from("a")]).array_len(), Some(1));
         // An array no attribute holds still answers, the table it is missing
         // from being about attribute values.
         assert_eq!(Value::PathVec(vec![Path::abs_root()]).array_len(), Some(1));
@@ -1481,7 +1481,10 @@ mod tests {
     #[test]
     fn cast_string_token() {
         assert_eq!(Value::Token("t".into()).cast::<String>().unwrap(), "t");
-        assert_eq!(Value::String("s".into()).cast::<Token>().unwrap(), Token::new("s"));
+        assert_eq!(
+            Value::String("s".into()).cast::<tf::Token>().unwrap(),
+            tf::Token::new("s")
+        );
         assert_eq!(
             Value::TokenVec(vec!["a".into(), "b".into()])
                 .cast::<Vec<String>>()
