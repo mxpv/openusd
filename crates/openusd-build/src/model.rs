@@ -256,8 +256,9 @@ pub struct Metadata {
     /// The concrete schemas a stage falls back to for this type.
     pub fallback_types: Vec<tf::Token>,
     /// The class's `extraPlugInfo` entries, which C++ `usdGenSchema` copies
-    /// into the type's `plugInfo.json` entry. The registry drops the keys
-    /// `usdGenSchema` writes over them and hands back the rest.
+    /// into the type's `plugInfo.json` entry, less `alias` where the class is
+    /// aliased. The registry drops the other keys `usdGenSchema` writes over
+    /// them and hands back the rest.
     pub plug_info: BTreeMap<String, vt::Value>,
 
     /// The Rust type name, which defaults to the identifier in proper case.

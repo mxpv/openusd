@@ -297,7 +297,7 @@ pub enum SchemaRegistryError {
     /// A manifest entry's `customData.extraPlugInfo` is not a dictionary, so
     /// the plug info it carries cannot be read.
     #[error("customData.extraPlugInfo must be a dictionary, not a {kind}")]
-    PlugInfoNotDictionary {
+    ExtraPlugInfoNotDictionary {
         /// The kind of value the entry holds.
         kind: vt::ValueKind,
     },
@@ -1255,7 +1255,7 @@ impl SchemaInfo {
     }
 
     /// The extra entries the schema's plugin declares for its type, by key,
-    /// which the registry carries without reading: those C++
+    /// which the registry carries without interpreting: those C++
     /// `PlugRegistry::GetDataFromPluginMetaData` answers for the schema's type
     /// beyond the ones this type's other accessors give. A generated C++
     /// `plugInfo.json` copies them from the class's `customData.extraPlugInfo`,
@@ -1553,7 +1553,7 @@ impl SchemaRegistryBuilder {
     /// records for the schema's type beyond those listed above, less the keys
     /// `usdGenSchema` writes over it. An `extraPlugInfo` that is not a
     /// dictionary is
-    /// [`PlugInfoNotDictionary`](SchemaRegistryError::PlugInfoNotDictionary).
+    /// [`ExtraPlugInfoNotDictionary`](SchemaRegistryError::ExtraPlugInfoNotDictionary).
     ///
     /// The layers are read here and not retained, so both may be dropped as
     /// soon as this returns. A failure is held for [`build`](Self::build), and
@@ -2200,7 +2200,7 @@ fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<Sche
             value
                 .try_as_dictionary_ref()
                 .cloned()
-                .ok_or_else(|| SchemaRegistryError::PlugInfoNotDictionary { kind: value.into() })
+                .ok_or_else(|| SchemaRegistryError::ExtraPlugInfoNotDictionary { kind: value.into() })
         })
         .transpose()?
         .unwrap_or_default();
@@ -2660,7 +2660,7 @@ def "FlaggedAPI" (
         assert!(
             matches!(
                 *cause,
-                SchemaRegistryError::PlugInfoNotDictionary {
+                SchemaRegistryError::ExtraPlugInfoNotDictionary {
                     kind: vt::ValueKind::String
                 }
             ),

@@ -19,7 +19,7 @@ fn main() {
         if env::var_os(format!("CARGO_FEATURE_{}", family.to_uppercase())).is_some() {
             builder = builder.schema(schemas.join(library).join("schema.usda"));
             if let Some(plug_info) = plug_info(schemas, library) {
-                builder = builder.plug_info(plug_info);
+                builder = builder.plugin(plug_info);
             }
         }
     }

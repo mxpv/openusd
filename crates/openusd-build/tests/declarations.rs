@@ -28,7 +28,7 @@ mod generated {
 fn compiled_family_registers() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let output = openusd_build::configure()
-        .plug_info(manifest.join("fixtures/tiny/plugInfo.json"))
+        .plugin(manifest.join("fixtures/tiny/plugInfo.json"))
         .build_declarations("tinyKinds")
         .expect("the plugin generates");
     common::matches(&manifest.join("tests/declarations/generated.rs"), &output.rust);

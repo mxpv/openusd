@@ -25,7 +25,7 @@
 //! A library's name comes from the `libraryName` its `schema.usda` declares,
 //! not from the path, so the two spellings above name one library.
 //!
-//! [`Builder::plug_info`] adds what a library's plugin declares, and
+//! [`Builder::plugin`] adds what a library's plugin declares, and
 //! [`Builder::declaration_family`] generates a plugin that has declarations
 //! and no `schema.usda` at all.
 //!
@@ -273,7 +273,7 @@ pub fn configure() -> Builder {
         extern_libraries: BTreeMap::new(),
         schemas: Vec::new(),
         token_enums: Vec::new(),
-        plug_infos: Vec::new(),
+        plugin_files: Vec::new(),
         declaration_families: Vec::new(),
         shader_defs: Vec::new(),
     }
@@ -294,7 +294,7 @@ pub struct Builder {
     token_enums: Vec<TokenEnum>,
     /// The `plugInfo.json` files declaring libraries' metadata fields and
     /// kinds.
-    plug_infos: Vec<PathBuf>,
+    plugin_files: Vec<PathBuf>,
     /// The plugins to generate as families of their own, with no schema
     /// library behind them.
     declaration_families: Vec<String>,
@@ -333,8 +333,8 @@ impl Builder {
     /// from its class's `customData.extraPlugInfo`, which C++ `usdGenSchema`
     /// writes those entries from.
     #[must_use]
-    pub fn plug_info(mut self, path: impl Into<PathBuf>) -> Self {
-        self.plug_infos.push(path.into());
+    pub fn plugin(mut self, path: impl Into<PathBuf>) -> Self {
+        self.plugin_files.push(path.into());
         self
     }
 
@@ -342,7 +342,7 @@ impl Builder {
     /// plugin that declares kinds or metadata fields and has no schema
     /// library. Repeatable.
     ///
-    /// The plugin is read from a file [`plug_info`](Self::plug_info) names.
+    /// The plugin is read from a file [`plugin`](Self::plugin) names.
     /// Its file is written as `<name>.rs` and included with
     /// [`openusd::include_schema!`](openusd::include_schema) like a schema
     /// library's, and its `SCHEMAS` registers the declarations and no schema.
@@ -664,7 +664,7 @@ impl Builder {
     /// read once.
     fn plugins(&self) -> Result<Vec<plug_info::Plugin>, Error> {
         let mut plugins = Vec::new();
-        for path in &self.plug_infos {
+        for path in &self.plugin_files {
             plugins.extend(plug_info::read(path)?);
         }
         Ok(plugins)
@@ -1066,7 +1066,7 @@ class "MissingSuffix" (
         configure()
             .out_dir(&out)
             .schema(&schema)
-            .plug_info(&info)
+            .plugin(&info)
             .declaration_family("siteKinds")
             .generate()
             .expect("generates both");
@@ -1098,14 +1098,14 @@ class "MissingSuffix" (
         // Naming the file alone asks for nothing, as configuring no schema does.
         configure()
             .out_dir(&out)
-            .plug_info(&info)
+            .plugin(&info)
             .generate()
             .expect("nothing to do");
         assert!(!out.exists(), "nothing is written");
 
         let error = configure()
             .out_dir(&out)
-            .plug_info(&info)
+            .plugin(&info)
             .declaration_family("siteKinds")
             .generate()
             .expect_err("testWarn has no schema library here");
@@ -1122,7 +1122,7 @@ class "MissingSuffix" (
         .expect("writes the plugInfo");
         configure()
             .out_dir(&out)
-            .plug_info(&kinds)
+            .plugin(&kinds)
             .declaration_family("siteKinds")
             .generate()
             .expect("generates the family");
@@ -1136,7 +1136,7 @@ class "MissingSuffix" (
         let info = mixed_plug_info(dir.path());
 
         let output = configure()
-            .plug_info(&info)
+            .plugin(&info)
             .build_declarations("siteKinds")
             .expect("builds");
         assert_eq!(output.library_name(), "siteKinds");
@@ -1160,7 +1160,7 @@ class "MissingSuffix" (
         for name in ["../kinds", "site/kinds", "my-kinds", ""] {
             let error = configure()
                 .out_dir(&out)
-                .plug_info(mixed_plug_info(dir.path()))
+                .plugin(mixed_plug_info(dir.path()))
                 .declaration_family(name)
                 .generate()
                 .expect_err("not an identifier");
@@ -1184,7 +1184,7 @@ class "MissingSuffix" (
         let error = configure()
             .out_dir(dir.path().join("generated"))
             .schema(&schema)
-            .plug_info(mixed_plug_info(dir.path()))
+            .plugin(mixed_plug_info(dir.path()))
             .declaration_family("siteKindz")
             .generate()
             .expect_err("no plugin is called siteKindz");
@@ -1213,7 +1213,7 @@ class "MissingSuffix" (
         let error = configure()
             .out_dir(dir.path().join("generated"))
             .schema(&schema)
-            .plug_info(&info)
+            .plugin(&info)
             .declaration_family("siteKinds")
             .generate()
             .expect_err("both declare prop");
@@ -1234,7 +1234,7 @@ class "MissingSuffix" (
         let error = configure()
             .out_dir(dir.path().join("generated"))
             .schema(&schema)
-            .plug_info(&info)
+            .plugin(&info)
             .generate()
             .expect_err("no library is called testElsewhere");
         assert!(
@@ -1252,7 +1252,7 @@ class "MissingSuffix" (
         let info = plug_info(dir.path(), "testWarn", "role");
 
         let output = configure()
-            .plug_info(&info)
+            .plugin(&info)
             .build_library(&schema, Views::Generate)
             .expect("builds");
         assert!(output.layers().contains(&info), "{:?}", output.layers());
@@ -1283,7 +1283,7 @@ class "MissingSuffix" (
         .expect("writes the plugInfo");
 
         let output = configure()
-            .plug_info(&info)
+            .plugin(&info)
             .build_library(&schema, Views::Generate)
             .expect("builds");
         let fallbacks: Vec<Option<vt::Value>> = output.with_family(|family| {
@@ -1315,8 +1315,8 @@ class "MissingSuffix" (
             .out_dir(dir.path().join("generated"))
             .schema(&first)
             .schema(&second)
-            .plug_info(plug_info(dir.path(), "testWarn", "role"))
-            .plug_info(plug_info(dir.path(), "testOther", "role"))
+            .plugin(plug_info(dir.path(), "testWarn", "role"))
+            .plugin(plug_info(dir.path(), "testOther", "role"))
             .generate()
             .expect_err("both declare role");
         assert!(

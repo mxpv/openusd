@@ -117,7 +117,7 @@ fn tables_match_their_schemas() {
         let library = compiled.name();
         let mut builder = configured(&schemas());
         if let Some(plug_info) = plug_info(&schemas(), library) {
-            builder = builder.plug_info(plug_info);
+            builder = builder.plugin(plug_info);
         }
         let output = builder
             .build_library(schemas().join(library).join("schema.usda"), openusd_build::Views::Skip)

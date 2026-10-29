@@ -395,8 +395,9 @@ impl<'a> SchemaDecl<'a> {
     /// The entries the schema's plugin declares for its type, each a
     /// [`Field`] named by its key: what a C++ `plugInfo.json` records in the
     /// type's entry, which a generated one copies from the class's
-    /// `customData.extraPlugInfo`. The registry keeps them uninterpreted, and
-    /// [`SchemaInfo::plug_info`](super::SchemaInfo::plug_info) hands them back.
+    /// `customData.extraPlugInfo`. The registry drops the keys C++
+    /// `usdGenSchema` writes over them and hands the rest back through
+    /// [`SchemaInfo::plug_info`](super::SchemaInfo::plug_info).
     pub const fn plug_info(mut self, entries: &'a [Field<'a>]) -> Self {
         self.plug_info = entries;
         self
