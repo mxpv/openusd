@@ -7,7 +7,9 @@
 //! [`FileFormat`](super::FileFormat) claiming each layer's extension. It is the
 //! Rust seam for C++ `Sdf_LayerRegistry` and `SdfFileFormat::FindByExtension`:
 //! a future `find_or_open` cache (the registry will own loaded layers and dedup
-//! them) and custom format registration grow here.
+//! them) grows here. Formats beyond the built-in ones (an Alembic reader, say)
+//! are registered by the program ([`register_format`](LayerRegistry::register_format)),
+//! as C++ registers `SdfFileFormat` plugins.
 //!
 //! References and payloads are not followed here. Composition opens each
 //! reference/payload target layer on demand when it reaches the arc (see
@@ -34,9 +36,18 @@ static USDC: UsdcFileFormat = UsdcFileFormat;
 static USDZ: UsdzFileFormat = UsdzFileFormat;
 
 /// The built-in formats, in lookup order — the Rust analog of C++
-/// `SdfFileFormat`'s static plugin set. Custom formats will register alongside
-/// these on a [`LayerRegistry`] in the future; today the set is fixed.
+/// `SdfFileFormat`'s static plugin set.
 static DEFAULT_FORMATS: &[&dyn sdf::FileFormat] = &[&USDA, &USDC, &USDZ];
+
+/// Formats the program registered ([`LayerRegistry::register_format`]), looked
+/// up after the built-in ones.
+static REGISTERED: std::sync::RwLock<Vec<&'static dyn sdf::FileFormat>> = std::sync::RwLock::new(Vec::new());
+
+/// Every format, built-in ones first, in lookup order.
+fn formats() -> Vec<&'static dyn sdf::FileFormat> {
+    let registered = REGISTERED.read().map(|r| r.clone()).unwrap_or_default();
+    DEFAULT_FORMATS.iter().copied().chain(registered).collect()
+}
 
 /// An error encountered while opening a layer's sublayer stack that may be
 /// recoverable.
@@ -143,8 +154,9 @@ impl From<LoadError> for crate::Error {
 /// reads a layer is a method here, and the registry stands in as the
 /// [`ar::Resolver`] it fronts where one is asked for, with the identifier
 /// rules below applied. This is the Rust analog of C++ `Sdf_LayerRegistry`;
-/// it will grow a ref-counted loaded-layer cache (`find_or_open` dedup) and
-/// custom format registration.
+/// it will grow a ref-counted loaded-layer cache (`find_or_open` dedup).
+/// Formats beyond the built-in ones are registered with
+/// [`register_format`](Self::register_format).
 pub struct LayerRegistry {
     resolver: Rc<dyn ar::Resolver>,
 }
@@ -345,9 +357,8 @@ impl LayerRegistry {
     /// rather than from bytes. `source_name` names their origin, for
     /// diagnostics that quote a location.
     pub fn read_bytes(bytes: ar::AssetBuffer, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        DEFAULT_FORMATS
-            .iter()
-            .copied()
+        formats()
+            .into_iter()
             .find(|format| format.matches_content(&bytes))
             .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
             .read_bytes(bytes, source_name)
@@ -356,9 +367,8 @@ impl LayerRegistry {
     /// Find the format claiming `ext` (without the leading dot, case-insensitive),
     /// e.g. `"usda"` or `"usd"`. C++ `SdfFileFormat::FindByExtension`.
     pub fn find_by_extension(ext: &str) -> Option<&'static dyn sdf::FileFormat> {
-        DEFAULT_FORMATS
-            .iter()
-            .copied()
+        formats()
+            .into_iter()
             .find(|f| f.extensions().iter().any(|e| e.eq_ignore_ascii_case(ext)))
     }
 
@@ -386,7 +396,27 @@ impl LayerRegistry {
     /// Find the format with the given [`format_id`](sdf::FileFormat::format_id),
     /// e.g. `"usdc"`. C++ `SdfFileFormat::FindById`.
     pub fn find_by_id(id: &str) -> Option<&'static dyn sdf::FileFormat> {
-        DEFAULT_FORMATS.iter().copied().find(|f| f.format_id() == id)
+        formats().into_iter().find(|f| f.format_id() == id)
+    }
+
+    /// Register `format`, for every stage opened after: a layer with one of
+    /// its extensions is read by it, opened, sublayered, referenced or
+    /// payloaded as any other (C++ registers `SdfFileFormat` plugins through
+    /// `plugInfo.json`; here the program registers them, once, before opening
+    /// stages). Built-in formats are looked up first, so a registered format
+    /// cannot take `usda`, `usdc`, `usd` or `usdz` from them. Whether it was
+    /// registered: `false` when a format of its id is known already.
+    pub fn register_format(format: &'static dyn sdf::FileFormat) -> bool {
+        if Self::find_by_id(format.format_id().as_str()).is_some() {
+            return false;
+        }
+        match REGISTERED.write() {
+            Ok(mut r) => {
+                r.push(format);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Resolves `identifier` and reads the layer there in its file format, or
