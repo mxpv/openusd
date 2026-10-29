@@ -15,7 +15,7 @@ impl MaterialAPI {
     /// where nothing is bound or the bound material does not (C++
     /// `_GetMaterialBinding` followed by `HasAPI<UsdPhysicsMaterialAPI>`).
     pub fn bound(binding: &MaterialBindingAPI) -> Result<Option<MaterialAPI>, SchemaError> {
-        let Some(material) = binding.bound_material(MATERIAL_PURPOSE)? else {
+        let Some(material) = binding.bound_material(MATERIAL_PURPOSE, true)? else {
             return Ok(None);
         };
         Ok(MaterialAPI::from_prim(material.prim().clone())?)

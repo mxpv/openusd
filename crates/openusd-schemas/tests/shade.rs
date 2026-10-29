@@ -112,7 +112,7 @@ fn reads_material_bindings_from_fixture() -> Result<()> {
 
     // Resolution reports the binding that won beside the material.
     let resolved = binding
-        .resolve_binding("preview", &mut shade::BindingCache::default())?
+        .resolve_binding("preview", true, &mut shade::BindingCache::default())?
         .expect("resolved");
     assert_eq!(resolved.rel().name(), "material:binding:preview");
     assert_eq!(
