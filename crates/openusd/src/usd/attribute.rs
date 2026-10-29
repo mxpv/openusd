@@ -861,10 +861,26 @@ impl Attribute {
     /// read would return.
     pub fn value_at<T: vt::FromValue>(&self, time: impl Into<Option<super::TimeCode>>) -> Result<Option<vt::Value>> {
         let time = time.into().map(|time| time.value());
-        let value = self.stage.resolve_at(&self.path, time, Some(T::accepts_kind))?;
+        let read = pcp::ValueRead {
+            accepts: Some(T::accepts_kind),
+            ..pcp::ValueRead::default()
+        };
+        let value = self.stage.resolve_at(&self.path, time, read)?;
         Ok(self
             .finish_composition(value)?
             .filter(|value| T::accepts_kind(vt::ValueKind::from(value))))
+    }
+
+    /// The composed value at `time`, undecoded, with its `asset` paths as
+    /// `assets` says: what a flattened layer keeps (C++
+    /// `Usd_FlattenAccess::ResolveValueForFlatten`).
+    pub(crate) fn value_with(&self, time: Option<f64>, assets: pcp::AssetMode) -> Result<Option<vt::Value>> {
+        let read = pcp::ValueRead {
+            assets,
+            ..pcp::ValueRead::default()
+        };
+        let value = self.stage.resolve_at(&self.path, time, read)?;
+        self.finish_composition(value)
     }
 
     /// Closes what the authored sources composed against the schema tier,
@@ -1586,10 +1602,12 @@ impl AttributeQuery {
                 }
                 // `with_cache` takes an `FnMut`, so the closure cannot consume
                 // `value`.
-                let resolved = stage.with_cache(|g, c| Ok(c.resolve_asset_values(g, value.clone(), Some(site))))?;
+                let resolved = stage.with_cache(|g, c| {
+                    Ok(c.resolve_asset_values(g, value.clone(), Some(site), pcp::AssetMode::Resolve))
+                })?;
                 Ok(pcp::TimedValue::Value(resolved))
             }
-            AttributeValueSource::PerTime => stage.resolve_at(self.attr.path(), Some(time), None),
+            AttributeValueSource::PerTime => stage.resolve_at(self.attr.path(), Some(time), pcp::ValueRead::default()),
         }
     }
 }

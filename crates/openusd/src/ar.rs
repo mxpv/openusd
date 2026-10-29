@@ -1007,7 +1007,7 @@ const SEPARATORS: [char; 2] = ['/', '\\'];
 /// ASCII letter and a colon (`C:`). The answer is the same on every host, so
 /// on Unix a file named `a:b.usda` is not reached by a relative path, while
 /// `ab:c.usda` is.
-fn is_relative_path(asset_path: &str) -> bool {
+pub(crate) fn is_relative_path(asset_path: &str) -> bool {
     let drive = matches!(asset_path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
     !asset_path.starts_with(SEPARATORS) && !drive
 }

@@ -15,7 +15,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier};
 use crate::vt::Value;
 
-use super::asset_resolve::{self, AssetSite};
+use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip;
 use super::diagnostics::Diagnostics;
 use super::mapping::MapFunction;
@@ -577,11 +577,15 @@ impl PrimIndex {
     ///
     /// A composition the layer stack could not finish comes back open, for
     /// [`close_composition`] to settle against whatever the tier below offers.
+    ///
+    /// `assets` and `errors` are as [`Self::resolve_strongest`] takes them.
     pub(crate) fn resolve_field(
         &self,
         field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
+        assets: AssetMode,
+        errors: &mut Diagnostics,
     ) -> Result<Option<Value>, QueryError> {
         if field == FieldKey::Specifier.as_str() {
             return self.resolve_specifier(stack, prop_suffix);
@@ -595,7 +599,7 @@ impl PrimIndex {
         if field == FieldKey::TimeSamples.as_str() {
             return Ok(self.resolve_time_samples(stack, prop_suffix)?.map(Value::TimeSamples));
         }
-        let composed = match self.resolve_strongest(field, stack, prop_suffix)? {
+        let composed = match self.resolve_strongest(field, stack, prop_suffix, assets, errors)? {
             Some(strongest) if sdf::folds_list_ops(field) => {
                 Some(self.resolve_list_op(field, stack, prop_suffix, strongest)?)
             }
@@ -959,38 +963,6 @@ impl PrimIndex {
         })
     }
 
-    /// The site of the strongest authored opinion for `field` — what an
-    /// `asset`-valued opinion needs to anchor, evaluate, and be diagnosed
-    /// (mirroring C++ `UsdStage::_GetAssetPathContext` for a default-sourced
-    /// value). `None` if nothing authors the field.
-    ///
-    /// The provenance is owned, so the caller is free to take `&mut self` on the
-    /// cache while it resolves.
-    pub(crate) fn strongest_opinion(
-        &self,
-        field: &str,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-    ) -> Option<AssetSite> {
-        // Shares `contributing_sites` with `opinions`, so the node filter never
-        // drifts.
-        for site in self.contributing_sites(prop_suffix) {
-            let Ok(site) = site else { continue };
-            if matches!(
-                stack.layer(site.layer).data().try_field(&site.query_path, field),
-                Ok(Some(_))
-            ) {
-                return Some(AssetSite::in_graph(
-                    stack,
-                    site.node.layer_stack_id(),
-                    site.layer,
-                    &site.query_path,
-                ));
-            }
-        }
-        None
-    }
-
     /// Composes a field across the prim's nodes, strongest to weakest.
     ///
     /// Each node's opinion folds into a [`Composing`] value, so a dictionary
@@ -1003,17 +975,31 @@ impl PrimIndex {
     /// A `%_` that outlives the nodes is left in the value for the caller's
     /// own weakest tier to answer: [`PrimIndex::resolve_field`] has none and
     /// closes it, while `usd` first offers the schema fallback.
+    ///
+    /// Each opinion's `asset` paths are taken as `assets` says, against the
+    /// layer that authored it, before the opinion folds in, so an entry a
+    /// weaker dictionary contributes keeps its own anchor (C++
+    /// `MetadataValueComposer::ConsumeAuthored`). An expression that fails to
+    /// evaluate is recorded in `errors`.
     pub(crate) fn resolve_strongest(
         &self,
         field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
+        assets: AssetMode,
+        errors: &mut Diagnostics,
     ) -> Result<Option<Value>, QueryError> {
         let mut composing = Composing::new();
         for opinion in self.opinions(field, stack, prop_suffix) {
             let opinion = opinion?;
             let anchor = opinion.query_path.prim_path();
-            let folded = composing.fold(opinion.value.into_owned(), &anchor, opinion.node.map_to_root());
+            let mut value = opinion.value.into_owned();
+            if assets.reaches(&value) {
+                let site =
+                    AssetSite::in_graph(stack, opinion.node.layer_stack_id(), opinion.layer, &opinion.query_path);
+                value = asset_resolve::resolve_values(stack, value, Some(&site), assets, errors);
+            }
+            let folded = composing.fold(value, &anchor, opinion.node.map_to_root());
             if folded.step().stop() {
                 break;
             }

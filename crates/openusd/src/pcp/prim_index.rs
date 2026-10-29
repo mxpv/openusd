@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::{iter, mem};
 
+use super::asset_resolve::AssetMode;
 use super::compose_site::{compose_arc_list_in, compose_token_children};
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path};
@@ -925,7 +926,13 @@ impl PrimIndex {
     /// partitions the whole graph. A failed read counts only for an index
     /// that has an instanceable node.
     pub(crate) fn is_instanceable(&self, graph: &LayerGraph, depth: u16) -> Result<bool, QueryError> {
-        match self.resolve_field(FieldKey::Instanceable.as_str(), graph, None) {
+        match self.resolve_field(
+            FieldKey::Instanceable.as_str(),
+            graph,
+            None,
+            AssetMode::Resolve,
+            &mut Diagnostics::default(),
+        ) {
             Ok(Some(Value::Bool(true))) => Ok(self.has_instanceable_node(depth)),
             Err(error) if self.has_instanceable_node(depth) => Err(error),
             Ok(_) | Err(_) => Ok(false),

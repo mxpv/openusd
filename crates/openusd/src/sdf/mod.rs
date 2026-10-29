@@ -33,7 +33,8 @@ mod value_type;
 
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
-    AssetExpressionFailure, AssetOutcome, evaluate_asset_paths, holds_asset_expression, resolve_asset_paths,
+    AssetExpressionFailure, AssetOutcome, anchor_asset_paths, evaluate_asset_paths, holds_asset_expression,
+    resolve_asset_paths,
 };
 pub use change::{ChangeEntry, ChangeFlags, ChangeList, FieldChange};
 pub use copy::{

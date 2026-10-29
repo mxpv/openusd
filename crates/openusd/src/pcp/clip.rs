@@ -31,7 +31,7 @@ use crate::sdf::{self, AssetPath, LayerOffset, Path};
 use crate::tf;
 use crate::vt::Value;
 
-use super::asset_resolve::{self, AssetSite};
+use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};
 use super::diagnostics::Diagnostics;
 use super::index_cache::block_to_none;
@@ -787,6 +787,8 @@ pub(crate) struct ClipQuery<'a> {
     pub attr_prim: &'a Path,
     /// The attribute's property suffix (e.g. `.size`).
     pub suffix: &'a str,
+    /// What the read makes of an `asset` path in a value the set returns.
+    pub assets: AssetMode,
 }
 
 /// The clip a set reads an attribute from at one time, for a set that sources
@@ -896,9 +898,9 @@ impl ClipCache {
         let Some(clip) = self.active_clip(graph, diagnostics, resolved, query, time)? else {
             return Ok(None);
         };
-        let value = Some(self.value_in_clip(graph, diagnostics, resolved, &clip, time, interp)?);
+        let value = Some(self.value_in_clip(graph, diagnostics, resolved, &clip, time, interp, query.assets)?);
         let set = &resolved.set;
-        if set.active.len() < 2 || value.as_ref().is_none_or(Value::is_asset_valued) {
+        if set.active.len() < 2 || value.as_ref().is_none_or(|value| query.assets.reaches(value)) {
             return Ok(value);
         }
         let Some(position) = set.active_position(time) else {
@@ -968,6 +970,7 @@ impl ClipCache {
             &clip,
             time,
             interp,
+            query.assets,
         )?))
     }
 
@@ -984,6 +987,7 @@ impl ClipCache {
     /// [`sdf::LayerOffset::apply_to_value`] maps a composed value out of its
     /// layer's frame (C++ `Usd_Clip::_TranslateTimeToExternal`, which is also
     /// why C++ skips the layer-offset transform for clip-sourced samples).
+    #[allow(clippy::too_many_arguments)] // See the `ClipEval` TODO on `interpolate_missing_value`.
     fn value_in_clip(
         &mut self,
         graph: &LayerGraph,
@@ -992,6 +996,7 @@ impl ClipCache {
         clip: &ActiveClip<'_>,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+        assets: AssetMode,
     ) -> Result<Value, QueryError> {
         let set = &resolved.set;
         let ActiveClip {
@@ -1013,7 +1018,7 @@ impl ClipCache {
             && let Some((clip_id, value)) =
                 self.clip_sample_at(graph, resolved, asset.asset_path(), clip_path, clip_time, interp)?
         {
-            return Ok(self.resolve_asset_in(graph, diagnostics, &clip_id, resolved, clip_path, value));
+            return Ok(self.resolve_asset_in(graph, diagnostics, &clip_id, resolved, clip_path, value, assets));
         }
 
         // The active clip has no sample at `clip_time`, and this set owns
@@ -1023,14 +1028,14 @@ impl ClipCache {
         //     time (spec 12.3.4.6). A synthesized manifest carries no
         //     defaults, so only an authored one reaches here.
         if let Some(value) = self.manifest_default(graph, manifest, clip_path)? {
-            return Ok(self.resolve_asset_in(graph, diagnostics, manifest, resolved, clip_path, value));
+            return Ok(self.resolve_asset_in(graph, diagnostics, manifest, resolved, clip_path, value, assets));
         }
 
         // (b) interpolateMissingClipValues: interpolate the gap across the
         //     nearest surrounding clips (spec 12.3.4.7).
         if set.interpolate_missing
             && let Some(value) =
-                self.interpolate_missing_value(graph, diagnostics, resolved, manifest, clip_path, time, interp)?
+                self.interpolate_missing_value(graph, diagnostics, resolved, manifest, clip_path, time, interp, assets)?
         {
             return Ok(value);
         }
@@ -1630,7 +1635,9 @@ impl ClipCache {
     ///
     /// Called on each value the set returns, with the identifier of the layer
     /// that sourced *that* value — never on one the set read but discarded, so a
-    /// failed expression is reported only for a value a caller sees.
+    /// failed expression is reported only for a value a caller sees. `assets`
+    /// says whether the paths are resolved or only anchored.
+    #[allow(clippy::too_many_arguments)] // See the `ClipEval` TODO on `interpolate_missing_value`.
     fn resolve_asset_in(
         &mut self,
         graph: &LayerGraph,
@@ -1639,17 +1646,18 @@ impl ClipCache {
         resolved: &ResolvedClipSet,
         clip_path: &Path,
         value: Value,
+        assets: AssetMode,
     ) -> Value {
         // Checked before the site is built: that copies the layer's location and
         // identifier, which an ordinary numeric clip sample has no use for.
-        if !value.is_asset_valued() {
+        if !assets.reaches(&value) {
             return value;
         }
         let Some(layer) = self.layer(graph, identifier) else {
             return value;
         };
         let site = AssetSite::in_clip(layer, resolved.source.stack, clip_path);
-        asset_resolve::resolve_values(graph, value, Some(&site), diagnostics)
+        asset_resolve::resolve_values(graph, value, Some(&site), assets, diagnostics)
     }
 
     /// Reads the authored `default` for `clip_path` from the manifest layer
@@ -1691,8 +1699,8 @@ impl ClipCache {
     /// being opened: the block is the author's statement that it carries no
     /// samples for the attribute (C++
     /// `Usd_ClipSet::_ClipContributesTimeSamples`).
-    // TODO: the clip context (graph, diagnostics, resolved set, manifest) is
-    // threaded through eight `ClipCache` methods, six of which only pass it on
+    // TODO: the clip context (graph, diagnostics, resolved set, manifest, asset
+    // mode) is threaded through ten `ClipCache` methods, most of which only pass it on
     // to reach `manifest_id`. Bundling it into a `ClipEval<'_>` — the shape
     // `ClipProbe` already has one layer up — would collapse the arity here and
     // at every one of them.
@@ -1706,6 +1714,7 @@ impl ClipCache {
         clip_path: &Path,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+        assets: AssetMode,
     ) -> Result<Option<Value>, QueryError> {
         let set = &resolved.set;
         // Position of the active clip among the `active` entries at `time`.
@@ -1755,14 +1764,14 @@ impl ClipCache {
         // injected.
         Ok(match (lower, upper) {
             (Some((lt, (lid, lv))), Some((ut, (_, uv)))) => {
-                if lv.is_asset_valued() || uv.is_asset_valued() {
-                    Some(self.resolve_asset_in(graph, diagnostics, &lid, resolved, clip_path, lv))
+                if assets.reaches(&lv) || assets.reaches(&uv) {
+                    Some(self.resolve_asset_in(graph, diagnostics, &lid, resolved, clip_path, lv, assets))
                 } else {
                     interp(&vec![(lt, lv), (ut, uv)], time)
                 }
             }
             (Some((_, (id, value))), None) | (None, Some((_, (id, value)))) => {
-                Some(self.resolve_asset_in(graph, diagnostics, &id, resolved, clip_path, value))
+                Some(self.resolve_asset_in(graph, diagnostics, &id, resolved, clip_path, value, assets))
             }
             (None, None) => None,
         })

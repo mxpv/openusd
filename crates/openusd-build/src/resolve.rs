@@ -42,7 +42,10 @@ pub fn library(source: &Source) -> Result<Library, Error> {
     // `subLayers` and are never read: `usdMedia` flattens 40 declarations to
     // read 2. A paths-scoped flatten — `usd::flatten`'s `write_prim` over the
     // generated declarations alone — would take it to roughly 21 ms.
-    let flattened = source.stage.flatten()?;
+    //
+    // A fallback is written into code, so its asset paths stay as authored:
+    // the registry anchors them against the schematics that declare them.
+    let flattened = source.stage.flatten_with(usd::FlattenAssets::Authored)?;
 
     // Declarations arrive strongest first, so the first of a name is the one
     // composition resolves to; a sublayer redeclaring a class must not

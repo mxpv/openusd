@@ -20,7 +20,7 @@ use crate::sdf::{LayerOffset, Path, SpecType};
 use crate::tf::Token;
 use crate::vt::{self, Value};
 
-use super::asset_resolve::{self, AssetSite};
+use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::diagnostics::Diagnostics;
@@ -381,6 +381,7 @@ impl<'a> ClipTier<'a> {
                             anchor,
                             attr_prim: prim,
                             suffix,
+                            assets: resolver.asset_mode(),
                         },
                     };
                     resolver.on_clips(&mut probe, site)
@@ -441,6 +442,28 @@ fn probe_source(composing: &mut Composing, value: Cow<'_, Value>, site: &Opinion
     composing.fold(value.into_owned(), &site.query_path, site.node.map_to_root())
 }
 
+/// How an attribute value read reads (the options of
+/// [`IndexCache::value_at`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ValueRead {
+    /// The kinds a typed read accepts (C++ `UsdAttribute::Get<T>`): at the
+    /// default time an initial `default` of any other kind is passed over for
+    /// a weaker one. `None` for an untyped read.
+    pub(crate) accepts: Option<fn(vt::ValueKind) -> bool>,
+    /// What the read makes of an `asset` path in the value.
+    pub(crate) assets: AssetMode,
+}
+
+impl Default for ValueRead {
+    /// An untyped read that resolves its asset paths.
+    fn default() -> Self {
+        Self {
+            accepts: None,
+            assets: AssetMode::Resolve,
+        }
+    }
+}
+
 /// Resolves an attribute's value (the resolver behind
 /// [`IndexCache::value_at`]).
 ///
@@ -450,35 +473,36 @@ fn probe_source(composing: &mut Composing, value: Cow<'_, Value>, site: &Opinion
 /// `default`, its samples, or a value clip. C++ composes the same way, walking
 /// the chain of resolve infos it built in one pass.
 struct ValueAtResolver<'a> {
+    graph: &'a LayerGraph,
     /// The stage time to resolve at, or `None` for the default time — which
     /// reaches neither of the time-varying tiers, since the walk skips them.
     time: Option<f64>,
     interp: &'a dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     composing: Composing,
-    /// The site the strongest source came from, which anchors an `asset` in the
-    /// composed value. `None` where it holds no asset path, and where a value
-    /// clip answered first, since the clip tier anchors its own values.
-    anchor: Option<SelectedSite>,
+    /// The expression failures met resolving an `asset` path in a source.
+    errors: Diagnostics,
     /// Whether a time-varying source answered without a value. It decides
     /// the answer only where nothing stronger composed one.
     withheld: bool,
-    /// The kinds a typed read accepts. At the default time an initial
-    /// `default` of any other kind is passed over. `None` for an untyped read.
-    accepts: Option<fn(vt::ValueKind) -> bool>,
+    /// The kinds the read accepts and what it makes of an `asset` path.
+    read: ValueRead,
 }
 
 impl ValueAtResolver<'_> {
     /// Folds a source's value in and reports how far the walk goes on.
     ///
-    /// `anchors` says whether the site can resolve an `asset` in the value.
-    /// Only the strongest source is asked: a weaker one composes into a value
-    /// whose provenance is already settled.
+    /// `anchors` says whether an `asset` in the value is resolved against
+    /// `site`, before it folds in, so an entry a weaker dictionary contributes
+    /// keeps its own anchor. A value clip's tier resolves its values itself.
     fn fold(&mut self, value: Value, site: &OpinionSite<'_>, anchors: bool) -> Step {
-        if self.composing.is_empty() {
-            // Building the site copies two strings, so only a value that turns
-            // out to hold asset paths asks for one.
-            self.anchor = (anchors && value.is_asset_valued()).then(|| site.select());
-        }
+        let assets = self.read.assets;
+        let value = match anchors && assets.reaches(&value) {
+            true => {
+                let asset_site = site.asset_site(self.graph);
+                asset_resolve::resolve_values(self.graph, value, Some(&asset_site), assets, &mut self.errors)
+            }
+            false => value,
+        };
         self.composing
             .fold(value, &site.query_path, site.node.map_to_root())
             .step()
@@ -486,6 +510,10 @@ impl ValueAtResolver<'_> {
 }
 
 impl OpinionResolver for ValueAtResolver<'_> {
+    fn asset_mode(&self) -> AssetMode {
+        self.read.assets
+    }
+
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
         let Some(time) = self.time else {
             return Step::Continue;
@@ -511,7 +539,7 @@ impl OpinionResolver for ValueAtResolver<'_> {
         // input goes to the composer, which may turn it into the composed kind.
         if self.time.is_none()
             && self.composing.is_empty()
-            && let Some(accepts) = self.accepts
+            && let Some(accepts) = self.read.accepts
             && !accepts(vt::ValueKind::from(value.as_ref()))
             && !composes_over_weaker(&value)
         {
@@ -559,10 +587,9 @@ impl OpinionResolver for ValueAtResolver<'_> {
 struct SourceResolver<'a> {
     graph: &'a LayerGraph,
     source: Option<AttributeValueSource>,
-    /// The site the strongest `default` was found at, whose composed value the
-    /// cached source holds. `None` when samples or clips won, or when nothing
-    /// was authored.
-    default_site: Option<SelectedSite>,
+    /// Whether a `default` won, whose composed value the cached source holds.
+    /// `false` when samples or clips won, or when nothing was authored.
+    defaulted: bool,
     /// What the `default` opinions found so far compose to, which decides
     /// whether the walk reads on — an opinion the composition ignores does not
     /// end it, and the sources it goes on to draw on decide the answer.
@@ -570,11 +597,11 @@ struct SourceResolver<'a> {
 }
 
 impl SourceResolver<'_> {
-    /// Records the site a `default` answered at, which is the strongest one:
-    /// a weaker source is reached only because that value composes, and the
-    /// composition is read from where it began.
-    fn select(&mut self, site: &OpinionSite<'_>) {
-        self.default_site.get_or_insert_with(|| site.select());
+    /// Records that a `default` answered: a weaker source is reached only
+    /// because that value composes, and the composition is read from where it
+    /// began.
+    fn select(&mut self) {
+        self.defaulted = true;
     }
 }
 
@@ -611,14 +638,14 @@ impl OpinionResolver for SourceResolver<'_> {
     /// value can be snapshotted at all, and only a weaker source that varies
     /// with time rules that out.
     fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
-        self.select(site);
+        self.select();
         probe_source(&mut self.composing, value, site).step()
     }
 
-    fn on_withheld(&mut self, kind: Withheld, site: &OpinionSite<'_>) -> Step {
+    fn on_withheld(&mut self, kind: Withheld, _site: &OpinionSite<'_>) -> Step {
         match matches!(kind, Withheld::DefaultBlock) {
             true => {
-                self.select(site);
+                self.select();
                 Step::Stop
             }
             false => Step::Continue,
@@ -661,6 +688,9 @@ struct SampleTimesResolver {
     /// value is held by no authored map at all (see
     /// [`IndexCache::time_samples`]).
     map: Option<sdf::TimeSampleMap>,
+    /// The site whose map [`map`](Self::map) is, which anchors an `asset` in
+    /// it.
+    map_site: Option<SelectedSite>,
     /// Whether the winning source is a clip set whose schedule alone can vary
     /// the value.
     clip_may_vary: bool,
@@ -732,6 +762,7 @@ impl OpinionResolver for SampleTimesResolver {
                 let mut map = samples.clone();
                 site.offset.apply_to_samples(&mut map);
                 self.map = Some(map);
+                self.map_site = Some(site.select());
             }
         }
         self.answered = true;
@@ -1658,17 +1689,17 @@ impl IndexCache {
     /// answers without a value is [`TimedValue::NoValue`], which the fallback
     /// does not answer.
     ///
-    /// `accepts` makes it a typed read (C++ `UsdAttribute::Get<T>`): at the
-    /// default time an initial `default` of a kind it rejects is passed over
-    /// for a weaker one. The chosen value is finalized at its own site, and
-    /// whether the type accepts its kind is the decoder's to check.
+    /// `read` says which kinds a typed read accepts and what it makes of an
+    /// `asset` path in the value ([`ValueRead`]). The chosen value is
+    /// finalized at its own site, and whether the type accepts its kind is the
+    /// decoder's to check.
     pub(crate) fn value_at(
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
         time: Option<f64>,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-        accepts: Option<fn(vt::ValueKind) -> bool>,
+        read: ValueRead,
     ) -> Result<TimedValue, QueryError> {
         let (owner, suffix) = attr_path.split_prim();
         let prim = self.effective_prim(graph, &owner)?;
@@ -1688,25 +1719,23 @@ impl IndexCache {
             }
         }
         let mut resolver = ValueAtResolver {
+            graph,
             time,
             interp,
             composing: Composing::new(),
-            anchor: None,
+            errors: Diagnostics::default(),
             withheld: false,
-            accepts,
+            read,
         };
         self.resolve_property(graph, &prim, suffix, mode, &mut resolver)?;
         let ValueAtResolver {
             composing,
-            anchor,
+            errors,
             withheld,
             ..
         } = resolver;
-        let value = match &anchor {
-            Some(anchor) => self.resolve_asset_at(graph, composing.into_open(), anchor),
-            None => composing.into_open(),
-        };
-        Ok(match value {
+        self.query_diagnostics.extend(errors);
+        Ok(match composing.into_open() {
             Some(value) => TimedValue::Value(value),
             None if withheld => TimedValue::NoValue,
             None => TimedValue::Fallback,
@@ -1732,17 +1761,17 @@ impl IndexCache {
         let mut resolver = SourceResolver {
             graph,
             source: None,
-            default_site: None,
+            defaulted: false,
             composing: Composing::new(),
         };
         self.resolve_property(graph, &prim, &suffix, ResolveMode::Proximal, &mut resolver)?;
         let source = match resolver.source {
             Some(source) => source,
-            // A winning `default` composes from the site the walk selected; with
-            // no site nothing was authored, which is the same static `None`.
-            None => match resolver.default_site {
-                Some(site) => AttributeValueSource::Static(self.default_at(graph, &prim, &suffix, &site)?),
-                None => AttributeValueSource::Static(None),
+            // A winning `default` composes across the nodes; with none nothing
+            // was authored, which is the same static `None`.
+            None => match resolver.defaulted {
+                true => AttributeValueSource::Static(self.default_at(graph, &prim, &suffix)?),
+                false => AttributeValueSource::Static(None),
             },
         };
         Ok(self.stamp_source(source, attr_path, Some(prim)))
@@ -1772,22 +1801,22 @@ impl IndexCache {
         }
     }
 
-    /// The `default` a walk answered with at `site`, read back for a caller
-    /// that recorded the site rather than the value.
+    /// The `default` a walk answered with, read back for a caller that
+    /// recorded that it answered rather than the value.
     ///
-    /// Composed across the nodes from the strongest opinion, which is what
-    /// `site` names; `site` also anchors any `asset` in the result.
-    fn default_at(
-        &mut self,
-        graph: &LayerGraph,
-        prim: &Path,
-        suffix: &str,
-        site: &SelectedSite,
-    ) -> Result<Option<Value>, QueryError> {
-        let value = self
-            .cached(prim)
-            .resolve_strongest(FieldKey::Default.as_str(), graph, Some(suffix))?;
-        Ok(self.resolve_asset_at(graph, value, site).and_then(block_to_none))
+    /// Composed across the nodes from the strongest opinion, each resolving
+    /// its own `asset` paths.
+    fn default_at(&mut self, graph: &LayerGraph, prim: &Path, suffix: &str) -> Result<Option<Value>, QueryError> {
+        let mut errors = Diagnostics::default();
+        let value = self.cached(prim).resolve_strongest(
+            FieldKey::Default.as_str(),
+            graph,
+            Some(suffix),
+            AssetMode::Resolve,
+            &mut errors,
+        )?;
+        self.query_diagnostics.extend(errors);
+        Ok(value.and_then(block_to_none))
     }
 
     /// Resolves an attribute's composed sample times, retimed to stage time and
@@ -1821,12 +1850,24 @@ impl IndexCache {
     /// assembled from sources rather than held anywhere. Both reach
     /// [`Self::time_sample_times`] for their times and
     /// [`Self::value_at`] for a value per time code.
+    ///
+    /// `assets` says what becomes of an `asset` path in a sample: left as the
+    /// map holds it for [`AssetMode::Resolve`], or anchored, or evaluated,
+    /// against the site whose map won (C++ `_GetTimeSampleMap` for
+    /// flattening).
     pub(crate) fn time_samples(
         &mut self,
         graph: &LayerGraph,
         attr_path: &Path,
+        assets: AssetMode,
     ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
-        Ok(self.sample_times(graph, attr_path, Want::Map)?.map)
+        let SampleTimesResolver { map, map_site, .. } = self.sample_times(graph, attr_path, Want::Map)?;
+        Ok(match (map, map_site) {
+            (Some(map), Some(site)) if assets != AssetMode::Resolve => self
+                .resolve_asset_at(graph, Some(Value::TimeSamples(map)), &site, assets)
+                .and_then(Value::try_as_time_samples),
+            (map, _) => map,
+        })
     }
 
     /// Resolves the number of composed sample times for an attribute, including
@@ -1875,6 +1916,7 @@ impl IndexCache {
             series: Series::default(),
             answered: false,
             map: None,
+            map_site: None,
             clip_may_vary: false,
             count: None,
             want,
@@ -2317,7 +2359,7 @@ impl IndexCache {
             return Ok(Some(sdf::Specifier::Def));
         }
         Ok(self
-            .resolve_field_at(graph, path, FieldKey::Specifier.as_str())?
+            .resolve_field_at(graph, path, FieldKey::Specifier.as_str(), AssetMode::Resolve)?
             .map(sdf::Specifier::try_from)
             .transpose()?)
     }
@@ -2336,11 +2378,13 @@ impl IndexCache {
         if self.is_prototype(path) {
             return Ok(false);
         }
-        Ok(match self.resolve_field_at(graph, path, FieldKey::Payload.as_str())? {
-            Some(Value::Payload(payload)) => payload_has_target(&payload),
-            Some(Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(payload_has_target),
-            _ => false,
-        })
+        Ok(
+            match self.resolve_field_at(graph, path, FieldKey::Payload.as_str(), AssetMode::Resolve)? {
+                Some(Value::Payload(payload)) => payload_has_target(&payload),
+                Some(Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(payload_has_target),
+                _ => false,
+            },
+        )
     }
 
     /// This prim's own composed `active` opinion, defaulting to `true`. The
@@ -2361,7 +2405,7 @@ impl IndexCache {
         if self.is_prototype(path) {
             return Ok(true);
         }
-        match self.resolve_field_at(graph, path, FieldKey::Active.as_str())? {
+        match self.resolve_field_at(graph, path, FieldKey::Active.as_str(), AssetMode::Resolve)? {
             Some(value) => Ok(bool::try_from(value)?),
             None => Ok(true),
         }
@@ -2522,68 +2566,73 @@ impl IndexCache {
     /// pseudo-root's `primChildren` field remains a child-list query and is
     /// handled by normal composition.
     pub fn resolve_field(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>, QueryError> {
-        let path = &self.effective_path(graph, path)?;
-        self.resolve_field_at(graph, path, field)
+        self.resolve_field_with(graph, path, field, AssetMode::Resolve)
     }
 
-    /// [`resolve_field`](Self::resolve_field) for a path already redirected onto
-    /// the index that composes it — the half a caller holding that redirection
-    /// reuses rather than resolving it again.
-    fn resolve_field_at(&mut self, graph: &LayerGraph, path: &Path, field: &str) -> Result<Option<Value>, QueryError> {
-        if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
-            return Ok(graph.root_layer_field(field)?);
-        }
-
-        if path.is_property() {
-            let prim_path = path.prim_path();
-            let prop_suffix = path.property_suffix();
-            self.ensure_index(graph, &prim_path)?;
-            let value = self.cached(&prim_path).resolve_field(field, graph, Some(prop_suffix))?;
-            Ok(self.anchor_asset_paths(graph, &prim_path, field, Some(prop_suffix), value))
-        } else {
-            self.ensure_index(graph, path)?;
-            let value = self.cached(path).resolve_field(field, graph, None)?;
-            Ok(self.anchor_asset_paths(graph, path, field, None, value))
-        }
-    }
-
-    /// [`Self::anchor_asset_paths`] for a value whose authoring site the shared
-    /// value-resolution walk already selected, so no search for it is needed.
-    fn resolve_asset_at(&mut self, graph: &LayerGraph, value: Option<Value>, site: &SelectedSite) -> Option<Value> {
-        // Building the site copies two strings, so only a value that turns out
-        // to hold asset paths asks for one.
-        let asset_site = value
-            .as_ref()
-            .filter(|value| value.is_asset_valued())
-            .map(|_| AssetSite::in_graph(graph, site.layer_stack, site.layer, &site.query_path));
-        value.map(|value| self.resolve_asset_values(graph, value, asset_site.as_ref()))
-    }
-
-    /// Fills the resolved path on any `asset` / `asset[]` value just resolved,
-    /// taking its provenance from the strongest opinion for `field` — the
-    /// default-sourced case of C++ `UsdStage::_GetAssetPathContext`. Non-asset
-    /// values pass through; asset paths nested inside a dictionary value are not
-    /// recursed into, only top-level `asset` / `asset[]` fields are resolved.
-    ///
-    /// A read that resolved through the shared value-resolution walk knows the
-    /// site already and uses [`Self::resolve_asset_at`] instead; this is for a
-    /// plain metadata read, which has no walk to take it from.
-    fn anchor_asset_paths(
+    /// [`resolve_field`](Self::resolve_field) with `assets` saying whether an
+    /// `asset` path in the value is resolved or only anchored.
+    pub(crate) fn resolve_field_with(
         &mut self,
         graph: &LayerGraph,
-        prim_path: &Path,
+        path: &Path,
         field: &str,
-        prop_suffix: Option<&str>,
+        assets: AssetMode,
+    ) -> Result<Option<Value>, QueryError> {
+        let path = &self.effective_path(graph, path)?;
+        self.resolve_field_at(graph, path, field, assets)
+    }
+
+    /// [`resolve_field_with`](Self::resolve_field_with) for a path already
+    /// redirected onto the index that composes it — the half a caller holding
+    /// that redirection reuses rather than resolving it again.
+    fn resolve_field_at(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        field: &str,
+        assets: AssetMode,
+    ) -> Result<Option<Value>, QueryError> {
+        if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
+            let value = graph.root_layer_field(field)?;
+            return Ok(match (value, graph.root_id()) {
+                // The root layer's metadata takes its asset paths against the
+                // root layer, as every other opinion does against its own.
+                (Some(value), Some(root)) if assets.reaches(&value) => {
+                    let site = AssetSite::in_graph(graph, LayerStackId::ROOT, root, path);
+                    Some(self.resolve_asset_values(graph, value, Some(&site), assets))
+                }
+                (value, _) => value,
+            });
+        }
+
+        let (prim_path, prop_suffix) = match path.is_property() {
+            true => (path.prim_path(), Some(path.property_suffix())),
+            false => (path.clone(), None),
+        };
+        self.ensure_index(graph, &prim_path)?;
+        let mut errors = Diagnostics::default();
+        let value = self
+            .cached(&prim_path)
+            .resolve_field(field, graph, prop_suffix, assets, &mut errors)?;
+        self.query_diagnostics.extend(errors);
+        Ok(value)
+    }
+
+    /// Resolves, anchors or evaluates the `asset` paths in `value` as `assets`
+    /// says, against `site`, the site the shared value-resolution walk
+    /// selected for it.
+    fn resolve_asset_at(
+        &mut self,
+        graph: &LayerGraph,
         value: Option<Value>,
+        site: &SelectedSite,
+        assets: AssetMode,
     ) -> Option<Value> {
-        // Only an asset-valued field needs provenance, and finding it walks the
-        // prim's opinions — so the type is checked before the walk.
-        let site = value
+        let asset_site = value
             .as_ref()
-            .filter(|value| value.is_asset_valued())
-            .and_then(|_| self.store.index_at(prim_path))
-            .and_then(|index| index.strongest_opinion(field, graph, prop_suffix));
-        value.map(|value| self.resolve_asset_values(graph, value, site.as_ref()))
+            .filter(|value| assets.reaches(value))
+            .map(|_| AssetSite::in_graph(graph, site.layer_stack, site.layer, &site.query_path));
+        value.map(|value| self.resolve_asset_values(graph, value, asset_site.as_ref(), assets))
     }
 
     /// Fills the evaluated and resolved paths on an `asset` value authored at
@@ -2591,15 +2640,20 @@ impl IndexCache {
     /// diagnostics — the error channel a value query has, since it answers
     /// through a value rather than a diagnostic.
     ///
-    /// The seam every composed value source shares: a `default` opinion reaches
-    /// it through [`Self::anchor_asset_paths`], a time-sampled one through the
+    /// The seam a value read after its walk shares: a sample map through the
     /// provenance its resolver carries out, and a value replayed from a cached
     /// [`AttributeValueSource::TimeSamples`] through the stage. A clip resolves
     /// against its own layer inside the clip cache instead, and merges its
     /// diagnostics here through [`Self::record_clip_diagnostics`].
-    pub(crate) fn resolve_asset_values(&mut self, graph: &LayerGraph, value: Value, site: Option<&AssetSite>) -> Value {
+    pub(crate) fn resolve_asset_values(
+        &mut self,
+        graph: &LayerGraph,
+        value: Value,
+        site: Option<&AssetSite>,
+        assets: AssetMode,
+    ) -> Value {
         let mut errors = Diagnostics::default();
-        let resolved = asset_resolve::resolve_values(graph, value, site, &mut errors);
+        let resolved = asset_resolve::resolve_values(graph, value, site, assets, &mut errors);
         self.query_diagnostics.extend(errors);
         resolved
     }
@@ -2609,10 +2663,13 @@ impl IndexCache {
     pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
-        match self
-            .cached(&path)
-            .resolve_field(FieldKey::ApiSchemas.as_str(), graph, None)?
-        {
+        match self.cached(&path).resolve_field(
+            FieldKey::ApiSchemas.as_str(),
+            graph,
+            None,
+            AssetMode::Resolve,
+            &mut Diagnostics::default(),
+        )? {
             Some(Value::TokenListOp(op)) => Ok(op.into_items(sdf::ListOpType::Explicit)),
             _ => Ok(Vec::new()),
         }
@@ -4013,7 +4070,7 @@ def "Unrelated"
     fn settled_value_at(graph: &mut LayerGraph, cache: &mut IndexCache, path: &Path, time: f64) -> Result<TimedValue> {
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         loop {
-            let value = cache.value_at(graph, path, Some(time), &interp, None)?;
+            let value = cache.value_at(graph, path, Some(time), &interp, ValueRead::default())?;
             let mut pending = Vec::new();
             cache.swap_pending_loads(&mut pending);
             if !graph.intern_demanded(&pending) {
@@ -4504,7 +4561,13 @@ def \"Model\"
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         cache.ensure_index(&graph, &sdf::path("/Inst")?)?;
         // Reading through the proxy mints and materializes the prototype.
-        cache.value_at(&graph, &sdf::path("/Inst/Scope.x")?, Some(0.0), &interp, None)?;
+        cache.value_at(
+            &graph,
+            &sdf::path("/Inst/Scope.x")?,
+            Some(0.0),
+            &interp,
+            ValueRead::default(),
+        )?;
 
         let scope = sdf::path("/__Prototype_0/Scope")?;
         let index = cache.cached(&scope);
@@ -4740,7 +4803,13 @@ def "A" (
         cache.ensure_index(&graph, &a)?;
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A.marker")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/A.marker")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::String("ok".to_string())),
             "the prim's local opinion survives the broken expression arc"
         );
@@ -5596,7 +5665,13 @@ def "Anchor" (inherits = </Rig>) {}
             |samples: &sdf::TimeSampleMap, t: f64| samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone());
 
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &interp, None)
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size").unwrap(),
+                Some(t),
+                &interp,
+                ValueRead::default(),
+            )
         };
         assert_eq!(size(&mut cache, 1.0)?, TimedValue::Value(vt::Value::Float(10.0)));
         assert_eq!(size(&mut cache, 2.0)?, TimedValue::Value(vt::Value::Float(20.0)));
@@ -5611,7 +5686,13 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_template_offset/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size").unwrap(),
+                Some(t),
+                &exact,
+                ValueRead::default(),
+            )
         };
         assert_eq!(size(&mut cache, 11.0)?, TimedValue::Value(Value::Float(10.0)));
         assert_eq!(size(&mut cache, 12.0)?, TimedValue::Value(Value::Float(20.0)));
@@ -5627,7 +5708,13 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_asset_anchor/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size").unwrap(),
+                Some(t),
+                &exact,
+                ValueRead::default(),
+            )
         };
         assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(42.0)));
         Ok(())
@@ -5668,7 +5755,13 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_missing_default/root.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size").unwrap(),
+                Some(t),
+                &exact,
+                ValueRead::default(),
+            )
         };
         assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(5.0)));
         assert_eq!(size(&mut cache, 10.0)?, TimedValue::Value(Value::Float(99.0)));
@@ -5684,7 +5777,13 @@ def "Anchor" (inherits = </Rig>) {}
         let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &exact, None)
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size").unwrap(),
+                Some(t),
+                &exact,
+                ValueRead::default(),
+            )
         };
         assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(5.0)));
         assert_eq!(size(&mut cache, 10.0)?, TimedValue::NoValue);
@@ -5729,7 +5828,13 @@ def "Anchor" (inherits = </Rig>) {}
         let (graph, mut cache) = collected_stack(&root);
 
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Model.size")?, Some(5.0), &lerp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size")?,
+                Some(5.0),
+                &lerp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Float(50.0))
         );
         assert!(matches!(
@@ -5776,7 +5881,13 @@ def "Model" (
             (20.0, 7.0),
         ] {
             assert_eq!(
-                cache.value_at(&graph, &sdf::path("/Model.size")?, Some(time), &lerp, None)?,
+                cache.value_at(
+                    &graph,
+                    &sdf::path("/Model.size")?,
+                    Some(time),
+                    &lerp,
+                    ValueRead::default()
+                )?,
                 TimedValue::Value(Value::Float(expected))
             );
         }
@@ -5813,7 +5924,13 @@ def "Model" (
         let root = format!("{}/fixtures/clip_missing_interp/root.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let size = |cache: &mut IndexCache, t: f64| {
-            cache.value_at(&graph, &sdf::path("/Model.size").unwrap(), Some(t), &lerp, None)
+            cache.value_at(
+                &graph,
+                &sdf::path("/Model.size").unwrap(),
+                Some(t),
+                &lerp,
+                ValueRead::default(),
+            )
         };
         assert_eq!(size(&mut cache, 0.0)?, TimedValue::Value(Value::Float(0.0)));
         assert_eq!(size(&mut cache, 15.0)?, TimedValue::Value(Value::Float(75.0)));
@@ -5832,8 +5949,9 @@ def "Model" (
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         // Query /A first so it mints /__Prototype_0 for its key.
-        let size =
-            |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
+        let size = |cache: &mut IndexCache, p: &str| {
+            cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, ValueRead::default())
+        };
         assert_eq!(
             size(&mut cache, "/A/Child.size")?,
             TimedValue::Value(vt::Value::Double(5.0))
@@ -5868,8 +5986,9 @@ def "Model" (
         let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
-        let v =
-            |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
+        let v = |cache: &mut IndexCache, p: &str| {
+            cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, ValueRead::default())
+        };
 
         // Reading the deep value walks the proxy ancestors (/A/Mid, /B/Mid),
         // testing each for instance-ness.
@@ -5939,8 +6058,9 @@ def "Model" (
         let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
-        let v =
-            |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, None);
+        let v = |cache: &mut IndexCache, p: &str| {
+            cache.value_at(&graph, &sdf::path(p).unwrap(), Some(0.0), &interp, ValueRead::default())
+        };
 
         // /A mints /__Prototype_0 (for /Outer); the nested instance mints
         // /__Prototype_1 (for /Inner). Both the outer proxy and the
@@ -6020,7 +6140,13 @@ def "Model" (
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/A/Inner/Nested/Leaf.v")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3, "one prototype per nesting level");
@@ -6035,7 +6161,13 @@ def "Model" (
         // The chain re-registers from scratch and resolves again, so the drop
         // left behind no stale index, redirection, or key.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/A/Inner/Nested/Leaf.v")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(1.0))
         );
         assert_eq!(cache.prototypes().len(), 3);
@@ -6052,7 +6184,13 @@ def "Model" (
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?;
+        cache.value_at(
+            &graph,
+            &sdf::path("/A/Inner/Nested/Leaf.v")?,
+            Some(0.0),
+            &interp,
+            ValueRead::default(),
+        )?;
         let registered = cache.prototypes();
         assert_eq!(registered.len(), 3, "one prototype per nesting level");
 
@@ -6083,7 +6221,13 @@ def "Model" (
                 .shares_data_with(cache.cached(&deep).graph())
         );
 
-        cache.value_at(&graph, &sdf::path("/A/Inner/Nested/Leaf.v")?, Some(0.0), &interp, None)?;
+        cache.value_at(
+            &graph,
+            &sdf::path("/A/Inner/Nested/Leaf.v")?,
+            Some(0.0),
+            &interp,
+            ValueRead::default(),
+        )?;
         let shared_below_prototype = cache.prototypes().iter().any(|prototype| {
             let child = prototype.append_path("Leaf").expect("a prim path");
             cache.is_indexed(&child)
@@ -6116,7 +6260,13 @@ def "Model" (
         // /__Prototype_1 for /Library/Inner, and the outer proxy's descendant
         // stands in for a prim there.
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/A/Nested/Leaf.v")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/A/Nested/Leaf.v")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(3.0))
         );
         assert_eq!(
@@ -6172,13 +6322,19 @@ def "Model" (
                 &sdf::path("/World/Inst/OtherChild.size")?,
                 Some(0.0),
                 &interp,
-                None
+                ValueRead::default()
             )?,
             TimedValue::Value(Value::Double(7.0)),
             "nested-reference descendant value survives in the shared subtree"
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Inst.otherAttr")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/World/Inst.otherAttr")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(5.0)),
             "nested-reference attribute survives on the instance root"
         );
@@ -6215,7 +6371,7 @@ def "Model" (
                 &sdf::path("/__Prototype_0.protoAttr")?,
                 Some(0.0),
                 &interp,
-                None
+                ValueRead::default()
             )?,
             TimedValue::Value(Value::Double(3.0)),
         );
@@ -6231,7 +6387,7 @@ def "Model" (
                 &sdf::path("/Deep/G/A/ProtoChild.size")?,
                 Some(0.0),
                 &interp,
-                None
+                ValueRead::default()
             )?,
             TimedValue::Value(Value::Double(7.0)),
         );
@@ -6259,9 +6415,13 @@ def "Model" (
         // The opinion resolves true on the prototype root, yet the root is not an
         // instance and so mints nothing further.
         assert_eq!(
-            cache
-                .cached(&proto)
-                .resolve_field(FieldKey::Instanceable.as_str(), &graph, None)?,
+            cache.cached(&proto).resolve_field(
+                FieldKey::Instanceable.as_str(),
+                &graph,
+                None,
+                AssetMode::Resolve,
+                &mut Diagnostics::default()
+            )?,
             Some(Value::Bool(true)),
             "the instanceable opinion is shared content of the prototype"
         );
@@ -6275,11 +6435,23 @@ def "Model" (
         // Its content composes in place rather than redirecting back through it.
         assert_eq!(cache.prim_children(&graph, &proto)?, vec![Token::from("BodyChild")]);
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/__Prototype_0.bodyAttr")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/__Prototype_0.bodyAttr")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(4.0)),
         );
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/World/Place.bodyAttr")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &sdf::path("/World/Place.bodyAttr")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(4.0)),
         );
         Ok(())
@@ -6305,7 +6477,13 @@ def "Model" (
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         let value = |cache: &mut IndexCache, name: &str| -> Result<TimedValue> {
-            Ok(cache.value_at(&graph, &proto.append_property(name)?, Some(0.0), &interp, None)?)
+            Ok(cache.value_at(
+                &graph,
+                &proto.append_property(name)?,
+                Some(0.0),
+                &interp,
+                ValueRead::default(),
+            )?)
         };
         assert_eq!(value(&mut cache, "shared")?, TimedValue::Value(Value::Double(1.0)));
         assert_eq!(value(&mut cache, "rootOnly")?, TimedValue::Fallback);
@@ -6321,7 +6499,13 @@ def "Model" (
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
         assert_eq!(
-            cache.value_at(&graph, &proto.append_property("picked")?, Some(0.0), &interp, None)?,
+            cache.value_at(
+                &graph,
+                &proto.append_property("picked")?,
+                Some(0.0),
+                &interp,
+                ValueRead::default()
+            )?,
             TimedValue::Value(Value::Double(5.0))
         );
         Ok(())
@@ -6359,7 +6543,7 @@ def "Model" (
         assert_eq!(cache.api_schemas(&graph, &proto)?, vec![Token::from("ExampleAPI")]);
         assert_eq!(
             cache
-                .time_samples(&graph, &proto.append_property("animated")?)?
+                .time_samples(&graph, &proto.append_property("animated")?, AssetMode::Resolve)?
                 .map(|samples| samples.len()),
             Some(2)
         );
@@ -7348,7 +7532,7 @@ def \"Ref\" {}
         let mut cache = fresh_cache();
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         assert_eq!(
-            cache.value_at(&graph, &sdf::path("/Inst.e")?, Some(0.0), &interp, None)?,
+            cache.value_at(&graph, &sdf::path("/Inst.e")?, Some(0.0), &interp, ValueRead::default())?,
             TimedValue::Value(Value::PathExpression(sdf::PathExpression::parse(
                 "/local// /Inst/child//"
             )))

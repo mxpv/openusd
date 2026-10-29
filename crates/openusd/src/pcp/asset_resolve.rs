@@ -96,9 +96,41 @@ impl AssetSite {
     }
 }
 
+/// What value resolution makes of an `asset` path a value holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetMode {
+    /// Evaluates and anchors it, and fills in the location it resolves to:
+    /// what a read answers.
+    Resolve,
+    /// Evaluates and anchors it, at any depth, without resolving it, writing
+    /// the anchored spelling as the authored one: what a flattened layer
+    /// keeps (C++ `forFlattening`).
+    Anchor,
+    /// Evaluates it, at any depth, and leaves it otherwise as authored: what a
+    /// flattened layer keeps for a reader that anchors the paths itself (C++
+    /// hands `UsdFlattenLayerStack`'s `resolveAssetPathFn` the evaluated
+    /// path).
+    Authored,
+}
+
+impl AssetMode {
+    /// Whether `value` holds an asset path this mode acts on: a top-level
+    /// `asset` / `asset[]` for [`Resolve`](Self::Resolve), and one at any
+    /// depth ([`Value::holds_asset_paths`]) otherwise. A caller asks before it
+    /// builds an [`AssetSite`], which copies the layer's location and
+    /// identifier, and an asset path does not blend between samples.
+    pub(crate) fn reaches(self, value: &Value) -> bool {
+        match self {
+            Self::Resolve => value.is_asset_valued(),
+            Self::Anchor | Self::Authored => value.holds_asset_paths(),
+        }
+    }
+}
+
 /// Fills the evaluated and resolved paths on an `asset` / `asset[]` value
-/// authored at `site`, recording any expression failure in `errors`. A value
-/// holding no asset paths passes through untouched.
+/// authored at `site`, or anchors every asset path in it, as `mode` says,
+/// recording any expression failure in `errors`. A value holding no asset
+/// paths passes through untouched.
 ///
 /// `site` is `None` when the caller found no authoring site, which leaves both
 /// derived paths unset and drops an expression without a diagnostic — there is
@@ -107,17 +139,18 @@ pub(super) fn resolve_values(
     graph: &LayerGraph,
     value: Value,
     site: Option<&AssetSite>,
+    mode: AssetMode,
     errors: &mut Diagnostics,
 ) -> Value {
     let mut failures = Vec::new();
     let anchor = site.and_then(AssetSite::anchor);
-    let value = sdf::resolve_asset_paths(
-        graph.layer_registry(),
-        anchor,
-        site.map(|site| site.variables(graph)),
-        value,
-        &mut failures,
-    );
+    let variables = site.map(|site| site.variables(graph));
+    let registry = graph.layer_registry();
+    let value = match mode {
+        AssetMode::Resolve => sdf::resolve_asset_paths(registry, anchor, variables, value, &mut failures),
+        AssetMode::Anchor => sdf::anchor_asset_paths(registry, anchor, variables, value, &mut failures),
+        AssetMode::Authored => sdf::anchor_asset_paths(registry, None, variables, value, &mut failures),
+    };
     record_failures(site, failures, errors);
     value
 }
@@ -179,7 +212,7 @@ mod tests {
         let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
         let mut errors = Diagnostics::default();
         let value = Value::AssetPath(sdf::AssetPath::new("`${A}`"));
-        let resolved = resolve_values(&graph, value, None, &mut errors)
+        let resolved = resolve_values(&graph, value, None, AssetMode::Resolve, &mut errors)
             .try_as_asset_path()
             .expect("an asset value stays one");
         assert_eq!(resolved.as_str(), "`${A}`", "the authored expression is kept");

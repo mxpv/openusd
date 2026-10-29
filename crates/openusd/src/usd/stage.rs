@@ -2944,8 +2944,17 @@ impl Stage {
     /// [`Attribute::get`](super::Attribute::get) with a time code when you
     /// need the stage's [`InterpolationType`] applied to a specific time.
     pub fn time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<Option<sdf::TimeSampleMap>> {
-        let attr_path = &sdf::try_into_path(attr_path)?;
-        Ok(self.masked_opinions(attr_path, |g, c| c.time_samples(g, attr_path))?)
+        self.time_samples_with(&sdf::try_into_path(attr_path)?, pcp::AssetMode::Resolve)
+    }
+
+    /// [`time_samples`](Self::time_samples) with its `asset` paths as `assets`
+    /// says: what a flattened layer keeps.
+    pub(crate) fn time_samples_with(
+        &self,
+        attr_path: &sdf::Path,
+        assets: pcp::AssetMode,
+    ) -> Result<Option<sdf::TimeSampleMap>> {
+        Ok(self.masked_opinions(attr_path, |g, c| c.time_samples(g, attr_path, assets))?)
     }
 
     /// Returns the sample times of whichever source value resolution answers
@@ -2993,19 +3002,18 @@ impl Stage {
     /// queried prim, and [`pcp::TimedValue::NoValue`] when
     /// a blocked sample or a clip answers at `time` without a value.
     ///
-    /// `accepts` makes it a typed read, which at the default time passes over
-    /// a `default` of a kind the requested type does not accept
-    /// ([`pcp::IndexCache::value_at`]).
+    /// `read` says which kinds a typed read accepts and what it makes of an
+    /// `asset` path ([`pcp::IndexCache::value_at`]).
     pub(crate) fn resolve_at(
         &self,
         attr_path: impl sdf::IntoPath,
         time: Option<f64>,
-        accepts: Option<fn(vt::ValueKind) -> bool>,
+        read: pcp::ValueRead,
     ) -> Result<pcp::TimedValue> {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp, accepts))?)
+        Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp, read))?)
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of
@@ -3269,6 +3277,18 @@ impl Stage {
         self.query_at(&path, true, Reads::spec_of(&path), |g, c| c.spec_type(g, &path))
     }
 
+    /// The composed `field` at `path`, undecoded, with its `asset` paths as
+    /// `assets` says: what a flattened layer keeps (C++
+    /// `Usd_FlattenAccess::GetAllMetadataForFlatten`).
+    pub(crate) fn field_with(
+        &self,
+        path: &sdf::Path,
+        field: &str,
+        assets: pcp::AssetMode,
+    ) -> Result<Option<vt::Value>, pcp::QueryError> {
+        self.masked_opinions(path, |g, c| c.resolve_field_with(g, path, field, assets))
+    }
+
     /// Resolves a composed field value by walking the prim index from strongest
     /// to weakest. The post-composition analog of `SdfLayer::GetField` /
     /// `SdfAbstractData::Get`, for fields the typed accessors do not expose;
@@ -3307,7 +3327,7 @@ impl Stage {
     {
         let path = sdf::try_into_path(path)?;
         let field = field.as_ref();
-        let mut raw = self.masked_opinions(&path, |g, c| c.resolve_field(g, &path, field))?;
+        let mut raw = self.field_with(&path, field, pcp::AssetMode::Resolve)?;
         // A prototype root reads no opinions, but is always defined (C++
         // `_GetPrimSpecifierImpl`).
         if raw.is_none() && field == sdf::FieldKey::Specifier.as_str() && self.cache().is_prototype(&path) {

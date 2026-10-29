@@ -18,7 +18,7 @@ use strum::EnumTryAs;
 use crate::{sdf, vt};
 
 use super::QueryError;
-use super::asset_resolve::AssetSite;
+use super::asset_resolve::{AssetMode, AssetSite};
 use super::clip::{ClipCache, ClipIntrospection, ClipQuery, ResolvedClipSet};
 use super::diagnostics::Diagnostics;
 use super::index_cache::SpecSiteRecord;
@@ -594,6 +594,12 @@ pub(crate) trait OpinionResolver {
     /// the graph spec and the clip spec at a site that has both.
     fn claims_sites(&self) -> bool {
         true
+    }
+
+    /// What the resolver makes of an `asset` path in a value a clip set
+    /// returns. Only a flattening read anchors rather than resolves.
+    fn asset_mode(&self) -> AssetMode {
+        AssetMode::Resolve
     }
 
     /// A value-clip set introduced at the site the walk has reached. The

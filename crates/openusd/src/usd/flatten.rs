@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use crate::usd::{Attribute, Prim, PrimPredicate, SpecSite, Stage};
-use crate::{Result, sdf, tf, vt};
+use crate::{Result, pcp, sdf, tf, vt};
 
 /// Fields flattening does not copy.
 ///
@@ -58,23 +58,55 @@ const STACK_FIELDS: &[sdf::FieldKey] = &[
     sdf::FieldKey::ExpressionVariables,
 ];
 
+/// What flattening writes for an `asset` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlattenAssets {
+    /// Anchored beside the layer that authored it, without being resolved,
+    /// so it names the same asset wherever the flattened layer is read (C++
+    /// `UsdStage::Flatten`). Its expression, if any, is evaluated first, and
+    /// a path nested in a dictionary is anchored too.
+    Anchored,
+    /// As authored, its expression evaluated, for a reader that anchors the
+    /// paths itself, such as a schema generator writing a fallback into code
+    /// (C++ `UsdFlattenLayerStack` takes this choice as its
+    /// `resolveAssetPathFn`).
+    Authored,
+}
+
+impl FlattenAssets {
+    /// The value-resolution mode that reads asset paths this way.
+    fn mode(self) -> pcp::AssetMode {
+        match self {
+            Self::Anchored => pcp::AssetMode::Anchor,
+            Self::Authored => pcp::AssetMode::Authored,
+        }
+    }
+}
+
 impl Stage {
-    /// The composed stage written into one layer (C++ `UsdStage::Flatten`).
+    /// The composed stage written into one layer (C++ `UsdStage::Flatten`),
+    /// with each `asset` path [anchored](FlattenAssets::Anchored).
     ///
-    /// The result is an anonymous layer, which anchors nothing: an asset path
-    /// it carries is the one composition already resolved, so it means the
-    /// same read from anywhere.
+    /// The result is an anonymous layer, which anchors nothing, so an asset
+    /// path it carries is anchored beside the layer that authored it.
+    pub fn flatten(&self) -> Result<sdf::Layer> {
+        self.flatten_with(FlattenAssets::Anchored)
+    }
+
+    /// The composed stage written into one layer, with each `asset` path as
+    /// `assets` says; [`flatten`](Self::flatten) anchors them.
     // TODO: instancing is not preserved. C++ mints a prototype per master and
     // authors an internal reference on each instance; this writes every
     // instance's contents in full, so N instances become N copies.
     // TODO: a value clip's schedule is dropped and its values are not baked, so
     // a flattened layer loses what the clips supplied. C++ writes the
     // clip-derived samples out instead (`MakeTimeSampleMapForFlatten`).
-    pub fn flatten(&self) -> Result<sdf::Layer> {
+    pub fn flatten_with(&self, assets: FlattenAssets) -> Result<sdf::Layer> {
+        let assets = assets.mode();
         let root = sdf::Path::abs_root();
         let mut data = sdf::Data::new();
         data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
-        write_fields(&mut data, &root, stage_fields(self)?);
+        write_fields(&mut data, &root, stage_fields(self, assets)?);
 
         // Everything the stage holds, whatever its status: a class prim is
         // abstract and the default predicate skips it, yet a schema library is
@@ -91,7 +123,7 @@ impl Stage {
         let mut paths = Vec::new();
         self.traverse(PrimPredicate::ALL, |path| paths.push(path.clone()))?;
         for path in paths {
-            write_prim(&mut data, &self.prim(&path)?)?;
+            write_prim(&mut data, &self.prim(&path)?, assets)?;
         }
 
         let tag = format!("flattened {}", self.root_layer().identifier);
@@ -100,7 +132,7 @@ impl Stage {
 }
 
 /// Writes one composed prim and every property it carries.
-fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim) -> Result<()> {
+fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim, assets: pcp::AssetMode) -> Result<()> {
     let stage = prim.stage();
     let specifier = prim.specifier()?.unwrap_or(sdf::Specifier::Def);
     let type_name = prim.type_name()?.unwrap_or_default();
@@ -108,7 +140,7 @@ fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim) -> Result<()> {
     write_fields(
         data,
         prim.path(),
-        spec_fields(stage, prim.path(), &prim.prim_stack()?, &[])?,
+        spec_fields(stage, prim.path(), &prim.prim_stack()?, &[], assets)?,
     );
 
     // The composed list is what the prim has applied, however the layers said
@@ -120,14 +152,19 @@ fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim) -> Result<()> {
     }
 
     for name in prim.authored_property_names()? {
-        write_property(data, prim, &name)?;
+        write_property(data, prim, &name, assets)?;
     }
     Ok(())
 }
 
 /// Writes one composed property: its declaration, the fields around it, and
 /// what it holds.
-fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Token) -> Result<()> {
+fn write_property(
+    data: &mut dyn sdf::AbstractData,
+    prim: &Prim,
+    name: &tf::Token,
+    assets: pcp::AssetMode,
+) -> Result<()> {
     let stage = prim.stage();
     let path = prim.path().append_property(name.as_str())?;
 
@@ -142,9 +179,9 @@ fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Toke
                 attribute.variability()?.unwrap_or_default(),
                 attribute.is_custom()?,
             )?;
-            write_fields(data, &path, spec_fields(stage, &path, &sites, &[])?);
+            write_fields(data, &path, spec_fields(stage, &path, &sites, &[], assets)?);
 
-            let held = held(stage, &attribute, &sites)?;
+            let held = held(stage, &attribute, &sites, assets)?;
             if let Some(value) = held.default {
                 data.set_field(&path, sdf::FieldKey::Default.as_str(), value);
             }
@@ -172,7 +209,7 @@ fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Toke
             write_fields(
                 data,
                 &path,
-                spec_fields(stage, &path, &relationship.property_stack()?, &[])?,
+                spec_fields(stage, &path, &relationship.property_stack()?, &[], assets)?,
             );
             write_explicit_paths(data, &path, sdf::FieldKey::TargetPaths, relationship.targets()?);
         }
@@ -185,7 +222,10 @@ fn write_property(data: &mut dyn sdf::AbstractData, prim: &Prim, name: &tf::Toke
 
 /// The stage metadata a standalone layer still carries: what the pseudo-root
 /// holds, less the fields that describe the layer stack it came from.
-fn stage_fields(stage: &Stage) -> Result<Vec<(String, vt::Value)>> {
+// TODO: each field is read from the root layer alone, though its name may
+// come from any layer of the stack; C++ writes the composed stage metadata,
+// a session-layer opinion over the root's (what `Stage::stage_metadata` reads).
+fn stage_fields(stage: &Stage, assets: pcp::AssetMode) -> Result<Vec<(String, vt::Value)>> {
     let root = sdf::Path::abs_root();
     let sites: Vec<SpecSite> = stage
         .layer_stack()
@@ -196,7 +236,7 @@ fn stage_fields(stage: &Stage) -> Result<Vec<(String, vt::Value)>> {
             offset: sdf::LayerOffset::default(),
         })
         .collect();
-    spec_fields(stage, &root, &sites, STACK_FIELDS)
+    spec_fields(stage, &root, &sites, STACK_FIELDS, assets)
 }
 
 /// The fields one composed spec carries, less what flattening resolved and
@@ -210,6 +250,7 @@ fn spec_fields(
     path: &sdf::Path,
     sites: &[SpecSite],
     also_dropped: &[sdf::FieldKey],
+    assets: pcp::AssetMode,
 ) -> Result<Vec<(String, vt::Value)>> {
     let mut names = BTreeSet::new();
     for site in sites {
@@ -224,8 +265,8 @@ fn spec_fields(
         if !copied(&name, also_dropped) {
             continue;
         }
-        if let Some(value) = stage.field::<vt::Value>(path, &name)? {
-            fields.push((name, bake_asset_paths(value)));
+        if let Some(value) = stage.field_with(path, &name, assets)? {
+            fields.push((name, value));
         }
     }
     Ok(fields)
@@ -253,7 +294,7 @@ struct Held {
 /// value is the fallback for the one case composition reports nothing: a
 /// block, which resolves to no value and would otherwise be lost along with
 /// the weaker opinion it hides.
-fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite]) -> Result<Held> {
+fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], assets: pcp::AssetMode) -> Result<Held> {
     let numeric = sites
         .iter()
         .find(|site| holds(stage, site, sdf::FieldKey::TimeSamples) || holds(stage, site, sdf::FieldKey::Default));
@@ -267,9 +308,7 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite]) -> Result<Held
             // The composed map is what a read would use, and is retimed the
             // same way; the authored one answers only when every sample is a
             // block, which resolves to nothing and reports no map at all.
-            let mut samples = attribute.time_samples()?.unwrap_or(raw);
-            resolve_samples(attribute, &mut samples)?;
-            Some(samples)
+            Some(stage.time_samples_with(attribute.path(), assets)?.unwrap_or(raw))
         }
         None => None,
     };
@@ -279,30 +318,11 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite]) -> Result<Held
         .find(|site| holds(stage, site, sdf::FieldKey::Default))
         .and_then(|site| authored(stage, site, sdf::FieldKey::Default))
     {
-        Some(raw) => Some(attribute.get::<vt::Value>()?.map_or(raw, bake_asset_paths)),
+        Some(raw) => Some(attribute.value_with(None, assets)?.unwrap_or(raw)),
         None => None,
     };
 
     Ok(Held { default, samples })
-}
-
-/// Anchors every asset path in a sample map.
-///
-/// A sample map is copied rather than resolved — the value resolver hands one
-/// back retimed but otherwise as authored — so each sample is re-read through
-/// the resolver at its own time. A block resolves to nothing and is the one
-/// sample worth keeping exactly as it was written.
-fn resolve_samples(attribute: &Attribute, samples: &mut sdf::TimeSampleMap) -> Result<()> {
-    if !samples.iter().any(|(_, value)| value.is_asset_valued()) {
-        return Ok(());
-    }
-    let query = attribute.query();
-    for (time, value) in samples {
-        if let Some(resolved) = query.get_at::<vt::Value>(super::TimeCode::from(*time))? {
-            *value = bake_asset_paths(resolved);
-        }
-    }
-    Ok(())
 }
 
 /// Whether a site authors `key` at all, without copying what it holds — a
@@ -318,30 +338,6 @@ fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Va
     let layer = stage.layer(&site.layer)?;
     let value = layer.data().try_field(&site.path, key.as_str()).ok()??;
     Some(value.into_owned())
-}
-
-/// Every asset path in `value` as it means to be read from anywhere.
-///
-/// A flattened layer is anonymous, so it anchors nothing: a path left as
-/// authored would resolve against whatever opened it, or against nothing.
-/// Composition already worked out where each one points, and this writes that
-/// answer down. A path nothing resolved is written as authored, or as its
-/// evaluation where an expression gave one. An expression that evaluated to
-/// the empty path is written as the empty path, where C++ anchors the
-/// expression text.
-// TODO: flattening needs value resolution to anchor without resolving, C++'s
-// `forFlattening` mode (`_MakeResolvedAssetPathsImpl` calling
-// `SdfAnchorAssetPaths`). Without it, a path that resolves to no file, whether
-// authored or evaluated, and any path nested in a dictionary, which
-// composition does not anchor (`is_asset_valued`), are written unanchored.
-// C++ anchors them all, over every value it copies.
-fn bake_asset_paths(value: vt::Value) -> vt::Value {
-    value
-        .map_asset_paths(|asset| match asset.resolved_path().or_else(|| asset.evaluated_path()) {
-            Some(resolved) => sdf::AssetPath::with_resolved_path(resolved, resolved),
-            None => asset,
-        })
-        .unwrap_or(value)
 }
 
 /// Whether a field is one flattening writes down rather than resolves away.
@@ -370,6 +366,7 @@ fn write_explicit_paths(data: &mut dyn sdf::AbstractData, path: &sdf::Path, key:
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path as FsPath;
 
     use super::*;
     use crate::{pcp, usd};
@@ -591,9 +588,144 @@ mod tests {
         );
     }
 
-    /// An asset path is written as the one composition resolved, since the
-    /// flattened layer anchors nothing and a relative path in it would mean
-    /// something else wherever it was read.
+    /// A relative asset path is anchored beside the layer that authored it
+    /// whether or not the file exists, and one nested in a dictionary is
+    /// reached, the root layer's own metadata included. Flattened as
+    /// authored, a path keeps its spelling.
+    #[test]
+    fn unresolved_nested_anchored() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root_path = directory.path().join("root.usda");
+        let nested = |name: &str| {
+            vt::Value::Dictionary(vt::Dictionary::from([(
+                "tex".to_string(),
+                vt::Value::AssetPath(sdf::AssetPath::new(name)),
+            )]))
+        };
+        let path = |text: &str| sdf::Path::new(text).expect("path");
+        let root = layer(&root_path.to_string_lossy(), |data| {
+            data.set_field(&sdf::Path::abs_root(), "customLayerData", nested("./layer.png"));
+            sdf::PrimSpec::new(data, "/Prim", sdf::Specifier::Def, "").expect("prim");
+            data.set_field(&path("/Prim"), "customData", nested("./custom.png"));
+            sdf::AttributeSpec::new(
+                data,
+                "/Prim.file",
+                sdf::ValueTypeName::ASSET,
+                sdf::Variability::Varying,
+                false,
+            )
+            .expect("attribute");
+            data.set_field(
+                &path("/Prim.file"),
+                "default",
+                vt::Value::AssetPath(sdf::AssetPath::new("./missing.png")),
+            );
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
+
+        let flattened = stage.flatten().expect("flattens");
+        let field = |at: &str, key: &str| {
+            flattened
+                .data()
+                .try_field(&path(at), key)
+                .expect("a read")
+                .expect("the field")
+                .into_owned()
+        };
+        let in_dictionary = |value: vt::Value| {
+            let entry = value.try_as_dictionary_ref().expect("a dictionary").get("tex").cloned();
+            entry.expect("the entry")
+        };
+        let anchored = |value: vt::Value, name: &str| {
+            let asset = value.try_as_asset_path().expect("an asset value");
+            assert!(
+                FsPath::new(asset.as_str()).is_absolute() && asset.as_str().ends_with(name),
+                "{name} is anchored beside the layer: {}",
+                asset.as_str()
+            );
+        };
+        anchored(field("/Prim.file", "default"), "missing.png");
+        anchored(in_dictionary(field("/Prim", "customData")), "custom.png");
+        anchored(in_dictionary(field("/", "customLayerData")), "layer.png");
+
+        // Flattened as authored, a path keeps its spelling.
+        let authored = stage.flatten_with(usd::FlattenAssets::Authored).expect("flattens");
+        let default = authored
+            .data()
+            .try_field(&path("/Prim.file"), "default")
+            .expect("a read")
+            .expect("the default")
+            .into_owned();
+        assert_eq!(default.try_as_asset_path().expect("an asset").as_str(), "./missing.png");
+    }
+
+    /// Each entry of a dictionary composed across layers is anchored beside
+    /// the layer that authored it.
+    #[test]
+    fn merged_dictionary_anchored() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(directory.path().join("weak")).expect("mkdir");
+        fs::write(
+            directory.path().join("weak").join("weak.usda"),
+            "#usda 1.0\n\ndef \"Prim\" (\n    customData = { asset weak = @./weak.png@ }\n)\n{\n}\n",
+        )
+        .expect("write");
+        let root_path = directory.path().join("root.usda");
+        fs::write(
+            &root_path,
+            "#usda 1.0\n(\n    subLayers = [@./weak/weak.usda@]\n)\n\n\
+             over \"Prim\" (\n    customData = { asset strong = @./strong.png@ }\n)\n{\n}\n",
+        )
+        .expect("write");
+        let stage = Stage::open(root_path.to_string_lossy().as_ref()).expect("opens");
+
+        let flattened = stage.flatten().expect("flattens");
+        let custom = flattened
+            .data()
+            .try_field(&sdf::Path::new("/Prim").expect("path"), "customData")
+            .expect("a read")
+            .expect("the field")
+            .into_owned();
+        let custom = custom.try_as_dictionary().expect("a dictionary");
+        let entry = |key: &str| {
+            let value = custom.get(key).cloned().expect("the entry");
+            FsPath::new(value.try_as_asset_path().expect("an asset").as_str()).to_path_buf()
+        };
+        let root_name = directory.path().file_name().expect("a name");
+        assert!(entry("strong").ends_with(FsPath::new(root_name).join("strong.png")));
+        assert!(entry("weak").ends_with(FsPath::new(root_name).join("weak").join("weak.png")));
+    }
+
+    /// Flattened as authored, an expression in the root layer's metadata is
+    /// evaluated, since the flattened layer keeps none of the variables it
+    /// names.
+    #[test]
+    fn authored_root_expression_evaluated() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root_path = directory.path().join("root.usda");
+        fs::write(
+            &root_path,
+            "#usda 1.0\n(\n    expressionVariables = { string NAME = \"tex\" }\n\
+             customLayerData = { asset file = @`\"./${NAME}.png\"`@ }\n)\n",
+        )
+        .expect("write");
+        let stage = Stage::open(root_path.to_string_lossy().as_ref()).expect("opens");
+
+        let flattened = stage.flatten_with(usd::FlattenAssets::Authored).expect("flattens");
+        let data = flattened
+            .data()
+            .try_field(&sdf::Path::abs_root(), "customLayerData")
+            .expect("a read")
+            .expect("the field")
+            .into_owned();
+        let file = data.try_as_dictionary().expect("a dictionary").get("file").cloned();
+        let file = file.expect("the entry");
+        assert_eq!(file.try_as_asset_path().expect("an asset").as_str(), "./tex.png");
+    }
+
+    /// An asset path to a file that exists is anchored beside the layer that
+    /// authored it, since the flattened layer anchors nothing and a relative
+    /// path in it would mean something else wherever it was read.
     #[test]
     fn asset_paths_anchored() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -709,9 +841,8 @@ mod tests {
         assert_eq!(value, None, "the block still hides the default at that time");
     }
 
-    /// An asset path inside a sample is written as the one composition
-    /// resolved, like any other. The map is copied rather than resolved, so
-    /// nothing else would anchor it.
+    /// An asset path inside a sample is anchored beside the layer that
+    /// authored it, like any other.
     #[test]
     fn sampled_asset_paths_anchored() {
         let directory = tempfile::tempdir().expect("tempdir");

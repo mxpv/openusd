@@ -272,6 +272,19 @@ impl vt::Value {
         matches!(self, vt::Value::AssetPath(_) | vt::Value::AssetPathVec(_))
     }
 
+    /// Whether this value holds an `asset` path at the reach of
+    /// [`map_asset_paths`](Self::map_asset_paths): itself, or nested in a
+    /// dictionary, a heterogeneous array or a time-sample map.
+    pub fn holds_asset_paths(&self) -> bool {
+        match self {
+            vt::Value::AssetPath(_) | vt::Value::AssetPathVec(_) => true,
+            vt::Value::Dictionary(entries) => entries.values().any(Self::holds_asset_paths),
+            vt::Value::ValueVec(values) => values.iter().any(Self::holds_asset_paths),
+            vt::Value::TimeSamples(samples) => samples.iter().any(|(_, value)| value.holds_asset_paths()),
+            _ => false,
+        }
+    }
+
     /// This value with every `asset` path it holds rewritten through
     /// `f`: an `AssetPath` or `AssetPathVec` itself, and any nested inside a
     /// dictionary, a heterogeneous array, or a time-sample map (the reach of
@@ -315,6 +328,30 @@ pub(crate) fn resolve_asset_paths(
     errors: &mut Vec<AssetExpressionFailure>,
 ) -> vt::Value {
     map_paths(value, |asset| resolve_path(registry, anchor, variables, asset, errors)).0
+}
+
+/// Each asset path `value` holds, at any depth, with its expression evaluated
+/// against `variables` and, where it is relative, anchored against `anchor`
+/// without being resolved (C++ `SdfAnchorAssetPaths`): the spelling that names
+/// the same asset from a layer written anywhere, as flattening a stage writes
+/// it. The anchored or evaluated path becomes the authored one, with no
+/// resolved path.
+///
+/// An empty path, an absolute one and a search path that names no file beside
+/// `anchor` are written as they evaluate, as is every path where `anchor` is
+/// `None`. A URI is anchored as the registry's resolver anchors it, as C++
+/// anchors one its resolver does not claim. An expression that fails, or that no scope evaluates,
+/// is left as authored, and a failure is recorded in `errors`.
+pub(crate) fn anchor_asset_paths(
+    registry: &sdf::LayerRegistry,
+    anchor: Option<&ar::ResolvedPath>,
+    variables: Option<&HashMap<String, vt::Value>>,
+    value: vt::Value,
+    errors: &mut Vec<AssetExpressionFailure>,
+) -> vt::Value {
+    value
+        .map_asset_paths(|asset| anchor_path(registry, anchor, variables, asset, errors))
+        .unwrap_or(value)
 }
 
 /// Fills the evaluated path on an `asset` / `asset[]` value without resolving
@@ -433,11 +470,76 @@ fn resolve_path(
     (asset, outcome)
 }
 
+/// Evaluates `asset` as [`evaluate_path`] does, then writes it anchored
+/// against `anchor` as [`anchor_asset_paths`] describes.
+fn anchor_path(
+    registry: &sdf::LayerRegistry,
+    anchor: Option<&ar::ResolvedPath>,
+    variables: Option<&HashMap<String, vt::Value>>,
+    asset: AssetPath,
+    errors: &mut Vec<AssetExpressionFailure>,
+) -> AssetPath {
+    let (asset, outcome) = evaluate_path(variables, asset, errors);
+    if outcome != AssetOutcome::Evaluated {
+        return asset;
+    }
+    let path = asset.evaluated_path().unwrap_or(asset.as_str());
+    match anchor {
+        Some(anchor) if !path.is_empty() && ar::is_relative_path(path) => {
+            AssetPath::new(registry.create_identifier(path, Some(anchor)))
+        }
+        _ => AssetPath::new(path),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
+
+    /// A relative path is anchored beside the layer whether or not the file
+    /// exists, an expression first evaluates, and an empty, absolute or
+    /// search path keeps its spelling; a path inside a dictionary is reached.
+    #[test]
+    fn anchor_relative_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor = ar::ResolvedPath::new(dir.path().join("root.usda"));
+        let registry = sdf::LayerRegistry::default();
+        let variables = HashMap::from([
+            ("V".to_string(), vt::Value::from("x")),
+            ("E".to_string(), vt::Value::from("")),
+        ]);
+        let anchored = |authored: &str| -> String {
+            let mut errors = Vec::new();
+            let value = vt::Value::AssetPath(AssetPath::new(authored));
+            let value = anchor_asset_paths(&registry, Some(&anchor), Some(&variables), value, &mut errors);
+            assert!(errors.is_empty(), "{errors:?}");
+            value.try_as_asset_path().expect("an asset").as_str().to_string()
+        };
+        let beside = |name: &str| registry.create_identifier(name, Some(&anchor));
+
+        assert!(anchored("./missing.png").contains("missing.png") && !anchored("./missing.png").starts_with('.'));
+        assert_eq!(anchored("`\"./tex_${V}.png\"`"), beside("./tex_x.png"));
+        assert_eq!(anchored("`${E}`"), "");
+        assert_eq!(anchored("search.png"), "search.png");
+        let absolute = dir.path().join("abs.png").to_string_lossy().replace('\\', "/");
+        assert_eq!(anchored(&absolute), absolute);
+
+        let mut errors = Vec::new();
+        let nested = vt::Value::Dictionary(vt::Dictionary::from([(
+            "tex".to_string(),
+            vt::Value::AssetPath(AssetPath::new("./nested.png")),
+        )]));
+        let nested = anchor_asset_paths(&registry, Some(&anchor), None, nested, &mut errors);
+        let entry = nested
+            .try_as_dictionary_ref()
+            .expect("a dictionary")
+            .get("tex")
+            .cloned();
+        let entry = entry.and_then(|value| value.try_as_asset_path()).expect("an asset");
+        assert_eq!(entry.as_str(), beside("./nested.png"));
+    }
 
     #[test]
     fn string_like() {
