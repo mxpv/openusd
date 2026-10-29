@@ -54,8 +54,8 @@ impl Opinion<'_> {
     /// ([`LayerOffset::apply_to_value`](sdf::LayerOffset::apply_to_value)). The
     /// value stays borrowed unless the offset actually retimes something in it.
     fn retimed(mut self) -> Self {
-        if !self.offset.is_identity() && self.value.holds_time_codes() {
-            self.offset.apply_to_value(self.value.to_mut());
+        if let Some(retimed) = self.offset.apply_to_value(&self.value) {
+            self.value = Cow::Owned(retimed);
         }
         self
     }

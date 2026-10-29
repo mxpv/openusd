@@ -567,11 +567,13 @@ impl<'a> Parser<'a> {
         // A path expression default is anchored at the nearest prim, as C++
         // `_SetDefault` anchors it, so `.//` reads as `/Prim//`, and `.//`
         // in a variant of `/Prim` reads as `/Prim//` too.
-        let mut value = types::parse_value(&mut self.cursor, &type_name)?;
-        if value.holds_path_expressions() {
-            let anchor = current_path.nearest_prim_path();
-            value = value.map_path_expressions(|expression| expression.make_absolute(&anchor));
-        }
+        let value = types::parse_value(&mut self.cursor, &type_name)?;
+        let mut anchor = None;
+        let value = value
+            .map_path_expressions(|expression| {
+                expression.make_absolute(anchor.get_or_insert_with(|| current_path.nearest_prim_path()))
+            })
+            .unwrap_or(value);
         let path = current_path.append_property(name)?;
 
         if self.cursor.at_punctuation('(')? {

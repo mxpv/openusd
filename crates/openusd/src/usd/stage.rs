@@ -37,7 +37,7 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
-use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -442,18 +442,34 @@ impl EditTarget {
     /// target-to-source through this target's namespace mapping; an atom the
     /// mapping cannot reach becomes the empty expression, and a `%_` or
     /// `%:name` reference keeps its empty path. Any other value passes
-    /// through, as does everything through a local or variant target, which
-    /// carries the identity offset and mapping.
+    /// through. A local or variant target carries the identity offset and
+    /// mapping, so through one only the anchoring applies.
     pub fn map_to_spec_value(&self, object_path: &sdf::Path, value: impl Into<vt::Value>) -> vt::Value {
-        let mut value = value.into();
-        self.spec_time_offset().apply_to_value(&mut value);
-        if !value.holds_path_expressions() {
-            return value;
-        }
-        let anchor_prim = object_path.prim_path();
-        value.map_path_expressions(|expr| {
-            expr.make_absolute(&anchor_prim)
+        let value = value.into();
+        // TODO(perf): an owned sample map is cloned to be retimed.
+        self.to_spec(&OnceCell::new(), object_path, &value).unwrap_or(value)
+    }
+
+    /// `value` as [`map_to_spec_value`](Self::map_to_spec_value) maps it, or
+    /// `None` where nothing in it changes: the one walk of C++
+    /// `_StageValueToFieldXf`, whose sample-map arm moves the times and walks
+    /// each sample through the same transform. `anchor` holds the owning
+    /// prim's path once a path expression needs it.
+    fn to_spec(&self, anchor: &OnceCell<sdf::Path>, object_path: &sdf::Path, value: &vt::Value) -> Option<vt::Value> {
+        let offset = self.spec_time_offset();
+        let map = |expr: sdf::PathExpression| {
+            expr.make_absolute(anchor.get_or_init(|| object_path.prim_path()))
                 .map_paths(|path| self.mapping.map_target_to_source(path))
+        };
+        value.try_transform(&mut |value| match value {
+            vt::Value::TimeCode(_) | vt::Value::TimeCodeVec(_) => offset.apply_to_value(value),
+            vt::Value::TimeSamples(samples) if !offset.is_identity() => {
+                let mut samples = samples.clone();
+                offset.retime_samples(&mut samples, |sample| self.to_spec(anchor, object_path, sample));
+                Some(vt::Value::TimeSamples(samples))
+            }
+            vt::Value::PathExpression(_) | vt::Value::PathExpressionVec(_) => value.map_path_expressions(map),
+            _ => None,
         })
     }
 

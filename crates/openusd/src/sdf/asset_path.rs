@@ -267,20 +267,24 @@ impl vt::Value {
         matches!(self, vt::Value::AssetPath(_) | vt::Value::AssetPathVec(_))
     }
 
-    /// Returns this value with every `asset` path it holds rewritten through
+    /// This value with every `asset` path it holds rewritten through
     /// `f`: an `AssetPath` or `AssetPathVec` itself, and any nested inside a
     /// dictionary, a heterogeneous array, or a time-sample map (the reach of
-    /// [`transform`](Self::transform)).
+    /// [`try_transform`](Self::try_transform)), or `None` where it holds none.
     ///
     /// That reach is wider than [`is_asset_valued`](Self::is_asset_valued)
     /// admits, which counts only the two top-level forms because resolution
     /// does not recurse. A caller rewriting paths rather than resolving them
     /// wants the nested ones too, which is what flattening a stage needs.
-    pub fn map_asset_paths(self, mut f: impl FnMut(AssetPath) -> AssetPath) -> vt::Value {
-        self.transform(&mut |value| match value {
-            vt::Value::AssetPath(asset) => vt::Value::AssetPath(f(asset)),
-            vt::Value::AssetPathVec(assets) => vt::Value::AssetPathVec(assets.into_iter().map(&mut f).collect()),
-            other => other,
+    pub fn map_asset_paths(&self, mut f: impl FnMut(AssetPath) -> AssetPath) -> Option<vt::Value> {
+        // TODO(perf): a caller that owns the value could move its paths
+        // through `f` instead of cloning each one.
+        self.try_transform(&mut |value| match value {
+            vt::Value::AssetPath(asset) => Some(vt::Value::AssetPath(f(asset.clone()))),
+            vt::Value::AssetPathVec(assets) => {
+                Some(vt::Value::AssetPathVec(assets.iter().cloned().map(&mut f).collect()))
+            }
+            _ => None,
         })
     }
 }

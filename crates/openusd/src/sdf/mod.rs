@@ -219,36 +219,31 @@ impl LayerOffset {
     /// retimes the value itself just as [`apply`](Self::apply) retimes the times
     /// a sample map is keyed by: an attribute authoring `timecode t = 5` in a
     /// layer sublayered with `(offset = 10; scale = 2)` resolves to `20` on the
-    /// stage. Dictionaries, heterogeneous arrays and sample maps are recursed
-    /// into, each able to carry a timecode at any depth; every other value is
-    /// left as it stands, as is any value at all under the identity offset.
+    /// stage. The timecodes a value holds at the reach of
+    /// [`try_transform`](Value::try_transform) are retimed, and a sample map's
+    /// times with them.
     ///
-    /// [`Value::holds_time_codes`] answers in advance whether this would rewrite
-    /// anything, for a caller holding the value behind a borrow.
-    pub fn apply_to_value(&self, value: &mut Value) {
+    /// `None` where nothing is retimed: a value that holds no time, and any
+    /// value at all under the identity offset. A sample map holds times
+    /// whatever its samples hold, so any other offset retimes one.
+    pub fn apply_to_value(&self, value: &Value) -> Option<Value> {
         if self.is_identity() {
-            return;
+            return None;
         }
-        match value {
-            Value::TimeCode(time) => *time = TimeCode(self.apply(time.value())),
-            Value::TimeCodeVec(times) => {
-                for time in times {
-                    *time = TimeCode(self.apply(time.value()));
-                }
+        value.try_transform(&mut |value| match value {
+            Value::TimeCode(time) => Some(Value::TimeCode(TimeCode(self.apply(time.value())))),
+            Value::TimeCodeVec(times) => Some(Value::TimeCodeVec(
+                times.iter().map(|time| TimeCode(self.apply(time.value()))).collect(),
+            )),
+            Value::TimeSamples(samples) => {
+                // TODO(perf): the clone copies each sample that is then
+                // replaced; the retimed map could be built sample by sample.
+                let mut samples = samples.clone();
+                self.apply_to_samples(&mut samples);
+                Some(Value::TimeSamples(samples))
             }
-            Value::TimeSamples(samples) => self.apply_to_samples(samples),
-            Value::Dictionary(entries) => {
-                for entry in entries.values_mut() {
-                    self.apply_to_value(entry);
-                }
-            }
-            Value::ValueVec(values) => {
-                for value in values {
-                    self.apply_to_value(value);
-                }
-            }
-            _ => {}
-        }
+            _ => None,
+        })
     }
 
     /// Applies this offset to a sample map in place: every key is a time in the
@@ -260,9 +255,18 @@ impl LayerOffset {
     /// non-positive scale [sanitizes](Self::sanitized) to the identity — but the
     /// arithmetic here is defined for any offset.
     pub fn apply_to_samples(&self, samples: &mut TimeSampleMap) {
+        self.retime_samples(samples, |sample| self.apply_to_value(sample));
+    }
+
+    /// Moves a sample map's times through this offset in place and replaces
+    /// each sample `f` rewrites (C++ `_TransformSampleMap`), keeping the map
+    /// in ascending time as [`apply_to_samples`](Self::apply_to_samples) does.
+    pub(crate) fn retime_samples(&self, samples: &mut TimeSampleMap, mut f: impl FnMut(&Value) -> Option<Value>) {
         for (time, sample) in samples.iter_mut() {
             *time = self.apply(*time);
-            self.apply_to_value(sample);
+            if let Some(rewritten) = f(sample) {
+                *sample = rewritten;
+            }
         }
         if self.scale < 0.0 {
             samples.reverse();
@@ -286,9 +290,8 @@ impl LayerOffset {
         time: f64,
         interp: impl Fn(&TimeSampleMap, f64) -> Option<Value>,
     ) -> Option<Value> {
-        let mut value = interp(samples, self.inverse().apply(time))?;
-        self.apply_to_value(&mut value);
-        Some(value)
+        let value = interp(samples, self.inverse().apply(time))?;
+        Some(self.apply_to_value(&value).unwrap_or(value))
     }
 
     /// Returns the inverse offset, undoing [`apply`](Self::apply): if `self`
@@ -498,27 +501,6 @@ pub type RelocateList = Vec<Relocate>;
 /// A boxed layer data source, used throughout the layer stack.
 pub type LayerData = Box<dyn AbstractData>;
 
-impl Value {
-    /// Whether this value holds a time coordinate that
-    /// [`LayerOffset::apply_to_value`](LayerOffset::apply_to_value)
-    /// retimes: a `timecode` or `timecode[]` at the reach of
-    /// [`holds`](Self::holds), or a sample map, whose keys are times whatever
-    /// the samples themselves hold.
-    ///
-    /// The single source of truth for the time-bearing variants, so the
-    /// retiming and the callers that decide whether to pay for it cannot
-    /// disagree. Checking it lets a borrowed value skip the clone a retiming
-    /// would need.
-    pub fn holds_time_codes(&self) -> bool {
-        self.holds(&|value| {
-            matches!(
-                value,
-                Value::TimeCode(_) | Value::TimeCodeVec(_) | Value::TimeSamples(_)
-            )
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,28 +579,25 @@ mod tests {
 
     #[test]
     fn value_identity_passthrough() {
-        let samples: TimeSampleMap = vec![(1.0, Value::Double(0.0))];
-        let mut value = Value::TimeSamples(samples.clone());
-        LayerOffset::IDENTITY.apply_to_value(&mut value);
-        assert_eq!(value, Value::TimeSamples(samples));
+        let value = Value::TimeSamples(vec![(1.0, Value::Double(0.0))]);
+        assert_eq!(LayerOffset::IDENTITY.apply_to_value(&value), None);
     }
 
     #[test]
     fn value_time_codes() {
         let offset = LayerOffset::new(10.0, 2.0);
 
-        let mut scalar = Value::TimeCode(TimeCode(5.0));
-        offset.apply_to_value(&mut scalar);
-        assert_eq!(scalar, Value::TimeCode(TimeCode(20.0)));
+        let scalar = Value::TimeCode(TimeCode(5.0));
+        assert_eq!(offset.apply_to_value(&scalar), Some(Value::TimeCode(TimeCode(20.0))));
 
-        let mut array = Value::TimeCodeVec(vec![TimeCode(5.0), TimeCode(10.0)]);
-        offset.apply_to_value(&mut array);
-        assert_eq!(array, Value::TimeCodeVec(vec![TimeCode(20.0), TimeCode(30.0)]));
+        let array = Value::TimeCodeVec(vec![TimeCode(5.0), TimeCode(10.0)]);
+        assert_eq!(
+            offset.apply_to_value(&array),
+            Some(Value::TimeCodeVec(vec![TimeCode(20.0), TimeCode(30.0)]))
+        );
 
         // A plain number is not a time coordinate, whatever it holds.
-        let mut plain = Value::Double(5.0);
-        offset.apply_to_value(&mut plain);
-        assert_eq!(plain, Value::Double(5.0));
+        assert_eq!(offset.apply_to_value(&Value::Double(5.0)), None);
     }
 
     #[test]
@@ -627,23 +606,21 @@ mod tests {
 
         // A dictionary carries timecodes at any depth.
         let inner = HashMap::from([("deep".to_string(), Value::TimeCode(TimeCode(5.0)))]);
-        let mut dict = Value::Dictionary(Dictionary::from([
+        let dict = Value::Dictionary(Dictionary::from([
             ("nested".to_string(), Value::Dictionary(inner.into())),
             ("kept".to_string(), Value::Double(5.0)),
         ]));
-        assert!(dict.holds_time_codes());
-        offset.apply_to_value(&mut dict);
+        let dict = offset.apply_to_value(&dict).expect("a timecode is retimed");
         let entries = dict.try_as_dictionary_ref().expect("dictionary");
         assert_eq!(entries.get("kept"), Some(&Value::Double(5.0)));
         let nested = entries.get("nested").expect("nested").try_as_dictionary_ref().unwrap();
         assert_eq!(nested.get("deep"), Some(&Value::TimeCode(TimeCode(20.0))));
 
         // A sample map's keys and its time-valued samples both move.
-        let mut samples = Value::TimeSamples(vec![(1.0, Value::TimeCode(TimeCode(5.0)))]);
-        offset.apply_to_value(&mut samples);
+        let samples = Value::TimeSamples(vec![(1.0, Value::TimeCode(TimeCode(5.0)))]);
         assert_eq!(
-            samples,
-            Value::TimeSamples(vec![(12.0, Value::TimeCode(TimeCode(20.0)))])
+            offset.apply_to_value(&samples),
+            Some(Value::TimeSamples(vec![(12.0, Value::TimeCode(TimeCode(20.0)))]))
         );
     }
 

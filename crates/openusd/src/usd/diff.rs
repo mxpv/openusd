@@ -700,18 +700,14 @@ fn translate_value(
     target: &EditTarget,
     time_offset: sdf::LayerOffset,
 ) -> Option<vt::Value> {
-    let retime = !time_offset.is_identity() && value.holds_time_codes();
     let holds_paths = match value {
         vt::Value::TimeSamples(samples) => samples.iter().any(|(_, sample)| sample.has_embedded_paths()),
         other => other.has_embedded_paths(),
     };
-    if !retime && !holds_paths {
-        return None;
-    }
 
     // Only the path rewriting recurses per sample; the retiming below reaches
     // the keys and the samples in one pass, so the recursion leaves time alone.
-    let mut translated = match value {
+    let translated = holds_paths.then(|| match value {
         vt::Value::TimeSamples(samples) => vt::Value::TimeSamples(
             samples
                 .iter()
@@ -722,15 +718,12 @@ fn translate_value(
                 })
                 .collect(),
         ),
-        other if holds_paths => {
-            other.remap_paths(|path| translate_value_path(diff, target, path).unwrap_or_else(|| path.clone()))
-        }
-        other => other.clone(),
-    };
-    if retime {
-        time_offset.apply_to_value(&mut translated);
-    }
-    Some(translated)
+        other => other.remap_paths(|path| translate_value_path(diff, target, path).unwrap_or_else(|| path.clone())),
+    });
+    // TODO(perf): a translated value is cloned again to be retimed.
+    time_offset
+        .apply_to_value(translated.as_ref().unwrap_or(value))
+        .or(translated)
 }
 
 #[cfg(test)]

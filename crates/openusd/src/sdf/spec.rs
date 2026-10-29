@@ -1237,12 +1237,12 @@ where
     /// coercion.
     fn coerce_for_declared(&self, value: vt::Value) -> Result<vt::Value, sdf::AuthoringError> {
         let declared = self.declared_type()?.ok_or(sdf::ValueTypeError::Empty)?;
-        let value = if value.holds_path_expressions() {
-            let prim_path = self.path().nearest_prim_path();
-            value.map_path_expressions(|expr| expr.make_absolute(&prim_path))
-        } else {
-            value
-        };
+        let mut anchor = None;
+        let value = value
+            .map_path_expressions(|expr| {
+                expr.make_absolute(anchor.get_or_insert_with(|| self.path().nearest_prim_path()))
+            })
+            .unwrap_or(value);
         Ok(declared.coerce(value)?)
     }
 

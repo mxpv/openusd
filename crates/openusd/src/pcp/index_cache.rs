@@ -517,10 +517,9 @@ impl OpinionResolver for ValueAtResolver<'_> {
         {
             return Step::Continue;
         }
-        let mut value = value.into_owned();
         // The opinion is authored in the layer's own time frame, so a time code
         // in it reaches the stage through that layer's offset (spec 12.3.2.1).
-        site.offset.apply_to_value(&mut value);
+        let value = site.offset.apply_to_value(&value).unwrap_or_else(|| value.into_owned());
         self.fold(value, site, true)
     }
 

@@ -353,43 +353,45 @@ impl Value {
         }
     }
 
-    /// Returns this value with every value it holds rewritten through `f`
-    /// (C++ `VtValueTryTransform`). The entries of a dictionary, the elements
-    /// of a heterogeneous array and the samples of a time-sample map are
-    /// walked to any depth, and `f` is handed every other value it reaches,
-    /// this one included when it is not such a container. The walk reaches a
-    /// heterogeneous array's elements, where C++, which registers no transform
-    /// for a `std::vector<VtValue>`, does not.
-    pub fn transform(self, f: &mut impl FnMut(Value) -> Value) -> Value {
-        match self {
-            Value::Dictionary(entries) => Value::Dictionary(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, value.transform(f)))
-                    .collect(),
-            ),
-            Value::ValueVec(values) => Value::ValueVec(values.into_iter().map(|value| value.transform(f)).collect()),
-            Value::TimeSamples(samples) => Value::TimeSamples(
-                samples
-                    .into_iter()
-                    .map(|(time, value)| (time, value.transform(f)))
-                    .collect(),
-            ),
-            value => f(value),
+    /// This value with `f` applied to it and to every value it holds, or
+    /// `None` where nothing changed (C++ `VtValueTryTransform`).
+    ///
+    /// `f` is asked about this value first, a container included: `Some`
+    /// replaces it, and `None` walks into a container's values or leaves any
+    /// other value as it stands. The containers walked are a dictionary, a
+    /// heterogeneous array and a time-sample map, whose values are walked and
+    /// whose times are left alone; a container is rebuilt only where one of
+    /// its values changed. The walk reaches a heterogeneous array's elements,
+    /// where C++, which registers no transform for a `std::vector<VtValue>`,
+    /// does not. An [`UnregisteredDictionary`](Self::UnregisteredDictionary)
+    /// is a value like any other, as an `SdfUnregisteredValue` is in C++.
+    pub fn try_transform(&self, f: &mut impl FnMut(&Value) -> Option<Value>) -> Option<Value> {
+        if let Some(value) = f(self) {
+            return Some(value);
         }
-    }
-
-    /// Whether `pred` holds for this value or for any value it holds, at the
-    /// reach of [`transform`](Self::transform). `pred` is asked about each
-    /// container as well as what it holds.
-    pub fn holds(&self, pred: &impl Fn(&Value) -> bool) -> bool {
-        pred(self)
-            || match self {
-                Value::Dictionary(entries) => entries.values().any(|value| value.holds(pred)),
-                Value::ValueVec(values) => values.iter().any(|value| value.holds(pred)),
-                Value::TimeSamples(samples) => samples.iter().any(|(_, value)| value.holds(pred)),
-                _ => false,
+        match self {
+            Value::Dictionary(entries) => {
+                // TODO(perf): the first change clones every entry, the ones
+                // about to be replaced included.
+                let mut changed: Option<Dictionary> = None;
+                for (key, value) in entries.iter() {
+                    if let Some(value) = value.try_transform(f) {
+                        changed
+                            .get_or_insert_with(|| entries.clone())
+                            .insert(key.clone(), value);
+                    }
+                }
+                changed.map(Value::Dictionary)
             }
+            Value::ValueVec(values) => {
+                try_transform_each(values, f, |value| value, |_, value| value).map(Value::ValueVec)
+            }
+            Value::TimeSamples(samples) => {
+                try_transform_each(samples, f, |(_, value)| value, |(time, _), value| (*time, value))
+                    .map(Value::TimeSamples)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1120,37 +1122,90 @@ impl<'a> IntoIterator for &'a Dictionary {
     }
 }
 
+/// `items` with the value each holds transformed through `f`, or `None`
+/// where none changed: the walk [`Value::try_transform`] makes over an array
+/// of values or of time samples. `value` reaches the value an item holds, and
+/// `with` makes the item that holds another value in its place.
+fn try_transform_each<T: Clone>(
+    items: &[T],
+    f: &mut impl FnMut(&Value) -> Option<Value>,
+    value: impl Fn(&T) -> &Value,
+    with: impl Fn(&T, Value) -> T,
+) -> Option<Vec<T>> {
+    let mut changed: Option<Vec<T>> = None;
+    for (at, item) in items.iter().enumerate() {
+        let transformed = value(item).try_transform(f);
+        match (&mut changed, transformed) {
+            (None, None) => {}
+            (None, Some(transformed)) => {
+                let mut rebuilt = Vec::with_capacity(items.len());
+                rebuilt.extend_from_slice(&items[..at]);
+                rebuilt.push(with(item, transformed));
+                changed = Some(rebuilt);
+            }
+            (Some(rebuilt), transformed) => {
+                rebuilt.push(transformed.map_or_else(|| item.clone(), |transformed| with(item, transformed)));
+            }
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A transform reaches through dictionaries, heterogeneous arrays and
-    /// sample maps to every other value, and `holds` asks the same values.
+    /// sample maps, rebuilds only the containers on the way to a change, and
+    /// answers `None` where nothing changed.
     #[test]
     fn transform_reach() {
-        let nested = Value::Dictionary(Dictionary::from([(
-            "k".to_string(),
-            Value::ValueVec(vec![Value::Int(1), Value::TimeSamples(vec![(0.0, Value::Int(2))])]),
-        )]));
-        let mut seen = Vec::new();
-        let doubled = nested.clone().transform(&mut |value| {
-            seen.push(value.clone());
-            match value {
-                Value::Int(n) => Value::Int(n * 2),
-                other => other,
-            }
-        });
-        assert_eq!(seen, [Value::Int(1), Value::Int(2)]);
-        let expected = Value::Dictionary(Dictionary::from([(
-            "k".to_string(),
-            Value::ValueVec(vec![Value::Int(2), Value::TimeSamples(vec![(0.0, Value::Int(4))])]),
-        )]));
-        assert_eq!(doubled, expected);
+        let nested = Value::Dictionary(Dictionary::from([
+            (
+                "k".to_string(),
+                Value::ValueVec(vec![Value::Int(1), Value::TimeSamples(vec![(0.0, Value::Int(2))])]),
+            ),
+            ("other".to_string(), Value::Float(1.5)),
+        ]));
+        let double = &mut |value: &Value| match value {
+            Value::Int(n) => Some(Value::Int(n * 2)),
+            _ => None,
+        };
+        let expected = Value::Dictionary(Dictionary::from([
+            (
+                "k".to_string(),
+                Value::ValueVec(vec![Value::Int(2), Value::TimeSamples(vec![(0.0, Value::Int(4))])]),
+            ),
+            ("other".to_string(), Value::Float(1.5)),
+        ]));
+        assert_eq!(nested.try_transform(double), Some(expected));
+        assert_eq!(Value::Float(1.0).try_transform(double), None);
+        assert_eq!(nested.try_transform(&mut |_| None), None);
 
-        assert!(nested.holds(&|value| *value == Value::Int(2)));
-        assert!(nested.holds(&|value| matches!(value, Value::TimeSamples(_))));
-        assert!(!nested.holds(&|value| *value == Value::Int(3)));
-        assert_eq!(Value::Float(1.0).transform(&mut |_| Value::Int(0)), Value::Int(0));
+        // A change after the first element keeps the elements before it.
+        let late = Value::ValueVec(vec![Value::Float(0.5), Value::Int(3)]);
+        assert_eq!(
+            late.try_transform(double),
+            Some(Value::ValueVec(vec![Value::Float(0.5), Value::Int(6)]))
+        );
+    }
+
+    /// `f` is asked about a container before what it holds, and a container
+    /// it answers for is not walked.
+    #[test]
+    fn transform_container_first() {
+        let dict = Value::Dictionary(Dictionary::from([("t".to_string(), Value::Int(1))]));
+        let replaced = dict.try_transform(&mut |value| match value {
+            Value::Dictionary(_) => Some(Value::Bool(true)),
+            Value::Int(_) => Some(Value::Int(0)),
+            _ => None,
+        });
+        assert_eq!(replaced, Some(Value::Bool(true)));
+
+        // An unregistered dictionary is a value, not a container to walk.
+        let unregistered = Value::UnregisteredDictionary(Dictionary::from([("t".to_string(), Value::Int(1))]));
+        let ints = &mut |value: &Value| value.is_int().then_some(Value::Int(0));
+        assert_eq!(unregistered.try_transform(ints), None);
     }
 
     /// A key path walks nested dictionaries: a set makes the steps it needs,

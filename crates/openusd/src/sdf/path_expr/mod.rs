@@ -549,25 +549,19 @@ impl Value {
         }
     }
 
-    /// Whether this value embeds a path expression that authoring anchors and
-    /// maps through [`map_path_expressions`](Self::map_path_expressions): a
-    /// `PathExpression` or `PathExpressionVec` at the reach of
-    /// [`holds`](Self::holds). Checking it lets the common write skip the
-    /// anchor path and the rewrite.
-    pub fn holds_path_expressions(&self) -> bool {
-        self.holds(&|value| matches!(value, Value::PathExpression(_) | Value::PathExpressionVec(_)))
-    }
-
-    /// Returns this value with every path expression it holds, a
-    /// `PathExpression` or `PathExpressionVec`, rewritten through `f` at the
-    /// reach of [`transform`](Self::transform). List ops, references,
-    /// payloads and relocates are left alone: authoring never transforms them,
-    /// only [`remap_paths`](Self::remap_paths) does, for copies.
-    pub fn map_path_expressions(self, mut f: impl FnMut(PathExpression) -> PathExpression) -> Value {
-        self.transform(&mut |value| match value {
-            Value::PathExpression(expr) => Value::PathExpression(f(expr)),
-            Value::PathExpressionVec(exprs) => Value::PathExpressionVec(exprs.into_iter().map(&mut f).collect()),
-            other => other,
+    /// This value with every path expression it holds, a `PathExpression` or
+    /// `PathExpressionVec`, rewritten through `f` at the reach of
+    /// [`try_transform`](Self::try_transform), or `None` where it holds none.
+    /// List ops, references, payloads and relocates are left alone: authoring
+    /// never transforms them, only [`remap_paths`](Self::remap_paths) does,
+    /// for copies.
+    pub fn map_path_expressions(&self, mut f: impl FnMut(PathExpression) -> PathExpression) -> Option<Value> {
+        self.try_transform(&mut |value| match value {
+            Value::PathExpression(expr) => Some(Value::PathExpression(f(expr.clone()))),
+            Value::PathExpressionVec(exprs) => {
+                Some(Value::PathExpressionVec(exprs.iter().cloned().map(&mut f).collect()))
+            }
+            _ => None,
         })
     }
 }
