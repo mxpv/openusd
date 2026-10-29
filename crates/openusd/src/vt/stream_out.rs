@@ -7,11 +7,7 @@ use std::slice;
 
 use bytemuck::Pod;
 
-use crate::{gf, tf};
-
-use crate::sdf::{
-    AssetPath, LayerOffset, ListOp, Path, Payload, Permission, Reference, Specifier, TimeCode, Variability,
-};
+use crate::{gf, sdf, tf};
 
 use super::{Dictionary, Value};
 
@@ -23,7 +19,7 @@ use super::{Dictionary, Value};
 ///   half, a time code and a layer offset take six significant digits
 ///   (`%g`).
 /// - A string, a token and an unregistered value are written raw, unquoted;
-///   an asset path between `@`s, as [`AssetPath::asset_path`] gives it.
+///   an asset path between `@`s, as [`sdf::AssetPath::asset_path`] gives it.
 /// - An array is `[a, b]`, a vector or quaternion `(a, b, c)` (a quaternion
 ///   real part first), a matrix `( (a, b), (c, d) )`, and a dictionary
 ///   `{'key': value}` sorted by key.
@@ -57,66 +53,66 @@ fn stream(s: &mut String, value: &Value) {
     match value {
         Value::None | Value::Value => {}
         Value::Bool(v) => boolean(s, v),
-        Value::BoolVec(v) => array(s, v, boolean),
-        Value::Uchar(v) => number(s, v),
-        Value::UcharVec(v) => array(s, v, number),
-        Value::Int(v) => number(s, v),
-        Value::IntVec(v) => array(s, v, number),
-        Value::Uint(v) => number(s, v),
-        Value::UintVec(v) => array(s, v, number),
-        Value::Int64(v) => number(s, v),
-        Value::Int64Vec(v) => array(s, v, number),
-        Value::Uint64(v) => number(s, v),
-        Value::Uint64Vec(v) => array(s, v, number),
+        Value::BoolVec(v) => separated(s, ARRAY, v, boolean),
+        Value::Uchar(v) => display(s, v),
+        Value::UcharVec(v) => separated(s, ARRAY, v, display),
+        Value::Int(v) => display(s, v),
+        Value::IntVec(v) => separated(s, ARRAY, v, display),
+        Value::Uint(v) => display(s, v),
+        Value::UintVec(v) => separated(s, ARRAY, v, display),
+        Value::Int64(v) => display(s, v),
+        Value::Int64Vec(v) => separated(s, ARRAY, v, display),
+        Value::Uint64(v) => display(s, v),
+        Value::Uint64Vec(v) => separated(s, ARRAY, v, display),
         Value::Half(v) => half(s, v),
-        Value::HalfVec(v) => array(s, v, half),
+        Value::HalfVec(v) => separated(s, ARRAY, v, half),
         Value::Float(v) => float(s, v),
-        Value::FloatVec(v) => array(s, v, float),
+        Value::FloatVec(v) => separated(s, ARRAY, v, float),
         Value::Double(v) => float(s, v),
-        Value::DoubleVec(v) => array(s, v, float),
+        Value::DoubleVec(v) => separated(s, ARRAY, v, float),
         Value::String(v) | Value::UnregisteredValue(v) => s.push_str(v),
-        Value::StringVec(v) => array(s, v, text),
+        Value::StringVec(v) => separated(s, ARRAY, v, text),
         Value::Token(v) => s.push_str(v.as_str()),
-        Value::TokenVec(v) => array(s, v, text),
+        Value::TokenVec(v) => separated(s, ARRAY, v, text),
         Value::AssetPath(v) => asset_path(s, v),
-        Value::AssetPathVec(v) => array(s, v, asset_path),
+        Value::AssetPathVec(v) => separated(s, ARRAY, v, asset_path),
         Value::Opaque => s.push_str("OpaqueValue"),
         Value::Quath(v) => gf_tuple(s, v, half),
         Value::Quatf(v) => gf_tuple(s, v, float::<f32>),
         Value::Quatd(v) => gf_tuple(s, v, float::<f64>),
-        Value::QuathVec(v) => array(s, v, |s, v| gf_tuple(s, v, half)),
-        Value::QuatfVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f32>)),
-        Value::QuatdVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f64>)),
+        Value::QuathVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, half)),
+        Value::QuatfVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f32>)),
+        Value::QuatdVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f64>)),
         Value::Vec2h(v) => gf_tuple(s, v, half),
         Value::Vec2f(v) => gf_tuple(s, v, float::<f32>),
         Value::Vec2d(v) => gf_tuple(s, v, float::<f64>),
-        Value::Vec2i(v) => gf_tuple(s, v, number),
-        Value::Vec2hVec(v) => array(s, v, |s, v| gf_tuple(s, v, half)),
-        Value::Vec2fVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f32>)),
-        Value::Vec2dVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f64>)),
-        Value::Vec2iVec(v) => array(s, v, |s, v| gf_tuple(s, v, number)),
+        Value::Vec2i(v) => gf_tuple(s, v, display),
+        Value::Vec2hVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, half)),
+        Value::Vec2fVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f32>)),
+        Value::Vec2dVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f64>)),
+        Value::Vec2iVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, display)),
         Value::Vec3h(v) => gf_tuple(s, v, half),
         Value::Vec3f(v) => gf_tuple(s, v, float::<f32>),
         Value::Vec3d(v) => gf_tuple(s, v, float::<f64>),
-        Value::Vec3i(v) => gf_tuple(s, v, number),
-        Value::Vec3hVec(v) => array(s, v, |s, v| gf_tuple(s, v, half)),
-        Value::Vec3fVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f32>)),
-        Value::Vec3dVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f64>)),
-        Value::Vec3iVec(v) => array(s, v, |s, v| gf_tuple(s, v, number)),
+        Value::Vec3i(v) => gf_tuple(s, v, display),
+        Value::Vec3hVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, half)),
+        Value::Vec3fVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f32>)),
+        Value::Vec3dVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f64>)),
+        Value::Vec3iVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, display)),
         Value::Vec4h(v) => gf_tuple(s, v, half),
         Value::Vec4f(v) => gf_tuple(s, v, float::<f32>),
         Value::Vec4d(v) => gf_tuple(s, v, float::<f64>),
-        Value::Vec4i(v) => gf_tuple(s, v, number),
-        Value::Vec4hVec(v) => array(s, v, |s, v| gf_tuple(s, v, half)),
-        Value::Vec4fVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f32>)),
-        Value::Vec4dVec(v) => array(s, v, |s, v| gf_tuple(s, v, float::<f64>)),
-        Value::Vec4iVec(v) => array(s, v, |s, v| gf_tuple(s, v, number)),
+        Value::Vec4i(v) => gf_tuple(s, v, display),
+        Value::Vec4hVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, half)),
+        Value::Vec4fVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f32>)),
+        Value::Vec4dVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, float::<f64>)),
+        Value::Vec4iVec(v) => separated(s, ARRAY, v, |s, v| gf_tuple(s, v, display)),
         Value::Matrix2d(m) => matrix(s, &m.0, 2),
         Value::Matrix3d(m) => matrix(s, &m.0, 3),
         Value::Matrix4d(m) => matrix(s, &m.0, 4),
-        Value::Matrix2dVec(v) => array(s, v, |s, m| matrix(s, &m.0, 2)),
-        Value::Matrix3dVec(v) => array(s, v, |s, m| matrix(s, &m.0, 3)),
-        Value::Matrix4dVec(v) => array(s, v, |s, m| matrix(s, &m.0, 4)),
+        Value::Matrix2dVec(v) => separated(s, ARRAY, v, |s, m| matrix(s, &m.0, 2)),
+        Value::Matrix3dVec(v) => separated(s, ARRAY, v, |s, m| matrix(s, &m.0, 3)),
+        Value::Matrix4dVec(v) => separated(s, ARRAY, v, |s, m| matrix(s, &m.0, 4)),
         Value::Specifier(v) => s.push_str(specifier(*v)),
         Value::Permission(v) => s.push_str(permission(*v)),
         Value::Variability(v) => s.push_str(variability(*v)),
@@ -127,10 +123,10 @@ fn stream(s: &mut String, value: &Value) {
         Value::PathListOp(op) => list_op(s, "SdfPathListOp", op, path),
         Value::ReferenceListOp(op) => list_op(s, "SdfReferenceListOp", op, reference),
         Value::PayloadListOp(op) => list_op(s, "SdfPayloadListOp", op, payload),
-        Value::IntListOp(op) => list_op(s, "SdfIntListOp", op, number),
-        Value::Int64ListOp(op) => list_op(s, "SdfInt64ListOp", op, number),
-        Value::UIntListOp(op) => list_op(s, "SdfUIntListOp", op, number),
-        Value::UInt64ListOp(op) => list_op(s, "SdfUInt64ListOp", op, number),
+        Value::IntListOp(op) => list_op(s, "SdfIntListOp", op, display),
+        Value::Int64ListOp(op) => list_op(s, "SdfInt64ListOp", op, display),
+        Value::UIntListOp(op) => list_op(s, "SdfUIntListOp", op, display),
+        Value::UInt64ListOp(op) => list_op(s, "SdfUInt64ListOp", op, display),
         Value::Payload(v) => payload(s, v),
         Value::PathVec(v) => vector(s, v, path),
         Value::LayerOffsetVec(v) => vector(s, v, layer_offset),
@@ -157,16 +153,16 @@ fn stream(s: &mut String, value: &Value) {
             }
         }
         Value::ValueBlock => s.push_str("None"),
-        Value::ValueVec(v) => array(s, v, stream),
+        Value::ValueVec(v) => separated(s, ARRAY, v, stream),
         Value::TimeCode(v) => time_code(s, v),
-        Value::TimeCodeVec(v) => array(s, v, time_code),
-        Value::PathExpression(v) => number(s, v),
-        Value::PathExpressionVec(v) => array(s, v, number),
+        Value::TimeCodeVec(v) => separated(s, ARRAY, v, time_code),
+        Value::PathExpression(v) => display(s, v),
+        Value::PathExpressionVec(v) => separated(s, ARRAY, v, display),
     }
 }
 
-/// `items` between `open` and `close`, separated by `", "`.
-fn separated<T>(s: &mut String, open: &str, close: &str, items: &[T], item: impl Fn(&mut String, &T)) {
+/// `items` between the `[open, close]` brackets, separated by `", "`.
+pub(crate) fn separated<T>(s: &mut String, [open, close]: [&str; 2], items: &[T], item: impl Fn(&mut String, &T)) {
     s.push_str(open);
     for (i, value) in items.iter().enumerate() {
         if i > 0 {
@@ -177,21 +173,18 @@ fn separated<T>(s: &mut String, open: &str, close: &str, items: &[T], item: impl
     s.push_str(close);
 }
 
-/// `[a, b]`, C++ `VtArray`'s stream and `std::vector<VtValue>`'s.
-fn array<T>(s: &mut String, items: &[T], item: impl Fn(&mut String, &T)) {
-    separated(s, "[", "]", items, item);
-}
+/// The brackets of `[a, b]`, C++ `VtArray`'s stream and
+/// `std::vector<VtValue>`'s.
+const ARRAY: [&str; 2] = ["[", "]"];
 
-/// `(a, b, c)`, a `Gf` vector's or quaternion's stream.
-pub(crate) fn tuple<T>(s: &mut String, components: &[T], component: impl Fn(&mut String, &T)) {
-    separated(s, "(", ")", components, component);
-}
+/// The brackets of `(a, b, c)`, a `Gf` vector's or quaternion's stream.
+pub(crate) const TUPLE: [&str; 2] = ["(", ")"];
 
-/// [`tuple`] over the components of `v`, a `gf` vector or quaternion, in
+/// A [`TUPLE`] of the components of `v`, a `gf` vector or quaternion, in
 /// their memory order: a quaternion's real part comes first, as C++ streams
 /// it.
 pub(crate) fn gf_tuple<V: GfTuple>(s: &mut String, v: &V, component: impl Fn(&mut String, &V::Component)) {
-    tuple(s, bytemuck::cast_slice(slice::from_ref(v)), component);
+    separated(s, TUPLE, bytemuck::cast_slice(slice::from_ref(v)), component);
 }
 
 /// A `gf` vector or quaternion, a run of [`Component`](Self::Component)s in
@@ -223,7 +216,7 @@ pub(crate) fn matrix(s: &mut String, entries: &[f64], dim: usize) {
         if i > 0 {
             s.push_str(", ");
         }
-        tuple(s, row, float);
+        separated(s, TUPLE, row, float);
     }
     s.push_str(" )");
 }
@@ -243,7 +236,7 @@ fn vector<T>(s: &mut String, items: &[T], item: impl Fn(&mut String, &T)) {
 fn dictionary(s: &mut String, dict: &Dictionary) {
     let mut entries: Vec<_> = dict.iter().collect();
     entries.sort_by_key(|(key, _)| *key);
-    separated(s, "{", "}", &entries, |s, (key, value)| {
+    separated(s, ["{", "}"], &entries, |s, (key, value)| {
         write!(s, "'{key}': ").expect("writing to a String cannot fail");
         stream(s, value);
     });
@@ -252,7 +245,12 @@ fn dictionary(s: &mut String, dict: &Dictionary) {
 /// `Alias(Name Items: [a, b], …)`, an `SdfListOp`'s stream: the explicit list
 /// alone where the op is explicit, empty or not, and otherwise each list it
 /// holds of deleted, added, prepended, appended and ordered items.
-fn list_op<T: Clone + PartialEq + Hash>(s: &mut String, alias: &str, op: &ListOp<T>, item: impl Fn(&mut String, &T)) {
+fn list_op<T: Clone + PartialEq + Hash>(
+    s: &mut String,
+    alias: &str,
+    op: &sdf::ListOp<T>,
+    item: impl Fn(&mut String, &T),
+) {
     let lists: Vec<(&str, &[T])> = if op.is_explicit() {
         vec![("Explicit", op.explicit_items())]
     } else {
@@ -268,15 +266,15 @@ fn list_op<T: Clone + PartialEq + Hash>(s: &mut String, alias: &str, op: &ListOp
         .collect()
     };
     s.push_str(alias);
-    separated(s, "(", ")", &lists, |s, (name, items)| {
+    separated(s, ["(", ")"], &lists, |s, (name, items)| {
         write!(s, "{name} Items: ").expect("writing to a String cannot fail");
-        array(s, items, &item);
+        separated(s, ARRAY, items, &item);
     });
 }
 
 /// A value through its `Display`, which for a number is its plain
 /// `std::ostream` stream.
-pub(crate) fn number<T: fmt::Display>(s: &mut String, v: &T) {
+pub(crate) fn display<T: fmt::Display>(s: &mut String, v: &T) {
     write!(s, "{v}").expect("writing to a String cannot fail");
 }
 
@@ -301,22 +299,22 @@ pub(crate) fn half(s: &mut String, v: &gf::f16) {
 }
 
 /// A time code through `std::ostream`, as its double.
-fn time_code(s: &mut String, v: &TimeCode) {
+fn time_code(s: &mut String, v: &sdf::TimeCode) {
     tf::stringify_general(s, v.0);
 }
 
 /// `@path@` (C++ `SdfAssetPath`'s stream).
-fn asset_path(s: &mut String, v: &AssetPath) {
+fn asset_path(s: &mut String, v: &sdf::AssetPath) {
     write!(s, "@{}@", v.asset_path()).expect("writing to a String cannot fail");
 }
 
 /// A path's text.
-fn path(s: &mut String, v: &Path) {
+fn path(s: &mut String, v: &sdf::Path) {
     s.push_str(v.as_str());
 }
 
 /// `SdfLayerOffset(offset, scale)`.
-fn layer_offset(s: &mut String, v: &LayerOffset) {
+fn layer_offset(s: &mut String, v: &sdf::LayerOffset) {
     s.push_str("SdfLayerOffset(");
     tf::stringify_general(s, v.offset);
     s.push_str(", ");
@@ -325,7 +323,7 @@ fn layer_offset(s: &mut String, v: &LayerOffset) {
 }
 
 /// `SdfReference(asset, prim, offset, customData)`, the asset path raw.
-fn reference(s: &mut String, v: &Reference) {
+fn reference(s: &mut String, v: &sdf::Reference) {
     write!(s, "SdfReference({}, {}, ", v.asset_path, v.prim_path).expect("writing to a String cannot fail");
     layer_offset(s, &v.layer_offset);
     s.push_str(", ");
@@ -334,34 +332,34 @@ fn reference(s: &mut String, v: &Reference) {
 }
 
 /// `SdfPayload(asset, prim, offset)`, the asset path raw.
-fn payload(s: &mut String, v: &Payload) {
+fn payload(s: &mut String, v: &sdf::Payload) {
     write!(s, "SdfPayload({}, {}, ", v.asset_path, v.prim_path).expect("writing to a String cannot fail");
     layer_offset(s, &v.layer_offset);
     s.push(')');
 }
 
 /// The `TfEnum` name C++ streams an `SdfSpecifier` by.
-fn specifier(v: Specifier) -> &'static str {
+fn specifier(v: sdf::Specifier) -> &'static str {
     match v {
-        Specifier::Def => "SdfSpecifierDef",
-        Specifier::Over => "SdfSpecifierOver",
-        Specifier::Class => "SdfSpecifierClass",
+        sdf::Specifier::Def => "SdfSpecifierDef",
+        sdf::Specifier::Over => "SdfSpecifierOver",
+        sdf::Specifier::Class => "SdfSpecifierClass",
     }
 }
 
 /// The `TfEnum` name C++ streams an `SdfPermission` by.
-fn permission(v: Permission) -> &'static str {
+fn permission(v: sdf::Permission) -> &'static str {
     match v {
-        Permission::Public => "SdfPermissionPublic",
-        Permission::Private => "SdfPermissionPrivate",
+        sdf::Permission::Public => "SdfPermissionPublic",
+        sdf::Permission::Private => "SdfPermissionPrivate",
     }
 }
 
 /// The `TfEnum` name C++ streams an `SdfVariability` by.
-fn variability(v: Variability) -> &'static str {
+fn variability(v: sdf::Variability) -> &'static str {
     match v {
-        Variability::Varying => "SdfVariabilityVarying",
-        Variability::Uniform => "SdfVariabilityUniform",
+        sdf::Variability::Varying => "SdfVariabilityVarying",
+        sdf::Variability::Uniform => "SdfVariabilityUniform",
     }
 }
 
@@ -387,7 +385,7 @@ mod tests {
         let mixed = sdf::IntListOp::default()
             .with(sdf::ListOpType::Deleted, [1])
             .with(sdf::ListOpType::Appended, [2]);
-        let mut evaluated_empty = AssetPath::new("a.png");
+        let mut evaluated_empty = sdf::AssetPath::new("a.png");
         evaluated_empty.set_evaluated_path("");
         for (value, written) in [
             (Value::None, ""),
@@ -402,7 +400,7 @@ mod tests {
             (Value::String("hello".into()), "hello"),
             (Value::StringVec(vec!["a".into(), "b".into()]), "[a, b]"),
             (Value::Token(tf::Token::from("foo")), "foo"),
-            (Value::AssetPath(AssetPath::new("a.png")), "@a.png@"),
+            (Value::AssetPath(sdf::AssetPath::new("a.png")), "@a.png@"),
             (Value::AssetPath(evaluated_empty), "@a.png@"),
             (Value::IntVec(vec![]), "[]"),
             (Value::IntVec(vec![1, 2, 3]), "[1, 2, 3]"),
@@ -430,8 +428,8 @@ mod tests {
                 "SdfIntListOp(Explicit Items: [])",
             ),
             (Value::IntListOp(sdf::IntListOp::default()), "SdfIntListOp()"),
-            (Value::Specifier(Specifier::Def), "SdfSpecifierDef"),
-            (Value::TimeCode(TimeCode(1234567.0)), "1.23457e+06"),
+            (Value::Specifier(sdf::Specifier::Def), "SdfSpecifierDef"),
+            (Value::TimeCode(sdf::TimeCode(1234567.0)), "1.23457e+06"),
             (Value::ValueBlock, "None"),
             (Value::Opaque, "OpaqueValue"),
             (

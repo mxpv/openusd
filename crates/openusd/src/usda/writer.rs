@@ -22,6 +22,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use crate::gf;
 use crate::sdf::{
     self, AbstractData, AssetPath, ChildrenKey, FieldKey, FormatError, LayerOffset, ListOp, Path, Payload, Reference,
     SpecType, Specifier, Variability,
@@ -561,8 +562,8 @@ impl Emitter<'_> {
         let (post_slope, post_width) = side("postTangentSlope", "postTangentWidth");
         let authored = |slope: f64, width: Option<f64>| slope != 0.0 || width.is_some_and(|width| width != 0.0);
         let tangent = |s: &mut String, slope: f64, width: Option<f64>| match width {
-            Some(width) => stream_out::tuple(s, &[slope, width], stream_out::float::<f64>),
-            None => stream_out::tuple(s, &[slope], stream_out::float::<f64>),
+            Some(width) => stream_out::separated(s, stream_out::TUPLE, &[slope, width], stream_out::float::<f64>),
+            None => stream_out::separated(s, stream_out::TUPLE, &[slope], stream_out::float::<f64>),
         };
 
         let s = &mut self.scratch;
@@ -1204,28 +1205,19 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
         Value::Vec4dVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f64>)))?,
         Value::QuatdVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::float::<f64>)))?,
 
-        Value::Vec2i(a) => stream_out::gf_tuple(s, a, stream_out::number),
-        Value::Vec3i(a) => stream_out::gf_tuple(s, a, stream_out::number),
-        Value::Vec4i(a) => stream_out::gf_tuple(s, a, stream_out::number),
-        Value::Vec2iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::number)))?,
-        Value::Vec3iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::number)))?,
-        Value::Vec4iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::number)))?,
+        Value::Vec2i(a) => stream_out::gf_tuple(s, a, stream_out::display),
+        Value::Vec3i(a) => stream_out::gf_tuple(s, a, stream_out::display),
+        Value::Vec4i(a) => stream_out::gf_tuple(s, a, stream_out::display),
+        Value::Vec2iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::display)))?,
+        Value::Vec3iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::display)))?,
+        Value::Vec4iVec(v) => format_vec(s, v, each(|s, a| stream_out::gf_tuple(s, a, stream_out::display)))?,
 
         Value::Matrix2d(m) => stream_out::matrix(s, &m.0, 2),
         Value::Matrix3d(m) => stream_out::matrix(s, &m.0, 3),
         Value::Matrix4d(m) => stream_out::matrix(s, &m.0, 4),
-        Value::Matrix2dVec(v) => format_vec(s, v, |s, m| {
-            stream_out::matrix(s, &m.0, 2);
-            Ok(())
-        })?,
-        Value::Matrix3dVec(v) => format_vec(s, v, |s, m| {
-            stream_out::matrix(s, &m.0, 3);
-            Ok(())
-        })?,
-        Value::Matrix4dVec(v) => format_vec(s, v, |s, m| {
-            stream_out::matrix(s, &m.0, 4);
-            Ok(())
-        })?,
+        Value::Matrix2dVec(v) => format_vec(s, v, each(|s, m: &gf::Mat2d| stream_out::matrix(s, &m.0, 2)))?,
+        Value::Matrix3dVec(v) => format_vec(s, v, each(|s, m: &gf::Mat3d| stream_out::matrix(s, &m.0, 3)))?,
+        Value::Matrix4dVec(v) => format_vec(s, v, each(|s, m: &gf::Mat4d| stream_out::matrix(s, &m.0, 4)))?,
 
         Value::Specifier(sp) => s.push_str(specifier_keyword(*sp)),
         Value::Permission(p) => s.push_str(match p {
@@ -1292,10 +1284,13 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
         }
 
         Value::LayerOffsetVec(offsets) => {
-            format_vec(s, offsets, |s, o| {
-                stream_out::tuple(s, &[o.offset, o.scale], stream_out::float::<f64>);
-                Ok(())
-            })?;
+            format_vec(
+                s,
+                offsets,
+                each(|s, o: &LayerOffset| {
+                    stream_out::separated(s, stream_out::TUPLE, &[o.offset, o.scale], stream_out::float::<f64>);
+                }),
+            )?;
         }
 
         Value::ValueVec(v) => format_vec(s, v, |s, v| format_value(s, v, indent))?,
