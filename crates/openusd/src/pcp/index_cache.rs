@@ -2618,6 +2618,39 @@ impl IndexCache {
         Ok(value)
     }
 
+    /// Pseudo-root stage metadata, composing the session layers' opinions over
+    /// the root layer's (C++ `UsdStage::GetMetadata`, through
+    /// `_ComposePseudoRootMetadataImpl`): the strongest wins, dictionaries
+    /// merge, and a [`Value::ValueBlock`] blocks weaker opinions.
+    ///
+    /// See also [`resolve_field`](Self::resolve_field) on the pseudo-root.
+    ///
+    /// Each opinion's `asset` paths are taken as `assets` says, against the
+    /// layer that authored it, before the opinion folds in.
+    pub(crate) fn stage_metadata(
+        &mut self,
+        graph: &LayerGraph,
+        field: &str,
+        assets: AssetMode,
+    ) -> Result<Option<Value>, QueryError> {
+        let root = Path::abs_root();
+        let mut composing = Composing::new();
+        for id in graph.stage_metadata_layers() {
+            let Some(value) = graph.layer(id).data().try_field(&root, field)? else {
+                continue;
+            };
+            let mut value = value.into_owned();
+            if assets.reaches(&value) {
+                let site = AssetSite::in_graph(graph, LayerStackId::ROOT, id, &root);
+                value = self.resolve_asset_values(graph, value, Some(&site), assets);
+            }
+            if composing.fold_rooted(value).step().stop() {
+                break;
+            }
+        }
+        Ok(composing.close())
+    }
+
     /// Resolves, anchors or evaluates the `asset` paths in `value` as `assets`
     /// says, against `site`, the site the shared value-resolution walk
     /// selected for it.

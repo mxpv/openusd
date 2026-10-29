@@ -78,6 +78,35 @@ fn metadata_fields_registered() {
     assert_eq!(registry.metadata_fields().count(), 2);
 }
 
+/// An authored dictionary of stage metadata composes over the registered
+/// fallback dictionary, as C++ `UsdStage::GetMetadata` composes it.
+#[test]
+fn stage_metadata_dictionary_fallback() {
+    static FIELDS: &SchemaFamily<'_> =
+        &SchemaFamily::new("hints", &[]).metadata(&[MetadataDecl::new("hints", "dictionary")
+            .applies_to(MetadataTargets::LAYERS)
+            .fallback(|| {
+                vt::Value::Dictionary(vt::Dictionary::from([
+                    ("a".to_string(), vt::Value::Int(1)),
+                    ("b".to_string(), vt::Value::Int(2)),
+                ]))
+            })]);
+    let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
+    let stage = openusd::usd::Stage::builder()
+        .schema_registry(registry)
+        .in_memory("anon.usda")
+        .expect("a stage");
+    let authored = vt::Dictionary::from([("a".to_string(), vt::Value::Int(5))]);
+    stage
+        .set_stage_metadata("hints", vt::Value::Dictionary(authored))
+        .expect("authors");
+
+    let hints = stage.stage_metadata("hints").expect("reads").expect("a value");
+    let hints = hints.try_as_dictionary().expect("a dictionary");
+    assert_eq!(hints.get("a"), Some(&vt::Value::Int(5)));
+    assert_eq!(hints.get("b"), Some(&vt::Value::Int(2)));
+}
+
 /// A stage reads a registered field's fallback as its own metadata where no
 /// layer authors the field, as C++ falls back to `SdfSchema::GetFallback`.
 #[test]

@@ -2001,27 +2001,6 @@ impl LayerGraph {
         &self.order
     }
 
-    /// Pseudo-root stage metadata, composing session-layer opinions over the
-    /// root layer (strongest first).
-    ///
-    /// Unlike [`root_layer_field`](Self::root_layer_field) — root-layer-only for
-    /// the spec 12.2.7 fields such as `defaultPrim` — general stage metadata
-    /// (e.g. `renderSettingsPrimPath`) honors a session-layer override, matching
-    /// C++ `UsdStage::GetMetadata`. A [`Value::ValueBlock`] in a stronger layer
-    /// blocks weaker opinions.
-    pub(crate) fn stage_metadata(&self, field: &str) -> Result<Option<Value>, sdf::DataError> {
-        let root = Path::abs_root();
-        for id in self.stage_metadata_layers() {
-            let layer = self.layer(id);
-            match layer.data().try_field(&root, field)? {
-                Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
-                Some(value) => return Ok(Some(value.into_owned())),
-                None => {}
-            }
-        }
-        Ok(None)
-    }
-
     /// Whether a layer stage metadata resolves from holds an opinion for
     /// `field`, a [`Value::ValueBlock`] included: blocking a field is
     /// authoring it.
@@ -2032,11 +2011,14 @@ impl LayerGraph {
     }
 
     /// The layers stage metadata resolves from, strongest first: the session
-    /// layers that are not muted, then the root layer, which is never muted.
-    fn stage_metadata_layers(&self) -> impl Iterator<Item = LayerId> + '_ {
+    /// root unless it is muted, then the root layer, which is never muted
+    /// (C++ `_ComposePseudoRootMetadataImpl`). A session sublayer holds no
+    /// stage metadata.
+    pub(crate) fn stage_metadata_layers(&self) -> impl Iterator<Item = LayerId> + '_ {
         self.session_layers()
-            .iter()
+            .first()
             .copied()
+            .into_iter()
             .chain(self.root_id())
             .filter(|&id| !self.is_muted(id))
     }

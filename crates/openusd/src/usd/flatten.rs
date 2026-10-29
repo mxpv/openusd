@@ -140,7 +140,11 @@ fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim, assets: pcp::AssetM
     write_fields(
         data,
         prim.path(),
-        spec_fields(stage, prim.path(), &prim.prim_stack()?, &[], assets)?,
+        spec_fields(
+            site_fields(stage, &prim.prim_stack()?),
+            &[],
+            composed(stage, prim.path(), assets),
+        )?,
     );
 
     // The composed list is what the prim has applied, however the layers said
@@ -179,7 +183,11 @@ fn write_property(
                 attribute.variability()?.unwrap_or_default(),
                 attribute.is_custom()?,
             )?;
-            write_fields(data, &path, spec_fields(stage, &path, &sites, &[], assets)?);
+            write_fields(
+                data,
+                &path,
+                spec_fields(site_fields(stage, &sites), &[], composed(stage, &path, assets))?,
+            );
 
             let held = held(stage, &attribute, &sites, assets)?;
             if let Some(value) = held.default {
@@ -209,7 +217,11 @@ fn write_property(
             write_fields(
                 data,
                 &path,
-                spec_fields(stage, &path, &relationship.property_stack()?, &[], assets)?,
+                spec_fields(
+                    site_fields(stage, &relationship.property_stack()?),
+                    &[],
+                    composed(stage, &path, assets),
+                )?,
             );
             write_explicit_paths(data, &path, sdf::FieldKey::TargetPaths, relationship.targets()?);
         }
@@ -220,38 +232,28 @@ fn write_property(
     Ok(())
 }
 
-/// The stage metadata a standalone layer still carries: what the pseudo-root
-/// holds, less the fields that describe the layer stack it came from.
-// TODO: each field is read from the root layer alone, though its name may
-// come from any layer of the stack; C++ writes the composed stage metadata,
-// a session-layer opinion over the root's (what `Stage::stage_metadata` reads).
+/// The stage metadata a standalone layer still carries: the composed
+/// pseudo-root metadata of the session and root layers, less the fields that
+/// describe the layer stack it came from (C++ `UsdStage::Flatten`, through
+/// `_ListPseudoRootMetadataFieldsImpl`). A session layer's `defaultPrim` is
+/// written over the root layer's, as C++ writes it.
+///
+/// C++ keeps `expressionVariables`. A flattened layer holds every expression
+/// already evaluated, so here it is dropped with the other stack fields.
 fn stage_fields(stage: &Stage, assets: pcp::AssetMode) -> Result<Vec<(String, vt::Value)>> {
-    let root = sdf::Path::abs_root();
-    let sites: Vec<SpecSite> = stage
-        .layer_stack()
-        .into_iter()
-        .map(|layer| SpecSite {
-            layer,
-            path: root.clone(),
-            offset: sdf::LayerOffset::default(),
-        })
-        .collect();
-    spec_fields(stage, &root, &sites, STACK_FIELDS, assets)
+    let names = {
+        let root = sdf::Path::abs_root();
+        let layers = stage.layers();
+        layers
+            .stage_metadata_layers()
+            .flat_map(|id| layers.layer(id).data().list_fields(&root).unwrap_or_default())
+            .collect()
+    };
+    spec_fields(names, STACK_FIELDS, |name| stage.stage_metadata_with(name, assets))
 }
 
-/// The fields one composed spec carries, less what flattening resolved and
-/// what is written from a composed answer instead.
-///
-/// The names come from every site that authors the spec, and the values from
-/// the stage, because a per-site value is not the composed one — strongest
-/// wins, dictionaries merge, and `variability` takes the weakest opinion.
-fn spec_fields(
-    stage: &Stage,
-    path: &sdf::Path,
-    sites: &[SpecSite],
-    also_dropped: &[sdf::FieldKey],
-    assets: pcp::AssetMode,
-) -> Result<Vec<(String, vt::Value)>> {
+/// The field names every site in `sites` authors.
+fn site_fields(stage: &Stage, sites: &[SpecSite]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for site in sites {
         let Some(layer) = stage.layer(&site.layer) else {
@@ -259,17 +261,41 @@ fn spec_fields(
         };
         names.extend(layer.data().list_fields(&site.path).unwrap_or_default());
     }
+    names
+}
 
+/// The fields one composed spec carries, less what flattening resolved and
+/// what is written from a composed answer instead.
+///
+/// The names are what any site of the spec authors, and the values come from
+/// `read`, the stage's composed answer, because a per-site value is not the
+/// composed one — strongest wins, dictionaries merge, and `variability` takes
+/// the weakest opinion.
+fn spec_fields(
+    names: BTreeSet<String>,
+    also_dropped: &[sdf::FieldKey],
+    read: impl Fn(&str) -> Result<Option<vt::Value>>,
+) -> Result<Vec<(String, vt::Value)>> {
     let mut fields = Vec::with_capacity(names.len());
     for name in names {
         if !copied(&name, also_dropped) {
             continue;
         }
-        if let Some(value) = stage.field_with(path, &name, assets)? {
+        if let Some(value) = read(&name)? {
             fields.push((name, value));
         }
     }
     Ok(fields)
+}
+
+/// The reader [`spec_fields`] takes for the composed field of the spec at
+/// `path`.
+fn composed<'a>(
+    stage: &'a Stage,
+    path: &'a sdf::Path,
+    assets: pcp::AssetMode,
+) -> impl Fn(&str) -> Result<Option<vt::Value>> + 'a {
+    move |name| Ok(stage.field_with(path, name, assets)?)
 }
 
 /// What an attribute holds, as the one site that answers for it.
@@ -657,6 +683,107 @@ mod tests {
             .expect("the default")
             .into_owned();
         assert_eq!(default.try_as_asset_path().expect("an asset").as_str(), "./missing.png");
+    }
+
+    /// Stage metadata is the session layer's over the root layer's, their
+    /// dictionaries merged, `defaultPrim` included.
+    #[test]
+    fn session_metadata_composed() {
+        let custom =
+            |key: &str| vt::Value::Dictionary(vt::Dictionary::from([(key.to_string(), vt::Value::from("set"))]));
+        let session = layer("session.usda", |data| {
+            data.set_field(&sdf::Path::abs_root(), "customLayerData", custom("session"));
+            data.set_field(&sdf::Path::abs_root(), "comment", vt::Value::from("from the session"));
+            data.set_field(
+                &sdf::Path::abs_root(),
+                "defaultPrim",
+                vt::Value::Token("Session".into()),
+            );
+        });
+        let root = layer("root.usda", |data| {
+            data.set_field(&sdf::Path::abs_root(), "customLayerData", custom("root"));
+            data.set_field(&sdf::Path::abs_root(), "comment", vt::Value::from("from the root"));
+            data.set_field(&sdf::Path::abs_root(), "defaultPrim", vt::Value::Token("Root".into()));
+        });
+        let session_sub = layer("session_sub.usda", |data| {
+            data.set_field(
+                &sdf::Path::abs_root(),
+                "documentation",
+                vt::Value::from("from a session sublayer"),
+            );
+        });
+        let stage = Stage::builder().make_stage(vec![session, session_sub, root], 2, pcp::Diagnostics::default());
+
+        let flattened = stage.flatten().expect("flattens");
+        // A session sublayer holds no stage metadata.
+        assert!(
+            flattened
+                .data()
+                .try_field(&sdf::Path::abs_root(), "documentation")
+                .expect("a read")
+                .is_none()
+        );
+        let field = |key: &str| {
+            let value = flattened.data().try_field(&sdf::Path::abs_root(), key).expect("a read");
+            value.expect("the field").into_owned()
+        };
+        assert_eq!(field("comment"), vt::Value::from("from the session"));
+        // C++ writes the composed `defaultPrim`, though the stage's own
+        // `default_prim` reads the root layer's.
+        assert_eq!(stage.default_prim(), Some("Root".into()));
+        assert_eq!(field("defaultPrim"), vt::Value::Token("Session".into()));
+        let data = field("customLayerData");
+        let mut keys: Vec<_> = data
+            .try_as_dictionary_ref()
+            .expect("a dictionary")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["root", "session"]);
+    }
+
+    /// An asset path in the session layer's stage metadata is resolved, and
+    /// flattened, beside the session layer.
+    #[test]
+    fn session_metadata_asset() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(directory.path().join("session")).expect("mkdir");
+        fs::write(directory.path().join("session").join("tex.png"), "").expect("write");
+        let session = layer(
+            &directory.path().join("session").join("s.usda").to_string_lossy(),
+            |data| {
+                data.set_field(
+                    &sdf::Path::abs_root(),
+                    "texture",
+                    vt::Value::AssetPath(sdf::AssetPath::new("./tex.png")),
+                );
+            },
+        );
+        let root = layer(&directory.path().join("root.usda").to_string_lossy(), |_| {});
+        let stage = Stage::builder().make_stage(vec![session, root], 1, pcp::Diagnostics::default());
+        let beside_session = |path: &str| {
+            assert!(
+                FsPath::new(path).ends_with(FsPath::new("session").join("tex.png")),
+                "beside the session layer: {path}"
+            );
+        };
+
+        let read = stage.stage_metadata("texture").expect("reads").expect("a value");
+        beside_session(
+            read.try_as_asset_path_ref()
+                .and_then(sdf::AssetPath::resolved_path)
+                .expect("resolved"),
+        );
+
+        let flattened = stage.flatten().expect("flattens");
+        let written = flattened
+            .data()
+            .try_field(&sdf::Path::abs_root(), "texture")
+            .expect("a read")
+            .expect("the field")
+            .into_owned();
+        beside_session(written.try_as_asset_path_ref().expect("an asset").as_str());
     }
 
     /// Each entry of a dictionary composed across layers is anchored beside

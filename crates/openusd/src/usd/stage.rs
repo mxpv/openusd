@@ -2846,18 +2846,30 @@ impl Stage {
     /// layer authors it
     /// (C++ `UsdStage::GetMetadata`, with `SdfSchema::GetFallback` behind it).
     ///
-    /// Distinct from [`Stage::field`] on [`sdf::Path::abs_root`], which reads
-    /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
-    /// Returns the raw [`vt::Value`]; the caller coerces it.
+    /// The session and root layers' dictionaries merge, over the fallback
+    /// dictionary where there is one, and an `asset` path is resolved against
+    /// the layer that authored it.
+    ///
+    /// Distinct from [`Stage::field`] on [`sdf::Path::abs_root`]. Returns an
+    /// undecoded [`vt::Value`]; the caller coerces it.
     pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<vt::Value>> {
         let field = field.as_ref();
-        if let Some(authored) = self.with_cache(|g, _| Ok(g.stage_metadata(field)?))? {
-            return Ok(Some(authored));
-        }
-        Ok(self
-            .schema_registry()
-            .stage_metadata_fallback(&Token::from(field))
-            .cloned())
+        let authored = self.stage_metadata_with(field, pcp::AssetMode::Resolve)?;
+        let fallback = self.schema_registry().stage_metadata_fallback(&Token::from(field));
+        Ok(match (authored, fallback) {
+            (Some(vt::Value::Dictionary(mut dict)), Some(vt::Value::Dictionary(fallback))) => {
+                dict.over(fallback.clone());
+                Some(vt::Value::Dictionary(dict))
+            }
+            (Some(authored), _) => Some(authored),
+            (None, fallback) => fallback.cloned(),
+        })
+    }
+
+    /// The authored half of [`stage_metadata`](Self::stage_metadata), with its
+    /// `asset` paths as `assets` says: what a flattened layer keeps.
+    pub(crate) fn stage_metadata_with(&self, field: &str, assets: pcp::AssetMode) -> Result<Option<vt::Value>> {
+        Ok(self.with_cache(|g, c| c.stage_metadata(g, field, assets))?)
     }
 
     /// Whether the session or root layer authors the pseudo-root metadata
