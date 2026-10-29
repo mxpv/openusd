@@ -255,9 +255,9 @@ pub struct Metadata {
     pub instance_restrictions: BTreeMap<tf::Token, Vec<tf::Token>>,
     /// The concrete schemas a stage falls back to for this type.
     pub fallback_types: Vec<tf::Token>,
-    /// The entries C++ `usdGenSchema` copies from `extraPlugInfo` into the
-    /// type's `plugInfo.json` entry, which the registry hands back
-    /// uninterpreted.
+    /// The class's `extraPlugInfo` entries, which C++ `usdGenSchema` copies
+    /// into the type's `plugInfo.json` entry. The registry drops the keys
+    /// `usdGenSchema` writes over them and hands back the rest.
     pub plug_info: BTreeMap<String, vt::Value>,
 
     /// The Rust type name, which defaults to the identifier in proper case.
