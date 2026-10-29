@@ -325,14 +325,16 @@ fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Va
 /// A flattened layer is anonymous, so it anchors nothing: a path left as
 /// authored would resolve against whatever opened it, or against nothing.
 /// Composition already worked out where each one points, and this writes that
-/// answer down. A path nothing resolved is left as written, since there is no
-/// better answer and a reader fails on it the way this stage did. An
-/// expression that evaluated to the empty path is written as the empty path,
-/// where C++ anchors the expression text.
-// TODO: composition anchors an asset value and not one nested in a dictionary
-// — `is_asset_valued` says so — so a relative path inside `customData` reaches
-// here unresolved and stays that way, losing the directory it was authored
-// against. C++ anchors those too, over every value it copies.
+/// answer down. A path nothing resolved is written as authored, or as its
+/// evaluation where an expression gave one. An expression that evaluated to
+/// the empty path is written as the empty path, where C++ anchors the
+/// expression text.
+// TODO: flattening needs value resolution to anchor without resolving, C++'s
+// `forFlattening` mode (`_MakeResolvedAssetPathsImpl` calling
+// `SdfAnchorAssetPaths`). Without it, a path that resolves to no file, whether
+// authored or evaluated, and any path nested in a dictionary, which
+// composition does not anchor (`is_asset_valued`), are written unanchored.
+// C++ anchors them all, over every value it copies.
 fn bake_asset_paths(value: vt::Value) -> vt::Value {
     value
         .map_asset_paths(|asset| match asset.resolved_path().or_else(|| asset.evaluated_path()) {
