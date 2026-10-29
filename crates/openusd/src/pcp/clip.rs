@@ -1818,8 +1818,8 @@ pub(crate) fn as_asset_field(value: Value) -> Value {
     }
 }
 
-/// An asset-valued clip field as the path to resolve: the evaluated form when a
-/// `` `${VAR}` `` was substituted, else the authored one (`AssetPath::asset_path`).
+/// An asset-valued clip field as the path to resolve, as
+/// [`AssetPath::asset_path`] answers it.
 /// A field authored as a plain string still reads through, since a dictionary
 /// value's type is whatever the layer declared.
 pub(crate) fn asset_input<'a>(set: &'a HashMap<String, Value>, field: &str) -> Option<&'a str> {

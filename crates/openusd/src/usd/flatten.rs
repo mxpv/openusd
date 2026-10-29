@@ -326,7 +326,9 @@ fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Va
 /// authored would resolve against whatever opened it, or against nothing.
 /// Composition already worked out where each one points, and this writes that
 /// answer down. A path nothing resolved is left as written, since there is no
-/// better answer and a reader fails on it the way this stage did.
+/// better answer and a reader fails on it the way this stage did. An
+/// expression that evaluated to the empty path is written as the empty path,
+/// where C++ anchors the expression text.
 // TODO: composition anchors an asset value and not one nested in a dictionary
 // — `is_asset_valued` says so — so a relative path inside `customData` reaches
 // here unresolved and stays that way, losing the directory it was authored
@@ -630,6 +632,44 @@ mod tests {
             "a relative path resolves against whatever opens the layer: {}",
             asset.asset_path()
         );
+    }
+
+    /// An asset expression that evaluates to the empty path is written as the
+    /// empty path.
+    #[test]
+    fn empty_expression_asset() {
+        let root = layer("root.usda", |data| {
+            data.set_field(
+                &sdf::Path::abs_root(),
+                sdf::FieldKey::ExpressionVariables.as_str(),
+                vt::Value::Dictionary(vt::Dictionary::from([("A".to_string(), vt::Value::from(""))])),
+            );
+            sdf::PrimSpec::new(data, "/Prim", sdf::Specifier::Def, "").expect("prim");
+            sdf::AttributeSpec::new(
+                data,
+                "/Prim.file",
+                sdf::ValueTypeName::ASSET,
+                sdf::Variability::Varying,
+                false,
+            )
+            .expect("attribute");
+            data.set_field(
+                &sdf::Path::new("/Prim.file").expect("path"),
+                "default",
+                vt::Value::AssetPath(sdf::AssetPath::new("`${A}`")),
+            );
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
+
+        let flattened = stage.flatten().expect("flattens");
+        let value = flattened
+            .attribute("/Prim.file")
+            .expect("a path")
+            .expect("the attribute")
+            .get::<vt::Value>("default")
+            .expect("a default");
+        let asset = value.try_as_asset_path().expect("an asset value");
+        assert_eq!(asset.as_str(), "");
     }
 
     /// A sample map of nothing but blocks is kept.

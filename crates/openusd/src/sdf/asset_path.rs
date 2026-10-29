@@ -24,6 +24,11 @@ use crate::{ar, sdf, vt};
 /// annotations that do not affect it (this differs from C++ `operator==`,
 /// which compares all three).
 ///
+/// An expression that evaluates to the empty path names no asset. Its
+/// evaluated path is the empty string, value resolution resolves nothing for
+/// it, and [`asset_path`](Self::asset_path) answers the authored expression
+/// as C++ `GetAssetPath` does.
+///
 /// The string-like traits ([`Deref`] to `str`, [`AsRef`], [`Borrow`],
 /// [`Display`](std::fmt::Display), and `PartialEq` against string types) let
 /// it stand in for its authored path: `&asset` coerces to `&str`, and
