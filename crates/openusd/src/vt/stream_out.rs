@@ -279,7 +279,7 @@ pub(crate) fn display<T: fmt::Display>(s: &mut String, v: &T) {
 }
 
 /// A bool as C++ streams one in a `VtValue`, `1` or `0`.
-fn boolean(s: &mut String, v: &bool) {
+pub(crate) fn boolean(s: &mut String, v: &bool) {
     s.push(if *v { '1' } else { '0' });
 }
 

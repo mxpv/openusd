@@ -1139,36 +1139,26 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
         }
         Value::ValueBlock => s.push_str("None"),
 
-        // C++ streams a bool as an int (`VtStreamOut(bool const &)`).
-        Value::Bool(b) => s.push_str(if *b { "1" } else { "0" }),
-        Value::BoolVec(v) => format_vec(s, v, |s, b| {
-            s.push(if *b { '1' } else { '0' });
-            Ok(())
-        })?,
+        Value::Bool(b) => stream_out::boolean(s, b),
+        Value::BoolVec(v) => format_vec(s, v, each(stream_out::boolean))?,
 
-        Value::Uchar(n) => write!(s, "{n}")?,
-        Value::UcharVec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
-        Value::Int(n) => write!(s, "{n}")?,
-        Value::IntVec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
-        Value::Uint(n) => write!(s, "{n}")?,
-        Value::UintVec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
-        Value::Int64(n) => write!(s, "{n}")?,
-        Value::Int64Vec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
-        Value::Uint64(n) => write!(s, "{n}")?,
-        Value::Uint64Vec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
+        Value::Uchar(n) => stream_out::display(s, n),
+        Value::UcharVec(v) => format_vec(s, v, each(stream_out::display))?,
+        Value::Int(n) => stream_out::display(s, n),
+        Value::IntVec(v) => format_vec(s, v, each(stream_out::display))?,
+        Value::Uint(n) => stream_out::display(s, n),
+        Value::UintVec(v) => format_vec(s, v, each(stream_out::display))?,
+        Value::Int64(n) => stream_out::display(s, n),
+        Value::Int64Vec(v) => format_vec(s, v, each(stream_out::display))?,
+        Value::Uint64(n) => stream_out::display(s, n),
+        Value::Uint64Vec(v) => format_vec(s, v, each(stream_out::display))?,
 
         Value::Half(h) => stream_out::half(s, h),
         Value::HalfVec(v) => format_vec(s, v, each(stream_out::half))?,
-        Value::Float(f) => tf::stringify_float(s, *f),
-        Value::FloatVec(v) => format_vec(s, v, |s, f| {
-            tf::stringify_float(s, *f);
-            Ok(())
-        })?,
-        Value::Double(d) => tf::stringify_float(s, *d),
-        Value::DoubleVec(v) => format_vec(s, v, |s, d| {
-            tf::stringify_float(s, *d);
-            Ok(())
-        })?,
+        Value::Float(f) => stream_out::float(s, f),
+        Value::FloatVec(v) => format_vec(s, v, each(stream_out::float))?,
+        Value::Double(d) => stream_out::float(s, d),
+        Value::DoubleVec(v) => format_vec(s, v, each(stream_out::float))?,
 
         Value::String(v) => write_quoted(s, v)?,
         Value::StringVec(v) => format_vec(s, v, |s, t: &String| write_quoted(s, t))?,
