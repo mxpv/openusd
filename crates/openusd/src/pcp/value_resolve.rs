@@ -19,11 +19,12 @@ use crate::{sdf, vt};
 
 use super::QueryError;
 use super::asset_resolve::{AssetMode, AssetSite};
-use super::clip::{ClipCache, ClipIntrospection, ClipQuery, ResolvedClipSet};
+use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::diagnostics::Diagnostics;
 use super::index_cache::SpecSiteRecord;
 use super::layer_graph::StackIdentity;
 use super::prim_graph::{ArcType, Node};
+use super::prim_resolve::Supplied;
 use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, MapFunction};
 
 /// Which value-resolution walk to run — the Rust form of C++
@@ -493,12 +494,11 @@ impl ClipProbe<'_> {
             .untimed_answer_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
-    /// The stage sample times the set contributes, whether its schedule alone
-    /// can vary the value, and whether it holds anything a composition would
-    /// read. `None` when the set does not participate.
-    pub(crate) fn introspection(&mut self) -> Result<Option<ClipIntrospection>, QueryError> {
+    /// The stage sample times the set contributes, each with what the set
+    /// supplies there. `None` when the set does not participate.
+    pub(crate) fn stage_samples(&mut self) -> Result<Option<Vec<(f64, Supplied)>>, QueryError> {
         self.cache
-            .clip_introspection_in_set(self.graph, self.diagnostics, self.set, &self.query)
+            .stage_samples_in_set(self.graph, self.diagnostics, self.set, &self.query)
     }
 
     /// The site a property stack lists for the set at `time`, carrying the
