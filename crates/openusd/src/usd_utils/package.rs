@@ -7,32 +7,40 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 
-use super::discover::{Content, Discover, Discovery, Placement, Source, Use, discover, discover_layer};
+use super::discover::{Content, Discover, Discovery, Placement, Root, Source, Use, discover};
 use super::walk::{Visit, apply_edits, visit_asset_paths};
 use crate::sdf::{self, AbstractData};
 use crate::usd::Stage;
 use crate::{Error, Result, ar, pcp, tf, usdz};
 
-/// Writes the layer at `asset_path` and everything it depends on into a new
-/// USDZ package at `usdz_file_path`, as C++ `UsdUtilsCreateNewUsdzPackage`
-/// does. Returns the layer dependencies that did not resolve and were left
-/// out, as C++ warns about them.
+/// Writes `root` and everything it depends on into a new USDZ package at
+/// `usdz_file_path`, as C++ `UsdUtilsCreateNewUsdzPackage` does. Returns the
+/// layer dependencies that did not resolve and were left out, as C++ warns
+/// about them.
 ///
 /// The dependencies are the ones [`all_dependencies`] walks, plus
 /// deleted reference and payload items, so a delete still matches its target
 /// once both are packaged. Layers keep their file format and are read as
 /// [`all_dependencies`] reads them, unsaved edits included.
 ///
+/// `root` may be a layer `stage` does not hold, such as one a stage was
+/// flattened into, which is packaged from memory. C++ resolves the root's
+/// asset path before it opens the layer. There an in-memory root has to be
+/// exported to a file first.
+///
 /// The root layer is the package's first entry, named `first_layer_name` or
-/// the root's file name; either way it must name a native layer (`.usd`,
-/// `.usda` or `.usdc`) for the package to open at it. A dependency authored
-/// as a `./` or `../` path that stays inside the package keeps its path and
-/// its place relative to the root. Any other (an absolute path, a search path,
-/// or one leading out of the package) moves into a numbered directory per
-/// source directory (`0/`, `1/`, ...) and its authored path is rewritten to
-/// reach it. Each source is stored once: a later path to it, from wherever
-/// it is authored, is rewritten to the entry it already has. That keeps a
-/// reference deleted in one layer matching the one another layer adds.
+/// the file name of the location the root was read from; an anonymous root
+/// has none and needs `first_layer_name`. Either way the name must be a
+/// native layer's (`.usd`, `.usda` or `.usdc`) for the package to open at it.
+///
+/// A dependency authored as a `./` or `../` path that stays inside the
+/// package keeps its path and its place relative to the root. Any other (an
+/// absolute path, a search path, or one leading out of the package) moves
+/// into a numbered directory per source directory (`0/`, `1/`, ...) and its
+/// authored path is rewritten to reach it. Each source is stored once: a
+/// later path to it, from wherever it is authored, is rewritten to the entry
+/// it already has. That keeps a reference deleted in one layer matching the
+/// one another layer adds.
 ///
 /// A `.usdz` dependency is stored whole, as a package nested in the new one.
 /// The layers in it that `stage` holds, at any depth of nesting, are
@@ -47,50 +55,18 @@ use crate::{Error, Result, ar, pcp, tf, usdz};
 /// included, stays intact until then.
 ///
 /// [`all_dependencies`]: super::all_dependencies
-pub fn create_usdz_package(
+pub fn create_usdz_package<'a>(
     stage: &Stage,
-    asset_path: &str,
+    root: impl Into<Root<'a>>,
     usdz_file_path: impl AsRef<Path>,
     first_layer_name: Option<&str>,
 ) -> Result<Vec<String>> {
     let graph = stage.layers();
-    let discovery = discover(&graph, asset_path, PACKAGE)?;
-    write_package(&graph, &discovery, usdz_file_path.as_ref(), first_layer_name)
-}
-
-/// [`create_usdz_package`] rooted at `layer`, which `stage` need not hold,
-/// such as a layer a stage was flattened into. C++ packages such a layer by
-/// its identifier, which `SdfLayer::Find` answers while the layer lives.
-///
-/// The root is named `first_layer_name`, or the file name of the location
-/// `layer` was read from; an anonymous root has none and needs the name.
-/// Its dependencies resolve through `stage`, which holds no anonymous root,
-/// so the relative paths of one are anchored against nothing.
-pub fn create_usdz_package_from_layer(
-    stage: &Stage,
-    layer: &sdf::Layer,
-    usdz_file_path: impl AsRef<Path>,
-    first_layer_name: Option<&str>,
-) -> Result<Vec<String>> {
-    let graph = stage.layers();
-    let discovery = discover_layer(&graph, layer, PACKAGE)?;
-    write_package(&graph, &discovery, usdz_file_path.as_ref(), first_layer_name)
-}
-
-/// The discovery a package is written from.
-const PACKAGE: Discover = Discover {
-    inactive: true,
-    open_packages: false,
-};
-
-/// Writes `discovery` into a new package at `usdz_file_path`, as
-/// [`create_usdz_package`] describes, returning the layers left out.
-fn write_package(
-    graph: &pcp::LayerGraph,
-    discovery: &Discovery<'_>,
-    usdz_file_path: &Path,
-    first_layer_name: Option<&str>,
-) -> Result<Vec<String>> {
+    let policy = Discover {
+        inactive: true,
+        open_packages: false,
+    };
+    let discovery = discover(&graph, root.into(), policy)?;
     let mut skipped = Vec::new();
     for (identifier, kind) in &discovery.unresolved {
         if *kind == super::walk::AssetKind::Asset {
@@ -101,10 +77,14 @@ fn write_package(
     let name = if let Some(name) = first_layer_name {
         name.to_owned()
     } else {
-        let location = discovery.sources[0]
+        let root = &discovery.sources[0];
+        let location = root
             .content
             .location()
-            .ok_or_else(|| Error::UnresolvedAsset(discovery.sources[0].identifier.clone()))?;
+            .ok_or_else(|| usdz::ArchiveError::InvalidEntryName {
+                name: String::new(),
+                reason: "is missing: a root read from nowhere needs first_layer_name to name the package's default layer",
+            })?;
         ar::split_file_name(location).1.to_owned()
     };
     if !usdz::is_layer_name(&name) {
@@ -114,11 +94,11 @@ fn write_package(
         }
         .into());
     }
-    let entries = assign_entries(discovery, &name, HashSet::new());
+    let entries = assign_entries(&discovery, &name, HashSet::new());
 
-    let mut temp = tf::SafeOutputFile::create(usdz_file_path)?;
+    let mut temp = tf::SafeOutputFile::create(usdz_file_path.as_ref())?;
     let mut archive = usdz::ArchiveWriter::new(temp.file());
-    write_entries(graph, discovery, &entries, &mut archive)?;
+    write_entries(&graph, &discovery, &entries, &mut archive)?;
     archive.finish()?;
     temp.persist()?;
     Ok(skipped)
@@ -613,7 +593,7 @@ def "T"
     /// names through the stage, under the name it is given. An anonymous one
     /// has no file name to default to.
     #[test]
-    fn packages_a_layer_the_stage_does_not_hold() -> Result<()> {
+    fn unheld_layer_packaged() -> Result<()> {
         let dir = tempfile::tempdir()?;
         write(dir.path(), "root.usda", "#usda 1.0\ndef \"A\" {\n}\n");
         write(
@@ -632,14 +612,96 @@ def "T"
             .into_bytes(),
         )?;
         let output = dir.path().join("out.usdz");
-        assert!(create_usdz_package_from_layer(&stage, &layer, &output, None).is_err());
+        let error = create_usdz_package(&stage, &layer, &output, None).unwrap_err();
+        assert!(
+            matches!(&error, Error::Archive(archive) if matches!(**archive, usdz::ArchiveError::InvalidEntryName { .. })),
+            "{error}"
+        );
         assert!(!output.exists());
 
-        let skipped = create_usdz_package_from_layer(&stage, &layer, &output, Some("flat.usdc"))?;
+        let skipped = create_usdz_package(&stage, &layer, &output, Some("flat.usdc"))?;
         assert!(skipped.is_empty());
         assert_eq!(entries(&output).0, ["flat.usdc", "0/part.usda"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
-        assert_eq!(attribute_value(&packaged, "/Flat.probe"), Some(sdf::Value::Int(7)));
+        assert_eq!(attribute_value(&packaged, "/Flat.probe"), Some(7.into()));
+
+        let dependencies = all_dependencies(&stage, &layer)?;
+        assert_eq!(dependencies.layers.len(), 2);
+        assert_eq!(dependencies.layers[0], layer.identifier());
+        assert!(dependencies.layers[1].ends_with("part.usda"));
+        Ok(())
+    }
+
+    /// A layer found through a search path is stored once, from memory, when
+    /// a path anchored to the file it was read from leads back to it.
+    #[test]
+    fn search_path_self_reference() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(dir.path(), "stage.usda", "#usda 1.0\n");
+        write(
+            dir.path(),
+            "model.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./model.usda@</B>\n)\n{\n}\n\ndef \"B\" {\n    int probe = 1\n}\n",
+        );
+        let (_, stage) = open(dir.path(), "stage.usda")?;
+        let mut layer = sdf::Layer::open_with(ar::DefaultResolver::with_search_paths([dir.path()]), "model.usda")?;
+        assert_eq!(layer.identifier(), "model.usda");
+        layer.edit(|edit| {
+            edit.data_mut()
+                .set_field(&sdf::Path::new("/B.probe")?, sdf::FieldKey::Default.as_str(), 5.into());
+            Ok(())
+        })?;
+
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &layer, &output, None)?;
+        assert_eq!(entries(&output).0, ["model.usda"]);
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(5.into()));
+        Ok(())
+    }
+
+    /// A layer reached first by its path and later through a search path is
+    /// one source.
+    #[test]
+    fn search_path_after_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\n(\n    subLayers = [@./lib/model.usda@, @./a.usda@]\n)\n",
+        );
+        write(
+            dir.path(),
+            "a.usda",
+            "#usda 1.0\n(\n    subLayers = [@model.usda@]\n)\n",
+        );
+        write(dir.path(), "lib/model.usda", "#usda 1.0\n");
+        let root = dir.path().join("root.usda").to_str().unwrap().to_owned();
+        let stage = Stage::builder()
+            .resolver(ar::DefaultResolver::with_search_paths([dir.path().join("lib")]))
+            .open(&root)?;
+
+        assert_eq!(all_dependencies(&stage, &root)?.layers.len(), 3);
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        assert_eq!(entries(&output).0, ["root.usda", "lib/model.usda", "a.usda"]);
+        Ok(())
+    }
+
+    /// A package and its default layer are two sources, as in C++.
+    #[test]
+    fn package_default_layer_apart() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut writer = ArchiveWriter::create(dir.path().join("x.usdz"))?;
+        writer.add_layer("default.usda", b"#usda 1.0\n")?;
+        writer.finish()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\n(\n    subLayers = [@./x.usdz@, @./x.usdz[default.usda]@]\n)\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(all_dependencies(&stage, &root)?.layers.len(), 3);
         Ok(())
     }
 

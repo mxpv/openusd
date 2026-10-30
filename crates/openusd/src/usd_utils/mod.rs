@@ -4,14 +4,14 @@
 //! (C++ `UsdUtilsComputeAllDependencies`), [`create_usdz_package`]
 //! writes them into a USDZ package (C++ `UsdUtilsCreateNewUsdzPackage`), and
 //! [`modify_asset_paths`] rewrites the asset paths a layer authors (C++
-//! `UsdUtilsModifyAssetPaths`).
+//! `UsdUtilsModifyAssetPaths`). The first two start from a [`Root`].
 
 mod discover;
 mod package;
 mod walk;
 
-pub use discover::{Dependencies, all_dependencies};
-pub use package::{create_usdz_package, create_usdz_package_from_layer};
+pub use discover::{Dependencies, Root, all_dependencies};
+pub use package::create_usdz_package;
 pub use walk::modify_asset_paths;
 
 /// An asset path the dependency walk cannot follow.
