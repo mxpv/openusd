@@ -336,6 +336,30 @@ impl Value {
         T::try_from(self).ok()
     }
 
+    /// Whether this holds a type that composes over a weaker value (C++
+    /// `VtValue::CanComposeOver`, the types `VtRegisterComposeOver` names):
+    /// a dictionary, a path expression, a list op or a time-sample map. A
+    /// type question, so a path expression answers `true` whether or not it
+    /// references a weaker value.
+    pub fn can_compose_over(&self) -> bool {
+        matches!(
+            self,
+            Value::Dictionary(_)
+                | Value::PathExpression(_)
+                | Value::TokenListOp(_)
+                | Value::StringListOp(_)
+                | Value::PathListOp(_)
+                | Value::ReferenceListOp(_)
+                | Value::IntListOp(_)
+                | Value::Int64ListOp(_)
+                | Value::UIntListOp(_)
+                | Value::UInt64ListOp(_)
+                | Value::PayloadListOp(_)
+                | Value::UnregisteredValueListOp(_)
+                | Value::TimeSamples(_)
+        )
+    }
+
     /// How many elements this holds, where it holds an array, and `None`
     /// where it holds a single value (C++ `VtValue::GetArraySize`, which
     /// answers zero for both).

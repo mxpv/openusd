@@ -120,25 +120,19 @@ pub(crate) struct ClipSet {
 }
 
 /// What a clip set authors for one attribute: each of its clips' own sample
-/// times and what each supplies, in schedule order, with what fills a gap
-/// where a clip authors none.
+/// times and what each supplies, with what fills a gap where a clip authors
+/// none.
 struct ClipSamples {
+    /// The attribute's path inside the clip layers.
+    clip_path: Path,
+    /// The manifest layer that declares the attribute.
+    manifest: String,
+    /// By clip asset index. A clip the schedule never activates is not read,
+    /// and its entry stays empty.
     per_clip: Vec<Vec<(f64, Supplied)>>,
     /// What the set supplies where a clip authors no sample for the attribute,
     /// which the manifest's default fills.
     gap: Supplied,
-}
-
-/// What a value-clip set contributes to a query that names no time: the stage
-/// times its value changes at, whether its schedule alone can vary the value
-/// ([`ClipSet::may_be_time_varying`]), and the strongest sample that still
-/// composes, which a walk reading a composition carries on from.
-pub(crate) struct ClipIntrospection {
-    pub(crate) may_vary: bool,
-    /// What the set supplies at each of those times, read from the samples the
-    /// times were read from, so a composition judges a clip exactly as it
-    /// judges a layer's own samples.
-    pub(crate) supplied: Vec<(f64, Supplied)>,
 }
 
 /// A parsed clip set plus the site that introduced it.
@@ -286,6 +280,20 @@ impl ClipSet {
         // clip's window over a span the author scheduled something else for, so
         // the set is rejected whole, as C++ does.
         if active.iter().any(|&(_, index)| index >= asset_paths.len()) {
+            return None;
+        }
+        // Two clips active from one start time leave the schedule without an
+        // answer there, and more than two `times` entries at one stage time
+        // are more than a jump discontinuity. C++ `_ValidateClipFields` rejects
+        // the set for either; both lists are sorted, so equal times are
+        // adjacent.
+        if active.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return None;
+        }
+        if times
+            .windows(3)
+            .any(|knots| knots[0].x == knots[1].x && knots[1].x == knots[2].x)
+        {
             return None;
         }
 
@@ -1100,45 +1108,34 @@ impl ClipCache {
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
     ) -> Result<ValueState, QueryError> {
-        let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
+        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query)? else {
             return Ok(ValueState::Absent);
         };
         if samples.per_clip.iter().any(|clip| !clip.is_empty()) {
             return Ok(ValueState::Present);
         }
-        let manifest = self.manifest_id(graph, diagnostics, resolved, query.anchor)?;
-        let default = match manifest.as_deref() {
-            Some(manifest) => self.manifest_default(graph, manifest, &clip_path)?,
-            None => None,
-        };
-        match default {
+        match self.manifest_default(graph, &samples.manifest, &samples.clip_path)? {
             Some(_) => Ok(ValueState::Present),
             None => Ok(ValueState::Blocked),
         }
     }
 
-    /// The value-clip introspection `resolved` (composed on `query.anchor`)
-    /// contributes when it participates in sourcing the attribute: its stage
-    /// sample times (spec 12.3.4) and whether its schedule alone can vary the
-    /// value ([`ClipSet::may_be_time_varying`]). `None` when it does not
-    /// participate.
-    pub(super) fn clip_introspection_in_set(
+    /// The stage sample times (spec 12.3.4) `resolved` (composed on
+    /// `query.anchor`) contributes when it participates in sourcing the
+    /// attribute, each with what the set supplies there, read from the samples
+    /// the time was read from, so a composition judges a clip exactly as it
+    /// judges a layer's own samples. `None` when it does not participate.
+    pub(super) fn stage_samples_in_set(
         &mut self,
         graph: &LayerGraph,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
-    ) -> Result<Option<ClipIntrospection>, QueryError> {
-        let clip_path = clip_attr_path(query, &resolved.set.clip_prim_path(query.anchor))?;
-        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query.anchor, &clip_path)? else {
+    ) -> Result<Option<Vec<(f64, Supplied)>>, QueryError> {
+        let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query)? else {
             return Ok(None);
         };
-        let set = &resolved.set;
-        Ok(Some(ClipIntrospection {
-            supplied: set.stage_samples(&samples.per_clip, &samples.gap),
-            may_vary: set.may_be_time_varying(),
-        }))
+        Ok(Some(resolved.set.stage_samples(&samples.per_clip, &samples.gap)))
     }
 
     /// Generates a manifest for `resolved` from the clips its `active` schedule
@@ -1499,51 +1496,56 @@ impl ClipCache {
         }
     }
 
-    /// Whether the resolved clip `set` participates in sourcing the attribute at
-    /// `clip_path`, returning each clip's in-clip authored sample times when it
-    /// does and `None` when it does not. A set participates when its manifest —
-    /// authored or synthesized — declares the attribute. The single
-    /// participation predicate behind [`Self::clip_introspection_in_sets`].
+    /// What the resolved clip `set` authors for the attribute of `query` when
+    /// it [sources](Self::sourced) it, and `None` when it does not.
     ///
-    /// Participation tracks what [`Self::value_in_sets`] can reach: it selects a
-    /// clip only through [`ClipSet::active_entry`], so a set with no `active`
-    /// schedule sources nothing, and a synthesized manifest indexes only the
-    /// clips that schedule names — an authored-but-unscheduled clip is never
-    /// read.
+    /// Only the clips the `active` schedule names are read, as C++ builds a
+    /// set's clips from its schedule: an unscheduled clip is never selected.
     fn clip_set_participates(
         &mut self,
         graph: &LayerGraph,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
-        prim: &Path,
-        clip_path: &Path,
+        query: &ClipQuery<'_>,
     ) -> Result<Option<ClipSamples>, QueryError> {
-        let set = &resolved.set;
-        // With no active schedule no clip is ever selected, so the set sources
-        // nothing regardless of what its clips author.
-        if set.active.is_empty() {
-            return Ok(None);
-        }
-        let Some(manifest) = self.declaring_manifest(graph, diagnostics, resolved, prim, clip_path)? else {
+        let Some((clip_path, manifest)) = self.sourced(graph, diagnostics, resolved, query)? else {
             return Ok(None);
         };
-        let mut per_clip: Vec<Vec<(f64, Supplied)>> = Vec::with_capacity(set.asset_paths.len());
-        for asset in &set.asset_paths {
-            per_clip.push(self.clip_in_clip_samples(graph, asset.asset_path(), resolved.source.layer, clip_path)?);
+        let set = &resolved.set;
+        // TODO: with `interpolateMissingClipValues`, C++
+        // `Usd_ClipSet::ListTimeSamplesForPath` skips a clip whose manifest
+        // blocks the attribute at its start time (`_ClipContributesValue`), and
+        // never opens it. That decision is per schedule entry, so `per_clip`,
+        // which is per asset, cannot carry it; the timed read applies it
+        // through `clip_contributes`.
+        // TODO(rayon): each scheduled clip opens and reads independently.
+        let mut scheduled: Vec<usize> = set.active.iter().map(|&(_, index)| index).collect();
+        scheduled.sort_unstable();
+        scheduled.dedup();
+        let mut per_clip: Vec<Vec<(f64, Supplied)>> = vec![Vec::new(); set.asset_paths.len()];
+        for &index in &scheduled {
+            per_clip[index] = self.clip_in_clip_samples(
+                graph,
+                set.asset_paths[index].asset_path(),
+                resolved.source.layer,
+                &clip_path,
+            )?;
         }
-        // A clip authoring no samples for the attribute is filled from the
-        // manifest's default (spec 12.3.4.6), so that value composes where the
-        // clip's own would have. With no gap there is none to read.
         // A clip authoring no sample for the attribute is filled from the
         // manifest's default (spec 12.3.4.6), so that value is what the set
         // supplies there. With no gap it is never read.
-        let gap = match per_clip.iter().any(Vec::is_empty) {
+        let gap = match scheduled.iter().any(|&index| per_clip[index].is_empty()) {
             true => self
-                .manifest_default(graph, &manifest, clip_path)?
+                .manifest_default(graph, &manifest, &clip_path)?
                 .map_or(Supplied::Blocked, |value| Supplied::classify(&value, &|value| value)),
             false => Supplied::Blocked,
         };
-        Ok(Some(ClipSamples { per_clip, gap }))
+        Ok(Some(ClipSamples {
+            clip_path,
+            manifest,
+            per_clip,
+            gap,
+        }))
     }
 
     /// The in-clip authored sample times for `clip_path` in a single clip layer,
@@ -2191,6 +2193,29 @@ mod tests {
         assert!(parse(knots(&[(0.0, 0.0), (5.0, 0.5)])).is_none());
         assert!(parse(vec![gf::vec2d(0.0, f64::NAN)]).is_none());
         assert!(parse(vec![gf::vec2d(f64::NAN, 0.0)]).is_none());
+    }
+
+    /// Two clips active from one start time, or three `times` entries at one
+    /// stage time, reject the set, as C++ `_ValidateClipFields` does; two
+    /// entries at one stage time are a jump discontinuity and stay.
+    #[test]
+    fn schedule_rejects_duplicates() {
+        use std::collections::HashMap;
+        let parse = |active: Vec<gf::Vec2d>, times: Vec<gf::Vec2d>| {
+            let mut set = HashMap::new();
+            set.insert(
+                keys::ASSET_PATHS.to_string(),
+                Value::AssetPathVec(vec!["a.usd".into(), "b.usd".into()]),
+            );
+            set.insert(keys::ACTIVE.to_string(), Value::Vec2dVec(active));
+            set.insert(keys::TIMES.to_string(), Value::Vec2dVec(times));
+            ClipSet::parse_set("default", &set)
+        };
+        let active = knots(&[(0.0, 0.0), (10.0, 1.0)]);
+
+        assert!(parse(knots(&[(0.0, 0.0), (0.0, 1.0)]), Vec::new()).is_none());
+        assert!(parse(active.clone(), knots(&[(10.0, 10.0), (10.0, 0.0)])).is_some());
+        assert!(parse(active, knots(&[(10.0, 10.0), (10.0, 0.0), (10.0, 5.0)])).is_none());
     }
 
     #[test]

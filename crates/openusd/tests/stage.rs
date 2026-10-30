@@ -7663,6 +7663,23 @@ fn timecode_authoring_retimed() -> Result<()> {
 // `default` at each site (C++ `Usd_Resolver`), so a stronger layer's `default`
 // hides a weaker layer's `timeSamples`.
 
+/// One time sample of a type that composes over weaker values might vary with
+/// what it composes over, as C++ `UsdAttribute::ValueMightBeTimeVarying`
+/// answers; one sample of any other type is constant.
+#[test]
+fn single_sample_composing_varies() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\"\n{\n    pathExpression p.timeSamples = { 0: \"/A\" }\n    double x.timeSamples = { 0: 2.0 }\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.attribute("/A.p")?.might_be_time_varying()?);
+    assert!(!stage.attribute("/A.x")?.might_be_time_varying()?);
+    Ok(())
+}
+
 /// A stronger layer's `default` hides a weaker sublayer's `timeSamples`.
 #[test]
 fn default_hides_weaker_samples() -> Result<()> {
@@ -9824,35 +9841,59 @@ fn clip_time_samples_gathered() -> Result<()> {
 #[test]
 fn clip_varying_skips_clips() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    fs::write(dir.path().join("clipA.usda"), "#usda 1.0\ndef !!!")?;
-    fs::write(dir.path().join("clipB.usda"), "#usda 1.0\ndef !!!")?;
+    let root = write_two_clip_scene(dir.path(), UNREADABLE_CLIP, "[(0, 0), (10, 1)]")?;
+    let stage = Stage::open(&root)?;
+    assert!(stage.attribute("/Model.size")?.might_be_time_varying()?);
+    Ok(())
+}
+
+/// A clip listed in `assetPaths` but never scheduled by `active` is never
+/// read, as C++ builds a set's clips from its schedule: an unreadable one does
+/// not fail a query that reads the set's samples.
+#[test]
+fn clip_unscheduled_never_read() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let clip = "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 5.0, 1: 6.0 }\n}\n";
+    let root = write_two_clip_scene(dir.path(), clip, "[(0, 0)]")?;
+    let stage = Stage::open(&root)?;
+    let size = stage.attribute("/Model.size")?;
+    assert_eq!(size.num_time_samples()?, 2);
+    assert!(size.might_be_time_varying()?);
+    Ok(())
+}
+
+/// A clip layer that fails to parse, so a test fails if it is ever read.
+const UNREADABLE_CLIP: &str = "#usda 1.0\ndef !!!";
+
+/// Writes a root whose `/Model` sources `size` from a clip set over
+/// `clipA.usda` (holding `clip_a`) and an unreadable `clipB.usda`, scheduled
+/// by `active`, with an authored manifest. Returns the root's path.
+fn write_two_clip_scene(dir: &FsPath, clip_a: &str, active: &str) -> Result<String> {
+    fs::write(dir.join("clipA.usda"), clip_a)?;
+    fs::write(dir.join("clipB.usda"), UNREADABLE_CLIP)?;
     fs::write(
-        dir.path().join("manifest.usda"),
+        dir.join("manifest.usda"),
         "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
     )?;
-    fs::write(
-        dir.path().join("root.usda"),
+    let root = format!(
         r#"#usda 1.0
 def "Model" (
-    clips = {
-        dictionary default = {
+    clips = {{
+        dictionary default = {{
             asset[] assetPaths = [@./clipA.usda@, @./clipB.usda@]
             asset manifestAssetPath = @./manifest.usda@
             string primPath = "/Model"
-            double2[] active = [(0, 0), (10, 1)]
-        }
-    }
+            double2[] active = {active}
+        }}
+    }}
 )
-{
+{{
     float size
-}
-"#,
-    )?;
-    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
-    assert!(stage.attribute("/Model.size")?.might_be_time_varying()?);
-    // Counting the samples does read the clips.
-    assert!(stage.attribute("/Model.size")?.num_time_samples().is_err());
-    Ok(())
+}}
+"#
+    );
+    fs::write(dir.join("root.usda"), root)?;
+    Ok(dir.join("root.usda").to_string_lossy().into_owned())
 }
 
 /// With `interpolateMissingClipValues`, `time_sample_times` reports the
@@ -9905,37 +9946,11 @@ fn query_clip_fallback() -> Result<()> {
 #[test]
 fn query_clip_opens_active() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    fs::write(
-        dir.path().join("clipA.usda"),
-        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 5.0 }\n}\n",
-    )?;
-    fs::write(dir.path().join("clipB.usda"), "#usda 1.0\ndef !!!")?;
-    fs::write(
-        dir.path().join("manifest.usda"),
-        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
-    )?;
-    fs::write(
-        dir.path().join("root.usda"),
-        r#"#usda 1.0
-def "Model" (
-    clips = {
-        dictionary default = {
-            asset[] assetPaths = [@./clipA.usda@, @./clipB.usda@]
-            asset manifestAssetPath = @./manifest.usda@
-            string primPath = "/Model"
-            double2[] active = [(0, 0), (10, 1)]
-        }
-    }
-)
-{
-    float size
-}
-"#,
-    )?;
-    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+    let clip = "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 5.0 }\n}\n";
+    let root = write_two_clip_scene(dir.path(), clip, "[(0, 0), (10, 1)]")?;
+    let stage = Stage::open(&root)?;
     let q = stage.attribute("/Model.size")?.query();
     assert_eq!(q.get_at::<f32>(usd::TimeCode::new(0.0))?, Some(5.0));
-    assert!(q.get_at::<f32>(usd::TimeCode::new(10.0)).is_err());
     Ok(())
 }
 

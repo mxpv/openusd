@@ -655,15 +655,14 @@ impl OpinionResolver for SourceResolver<'_> {
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
         // Participation alone decides: clip values are time-dependent, so the
         // query replays them through `value_at` per time code — whether the set
-        // answers or a stronger composing `default` draws on it. It reads the
-        // manifest, and a clip opens when a time it is active at is read.
-        match probe.sources()? {
-            true => {
-                self.source = Some(AttributeValueSource::PerTime);
-                Ok(Step::Stop)
-            }
-            false => Ok(Step::Continue),
+        // answers or a stronger composing `default` draws on it. Participation
+        // reads the set's manifest, which a set authoring none generates from
+        // its clips; a clip opens when a time it is active at is read.
+        if !probe.sources()? {
+            return Ok(Step::Continue);
         }
+        self.source = Some(AttributeValueSource::PerTime);
+        Ok(Step::Stop)
     }
 }
 
@@ -693,9 +692,10 @@ struct SampleTimesResolver {
     /// The site whose map [`map`](Self::map) is, which anchors an `asset` in
     /// it.
     map_site: Option<SelectedSite>,
-    /// Whether the winning source is a clip set whose schedule alone can vary
-    /// the value.
-    clip_may_vary: bool,
+    /// Whether the winning source may vary whatever its sample count: a clip
+    /// set whose schedule alone can vary the value, or a single sample that
+    /// composes. Only read for [`Want::Vary`].
+    may_vary: bool,
     /// The sample count, where it is read without the times themselves.
     count: Option<usize>,
     /// How much of the winning source the caller reads.
@@ -712,10 +712,11 @@ enum Want {
     /// The sample count alone. An offset maps times one-for-one, so nothing has
     /// to be retimed to answer it.
     Count,
-    /// Whether the value can vary: the sample count, except that a clip set
-    /// whose schedule alone can vary the value answers without reading any of
-    /// its clips (C++ `UsdAttribute::ValueMightBeTimeVarying` likewise opens a
-    /// clip only for a set with a single one).
+    /// Whether the value can vary, answered with the sample count. A clip set
+    /// that sources the attribute and whose schedule alone can vary the value
+    /// answers from its manifest and schedule (C++
+    /// `_ValueFromClipsMightBeTimeVarying`, which counts a clip's samples only
+    /// for a set with a single clip).
     Vary,
     /// The retimed sample times.
     Times,
@@ -758,6 +759,18 @@ impl OpinionResolver for SampleTimesResolver {
         // needs no series, and the map is one an authored spec holds. Whether a
         // *stronger* composition would read these values is a different
         // question, and not this one.
+        // A winning map holding one sample of a type that composes may vary
+        // with what it composes over (C++ `_ValueMightBeTimeVarying`, which
+        // asks `VtValueTypeCanComposeOver` of the sample's type).
+        if self.want == Want::Vary
+            && self.series.is_empty()
+            && samples.len() == 1
+            && samples.iter().all(|(_, value)| value.can_compose_over())
+        {
+            self.answered = true;
+            self.may_vary = true;
+            return Step::Stop;
+        }
         let composes = samples.iter().any(|(_, value)| composes_over_weaker(value));
         if !composes && self.series.is_empty() {
             if matches!(self.want, Want::Count | Want::Vary) {
@@ -790,26 +803,28 @@ impl OpinionResolver for SampleTimesResolver {
     }
 
     fn on_clips(&mut self, probe: &mut ClipProbe<'_>, _site: &OpinionSite<'_>) -> Result<Step, QueryError> {
-        // A set that sources the attribute and switches clips may vary
-        // whatever its clips hold, which answers the question without opening
-        // them: participation reads the manifest alone.
-        if self.want == Want::Vary && probe.set.set.may_be_time_varying() && probe.sources()? {
+        // A set that sources the attribute and switches clips may vary whatever
+        // its clips hold. Its schedule and manifest answer, and a clip opens
+        // only to generate a manifest the set does not author.
+        if self.want == Want::Vary && probe.set.set.may_be_time_varying() {
+            if !probe.sources()? {
+                return Ok(Step::Continue);
+            }
             self.answered = true;
-            self.clip_may_vary = true;
+            self.may_vary = true;
             return Ok(Step::Stop);
         }
         // TODO(perf): the count-only consumer materializes every clip's stage
         // times to read the length. `ClipSet::stage_sample_times` builds the
         // vector; a count-only form over the same per-clip times would answer
         // `num_time_samples` without it.
-        let Some(clips) = probe.introspection()? else {
+        let Some(supplied) = probe.stage_samples()? else {
             return Ok(Step::Continue);
         };
         self.answered = true;
-        self.clip_may_vary = clips.may_vary;
         // A clip set supplies a value per stage time like any other source, read
         // from the samples its times were read from.
-        Ok(self.fold(Series::sampled(clips.supplied)))
+        Ok(self.fold(Series::sampled(supplied)))
     }
 }
 
@@ -1894,10 +1909,12 @@ impl IndexCache {
 
     /// Whether an attribute's value may vary over time, the introspection behind
     /// [`Attribute::might_be_time_varying`]. True when the winning value
-    /// source has more than one composed sample, or when that source is a value-
-    /// clip set whose schedule alone can vary the value
+    /// source has more than one composed sample, when it is a single
+    /// `timeSamples` sample of a type that composes over weaker values, or
+    /// when it is a value-clip set whose schedule alone can vary the value
     /// ([`ClipSet::may_be_time_varying`]). Such a set answers from its
-    /// manifest and schedule, without opening its clips.
+    /// schedule and manifest, and opens its clips only to generate a manifest
+    /// it does not author.
     ///
     /// [`Attribute::might_be_time_varying`]: crate::usd::Attribute::might_be_time_varying
     pub(crate) fn value_might_be_time_varying(
@@ -1906,7 +1923,7 @@ impl IndexCache {
         attr_path: &Path,
     ) -> Result<bool, QueryError> {
         let resolved = self.sample_times(graph, attr_path, Want::Vary)?;
-        Ok(resolved.clip_may_vary || resolved.count() > 1)
+        Ok(resolved.may_vary || resolved.count() > 1)
     }
 
     /// The composed sample times of whichever source [`Self::value_at`] would
@@ -1923,7 +1940,7 @@ impl IndexCache {
             answered: false,
             map: None,
             map_site: None,
-            clip_may_vary: false,
+            may_vary: false,
             count: None,
             want,
             chains: want != Want::Map,
