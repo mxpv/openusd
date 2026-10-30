@@ -1851,8 +1851,9 @@ pub(crate) fn asset_input<'a>(set: &'a HashMap<String, Value>, field: &str) -> O
 /// clip by its anchored form would leave it unreadable, and would key its
 /// registrations under a name no edit to it is ever reported with.
 fn clip_identifier(graph: &LayerGraph, asset_path: &str, anchor_layer: LayerId) -> String {
-    let anchor = graph.anchor_location(Some(anchor_layer));
-    let anchored = graph.layer_registry().create_identifier(asset_path, anchor.as_ref());
+    let anchored = graph
+        .layer(anchor_layer)
+        .absolute_path_with(graph.layer_registry(), asset_path);
     if graph.id_of(&anchored).is_some() {
         return anchored;
     }

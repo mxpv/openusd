@@ -288,7 +288,11 @@ fn resolve_arc_asset_path(
             EvaluatedExpression::None | EvaluatedExpression::Failed => return None,
         }
     }
-    anchor_asset_path(asset_path, graph.layer(authoring_layer), graph.layer_registry());
+    // The same relative path authored in different layers names distinct
+    // targets. An empty path, an internal reference, stays empty.
+    *asset_path = graph
+        .layer(authoring_layer)
+        .absolute_path_with(graph.layer_registry(), asset_path);
     Some(arc_tcps_scale(graph.layer(authoring_layer), asset_path, graph))
 }
 
@@ -371,17 +375,6 @@ pub(super) fn evaluate_expression(
             EvaluatedExpression::Failed
         }
     }
-}
-
-/// Anchors a non-empty, non-absolute asset path to the layer that authored it,
-/// so the same relative path in different layers resolves to distinct targets
-/// (C++ resolves a reference's asset path against its authoring layer when the
-/// layer stack is composed). An empty path (internal reference) is left as-is.
-fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, registry: &sdf::LayerRegistry) {
-    if asset_path.is_empty() {
-        return;
-    }
-    *asset_path = registry.create_identifier_anchored(asset_path, authoring_layer);
 }
 
 /// The retiming scale a reference or payload arc folds into its layer offset

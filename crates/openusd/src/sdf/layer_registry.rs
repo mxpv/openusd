@@ -255,20 +255,6 @@ impl LayerRegistry {
         self.resolver.create_identifier(asset_path, anchor)
     }
 
-    /// The canonical identifier of the layer `asset_path` names when authored
-    /// in `anchor` (C++ `SdfComputeAssetPathRelativeToLayer`). A relative path
-    /// anchors against the layer's
-    /// [`anchor_location`](sdf::Layer::anchor_location), which for a package
-    /// is the package-relative default layer. An anonymous layer has no
-    /// location, and its paths resolve without an anchor.
-    ///
-    /// TODO(perf): the resolver canonicalizes via the filesystem, so each call
-    /// runs a `canonicalize`. Cache resolved identifiers per
-    /// `(anchor location, asset_path)`.
-    pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor: &sdf::Layer) -> String {
-        self.create_identifier(asset_path, anchor.anchor_location().as_ref())
-    }
-
     /// The identifier an in-memory layer is interned under when `asset_path`
     /// names it, by the resolver's
     /// [`in_memory_identifier`](ar::Resolver::in_memory_identifier). An
