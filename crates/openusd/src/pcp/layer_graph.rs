@@ -975,7 +975,7 @@ impl LayerGraph {
                 .anchored_or_bare(anchored, sub_path)
                 .ok_or_else(|| anchored.clone());
         }
-        let anchored = self.registry.create_identifier_anchored(sub_path, self.layer(parent));
+        let anchored = self.layer(parent).absolute_path_with(&self.registry, sub_path);
         let Some(resolved) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
@@ -1216,8 +1216,8 @@ impl LayerGraph {
                 // resolver finds the asset; any other failure is regenerated
                 // per referrer.
                 let anchored = self
-                    .registry
-                    .create_identifier_anchored(&demand.evaluated, self.layer(demand.parent));
+                    .layer(demand.parent)
+                    .absolute_path_with(&self.registry, &demand.evaluated);
                 match self.failed_loads.get(&anchored) {
                     Some(LoadFailure::Unresolved) if self.registry.resolve(&anchored).is_some() => {
                         self.failed_loads.remove(&anchored);
@@ -2494,7 +2494,7 @@ impl LayerGraph {
     /// on-demand loader opens a sublayer demand at, and the key load failures
     /// and open attempts are recorded by.
     pub(crate) fn resolve_relative(&self, asset_path: &str, anchor: LayerId) -> Result<LayerId, String> {
-        let anchored = self.registry.create_identifier_anchored(asset_path, self.layer(anchor));
+        let anchored = self.layer(anchor).absolute_path_with(&self.registry, asset_path);
         self.anchored_or_bare(&anchored, asset_path)
             .map(|(id, _)| id)
             .ok_or(anchored)

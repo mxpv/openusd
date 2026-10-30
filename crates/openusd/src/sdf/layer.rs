@@ -364,26 +364,58 @@ impl Layer {
         (!self.is_anonymous()).then(|| ar::ResolvedPath::new(self.real_path()))
     }
 
-    /// `asset_path`, authored in this layer, as an identifier anchored to
-    /// the layer's location, so it names the same asset from any other layer
-    /// (C++ `SdfLayer::ComputeAbsolutePath`). The anchoring goes through the
-    /// resolver the layer was read through, or the default resolver for a
-    /// layer that was not read from an asset.
+    /// `asset_path`, authored in this layer, as an identifier that names the
+    /// same asset from any other layer (C++ `SdfLayer::ComputeAbsolutePath`).
     ///
-    /// An empty path and an anonymous layer identifier are returned as they
-    /// are, and so is every path an anonymous layer authors, which has no
-    /// location to anchor to.
-    pub fn compute_absolute_path(&self, asset_path: &str) -> String {
-        let Some(anchor) = self.anchor_location() else {
-            return asset_path.to_owned();
-        };
+    /// A relative path is anchored to the location the layer was read from,
+    /// through the resolver it was read through, or the default resolver for
+    /// a layer that was not read from an asset. The paths an anonymous layer
+    /// authors are given no anchor. An empty path and an anonymous layer
+    /// identifier are returned as they are.
+    ///
+    /// A search path (relative, and not opening with `./` or `../`) authored
+    /// inside a package is anchored to the authoring layer. Where it does not
+    /// resolve there, C++ also tries the package's root layer.
+    pub fn absolute_path(&self, asset_path: &str) -> String {
+        match &self.resolver {
+            Some(resolver) => self.absolute_path_with(resolver.as_ref(), asset_path),
+            None => self.absolute_path_with(&ar::DefaultResolver::new(), asset_path),
+        }
+    }
+
+    /// [`absolute_path`](Self::absolute_path) through `resolver`. The
+    /// counterpart of C++ `SdfComputeAssetPathRelativeToLayer`, less its rules
+    /// for search paths inside a package.
+    //
+    // TODO: port the package rules of C++ `SdfComputeAssetPathRelativeToLayer`
+    // (layerUtils.cpp) into one sdf function over `(resolver, anchor
+    // location, asset_path)`. A search path (C++: not opening with `.`)
+    // authored in a packaged layer is anchored there if that resolves, then
+    // at the package's root layer (`GetPackageRootLayerPath`, expanded
+    // through nested packages by `_ExpandPackagePath`) if that resolves,
+    // then by the plain resolver against the package file. Here the package
+    // handling lives in `DefaultResolver::create_identifier`, which keeps
+    // every such path inside the package and, with no anchor, joins the
+    // current directory where C++ returns the normalized path.
+    //
+    // The rules must apply at every anchoring site at once, or one layer
+    // gets two identifiers: this method's callers in composition and clips,
+    // `LayerRegistry::open_sublayers`, the mute keys (`muted_asset_id`,
+    // `canonical_muted_id`, `sublayer_diagnostic_contributes`), asset-value
+    // resolution in `sdf::asset_path`, and the `usd_utils` discovery. The
+    // fallback probes the resolver, which a prim-index build does not do:
+    // either resolve these paths once per layer stack, or allow the probe in
+    // builds. `failed_loads` keys must stay stable when a path moves from the
+    // authoring layer to the package root.
+    //
+    // TODO(perf): the default resolver canonicalizes through the filesystem,
+    // so each call runs a `canonicalize`. Cache identifiers per
+    // `(anchor location, asset_path)` within an `ar::CacheScope`.
+    pub(crate) fn absolute_path_with(&self, resolver: &dyn ar::Resolver, asset_path: &str) -> String {
         if asset_path.is_empty() || Self::is_anonymous_identifier(asset_path) {
             return asset_path.to_owned();
         }
-        match &self.resolver {
-            Some(resolver) => resolver.create_identifier(asset_path, Some(&anchor)),
-            None => ar::Resolver::create_identifier(&ar::DefaultResolver::new(), asset_path, Some(&anchor)),
-        }
+        resolver.create_identifier(asset_path, self.anchor_location().as_ref())
     }
 }
 
@@ -1261,6 +1293,7 @@ mod tests {
 
     use crate::sdf;
     use crate::usda;
+    use crate::usdz;
 
     /// A layer opened by any spelling of its path keeps the canonical
     /// identifier, so it stays one identity and `save` finds the file it loaded
@@ -1286,11 +1319,10 @@ mod tests {
         Ok(())
     }
 
-    /// Paths a layer authors anchor to its directory, while an empty path,
-    /// an anonymous identifier and every path of an anonymous layer stay as
-    /// they are.
+    /// Paths a layer authors anchor to its directory. An empty path and an
+    /// anonymous identifier stay as they are.
     #[test]
-    fn compute_absolute_path_anchors_to_layer() -> Result<()> {
+    fn absolute_path_anchors() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
         fs::create_dir_all(root.join("scene/textures"))?;
@@ -1300,20 +1332,46 @@ mod tests {
         let layer = Layer::open(root.join("scene/scene.usda").to_string_lossy())?;
 
         assert_eq!(
-            layer.compute_absolute_path("./textures/wood.png"),
+            layer.absolute_path("./textures/wood.png"),
             root.join("scene/textures/wood.png").to_string_lossy()
         );
         assert_eq!(
-            layer.compute_absolute_path("../shared.usda"),
+            layer.absolute_path("../shared.usda"),
             root.join("shared.usda").to_string_lossy()
         );
-        assert_eq!(layer.compute_absolute_path(""), "");
+        assert_eq!(layer.absolute_path(""), "");
         let anonymous = Layer::new_anonymous("other.usda");
+        assert_eq!(layer.absolute_path(anonymous.identifier()), anonymous.identifier());
+        Ok(())
+    }
+
+    /// The paths an anonymous layer authors are given no anchor.
+    #[test]
+    fn absolute_path_anonymous() {
+        let anonymous = Layer::new_anonymous("other.usda");
+        let unanchored = ar::Resolver::create_identifier(&ar::DefaultResolver::new(), "./wood.png", None);
+        assert_eq!(anonymous.absolute_path("./wood.png"), unanchored);
+    }
+
+    /// The paths a packaged layer authors anchor inside its package, next to
+    /// that layer.
+    #[test]
+    fn absolute_path_in_package() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let package = dir.path().canonicalize()?.join("pkg.usdz");
+        let mut writer = usdz::ArchiveWriter::create(&package)?;
+        writer.add_layer("root.usda", b"#usda 1.0\n")?;
+        writer.add_layer("sub/inner.usda", b"#usda 1.0\n")?;
+        writer.add_layer("sub/tex/b.usda", b"#usda 1.0\n")?;
+        writer.finish()?;
+        let package = package.to_string_lossy();
+        let inner = Layer::open(format!("{package}[sub/inner.usda]"))?;
+
+        assert_eq!(inner.absolute_path("tex/b.usda"), format!("{package}[sub/tex/b.usda]"));
         assert_eq!(
-            layer.compute_absolute_path(anonymous.identifier()),
-            anonymous.identifier()
+            inner.absolute_path("./tex/b.usda"),
+            format!("{package}[sub/tex/b.usda]")
         );
-        assert_eq!(anonymous.compute_absolute_path("./wood.png"), "./wood.png");
         Ok(())
     }
 
