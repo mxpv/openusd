@@ -690,6 +690,10 @@ impl<'a> Decoder<'a> {
         Ok(indexed(&self.file.tokens, token, "token")?.clone())
     }
 
+    fn resolve_token(&self, token_index: usize) -> Result<tf::Token, ReadError> {
+        Ok(indexed(&self.file.tokens, token_index, "token")?.as_str().into())
+    }
+
     fn unpack_value<T: AnyBitPattern>(&mut self, value: ValueRep) -> Result<T, ReadError> {
         corrupt!(!value.is_array(), "Can't unpack array {value:?} as inline value");
 
@@ -717,7 +721,7 @@ impl<'a> Decoder<'a> {
 
     fn read_token(&mut self, value: ValueRep) -> Result<tf::Token, ReadError> {
         let index: u64 = self.unpack_value(value)?;
-        Ok(indexed(&self.file.tokens, index as usize, "token")?.as_str().into())
+        self.resolve_token(index as usize)
     }
 
     /// Read a scalar asset path or path expression.
@@ -769,9 +773,10 @@ impl<'a> Decoder<'a> {
                 }
             }
             ArrayKind::Other => {
-                // Fallback to uncompressed.
+                // A type with no compressed encoding reads uncompressed,
+                // whatever the compressed bit says (C++
+                // `_ReadPossiblyCompressedArray`'s fallback).
                 // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1868
-                corrupt!(!value.is_compressed());
                 compressed = false;
             }
         }
@@ -780,7 +785,7 @@ impl<'a> Decoder<'a> {
         let count = if self.file.version() < version(0, 7, 0) {
             self.stream.read_pod::<u32>()? as usize
         } else {
-            self.stream.read_pod::<u64>()? as usize
+            self.stream.read_count()?
         };
 
         if count < MIN_COMPRESSED_ARRAY_SIZE {
@@ -892,18 +897,15 @@ impl<'a> Decoder<'a> {
         indices.into_iter().map(|index| lookup(self, index as usize)).collect()
     }
 
-    /// Reads a value array (`VtArray`) of `u32` table indices and maps each
-    /// through `lookup`. Unlike the count-prefixed vectors above, its header
-    /// goes through `unpack_array_len`: an empty array is a zero payload with
-    /// no data, and the count width depends on the crate version.
+    /// Reads a value array (`VtArray`) of `u32` table indices, laid out as
+    /// [`read_array`](Self::read_array) reads one, and maps each through
+    /// `lookup`. An empty array is a zero payload with no data.
     fn read_indexed_array<T>(
         &mut self,
         value: ValueRep,
         lookup: impl Fn(&Self, usize) -> Result<T, ReadError>,
     ) -> Result<Vec<T>, ReadError> {
-        let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-        let indices = self.stream.read_vec::<u32>(count)?;
-
+        let indices = self.read_array::<u32>(value)?;
         indices.into_iter().map(|index| lookup(self, index as usize)).collect()
     }
 
@@ -912,7 +914,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_token_vec(&mut self) -> Result<Vec<tf::Token>, ReadError> {
-        self.read_indexed_vec(|decoder, index| Ok(indexed(&decoder.file.tokens, index, "token")?.as_str().into()))
+        self.read_indexed_vec(Self::resolve_token)
     }
 
     fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>, ReadError> {
@@ -1055,7 +1057,7 @@ impl<'a> Decoder<'a> {
     /// is replaced; that needs a `vt::Value` array form over an
     /// `ar::SharedBuffer` view.
     fn read_array<U: NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>, ReadError> {
-        corrupt!(value.is_array() && !value.is_compressed());
+        corrupt!(value.is_array());
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
         self.stream.read_vec::<U>(count)
     }
@@ -1166,18 +1168,13 @@ impl<'a> Decoder<'a> {
                 // stored like string arrays — string-table indices, not direct
                 // token indices.
                 vt::Value::AssetPathVec(
-                    self.read_indexed_array(value, Self::resolve_string)?
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
+                    self.read_indexed_array(value, |decoder, index| decoder.resolve_string(index).map(Into::into))?,
                 )
             }
             Type::AssetPath => vt::Value::AssetPath(self.read_asset_path(value)?.into()),
 
             Type::Token if value.is_array() => {
-                vt::Value::TokenVec(self.read_indexed_array(value, |decoder, index| {
-                    Ok(indexed(&decoder.file.tokens, index, "token")?.as_str().into())
-                })?)
+                vt::Value::TokenVec(self.read_indexed_array(value, Self::resolve_token)?)
             }
             Type::Token => vt::Value::Token(self.read_token(value)?),
 
@@ -1544,12 +1541,9 @@ impl<'a> Decoder<'a> {
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays
                 // (string-table indices), each entry parsed into an expression.
-                vt::Value::PathExpressionVec(
-                    self.read_indexed_array(value, Self::resolve_string)?
-                        .iter()
-                        .map(|text| sdf::PathExpression::parse(text))
-                        .collect(),
-                )
+                vt::Value::PathExpressionVec(self.read_indexed_array(value, |decoder, index| {
+                    Ok(sdf::PathExpression::parse(&decoder.resolve_string(index)?))
+                })?)
             }
             Type::PathExpression => {
                 let expr = self.read_asset_path(value)?;
