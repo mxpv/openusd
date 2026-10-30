@@ -24,7 +24,39 @@ pub struct Dependencies {
     pub unresolved: Vec<String>,
 }
 
-/// Computes every layer and asset `asset_path` depends on through `stage`'s
+/// The layer a dependency walk starts from.
+#[derive(Debug, Clone, Copy)]
+pub enum Root<'a> {
+    /// The layer an asset path names: one the stage holds under that
+    /// identifier, otherwise the one the stage's resolver opens.
+    Path(&'a str),
+    /// A layer in hand, which the stage need not hold, such as a layer a stage
+    /// was flattened into. It is walked as it is in memory. The paths it
+    /// authors are anchored to the location it was read from. An anonymous
+    /// layer was read from nowhere, and its relative paths resolve against
+    /// the current directory first, as in C++.
+    Layer(&'a sdf::Layer),
+}
+
+impl<'a> From<&'a str> for Root<'a> {
+    fn from(path: &'a str) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a String> for Root<'a> {
+    fn from(path: &'a String) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a sdf::Layer> for Root<'a> {
+    fn from(layer: &'a sdf::Layer) -> Self {
+        Self::Layer(layer)
+    }
+}
+
+/// Computes every layer and asset `root` depends on through `stage`'s
 /// resolver, as C++ `UsdUtilsComputeAllDependencies` does through the global
 /// one.
 ///
@@ -42,13 +74,13 @@ pub struct Dependencies {
 /// listing the filesystem, and variable expressions, which C++ anchors
 /// unevaluated and reports unresolved, return
 /// [`DependencyError`](super::DependencyError).
-pub fn all_dependencies(stage: &Stage, asset_path: &str) -> Result<Dependencies> {
+pub fn all_dependencies<'a>(stage: &Stage, root: impl Into<Root<'a>>) -> Result<Dependencies> {
     let graph = stage.layers();
     let policy = Discover {
         inactive: false,
         open_packages: true,
     };
-    let discovery = discover(&graph, asset_path, policy)?;
+    let discovery = discover(&graph, root.into(), policy)?;
     let mut dependencies = Dependencies::default();
     for source in &discovery.sources {
         match &source.content {
@@ -168,39 +200,25 @@ impl Content<'_> {
     }
 }
 
-/// Walks from the root layer `asset_path` names over every file it reaches
-/// through `graph`'s resolver, breadth first, visiting each layer once. A
-/// layer `graph` holds is walked as it is in memory; any other is read
-/// through the resolver. The root failing to resolve is an error; any other
-/// file failing to is recorded.
-pub(super) fn discover<'a>(graph: &'a pcp::LayerGraph, asset_path: &str, policy: Discover) -> Result<Discovery<'a>> {
+/// Walks from `root` over every file it reaches through `graph`'s resolver,
+/// breadth first, visiting each layer once. A root layer in hand and a layer
+/// `graph` holds are walked as they are in memory; any other is read through
+/// the resolver. The root failing to resolve is an error; any other file
+/// failing to is recorded.
+pub(super) fn discover<'a>(graph: &'a pcp::LayerGraph, root: Root<'a>, policy: Discover) -> Result<Discovery<'a>> {
     // One cache scope spans the discovery. Each package it reads into is
     // opened once.
     let _scope = ar::CacheScope::begin();
-    let identifier = root_identifier(graph, asset_path);
-    let Some(layer) = SourceLayer::open(graph, &identifier)? else {
-        return Err(Error::UnresolvedAsset(asset_path.to_owned()));
+    let (identifier, layer) = match root {
+        Root::Path(asset_path) => {
+            let identifier = root_identifier(graph, asset_path);
+            let Some(layer) = SourceLayer::open(graph, &identifier)? else {
+                return Err(Error::UnresolvedAsset(asset_path.to_owned()));
+            };
+            (identifier, layer)
+        }
+        Root::Layer(layer) => (layer.identifier().to_owned(), SourceLayer::Live(layer)),
     };
-    discover_root(graph, identifier, layer, policy)
-}
-
-/// [`discover`] from `layer`, which `graph` need not hold, as the root.
-pub(super) fn discover_layer<'a>(
-    graph: &'a pcp::LayerGraph,
-    layer: &'a sdf::Layer,
-    policy: Discover,
-) -> Result<Discovery<'a>> {
-    let _scope = ar::CacheScope::begin();
-    discover_root(graph, layer.identifier().to_owned(), SourceLayer::Live(layer), policy)
-}
-
-/// Walks from the root `layer`, known by `identifier`.
-fn discover_root<'a>(
-    graph: &'a pcp::LayerGraph,
-    identifier: String,
-    layer: SourceLayer<'a>,
-    policy: Discover,
-) -> Result<Discovery<'a>> {
     let root = Source {
         identifier,
         placement: Placement::Root,
@@ -475,7 +493,14 @@ impl<'a> Discoverer<'a> {
                 placement: located.placement,
                 content,
             };
-            (self.admit(source), true)
+            // A layer already found under another spelling of its location
+            // is that source. The index records this spelling for it too.
+            if let Some(&index) = source.real_path().and_then(|real| self.index.get(real)) {
+                self.index.insert(source.identifier, index);
+                (index, false)
+            } else {
+                (self.admit(source), true)
+            }
         };
         Ok(Some((
             Use {
@@ -623,6 +648,11 @@ impl<'a> Discoverer<'a> {
         if source.is_layer() {
             self.queue.push_back(index);
         }
+        if let Some(real) = source.real_path()
+            && real != source.identifier
+        {
+            self.index.entry(real.to_owned()).or_insert(index);
+        }
         self.index.insert(source.identifier.clone(), index);
         self.sources.push(source);
         index
@@ -638,6 +668,18 @@ impl<'a> Discoverer<'a> {
 impl Source<'_> {
     fn is_layer(&self) -> bool {
         matches!(self.content, Content::Layer { .. })
+    }
+
+    /// The file a layer source was read from. A path anchored elsewhere can
+    /// spell this location for a layer whose identifier differs from it, such
+    /// as one found through a search path or a root in hand. `None` for a
+    /// layer read from inside a package: C++ opens it as a layer apart from
+    /// its package.
+    fn real_path(&self) -> Option<&str> {
+        let Content::Layer { layer, .. } = &self.content else {
+            return None;
+        };
+        layer.resolved_path().filter(|real| !ar::is_package_relative_path(real))
     }
 
     /// Whether the source is stored as an entry of its own: a set of tiles is
