@@ -1262,7 +1262,10 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
             identifier: layer.identifier.clone(),
             txn: txn.id,
             changes: mem::take(&mut layer.changes),
-            footprint,
+            // TODO(perf): every subscribed commit builds and sorts its
+            // footprint, which only a stage with a transaction observer reads;
+            // a subscriber that says it wants one would skip the rest.
+            footprint: Rc::new(footprint),
             origin: txn.origin,
         });
         notifications.extend(layer.sinks.snapshot().into_iter().map(|sink| Notification {

@@ -16,6 +16,7 @@
 //! outlives it.
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::mem;
 use std::ops::Deref;
@@ -25,7 +26,7 @@ use crate::Result;
 use crate::{pcp, sdf};
 
 use super::diff::{apply_edits_verbatim, forward_diff, inverse_diff};
-use super::sink::{CommittedChange, PendingChange, StageSink, StageSinkId, TxnObserver};
+use super::sink::{CommittedChange, PendingChange, TxnObserver};
 use super::stage::{Stage, StageAuthoringError};
 use super::{Diff, Edit};
 
@@ -41,16 +42,23 @@ const DEFAULT_CAPACITY: usize = 128;
 /// [`undo`](Self::undo) reverts the newest step, [`reset`](Self::reset)
 /// discards the stack, and [`into_inner`](Self::into_inner) stops recording.
 ///
-/// The inverse is derived at the layer's commit seam, from
-/// [`StageSink::before_commit`], the one moment the pre-edit values are still
-/// readable — after the commit drains they are gone. Each layer's inverse is
-/// buffered against its transaction id ([`PendingChange::generation`]) and
-/// sealed into one entry when that transaction reconciles, before its
-/// notices are delivered; a transaction that does not land drops its
-/// buffered captures. Only the stage's own edits are recorded
-/// ([`PendingChange::is_own`]). The stack is bounded
+/// The inverse is derived at the layer's commit seam, the one moment the
+/// pre-edit values are still readable — after the commit drains they are
+/// gone — ahead of the stage's sinks, so no sink's order or panic reaches the
+/// record. Each layer's inverse is buffered against its transaction id
+/// ([`PendingChange::generation`]) and sealed into one entry when that
+/// transaction reconciles, before its notices are delivered; a transaction
+/// that does not land drops its buffered captures. Only the stage's own edits
+/// are recorded ([`PendingChange::is_own`]). The stack is bounded
 /// ([`with_capacity`](Self::with_capacity)); once full, the oldest step is
 /// dropped and becomes permanent.
+///
+/// The stage's layers may be shared with other stages and handles on its
+/// registry. An edit made elsewhere that touches what a step's inverse would
+/// restore — a field the step changed, or a spec it created or erased, or one
+/// beneath either — makes the step stale: that step and every older one are
+/// dropped, and an open [`group`](Self::group) loses what it recorded, so an
+/// undo never overwrites the other editor's work.
 pub struct UndoStage {
     capture: CaptureStage<Journal>,
 }
@@ -71,17 +79,11 @@ impl UndoStage {
         let journal = Journal {
             stack: VecDeque::new(),
             in_flight: Vec::new(),
-            group: None,
-            suspended: false,
+            groups: Vec::new(),
+            reverting: Vec::new(),
             capacity: capacity.max(1),
-            resets: 0,
-            late: None,
         };
-        // The recorder captures as a stage sink, before each commit, and seals
-        // as an observer, as each transaction reconciles.
-        let capture = CaptureStage::new(stage, journal)
-            .with_sink(|journal| UndoRecorder { journal })
-            .with_observer(|journal| UndoRecorder { journal });
+        let capture = CaptureStage::new(stage, journal, |journal| UndoRecorder { journal });
         Self { capture }
     }
 
@@ -112,19 +114,8 @@ impl UndoStage {
     {
         // An edit committed before the group, still pending, is not part of it.
         self.capture.process_pending();
-        // The group collects its own transactions; an enclosing group's are
-        // held aside until this one closes and joins them.
-        let (outer, resets, opened_after) = {
-            let mut journal = self.capture.log().borrow_mut();
-            let opened_after = journal.in_flight.last().map(|bucket| bucket.generation);
-            (journal.group.replace(Vec::new()), journal.resets, opened_after)
-        };
-        let _close = CloseGroup {
-            journal: self.capture.log(),
-            outer,
-            resets,
-            opened_after,
-        };
+        self.capture.log().borrow_mut().groups.push(Vec::new());
+        let _close = CloseGroup(self.capture.log());
         let result = edit(self);
         // Reconcile what the group committed, which seals it into the group.
         self.capture.process_pending();
@@ -135,15 +126,19 @@ impl UndoStage {
             self.capture
                 .log()
                 .borrow_mut()
-                .group
-                .as_mut()
+                .groups
+                .last_mut()
                 .expect("a group is open until its guard drops"),
         );
         // What could not be reverted stays in the group, still undoable.
         if let Err((revert, unreverted)) = self.revert(committed) {
-            if let Some(open) = self.capture.log().borrow_mut().group.as_mut() {
-                open.extend(unreverted);
-            }
+            self.capture
+                .log()
+                .borrow_mut()
+                .groups
+                .last_mut()
+                .expect("a group is open until its guard drops")
+                .extend(unreverted);
             return Err(revert.into());
         }
         Err(error)
@@ -157,7 +152,14 @@ impl UndoStage {
     /// The revert is itself an edit but is not recorded: capture is suspended
     /// for its duration, so an undone step leaves the stack shorter, not
     /// longer. Each transaction reverts atomically; one that fails leaves the
-    /// transactions not yet reverted on the stack as the newest step.
+    /// transactions not yet reverted on the stack as the newest step. An edit
+    /// made elsewhere while the step replays, overlapping one of its
+    /// transactions not yet replayed, ends the revert before that one, so the
+    /// step is undone in part and the other editor's work stays.
+    //
+    // TODO: an own edit a sink makes while a revert replays is not recorded,
+    // and a later transaction of the revert can overwrite it. Telling such an
+    // edit from the revert's own replays needs the replays' transaction ids.
     ///
     /// Inside an open [`group`](Self::group) nothing is undone, and this
     /// returns `false`: the group's own edits are newer than every step.
@@ -168,7 +170,7 @@ impl UndoStage {
         self.capture.settle()?;
         let step = {
             let mut journal = self.capture.log().borrow_mut();
-            if journal.group.is_some() {
+            if !journal.groups.is_empty() {
                 return Ok(false);
             }
             journal.stack.pop_back()
@@ -187,16 +189,10 @@ impl UndoStage {
 
     /// Discard the recorded undo stack, keeping the current scene. Cheap — the
     /// captured inverse diffs are dropped without replaying. Recording continues
-    /// for subsequent edits, a group still open included.
+    /// for subsequent edits, a group still open included, and an undo in
+    /// progress replays to its end.
     pub fn reset(&self) {
-        let mut journal = self.capture.log().borrow_mut();
-        journal.stack.clear();
-        journal.in_flight.clear();
-        journal.late = None;
-        journal.resets += 1;
-        if let Some(open) = journal.group.as_mut() {
-            open.clear();
-        }
+        self.capture.log().borrow_mut().discard();
     }
 
     /// Whether [`undo`](Self::undo) would revert a step: one is recorded and no
@@ -205,7 +201,7 @@ impl UndoStage {
     pub fn can_undo(&self) -> bool {
         self.capture.process_pending();
         let journal = self.capture.log().borrow();
-        journal.group.is_none() && !journal.stack.is_empty()
+        journal.groups.is_empty() && !journal.stack.is_empty()
     }
 
     /// The number of recorded steps on the undo stack. Reconciles first, so
@@ -215,8 +211,8 @@ impl UndoStage {
         self.capture.log().borrow().stack.len()
     }
 
-    /// Stop recording and return the wrapped [`Stage`], removing the capture
-    /// sink.
+    /// Stop recording and return the wrapped [`Stage`], removing the
+    /// recorder.
     pub fn into_inner(self) -> Stage {
         self.capture.into_inner()
     }
@@ -224,45 +220,44 @@ impl UndoStage {
     /// Replay the inverse of each of `transactions`, newest first, with
     /// capture suspended. On a failure, returns the error with the
     /// transactions not yet reverted, the failed one included, oldest first.
-    fn revert(&self, mut transactions: Vec<Transaction>) -> Result<(), (StageAuthoringError, Vec<Transaction>)> {
-        // Restore capture even if a replay panics (a user sink could panic
+    ///
+    /// The transactions not yet replayed wait in the journal, where an edit
+    /// elsewhere that makes one stale ([`Journal::invalidate`]) drops them, and
+    /// the revert ends there.
+    fn revert(&self, transactions: Vec<Transaction>) -> Result<(), (StageAuthoringError, Vec<Transaction>)> {
+        let journal = self.capture.log();
+        // Ends the revert even if a replay panics (a user sink could panic
         // mid-commit), so a panic can never leave capture suspended.
-        let _suspend = Suspend::begin(self.capture.log());
-        while let Some(transaction) = transactions.pop() {
+        let _reverting = Reverting::begin(journal, transactions);
+        loop {
+            let next = journal.borrow_mut().reverting.last_mut().and_then(Vec::pop);
+            let Some(transaction) = next else {
+                return Ok(());
+            };
             // A single-mapping replay is atomic, so a failure applied nothing.
             if let Err(error) = self.replay(&transaction) {
-                transactions.push(transaction);
-                return Err((error, transactions));
+                let mut journal = journal.borrow_mut();
+                let rest = journal
+                    .reverting
+                    .last_mut()
+                    .expect("a revert holds its list until it ends");
+                rest.push(transaction);
+                return Err((error, mem::take(rest)));
             }
         }
-        Ok(())
     }
 
     /// Replay `transaction`'s per-layer inverse edits as one atomic
     /// [`author_layers_txn`] (all-or-nothing) through its shared edit-target
-    /// mapping. A layer no longer in the stage is skipped.
+    /// mapping.
     fn replay(&self, transaction: &Transaction) -> Result<(), StageAuthoringError> {
         self.capture.settle()?;
-        // Resolve recorded identifiers to live layer ids under a short graph
-        // borrow, pairing each with its inverse edits. The borrow is released
-        // before `author_layers_txn` re-borrows the graph mutably.
-        let batch: Vec<(pcp::LayerId, &[Edit])> = {
-            let graph = self.capture.layers();
-            transaction
-                .layers
-                .iter()
-                .filter_map(|(identifier, edits)| graph.id_of(identifier).map(|id| (id, edits.as_slice())))
-                .collect()
-        };
-        if batch.is_empty() {
-            return Ok(());
-        }
-        let ids: Vec<pcp::LayerId> = batch.iter().map(|(id, _)| *id).collect();
+        let ids: Vec<pcp::LayerId> = transaction.layers.iter().map(|inverse| inverse.layer).collect();
         self.capture
             .author_layers_txn(&ids, transaction.mapping.as_ref(), true, |realized, edits| {
                 for (edit, &id) in edits.iter_mut().zip(realized) {
-                    if let Some((_, ops)) = batch.iter().find(|(batch_id, _)| *batch_id == id) {
-                        apply_edits_verbatim(edit, ops).map_err(StageAuthoringError::from)?;
+                    if let Some(inverse) = transaction.layers.iter().find(|inverse| inverse.layer == id) {
+                        apply_edits_verbatim(edit, &inverse.edits).map_err(StageAuthoringError::from)?;
                     }
                 }
                 Ok(())
@@ -279,20 +274,41 @@ impl Deref for UndoStage {
     }
 }
 
-/// The recorded inverse of one atomic transaction: its per-layer inverse edits
-/// (each keyed by layer identifier) and the one edit-target mapping they were
-/// authored through — a transaction's layers share it, so it is stored once.
+/// The recorded inverse of one atomic transaction: its per-layer inverses and
+/// the one edit-target mapping they were authored through — a transaction's
+/// layers share it, so it is stored once.
 struct Transaction {
     mapping: Option<pcp::MapFunction>,
-    layers: Vec<(String, Vec<Edit>)>,
+    layers: Vec<Inverse>,
 }
 
-/// A transaction's captures buffered at `before_commit`, awaiting its
-/// reconciliation, keyed by the transaction id ([`PendingChange::generation`]).
+impl Transaction {
+    /// Whether an edit elsewhere that touched each layer in `footprints` with
+    /// its footprint overlaps what this transaction's inverse would restore.
+    fn overlaps(&self, footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)]) -> bool {
+        self.layers.iter().any(|inverse| {
+            footprint_of(footprints, inverse.layer).is_some_and(|footprint| inverse.footprint.overlaps(footprint))
+        })
+    }
+}
+
+/// One layer's part of a recorded transaction: the edits that restore it, and
+/// what the transaction touched on it.
+struct Inverse {
+    /// The layer, by its id in the stage's graph, which no other layer ever
+    /// takes.
+    layer: pcp::LayerId,
+    edits: Vec<Edit>,
+    /// Empty until the transaction reconciles.
+    footprint: Rc<sdf::Footprint>,
+}
+
+/// A transaction's captures buffered as its layers commit, awaiting its
+/// reconciliation, keyed by the transaction id
+/// ([`PendingChange::generation`]).
 struct InFlight {
     generation: u64,
-    mapping: Option<pcp::MapFunction>,
-    layers: Vec<(String, Vec<Edit>)>,
+    transaction: Transaction,
 }
 
 /// An [`UndoStage`]'s recording state.
@@ -304,31 +320,15 @@ struct Journal {
     /// Per-transaction captures awaiting their reconciliation, which seals a
     /// landed transaction's bucket and drops an aborted one's.
     in_flight: Vec<InFlight>,
-    /// The transactions sealed inside the innermost open
-    /// [`group`](UndoStage::group), oldest first, or `None` outside one.
-    group: Option<Vec<Transaction>>,
-    /// Set while [`undo`](UndoStage::undo) or a failed
-    /// [`group`](UndoStage::group) replays inverses, so the revert's own
-    /// commits are not recorded.
-    suspended: bool,
+    /// The transactions sealed inside each open [`group`](UndoStage::group),
+    /// oldest first, the innermost group last; empty outside one.
+    groups: Vec<Vec<Transaction>>,
+    /// The transactions each revert in progress has still to replay, newest
+    /// last, the innermost revert last. While one runs capture is suspended,
+    /// so the revert's own commits are not recorded.
+    reverting: Vec<Vec<Transaction>>,
     /// The maximum number of steps on [`stack`](Self::stack).
     capacity: usize,
-    /// How many times [`reset`](UndoStage::reset) has run, so a group open
-    /// across one drops what its enclosing groups recorded before it.
-    resets: u64,
-    /// The transactions a group closed by unwinding began that had not sealed,
-    /// each of which seals into that group's step.
-    late: Option<Late>,
-}
-
-/// What [`Journal::late`] tracks for a group closed by unwinding.
-struct Late {
-    /// The id of the newest transaction the group began that had not sealed.
-    until: u64,
-    /// Whether the group's step is on the stack, the newest. A group that had
-    /// sealed nothing gets its step when a late transaction seals, so one that
-    /// rolled back leaves no step.
-    stepped: bool,
 }
 
 impl Journal {
@@ -340,81 +340,105 @@ impl Journal {
             self.stack.pop_front();
         }
     }
+
+    /// Whether a revert is replaying inverses, which capture skips.
+    fn suspended(&self) -> bool {
+        !self.reverting.is_empty()
+    }
+
+    /// Drop every recorded step and capture, the open groups' included. A
+    /// revert in progress replays to its end.
+    fn discard(&mut self) {
+        self.in_flight.clear();
+        self.stack.clear();
+        for open in &mut self.groups {
+            open.clear();
+        }
+    }
+
+    /// Drop what an edit elsewhere, which touched each layer in `footprints`
+    /// with its footprint, made stale. Undo replays newest first, so the newest
+    /// transaction it overlaps goes with every older one, and the newer ones
+    /// stay. From oldest to newest, the transactions run through the stack's
+    /// steps, the open groups from the outermost, and the reverts in progress
+    /// from the outermost, each holding its transactions oldest first. A
+    /// capture still in flight is of an edit made after it, and stays.
+    fn invalidate(&mut self, footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)]) {
+        // TODO(perf): every foreign commit scans every recorded transaction; a
+        // per-layer index of the steps touching each layer would skip the
+        // layers no step touched.
+        let stale = |transaction: &Transaction| transaction.overlaps(footprints);
+        let held = self.groups.iter_mut().chain(&mut self.reverting);
+        let newest = held
+            .enumerate()
+            .filter_map(|(level, transactions)| Some((level, transactions.iter().rposition(stale)?)))
+            .last();
+        if let Some((level, at)) = newest {
+            for (index, transactions) in self.groups.iter_mut().chain(&mut self.reverting).enumerate() {
+                match index.cmp(&level) {
+                    Ordering::Less => transactions.clear(),
+                    Ordering::Equal => {
+                        transactions.drain(..=at);
+                    }
+                    Ordering::Greater => {}
+                }
+            }
+            self.stack.clear();
+            return;
+        }
+        let stale = self.stack.iter().rposition(|step| step.iter().any(stale));
+        if let Some(newest) = stale {
+            self.stack.drain(..=newest);
+        }
+    }
 }
 
-/// Suspends capture until dropped, so a panic mid-replay cannot leave capture
-/// suspended.
-struct Suspend<'a>(&'a RefCell<Journal>);
+/// A revert in progress, which suspends capture until dropped, so a panic
+/// mid-replay cannot leave capture suspended.
+struct Reverting<'a>(&'a RefCell<Journal>);
 
-impl<'a> Suspend<'a> {
-    fn begin(journal: &'a RefCell<Journal>) -> Self {
-        journal.borrow_mut().suspended = true;
+impl<'a> Reverting<'a> {
+    /// Begin reverting `transactions`, newest last.
+    fn begin(journal: &'a RefCell<Journal>, transactions: Vec<Transaction>) -> Self {
+        journal.borrow_mut().reverting.push(transactions);
         Self(journal)
     }
 }
 
-impl Drop for Suspend<'_> {
+impl Drop for Reverting<'_> {
     fn drop(&mut self) {
-        self.0.borrow_mut().suspended = false;
+        self.0.borrow_mut().reverting.pop();
     }
 }
 
 /// Closes a [`group`](UndoStage::group) when dropped, as its edit returns or
 /// unwinds: what it committed joins the enclosing group, or is recorded as
 /// one step when there is none.
-struct CloseGroup<'a> {
-    journal: &'a RefCell<Journal>,
-    /// The enclosing group's transactions, held aside while this one is open.
-    outer: Option<Vec<Transaction>>,
-    /// [`Journal::resets`] when the group opened.
-    resets: u64,
-    /// The newest transaction already in flight when the group opened; a
-    /// newer one began inside it.
-    opened_after: Option<u64>,
-}
+struct CloseGroup<'a>(&'a RefCell<Journal>);
 
 impl Drop for CloseGroup<'_> {
     fn drop(&mut self) {
-        let mut journal = self.journal.borrow_mut();
-        let own = journal.group.take().unwrap_or_default();
-        if let Some(mut outer) = self.outer.take() {
-            // A reset while this group was open discarded what the enclosing
-            // groups had recorded too. A transaction still in flight seals into
-            // the enclosing group, which is open.
-            if journal.resets != self.resets {
-                outer.clear();
-            }
+        let mut journal = self.0.borrow_mut();
+        // Every transaction the group committed has reconciled: a stage edit
+        // reconciles as its commit is delivered.
+        let own = journal.groups.pop().unwrap_or_default();
+        if let Some(outer) = journal.groups.last_mut() {
             outer.extend(own);
-            journal.group = Some(outer);
-            return;
-        }
-        // A group closed by unwinding skips its final drain, so a transaction
-        // it committed may not be reconciled yet.
-        // It seals into this step when it seals, and runs no user code here; a
-        // capture whose transaction rolled back never seals.
-        let stepped = !own.is_empty();
-        if stepped {
+        } else if !own.is_empty() {
             journal.push_step(own);
         }
-        journal.late = journal
-            .in_flight
-            .iter()
-            .map(|bucket| bucket.generation)
-            .filter(|&generation| self.opened_after.is_none_or(|after| generation > after))
-            .max()
-            .map(|until| Late { until, stepped });
     }
 }
 
-/// The recorder an [`UndoStage`] installs: as a [`StageSink`] it captures each
-/// layer's inverse at `before_commit`, and as a [`TxnObserver`] it seals or
-/// drops the transaction as it reconciles.
+/// The observer an [`UndoStage`] installs: it captures each layer's inverse
+/// as the layer commits, and seals, drops or invalidates as each transaction
+/// reconciles.
 struct UndoRecorder {
     journal: Rc<RefCell<Journal>>,
 }
 
-impl StageSink for UndoRecorder {
-    fn before_commit(&self, _stage: &Stage, change: &PendingChange<'_>) {
+impl TxnObserver for UndoRecorder {
+    fn capture(&self, _stage: &Stage, change: &PendingChange<'_>, layer: pcp::LayerId) {
         // Only the stage's own edits are undoable: another editor's edit to a
         // layer the stage holds, or one made through a layer handle, is not
         // this stage's to revert.
@@ -422,7 +446,7 @@ impl StageSink for UndoRecorder {
             return;
         }
         let mut journal = self.journal.borrow_mut();
-        if journal.suspended {
+        if journal.suspended() {
             return;
         }
         // Derive this layer's inverse. A read error (near-impossible on a
@@ -434,22 +458,26 @@ impl StageSink for UndoRecorder {
         if edits.is_empty() {
             return;
         }
-        let layer = (change.layer_identifier.to_string(), edits);
         // Buffer against this transaction's id. Its layers commit consecutively
         // and ids increase, so the current bucket — if any — is the last one; a
         // new bucket captures the transaction's mapping once (all layers share it).
+        let inverse = Inverse {
+            layer,
+            edits,
+            footprint: Rc::default(),
+        };
         match journal.in_flight.last_mut() {
-            Some(bucket) if bucket.generation == change.generation => bucket.layers.push(layer),
+            Some(bucket) if bucket.generation == change.generation => bucket.transaction.layers.push(inverse),
             _ => journal.in_flight.push(InFlight {
                 generation: change.generation,
-                mapping: change.mapping.cloned(),
-                layers: vec![layer],
+                transaction: Transaction {
+                    mapping: change.mapping.cloned(),
+                    layers: vec![inverse],
+                },
             }),
         }
     }
-}
 
-impl TxnObserver for UndoRecorder {
     fn aborted(&self, generation: u64) {
         self.journal
             .borrow_mut()
@@ -457,47 +485,40 @@ impl TxnObserver for UndoRecorder {
             .retain(|bucket| bucket.generation != generation);
     }
 
-    fn committed(&self, _stage: &Stage, change: &CommittedChange<'_>) {
+    fn committed(
+        &self,
+        _stage: &Stage,
+        change: &CommittedChange<'_>,
+        footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)],
+    ) {
         let generation = change.generation;
         let mut journal = self.journal.borrow_mut();
+        // An edit made elsewhere invalidates what it overlaps, while a revert
+        // replays too.
+        if !change.is_own() {
+            journal.invalidate(footprints);
+            return;
+        }
         let at = journal
             .in_flight
             .iter()
             .position(|bucket| bucket.generation == generation);
         let bucket = at.map(|at| journal.in_flight.remove(at));
-        if journal.suspended {
+        if journal.suspended() {
             return;
-        }
-        // Past the newest transaction an unwound group left in flight, its step
-        // is complete.
-        if journal.late.as_ref().is_some_and(|late| generation > late.until) {
-            journal.late = None;
         }
         // Seal this transaction's bucket if it captured anything. A
         // transaction that did not land drops its bucket through `aborted`.
         let Some(bucket) = bucket else {
             return;
         };
-        let transaction = Transaction {
-            mapping: bucket.mapping,
-            layers: bucket.layers,
-        };
-        if let Some(open) = journal.group.as_mut() {
-            open.push(transaction);
-            return;
+        let mut transaction = bucket.transaction;
+        for inverse in &mut transaction.layers {
+            let footprint = footprint_of(footprints, inverse.layer).expect("an observed commit carries its footprint");
+            inverse.footprint = Rc::clone(footprint);
         }
-        // A late transaction of an unwound group joins its step, made by the
-        // first one to seal when the group had sealed nothing itself.
-        match journal.late.as_mut() {
-            Some(late) if late.stepped => {
-                if let Some(step) = journal.stack.back_mut() {
-                    step.push(transaction);
-                }
-            }
-            Some(late) => {
-                late.stepped = true;
-                journal.push_step(vec![transaction]);
-            }
+        match journal.groups.last_mut() {
+            Some(open) => open.push(transaction),
             None => journal.push_step(vec![transaction]),
         }
     }
@@ -517,7 +538,7 @@ impl From<Stage> for ReplayStage {
     /// wrapper with [`into_inner`](Self::into_inner) to stop.
     fn from(stage: Stage) -> Self {
         Self {
-            capture: CaptureStage::new(stage, Vec::new()).with_observer(|log| ReplayRecorder { log }),
+            capture: CaptureStage::new(stage, Vec::new(), |log| ReplayRecorder { log }),
         }
     }
 }
@@ -537,8 +558,8 @@ impl ReplayStage {
         self.capture.log().borrow_mut().clear();
     }
 
-    /// Stop recording and return the wrapped [`Stage`], removing the capture
-    /// sink.
+    /// Stop recording and return the wrapped [`Stage`], removing the
+    /// recorder.
     pub fn into_inner(self) -> Stage {
         self.capture.into_inner()
     }
@@ -560,7 +581,12 @@ struct ReplayRecorder {
 }
 
 impl TxnObserver for ReplayRecorder {
-    fn committed(&self, stage: &Stage, change: &CommittedChange<'_>) {
+    fn committed(
+        &self,
+        stage: &Stage,
+        change: &CommittedChange<'_>,
+        _footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)],
+    ) {
         // Only the stage's own edits are its to replay, as only they are its
         // to undo.
         if !change.is_own() {
@@ -576,51 +602,32 @@ impl TxnObserver for ReplayRecorder {
     }
 }
 
-/// A [`Stage`] with recorders installed (a [`StageSink`], a [`TxnObserver`],
-/// or both) and a shared log of type `L` they write: the shared plumbing
-/// behind [`UndoStage`] and [`ReplayStage`].
+/// A [`Stage`] with a recorder installed (a [`TxnObserver`]) and a shared log
+/// of type `L` it writes: the shared plumbing behind [`UndoStage`] and
+/// [`ReplayStage`].
 ///
-/// The log is an `Rc<RefCell<L>>` shared between the recorders and the wrapper
+/// The log is an `Rc<RefCell<L>>` shared between the recorder and the wrapper
 /// handle, so a returned sub-view (a [`Prim`](super::Prim) authoring through
-/// its own stage clone) still records through them. The recorders are removed
+/// its own stage clone) still records through it. The recorder is removed
 /// when this `CaptureStage` drops — whether through
 /// [`into_inner`](Self::into_inner) or by going out of scope — so recording
 /// always stops with the wrapper, even if a [`Stage`] clone outlives it.
 struct CaptureStage<L> {
     stage: Stage,
     log: Rc<RefCell<L>>,
-    sink: Option<StageSinkId>,
     /// The internal observer of transaction outcomes, for a log kept current
     /// as transactions reconcile.
     observer: Option<sdf::sink::Id<dyn TxnObserver>>,
 }
 
 impl<L> CaptureStage<L> {
-    /// Wrap `stage` with a fresh `Rc<RefCell<log>>`, recording nothing until
-    /// a sink or an observer is installed.
-    fn new(stage: Stage, log: L) -> Self {
-        Self {
-            stage,
-            log: Rc::new(RefCell::new(log)),
-            sink: None,
-            observer: None,
-        }
-    }
-
-    /// Install the sink `make` builds over the shared log, until this
-    /// `CaptureStage` drops.
-    fn with_sink<S: StageSink + 'static>(mut self, make: impl FnOnce(Rc<RefCell<L>>) -> S) -> Self {
-        debug_assert!(self.sink.is_none(), "a capture installs one sink");
-        self.sink = Some(self.stage.add_sink(make(Rc::clone(&self.log))));
-        self
-    }
-
-    /// Install the observer `make` builds over the shared log, to hear each
-    /// transaction outcome as it reconciles, until this `CaptureStage` drops.
-    fn with_observer<O: TxnObserver + 'static>(mut self, make: impl FnOnce(Rc<RefCell<L>>) -> O) -> Self {
-        debug_assert!(self.observer.is_none(), "a capture installs one observer");
-        self.observer = Some(self.stage.add_observer(Rc::new(make(Rc::clone(&self.log)))));
-        self
+    /// Wrap `stage` with a fresh `Rc<RefCell<log>>` and install the observer
+    /// `make` builds over it, to hear each transaction outcome as it
+    /// reconciles, until this `CaptureStage` drops.
+    fn new<O: TxnObserver + 'static>(stage: Stage, log: L, make: impl FnOnce(Rc<RefCell<L>>) -> O) -> Self {
+        let log = Rc::new(RefCell::new(log));
+        let observer = Some(stage.add_observer(Rc::new(make(Rc::clone(&log)))));
+        Self { stage, log, observer }
     }
 
     /// The shared log, for the wrapper's queries.
@@ -647,29 +654,35 @@ impl<L> Deref for CaptureStage<L> {
 }
 
 impl<L> Drop for CaptureStage<L> {
-    /// Remove the recorders, so recording stops when the wrapper goes away
+    /// Remove the recorder, so recording stops when the wrapper goes away
     /// even if a [`Stage`] clone (or a returned sub-view) outlives it — otherwise
     /// later edits would keep writing into a now-unreachable log.
     fn drop(&mut self) {
-        if let Some(sink) = self.sink.take() {
-            self.stage.remove_sink(sink);
-        }
         if let Some(observer) = self.observer.take() {
             self.stage.remove_observer(observer);
         }
     }
 }
 
+/// The footprint `footprints` holds for the layer `layer`.
+fn footprint_of(footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)], layer: pcp::LayerId) -> Option<&Rc<sdf::Footprint>> {
+    footprints
+        .iter()
+        .find(|(touched, _)| *touched == layer)
+        .map(|(_, footprint)| footprint)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::fs;
     use std::panic::{self, AssertUnwindSafe};
 
     use super::*;
-    use crate::sdf;
     use crate::usd::stage::tests::recorder_counts;
-    use crate::usd::{ApplyMode, EditTarget};
+    use crate::usd::{ApplyMode, EditTarget, ListPosition, StageSink};
     use crate::{Error, Result};
+    use crate::{sdf, vt};
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -1102,7 +1115,7 @@ mod tests {
         Ok(())
     }
 
-    /// `UndoStage::into_inner` removes the recording sink and returns the wrapped
+    /// `UndoStage::into_inner` removes the recorder and returns the wrapped
     /// stage, which then authors normally.
     #[test]
     fn undo_into_inner_returns_stage() -> Result<()> {
@@ -1116,22 +1129,23 @@ mod tests {
         Ok(())
     }
 
-    /// Dropping an [`UndoStage`] without `into_inner` still removes its recording
-    /// sink, so recording stops even when a stage clone outlives it — no sink
-    /// left writing into an unreachable log.
+    /// An [`UndoStage`] records through one observer and installs no sink.
+    /// Dropping it without `into_inner` still removes the observer, so
+    /// recording stops even when a stage clone outlives it — nothing left
+    /// writing into an unreachable log.
     #[test]
-    fn undo_drop_removes_sink() -> Result<()> {
+    fn undo_drop_removes_observer() -> Result<()> {
         let stage = in_memory_stage()?;
         assert_eq!(recorder_counts(&stage), (0, 0));
         {
             let undo = UndoStage::from(stage.clone());
-            assert_eq!(recorder_counts(&stage), (1, 1));
+            assert_eq!(recorder_counts(&stage), (0, 1), "one observer, no sink");
             undo.define_prim("/World")?;
         }
         assert_eq!(
             recorder_counts(&stage),
             (0, 0),
-            "the recorders go when the wrapper drops"
+            "the recorder goes when the wrapper drops"
         );
         // The surviving clone still authors, no longer recording.
         stage.define_prim("/Another")?;
@@ -1283,6 +1297,327 @@ mod tests {
             (0, 0),
             "the recorder goes when the wrapper drops"
         );
+        Ok(())
+    }
+
+    /// Two stages on one registry over `root.usda`, which holds `/P` with
+    /// `double x = 0` and an empty `/Q`: the first wrapped for undo.
+    fn shared_pair() -> Result<(tempfile::TempDir, UndoStage, Stage)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("root.usda");
+        fs::write(&path, "#usda 1.0\ndef \"P\" {\n    double x = 0\n}\ndef \"Q\" {}\n")?;
+        let path = path.to_str().expect("utf-8 path");
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(path)?;
+        let b = Stage::builder().registry(registry).open(path)?;
+        Ok((dir, UndoStage::from(a), b))
+    }
+
+    /// `/P.x` as `stage` composes it.
+    fn x(stage: &Stage) -> Result<Option<f64>> {
+        stage.attribute("/P.x")?.get::<f64>()
+    }
+
+    /// Another stage setting a field a step changed drops the step, and the
+    /// other stage's value stays.
+    #[test]
+    fn foreign_set_drops_step() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.attribute("/P.x")?.set(1.0)?;
+        assert!(a.can_undo());
+        b.attribute("/P.x")?.set(2.0)?;
+        assert!(!a.can_undo(), "the step would overwrite B's value");
+        assert!(!a.undo()?);
+        assert_eq!(x(&a)?, Some(2.0));
+        Ok(())
+    }
+
+    /// Another stage erasing a field a step changed drops the step, and the
+    /// field stays erased.
+    #[test]
+    fn foreign_erase_drops_step() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.attribute("/P.x")?.set(1.0)?;
+        b.attribute("/P.x")?.clear_default()?;
+        assert!(!a.can_undo());
+        assert_eq!(x(&a)?, None);
+        Ok(())
+    }
+
+    /// Another stage erasing the spec that holds a field a step changed drops
+    /// the step.
+    #[test]
+    fn foreign_spec_erase_drops() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.attribute("/P.x")?.set(1.0)?;
+        assert!(b.remove_prim("/P")?);
+        assert!(!a.can_undo());
+        assert!(!a.prim("/P")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A foreign edit that touches nothing a step would restore keeps the
+    /// history, and the step still undoes.
+    #[test]
+    fn foreign_disjoint_keeps_step() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.attribute("/P.x")?.set(1.0)?;
+        b.define_prim("/Q/Child")?;
+        assert_eq!(a.undo_depth(), 1);
+        assert!(a.undo()?);
+        assert_eq!(x(&a)?, Some(0.0));
+        assert!(b.prim("/Q/Child")?.is_valid()?, "B's edit stays");
+        Ok(())
+    }
+
+    /// A foreign edit overlapping a grouped step drops it and every older
+    /// step, and leaves newer ones.
+    #[test]
+    fn foreign_conflict_drops_older() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.define_prim("/Old")?;
+        a.group(|a| {
+            a.attribute("/P.x")?.set(1.0)?;
+            a.define_prim("/Grouped")?;
+            Ok::<_, Error>(())
+        })?;
+        a.define_prim("/Newer")?;
+        assert_eq!(a.undo_depth(), 3);
+        b.attribute("/P.x")?.set(2.0)?;
+        assert_eq!(a.undo_depth(), 1, "only the step newer than the conflict stays");
+        assert!(a.undo()?);
+        assert!(!a.prim("/Newer")?.is_valid()?);
+        assert!(a.prim("/Grouped")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A foreign edit overlapping what an open nested group recorded discards
+    /// the open groups and the stack: the inner group's failure reverts
+    /// nothing, and the outer records no step.
+    #[test]
+    fn foreign_conflict_open_groups() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.define_prim("/Before")?;
+        let failed = a.group(|a| {
+            a.define_prim("/Outer")?;
+            a.group(|a| {
+                a.attribute("/P.x")?.set(1.0)?;
+                b.attribute("/P.x")?.set(2.0)?;
+                Err::<(), _>(Error::from(StageAuthoringError::PrimNotValid {
+                    path: sdf::path("/Failed")?,
+                }))
+            })
+        });
+        assert!(failed.is_err());
+        assert_eq!(x(&a)?, Some(2.0), "the inner group reverted nothing");
+        assert!(a.prim("/Outer")?.is_valid()?);
+        assert_eq!(a.undo_depth(), 0, "the stale chain and the stack below it are gone");
+        Ok(())
+    }
+
+    /// Inside one of A's sink callbacks, a foreign edit that overlaps A's step
+    /// already drops it: `can_undo` is false and `undo` restores nothing.
+    #[test]
+    fn undo_inside_callback() -> Result<()> {
+        struct Check {
+            a: Rc<RefCell<Option<UndoStage>>>,
+            b: Stage,
+            seen: Rc<RefCell<Vec<(bool, bool)>>>,
+        }
+        impl StageSink for Check {
+            fn after_commit(&self, _: &Stage, change: &CommittedChange<'_>) {
+                if !change.is_own() {
+                    return;
+                }
+                let a = self.a.borrow();
+                let a = a.as_ref().expect("the wrapper is set");
+                let Ok(attribute) = self.b.attribute("/P.x") else {
+                    return;
+                };
+                if attribute.set(2.0).is_err() {
+                    return;
+                }
+                let undone = a.undo().unwrap_or(true);
+                self.seen.borrow_mut().push((a.can_undo(), undone));
+            }
+        }
+
+        let (_dir, a, b) = shared_pair()?;
+        let slot = Rc::new(RefCell::new(None));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = a.add_sink(Check {
+            a: Rc::clone(&slot),
+            b: b.clone(),
+            seen: Rc::clone(&seen),
+        });
+        let stage = Stage::clone(&a);
+        slot.replace(Some(a));
+        stage.attribute("/P.x")?.set(1.0)?;
+        stage.remove_sink(sink);
+        assert_eq!(*seen.borrow(), [(false, false)]);
+        assert_eq!(x(&stage)?, Some(2.0), "B's value stays");
+        slot.take();
+        Ok(())
+    }
+
+    /// An edit through a handle to a layer the stage holds is foreign to it,
+    /// and drops a step it overlaps.
+    #[test]
+    fn handle_edit_drops_step() -> Result<()> {
+        let (_dir, a, _b) = shared_pair()?;
+        a.attribute("/P.x")?.set(1.0)?;
+        let root = a.root_layer().identifier().to_string();
+        a.layer_handle(&root).expect("root layer").edit(|e| {
+            e.data_mut().set_field(
+                &sdf::path("/P.x")?,
+                sdf::FieldKey::Default.as_str(),
+                vt::Value::Double(3.0),
+            );
+            Ok(())
+        })?;
+        assert!(!a.can_undo());
+        assert_eq!(x(&a)?, Some(3.0));
+        Ok(())
+    }
+
+    /// Two stages creating different siblings do not conflict: the parent's
+    /// child list is bookkeeping, and undoing A's prim keeps B's.
+    #[test]
+    fn foreign_sibling_keeps_step() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.define_prim("/A")?;
+        b.define_prim("/B")?;
+        assert!(a.can_undo());
+        assert!(a.undo()?);
+        assert!(!a.prim("/A")?.is_valid()?);
+        assert!(a.prim("/B")?.is_valid()?, "B's sibling stays");
+        Ok(())
+    }
+
+    /// Another stage creating a child under a prim a step created drops the
+    /// step, whose undo would erase the child.
+    #[test]
+    fn foreign_child_drops_step() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.define_prim("/N")?;
+        b.define_prim("/N/Child")?;
+        assert!(!a.can_undo());
+        assert!(a.prim("/N/Child")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A foreign edit made while an undo replays, overlapping a transaction
+    /// not yet replayed, ends the revert: that transaction is not replayed
+    /// over the other stage's value.
+    #[test]
+    fn revert_stops_on_conflict() -> Result<()> {
+        struct Arm {
+            armed: Rc<Cell<bool>>,
+            b: Stage,
+        }
+        impl StageSink for Arm {
+            fn after_commit(&self, _: &Stage, change: &CommittedChange<'_>) {
+                if change.is_own()
+                    && self.armed.replace(false)
+                    && let Ok(attribute) = self.b.attribute("/P.x")
+                {
+                    let _ = attribute.set(2.0);
+                }
+            }
+        }
+
+        let (_dir, a, b) = shared_pair()?;
+        a.group(|a| {
+            a.attribute("/P.x")?.set(1.0)?;
+            a.define_prim("/G")?;
+            Ok::<_, Error>(())
+        })?;
+        let armed = Rc::new(Cell::new(false));
+        let sink = a.add_sink(Arm {
+            armed: Rc::clone(&armed),
+            b: b.clone(),
+        });
+        armed.set(true);
+        assert!(a.undo()?);
+        a.remove_sink(sink);
+        assert!(!a.prim("/G")?.is_valid()?, "the newest transaction reverted");
+        assert_eq!(x(&a)?, Some(2.0), "the stale one was not replayed");
+        assert!(!a.can_undo());
+        Ok(())
+    }
+
+    /// A foreign edit overlapping an older transaction of an open group keeps
+    /// the group's newer ones, which a failed group still reverts.
+    #[test]
+    fn group_keeps_newer() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        let failed = a.group(|a| {
+            a.attribute("/P.x")?.set(1.0)?;
+            a.define_prim("/G")?;
+            b.attribute("/P.x")?.set(2.0)?;
+            Err::<(), _>(Error::from(StageAuthoringError::PrimNotValid {
+                path: sdf::path("/Failed")?,
+            }))
+        });
+        assert!(failed.is_err());
+        assert!(!a.prim("/G")?.is_valid()?, "the newer transaction reverted");
+        assert_eq!(x(&a)?, Some(2.0), "the stale one did not");
+        Ok(())
+    }
+
+    /// A reset made while an undo replays leaves the undo to finish its step.
+    #[test]
+    fn reset_mid_undo() -> Result<()> {
+        struct Reset {
+            undo: Rc<RefCell<Option<UndoStage>>>,
+            armed: Rc<Cell<bool>>,
+        }
+        impl StageSink for Reset {
+            fn after_commit(&self, _: &Stage, _: &CommittedChange<'_>) {
+                if self.armed.replace(false)
+                    && let Some(undo) = self.undo.borrow().as_ref()
+                {
+                    undo.reset();
+                }
+            }
+        }
+
+        let undo = UndoStage::from(in_memory_stage()?);
+        undo.group(|stage| {
+            stage.define_prim("/A")?;
+            stage.define_prim("/B")?;
+            Ok::<_, Error>(())
+        })?;
+        let slot = Rc::new(RefCell::new(None));
+        let armed = Rc::new(Cell::new(false));
+        let sink = undo.add_sink(Reset {
+            undo: Rc::clone(&slot),
+            armed: Rc::clone(&armed),
+        });
+        let stage = Stage::clone(&undo);
+        slot.replace(Some(undo));
+        armed.set(true);
+        let undone = slot.borrow().as_ref().expect("the wrapper is set").undo()?;
+        assert!(undone);
+        stage.remove_sink(sink);
+        assert!(!stage.prim("/A")?.is_valid()?, "the whole step reverted");
+        assert!(!stage.prim("/B")?.is_valid()?);
+        slot.take();
+        Ok(())
+    }
+
+    /// Another stage adding a variant to a set a step created drops the step,
+    /// whose undo would erase the set the variant belongs to.
+    #[test]
+    fn foreign_variant_drops_step() -> Result<()> {
+        let (_dir, a, b) = shared_pair()?;
+        a.prim("/Q")?
+            .variant_set("v")
+            .add_variant("a", ListPosition::BackOfPrepend)?;
+        b.prim("/Q")?
+            .variant_set("v")
+            .add_variant("b", ListPosition::BackOfPrepend)?;
+        assert!(!a.can_undo());
         Ok(())
     }
 }

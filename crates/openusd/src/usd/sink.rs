@@ -15,8 +15,10 @@
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
 use std::mem;
+use std::rc::Rc;
 
 use super::stage::Stage;
+
 use crate::{pcp, sdf, tf};
 
 /// A [`sink::Id`](sdf::sink::Id) for a [`StageSink`] installed on a [`Stage`].
@@ -244,9 +246,7 @@ pub struct CommittedChange<'a> {
     /// [`generation`](PendingChange::generation) its layers carried at
     /// [`before_commit`](StageSink::before_commit). Each committed transaction
     /// delivers its own `after_commit`, so a sink can correlate a transaction's
-    /// pre-commit and post-commit events by it — e.g. an
-    /// [`UndoStage`](super::UndoStage) pairs the two to seal one transaction's
-    /// captured inverses.
+    /// pre-commit and post-commit events by it.
     pub generation: u64,
     /// Whether this stage made the edit (see [`is_own`](Self::is_own)).
     pub(crate) own: bool,
@@ -317,8 +317,7 @@ pub struct PendingChange<'a> {
     /// [`generation`](CommittedChange::generation) the matching
     /// [`after_commit`](StageSink::after_commit) carries, so a sink can group a
     /// transaction's per-layer pre-commit events and correlate them with its
-    /// commit — e.g. an [`UndoStage`](super::UndoStage) buffers per-layer inverses
-    /// by it and seals them when the commit arrives.
+    /// commit.
     pub generation: u64,
     /// Whether this stage is making the edit (see [`is_own`](Self::is_own)).
     pub(crate) own: bool,
@@ -342,8 +341,16 @@ impl PendingChange<'_> {
 /// ends, before the next edit, while edits made through a layer handle and
 /// drained together are read as the last of them left the layers.
 pub(crate) trait TxnObserver {
-    /// The transaction `change` reports landed.
-    fn committed(&self, stage: &Stage, change: &CommittedChange<'_>);
+    /// One layer of a transaction is about to commit, with the pre-edit data
+    /// still readable: `change` is the staged edit to the layer `layer`. Runs
+    /// with the layer's registry borrowed, ahead of the stage's sinks.
+    fn capture(&self, stage: &Stage, change: &PendingChange<'_>, layer: pcp::LayerId) {
+        let _ = (stage, change, layer);
+    }
+
+    /// The transaction `change` reports landed, which touched each layer in
+    /// `footprints` with its footprint.
+    fn committed(&self, stage: &Stage, change: &CommittedChange<'_>, footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)]);
 
     /// The transaction `generation` began committing and did not land.
     fn aborted(&self, generation: u64) {

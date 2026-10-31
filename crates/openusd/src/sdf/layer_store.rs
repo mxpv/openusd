@@ -731,7 +731,7 @@ mod tests {
 
     impl Prepared for Keep {
         fn commit(self: Box<Self>, record: &CommitRecord) -> Option<Rc<dyn sdf::LayerSink>> {
-            self.0.borrow_mut().push((record.footprint.clone(), record.origin));
+            self.0.borrow_mut().push(((*record.footprint).clone(), record.origin));
             None
         }
     }

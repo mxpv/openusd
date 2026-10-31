@@ -40,7 +40,7 @@ pub(crate) use asset_path::{
 };
 pub use change::{ChangeEntry, ChangeFlags, ChangeList, FieldChange};
 pub(crate) use commit::{
-    CommitRecord, Committed, EditorId, PendingCommit, Prepared, StopRunning, Subscriber, TxnContext,
+    CommitRecord, Committed, EditorId, Footprint, PendingCommit, Prepared, StopRunning, Subscriber, TxnContext,
 };
 pub use copy::{
     CopyChildren, CopyChildrenArgs, CopyValue, CopyValueArgs, copy_spec, copy_spec_with, copy_spec_within,

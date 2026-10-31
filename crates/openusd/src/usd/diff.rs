@@ -261,9 +261,8 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
 
 /// Derive the inverse of the staged edit `change` — the diff that, replayed onto
 /// the same layer, restores it to the state its [`base`](PendingChange::base)
-/// holds. Used by [`UndoStage`](super::UndoStage) from
-/// [`StageSink::before_commit`](super::StageSink::before_commit), the one moment
-/// the pre-edit values are still readable.
+/// holds. Used by [`UndoStage`](super::UndoStage) as the layer commits, the one
+/// moment the pre-edit values are still readable.
 ///
 /// The undo counterpart of [`forward_diff`]: where the forward diff captures the
 /// edit's new values, this reads the old values off the pre-edit base. A field

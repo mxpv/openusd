@@ -68,6 +68,9 @@ pub(super) struct PendingEdit {
     /// because the change record carries field names, not prior values. See
     /// [`pcp::LayerChanges::prior_default_prim`].
     pub(super) prior_default_prim: Option<tf::Token>,
+    /// The specs and fields the edit touched, kept for the stage's
+    /// transaction observers and `None` when it has none.
+    pub(super) footprint: Option<Rc<sdf::Footprint>>,
 }
 
 /// One reconciled transaction, handed to [`CompositionHooks::notify`] with every
@@ -82,6 +85,8 @@ pub(super) struct CompositionNotice {
     pub(super) generation: u64,
     pub(super) own: bool,
     pub(super) layer_identifier: String,
+    /// Each edited layer's footprint, for the stage's transaction observers.
+    pub(super) footprints: Vec<(pcp::LayerId, Rc<sdf::Footprint>)>,
 }
 
 /// What composition needs from the stage that owns it.
@@ -489,6 +494,10 @@ impl StageComposition {
                     group.push(edit);
                 }
                 let own = group[0].own;
+                let footprints = group
+                    .iter_mut()
+                    .filter_map(|edit| Some((edit.layer, edit.footprint.take()?)))
+                    .collect();
                 let provenance = self.resolve_group_provenance(&mut group);
                 let edits: Vec<pcp::LayerChanges<'_>> = group
                     .iter()
@@ -498,7 +507,7 @@ impl StageComposition {
                         prior_default_prim: edit.prior_default_prim.clone(),
                     })
                     .collect();
-                self.apply_change_sets(generation, own, &edits, provenance, hooks);
+                self.apply_change_sets(generation, own, &edits, footprints, provenance, hooks);
             }
             if !edited {
                 continue;
@@ -556,6 +565,7 @@ impl StageComposition {
         generation: u64,
         own: bool,
         edits: &[pcp::LayerChanges<'_>],
+        footprints: Vec<(pcp::LayerId, Rc<sdf::Footprint>)>,
         provenance: Provenance,
         hooks: &dyn CompositionHooks,
     ) {
@@ -620,6 +630,7 @@ impl StageComposition {
                 generation,
                 own,
                 layer_identifier,
+                footprints,
             });
             hooks.observe(&notice);
             if hooks.delivers() {
@@ -1394,6 +1405,7 @@ mod tests {
             changes: sdf::ChangeList::new(),
             provenance: None,
             prior_default_prim: None,
+            footprint: None,
         }
     }
 

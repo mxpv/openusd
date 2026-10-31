@@ -29,7 +29,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use super::{ChangeList, CommittedLayerChange, LayerSink, Patch, Path, PathMap, PendingLayerChange};
+use super::{ChangeList, CommittedLayerChange, LayerSink, Patch, Path, PathMap, PendingLayerChange, is_children_field};
 
 /// The id of one atomic transaction: shared by every layer it commits,
 /// distinct from every other transaction's, and increasing in the order
@@ -95,6 +95,35 @@ pub(crate) struct Footprint {
 }
 
 impl Footprint {
+    /// Whether this footprint and `other`, both of one layer, touch the same
+    /// state: a field both set or erase, a spec one creates or erases that
+    /// holds a spec or a field the other touches, or the reverse. A spec's
+    /// child-name lists are bookkeeping its children's specs stand for, so two
+    /// edits that each add or remove a different child do not overlap.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        // TODO(perf): the spec tests scan every pair; indexing one side's
+        // `specs` in an `sdf::PathTable` would answer each through
+        // `contains_ancestor` and `subtree`.
+        let under = |specs: &[Path], fields: &[(Path, String)]| {
+            specs.iter().any(|spec| {
+                fields
+                    .iter()
+                    .any(|(path, field)| !is_children_field(field) && beneath(path, spec))
+            })
+        };
+        self.fields
+            .iter()
+            .any(|field| !is_children_field(&field.1) && other.fields.binary_search(field).is_ok())
+            || self.specs.iter().any(|spec| {
+                other
+                    .specs
+                    .iter()
+                    .any(|path| beneath(path, spec) || beneath(spec, path))
+            })
+            || under(&self.specs, &other.fields)
+            || under(&other.specs, &self.fields)
+    }
+
     /// The footprint of the edits staged in `overlay`, in path order.
     pub(crate) fn of(overlay: &PathMap<Patch>) -> Self {
         let mut footprint = Self::default();
@@ -128,11 +157,21 @@ pub(crate) struct CommitRecord {
     pub changes: ChangeList,
     /// The specs and fields the edit touched, read only for a layer with a
     /// [`Subscriber`] and empty for one without.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read a footprint"))]
-    pub footprint: Footprint,
+    pub footprint: Rc<Footprint>,
     /// The editor the transaction is attributed to.
     #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read a record's origin"))]
     pub origin: Option<EditorId>,
+}
+
+/// Whether `path` is the spec `spec` or lies beneath it. A variant set's spec
+/// (`/P{v=}`) holds the set's variants (`/P{v=a}`) and what lies beneath them.
+fn beneath(path: &Path, spec: &Path) -> bool {
+    path.has_prefix(spec)
+        || spec.as_str().strip_suffix("=}").is_some_and(|set| {
+            path.as_str()
+                .strip_prefix(set)
+                .is_some_and(|selection| selection.starts_with('='))
+        })
 }
 
 /// A staged edit offered to a [`Subscriber`]: the layer's pending change and

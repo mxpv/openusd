@@ -1121,7 +1121,7 @@ impl composition::CompositionHooks for Stage {
             notice.own,
         );
         for observer in observers {
-            observer.committed(self, &change);
+            observer.committed(self, &change, &notice.footprints);
         }
     }
 
@@ -1324,7 +1324,7 @@ impl sdf::Subscriber for StageRecorder {
             landed: false,
         });
         let mapping = recording.provenance.as_deref().and_then(Provenance::mapping);
-        stage.forward_before_commit(change, own, mapping);
+        stage.forward_before_commit(change, self.layer_id, own, mapping);
         Some(recording)
     }
 }
@@ -1358,6 +1358,7 @@ impl sdf::Prepared for StageRecording {
             changes: record.changes.clone(),
             provenance: self.provenance.take(),
             prior_default_prim: self.prior_default_prim.take(),
+            footprint: (!stage.observers.borrow().is_empty()).then(|| Rc::clone(&record.footprint)),
         });
         Some(Rc::new(StageDelivery(self.stage.clone())))
     }
@@ -2522,22 +2523,25 @@ impl Stage {
         self.layers().root_layer_stack().iter().map(|&(id, _)| id).collect()
     }
 
-    /// Fan out a layer's staged pre-commit edit to the installed
-    /// [`StageSink`]s' [`before_commit`](StageSink::before_commit), bridging one
-    /// [`sdf::PendingLayerChange`] to the stage-tier [`PendingChange`]. Called by
-    /// the layer's [`StageRecorder`] from inside the commit seam, while the
-    /// layers are borrowed for the edit — so it reads only
-    /// [`sinks`](StageInner::sinks), never the graph or cache. A no-op when no
-    /// sink is installed. `mapping` is the edit target's, for a stage edit
-    /// through a remapping target.
+    /// Fan out the staged pre-commit edit to the layer `layer` to the stage's
+    /// transaction observers' [`capture`](TxnObserver::capture) and then the
+    /// installed [`StageSink`]s' [`before_commit`](StageSink::before_commit),
+    /// bridging one [`sdf::PendingLayerChange`] to the stage-tier
+    /// [`PendingChange`]. Called by the layer's [`StageRecorder`] from inside
+    /// the commit seam, while the layers are borrowed for the edit — so it reads
+    /// only the observers and [`sinks`](StageInner::sinks), never the graph or
+    /// cache. A no-op when neither is installed. `mapping` is the edit
+    /// target's, for a stage edit through a remapping target.
     fn forward_before_commit(
         &self,
         change: &sdf::PendingLayerChange<'_>,
+        layer: pcp::LayerId,
         own: bool,
         mapping: Option<&pcp::MapFunction>,
     ) {
+        let observers = self.observers.borrow().snapshot();
         let sinks = self.sinks.borrow();
-        if sinks.is_empty() {
+        if sinks.is_empty() && observers.is_empty() {
             return;
         }
         let pending = PendingChange {
@@ -2548,6 +2552,10 @@ impl Stage {
             generation: change.generation,
             own,
         };
+        // Observers capture first, so no sink's order or panic reaches them.
+        for observer in observers {
+            observer.capture(self, &pending, layer);
+        }
         for sink in sinks.iter() {
             sink.before_commit(self, &pending);
         }
