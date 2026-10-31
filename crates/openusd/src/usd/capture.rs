@@ -17,6 +17,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::mem;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -73,6 +74,8 @@ impl UndoStage {
             group: None,
             suspended: false,
             capacity: capacity.max(1),
+            resets: 0,
+            late: None,
         };
         Self {
             capture: CaptureStage::new(stage, journal, |journal| UndoRecorder { journal }),
@@ -100,48 +103,47 @@ impl UndoStage {
     /// assert!(!undo.prim("/World")?.is_valid()?);
     /// # Ok::<(), openusd::Error>(())
     /// ```
-    pub fn group<T, E>(&self, edit: impl FnOnce(&Stage) -> Result<T, E>) -> Result<T, E>
+    pub fn group<T, E>(&self, edit: impl FnOnce(&Self) -> Result<T, E>) -> Result<T, E>
     where
         E: From<StageAuthoringError>,
     {
         // An edit committed before the group, still pending, is not part of it.
         self.capture.process_pending();
-        let (outermost, start) = {
+        // The group collects its own transactions; an enclosing group's are
+        // held aside until this one closes and joins them.
+        let (outer, resets, opened_after) = {
             let mut journal = self.capture.log().borrow_mut();
-            let outermost = journal.group.is_none();
-            let open = journal.group.get_or_insert_with(Vec::new);
-            (outermost, open.len())
+            let opened_after = journal.in_flight.last().map(|bucket| bucket.generation);
+            (journal.group.replace(Vec::new()), journal.resets, opened_after)
         };
-        // Closes the group when the outermost edit returns or unwinds,
-        // recording what it committed as one step.
         let _close = CloseGroup {
             journal: self.capture.log(),
-            outermost,
+            outer,
+            resets,
+            opened_after,
         };
-        let result = edit(&self.capture);
+        let result = edit(self);
         // A direct edit made inside the group seals into it.
         self.capture.process_pending();
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                let committed = {
-                    let mut journal = self.capture.log().borrow_mut();
-                    journal
-                        .group
-                        .as_mut()
-                        .map(|open| open.split_off(start))
-                        .unwrap_or_default()
-                };
-                // What could not be reverted stays in the group, still undoable.
-                if let Err((revert, unreverted)) = self.revert(committed) {
-                    if let Some(open) = self.capture.log().borrow_mut().group.as_mut() {
-                        open.extend(unreverted);
-                    }
-                    return Err(revert.into());
-                }
-                Err(error)
+        let Err(error) = result else {
+            return result;
+        };
+        let committed = mem::take(
+            self.capture
+                .log()
+                .borrow_mut()
+                .group
+                .as_mut()
+                .expect("a group is open until its guard drops"),
+        );
+        // What could not be reverted stays in the group, still undoable.
+        if let Err((revert, unreverted)) = self.revert(committed) {
+            if let Some(open) = self.capture.log().borrow_mut().group.as_mut() {
+                open.extend(unreverted);
             }
+            return Err(revert.into());
         }
+        Err(error)
     }
 
     /// Revert the most recent step, replaying the inverse of each of its
@@ -153,6 +155,9 @@ impl UndoStage {
     /// for its duration, so an undone step leaves the stack shorter, not
     /// longer. Each transaction reverts atomically; one that fails leaves the
     /// transactions not yet reverted on the stack as the newest step.
+    ///
+    /// Inside an open [`group`](Self::group) nothing is undone, and this
+    /// returns `false`: the group's own edits are newer than every step.
     pub fn undo(&self) -> Result<bool, StageAuthoringError> {
         // A direct `layer_mut` edit does not drain on its own, so seal any edit
         // still pending into the stack before reading it — otherwise it is
@@ -160,13 +165,20 @@ impl UndoStage {
         // its seal and lose it. Draining on a query is the stage's normal
         // drain-on-read.
         self.capture.process_pending();
-        let Some(step) = self.capture.log().borrow_mut().stack.pop_back() else {
+        let step = {
+            let mut journal = self.capture.log().borrow_mut();
+            if journal.group.is_some() {
+                return Ok(false);
+            }
+            journal.stack.pop_back()
+        };
+        let Some(step) = step else {
             return Ok(false);
         };
-        match self.revert(step.transactions) {
+        match self.revert(step) {
             Ok(()) => Ok(true),
             Err((error, unreverted)) => {
-                self.capture.log().borrow_mut().stack.push_back(Step::new(unreverted));
+                self.capture.log().borrow_mut().stack.push_back(unreverted);
                 Err(error)
             }
         }
@@ -179,58 +191,20 @@ impl UndoStage {
         let mut journal = self.capture.log().borrow_mut();
         journal.stack.clear();
         journal.in_flight.clear();
+        journal.late = None;
+        journal.resets += 1;
         if let Some(open) = journal.group.as_mut() {
             open.clear();
         }
     }
 
-    /// Discard up to `count` of the oldest steps, keeping the current scene,
-    /// as eviction from a full stack does. Returns how many were discarded.
-    /// Drains any pending edit into the stack first.
-    pub fn discard_oldest(&self, count: usize) -> usize {
-        self.capture.process_pending();
-        let mut journal = self.capture.log().borrow_mut();
-        let count = count.min(journal.stack.len());
-        journal.stack.drain(..count);
-        count
-    }
-
-    /// Keep only the steps `keep` accepts, oldest first, discarding the rest
-    /// without replaying them. A step discarded below a kept one is
-    /// permanent, as an evicted one is, so a caller drops only steps whose
-    /// layers it no longer edits through this history, such as layers it
-    /// reloaded. Drains any pending edit into the stack first.
-    pub fn retain(&self, mut keep: impl FnMut(&UndoStep) -> bool) {
-        self.capture.process_pending();
-        self.capture.log().borrow_mut().stack.retain(|step| keep(&step.summary));
-    }
-
-    /// The steps on the undo stack, oldest first. Drains any pending edit into
-    /// the stack first.
-    pub fn steps(&self) -> Vec<UndoStep> {
-        self.capture.process_pending();
-        let journal = self.capture.log().borrow();
-        journal.stack.iter().map(|step| step.summary.clone()).collect()
-    }
-
-    /// Run `edit` without recording what it commits, such as a layer reloaded
-    /// from disk, which no undo should revert. Drains any pending edit into
-    /// the stack first. Recording resumes as it was when `edit` returns or
-    /// unwinds, so a call inside another keeps the outer one unrecorded.
-    pub fn without_recording<T>(&self, edit: impl FnOnce(&Stage) -> T) -> T {
-        self.capture.process_pending();
-        let _suspend = Suspend::begin(self.capture.log());
-        let result = edit(&self.capture);
-        // A direct edit made inside commits while capture is still suspended.
-        self.capture.process_pending();
-        result
-    }
-
-    /// Whether there is a recorded step to [`undo`](Self::undo). Drains any
-    /// pending edit into the stack first, so an undrained direct edit counts.
+    /// Whether [`undo`](Self::undo) would revert a step: one is recorded and no
+    /// [`group`](Self::group) is open. Drains any pending edit into the stack
+    /// first, so an undrained direct edit counts.
     pub fn can_undo(&self) -> bool {
         self.capture.process_pending();
-        !self.capture.log().borrow().stack.is_empty()
+        let journal = self.capture.log().borrow();
+        journal.group.is_none() && !journal.stack.is_empty()
     }
 
     /// The number of recorded steps on the undo stack. Drains any pending edit
@@ -311,48 +285,6 @@ struct Transaction {
     layers: Vec<(String, Vec<Edit>)>,
 }
 
-/// One step of an [`UndoStage`]'s undo stack, as [`UndoStage::steps`] and
-/// [`UndoStage::retain`] show it: what one [`undo`](UndoStage::undo) reverts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UndoStep {
-    layers: Vec<String>,
-}
-
-impl UndoStep {
-    /// The identifiers of the layers the step edits, in the order its
-    /// transactions first edited them.
-    pub fn layers(&self) -> &[String] {
-        &self.layers
-    }
-
-    /// Whether the step edits the layer `identifier`.
-    pub fn edits_layer(&self, identifier: &str) -> bool {
-        self.layers.iter().any(|layer| layer == identifier)
-    }
-}
-
-/// The recorded transactions of one step, oldest first, with the summary
-/// [`UndoStep`] shows of them.
-struct Step {
-    transactions: Vec<Transaction>,
-    summary: UndoStep,
-}
-
-impl Step {
-    fn new(transactions: Vec<Transaction>) -> Self {
-        let mut layers: Vec<String> = Vec::new();
-        for (identifier, _) in transactions.iter().flat_map(|transaction| &transaction.layers) {
-            if !layers.contains(identifier) {
-                layers.push(identifier.clone());
-            }
-        }
-        Self {
-            transactions,
-            summary: UndoStep { layers },
-        }
-    }
-}
-
 /// A transaction's captures buffered at `before_commit`, awaiting its sealing
 /// `after_commit`, keyed by the transaction id ([`PendingChange::generation`]).
 struct InFlight {
@@ -364,72 +296,112 @@ struct InFlight {
 /// An [`UndoStage`]'s recording state.
 struct Journal {
     /// The undo stack, oldest at the front (the eviction end), newest at the
-    /// back (the [`undo`](UndoStage::undo) end).
-    stack: VecDeque<Step>,
+    /// back (the [`undo`](UndoStage::undo) end). Each step is the
+    /// transactions one [`undo`](UndoStage::undo) reverts, oldest first.
+    stack: VecDeque<Vec<Transaction>>,
     /// Per-transaction captures awaiting their sealing `after_commit`. Buckets
     /// open in id order; a bucket older than a sealing transaction that was never
     /// sealed belongs to a rolled-back transaction and is dropped.
     in_flight: Vec<InFlight>,
-    /// The transactions sealed inside the open [`group`](UndoStage::group),
-    /// oldest first, or `None` outside one.
+    /// The transactions sealed inside the innermost open
+    /// [`group`](UndoStage::group), oldest first, or `None` outside one.
     group: Option<Vec<Transaction>>,
-    /// Set while [`undo`](UndoStage::undo) replays or
-    /// [`without_recording`](UndoStage::without_recording) runs, so their
+    /// Set while [`undo`](UndoStage::undo) or a failed
+    /// [`group`](UndoStage::group) replays inverses, so the revert's own
     /// commits are not recorded.
     suspended: bool,
     /// The maximum number of steps on [`stack`](Self::stack).
     capacity: usize,
+    /// How many times [`reset`](UndoStage::reset) has run, so a group open
+    /// across one drops what its enclosing groups recorded before it.
+    resets: u64,
+    /// The transactions a group closed by unwinding began that had not sealed,
+    /// each of which seals into that group's step.
+    late: Option<Late>,
+}
+
+/// What [`Journal::late`] tracks for a group closed by unwinding.
+struct Late {
+    /// The id of the newest transaction the group began that had not sealed.
+    until: u64,
+    /// Whether the group's step is on the stack, the newest. A group that had
+    /// sealed nothing gets its step when a late transaction seals, so one that
+    /// rolled back leaves no step.
+    stepped: bool,
 }
 
 impl Journal {
     /// Push `transactions` as the newest step, evicting the oldest past
     /// capacity.
     fn push_step(&mut self, transactions: Vec<Transaction>) {
-        self.stack.push_back(Step::new(transactions));
-        while self.stack.len() > self.capacity {
+        self.stack.push_back(transactions);
+        if self.stack.len() > self.capacity {
             self.stack.pop_front();
         }
     }
 }
 
-/// Suspends capture until dropped, then restores it as it was, so nested
-/// suspensions and a panic mid-replay leave it as they found it.
-struct Suspend<'a> {
-    journal: &'a RefCell<Journal>,
-    previous: bool,
-}
+/// Suspends capture until dropped, so a panic mid-replay cannot leave capture
+/// suspended.
+struct Suspend<'a>(&'a RefCell<Journal>);
 
 impl<'a> Suspend<'a> {
     fn begin(journal: &'a RefCell<Journal>) -> Self {
-        let previous = std::mem::replace(&mut journal.borrow_mut().suspended, true);
-        Self { journal, previous }
+        journal.borrow_mut().suspended = true;
+        Self(journal)
     }
 }
 
 impl Drop for Suspend<'_> {
     fn drop(&mut self) {
-        self.journal.borrow_mut().suspended = self.previous;
+        self.0.borrow_mut().suspended = false;
     }
 }
 
-/// Closes the outermost [`group`](UndoStage::group) when dropped, recording
-/// what it committed as one step.
+/// Closes a [`group`](UndoStage::group) when dropped, as its edit returns or
+/// unwinds: what it committed joins the enclosing group, or is recorded as
+/// one step when there is none.
 struct CloseGroup<'a> {
     journal: &'a RefCell<Journal>,
-    outermost: bool,
+    /// The enclosing group's transactions, held aside while this one is open.
+    outer: Option<Vec<Transaction>>,
+    /// [`Journal::resets`] when the group opened.
+    resets: u64,
+    /// The newest transaction already in flight when the group opened; a
+    /// newer one began inside it.
+    opened_after: Option<u64>,
 }
 
 impl Drop for CloseGroup<'_> {
     fn drop(&mut self) {
-        if !self.outermost {
+        let mut journal = self.journal.borrow_mut();
+        let own = journal.group.take().unwrap_or_default();
+        if let Some(mut outer) = self.outer.take() {
+            // A reset while this group was open discarded what the enclosing
+            // groups had recorded too. A transaction still in flight seals into
+            // the enclosing group, which is open.
+            if journal.resets != self.resets {
+                outer.clear();
+            }
+            outer.extend(own);
+            journal.group = Some(outer);
             return;
         }
-        let mut journal = self.journal.borrow_mut();
-        if let Some(open) = journal.group.take()
-            && !open.is_empty()
-        {
-            journal.push_step(open);
+        // A group closed by unwinding skips its final drain, so a transaction
+        // it began, such as a direct `layer_mut` edit, may still be in flight.
+        // It seals into this step when it seals, and runs no user code here; a
+        // capture whose transaction rolled back never seals.
+        let stepped = !own.is_empty();
+        if stepped {
+            journal.push_step(own);
         }
+        journal.late = journal
+            .in_flight
+            .iter()
+            .map(|bucket| bucket.generation)
+            .filter(|&generation| self.opened_after.is_none_or(|after| generation > after))
+            .max()
+            .map(|until| Late { until, stepped });
     }
 }
 
@@ -474,6 +446,11 @@ impl StageSink for UndoRecorder {
             return;
         }
         let generation = change.generation;
+        // Past the newest transaction an unwound group left in flight, its step
+        // is complete.
+        if journal.late.as_ref().is_some_and(|late| generation > late.until) {
+            journal.late = None;
+        }
         // Buckets open in id order and `after_commit`s arrive in id order, so any
         // bucket older than this transaction never sealed — it rolled back (no
         // `after_commit`). Drop those orphans off the front, then seal this
@@ -493,8 +470,22 @@ impl StageSink for UndoRecorder {
             mapping: bucket.mapping,
             layers: bucket.layers,
         };
-        match journal.group.as_mut() {
-            Some(open) => open.push(transaction),
+        if let Some(open) = journal.group.as_mut() {
+            open.push(transaction);
+            return;
+        }
+        // A late transaction of an unwound group joins its step, made by the
+        // first one to seal when the group had sealed nothing itself.
+        match journal.late.as_mut() {
+            Some(late) if late.stepped => {
+                if let Some(step) = journal.stack.back_mut() {
+                    step.push(transaction);
+                }
+            }
+            Some(late) => {
+                late.stepped = true;
+                journal.push_step(vec![transaction]);
+            }
             None => journal.push_step(vec![transaction]),
         }
     }
@@ -628,10 +619,12 @@ impl<L> Drop for CaptureStage<L> {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+
     use super::*;
     use crate::Result;
     use crate::sdf;
-    use crate::usd::{ApplyMode, EditTarget};
+    use crate::usd::ApplyMode;
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -682,9 +675,9 @@ mod tests {
     }
 
     /// Every spec created in one transaction undoes together as one step: an
-    /// ancestor chain authored by a single `define_prim` is one undo entry.
+    /// ancestor chain authored by a single `define_prim` is one step.
     #[test]
-    fn undo_groups_transaction() -> Result<()> {
+    fn undo_one_transaction() -> Result<()> {
         let stage = UndoStage::from(in_memory_stage()?);
         stage.define_prim("/A/B/C")?;
         assert!(stage.prim("/A/B/C")?.is_valid()?);
@@ -697,8 +690,8 @@ mod tests {
     }
 
     /// A direct `layer_mut` edit left pending when a stage edit lands keeps its
-    /// own undo entry — the two transactions do not coalesce, and neither
-    /// inverse is discarded.
+    /// own step — the two transactions do not coalesce, and neither inverse is
+    /// discarded.
     #[test]
     fn undo_pending_direct_edit() -> Result<()> {
         let stage = UndoStage::from(in_memory_stage()?);
@@ -757,8 +750,8 @@ mod tests {
         Ok(())
     }
 
-    /// A bounded stack drops the oldest transaction once full; the evicted edit
-    /// becomes permanent (no longer undoable).
+    /// A bounded stack drops the oldest step once full; the evicted edit becomes
+    /// permanent (no longer undoable).
     #[test]
     fn capacity_eviction() -> Result<()> {
         let stage = UndoStage::with_capacity(in_memory_stage()?, 1);
@@ -812,7 +805,7 @@ mod tests {
 
         undo.group(|stage| {
             stage.define_prim("/Kept")?;
-            assert!(undo.group(|stage| fail(stage, "/Dropped")).is_err());
+            assert!(stage.group(|stage| fail(stage, "/Dropped")).is_err());
             stage.define_prim("/Also")?;
             Ok::<_, crate::Error>(())
         })?;
@@ -828,90 +821,120 @@ mod tests {
     /// A full stack evicts the oldest whole step, never part of a group.
     #[test]
     fn capacity_evicts_whole_steps() -> Result<()> {
-        let stage = UndoStage::with_capacity(in_memory_stage()?, 1);
+        let stage = UndoStage::with_capacity(in_memory_stage()?, 2);
+        stage.define_prim("/Old")?;
         stage.group(|stage| {
             stage.define_prim("/World")?.set_type_name("Xform")?;
             Ok::<_, crate::Error>(())
         })?;
-        assert_eq!(stage.undo_depth(), 1);
+        stage.define_prim("/New")?;
+        assert_eq!(stage.undo_depth(), 2);
+
         assert!(stage.undo()?);
-        assert!(!stage.prim("/World")?.is_valid()?);
+        assert!(!stage.prim("/New")?.is_valid()?);
+        assert!(stage.undo()?);
+        assert!(!stage.prim("/World")?.is_valid()?, "the group undoes whole");
+        assert!(!stage.undo()?);
+        assert!(stage.prim("/Old")?.is_valid()?, "the evicted step is permanent");
         Ok(())
     }
 
-    /// `discard_oldest` drops whole steps and keeps the scene; the newer
-    /// steps stay undoable.
+    /// A `reset` inside a nested group discards what every open group recorded
+    /// before it, and a failure after it reverts only what came after.
     #[test]
-    fn discard_oldest_drops_steps() -> Result<()> {
-        let stage = UndoStage::from(in_memory_stage()?);
-        stage.group(|stage| {
-            stage.define_prim("/World")?.set_type_name("Xform")?;
+    fn group_reset_nested() -> Result<()> {
+        let undo = UndoStage::from(in_memory_stage()?);
+        undo.group(|stage| {
+            stage.define_prim("/Before")?;
+            let failed = stage.group(|stage| {
+                stage.define_prim("/Discarded")?;
+                stage.reset();
+                stage.define_prim("/Reverted")?;
+                Err::<(), _>(crate::Error::UnresolvedAsset("/Reverted".to_owned()))
+            });
+            assert!(failed.is_err());
+            stage.define_prim("/After")?;
             Ok::<_, crate::Error>(())
         })?;
-        stage.define_prim("/World/Child")?;
-        assert_eq!(stage.discard_oldest(0), 0);
-        assert_eq!(stage.discard_oldest(1), 1);
-        assert_eq!(stage.undo_depth(), 1);
-        assert!(stage.undo()?);
-        assert!(!stage.prim("/World/Child")?.is_valid()?);
-        assert_eq!(stage.prim("/World")?.type_name()?.as_deref(), Some("Xform"));
-        assert_eq!(stage.discard_oldest(usize::MAX), 0);
+        assert!(undo.prim("/Before")?.is_valid()?);
+        assert!(undo.prim("/Discarded")?.is_valid()?);
+        assert!(!undo.prim("/Reverted")?.is_valid()?);
+        assert_eq!(undo.undo_depth(), 1);
+        assert!(undo.undo()?);
+        assert!(!undo.prim("/After")?.is_valid()?);
+        assert!(undo.prim("/Before")?.is_valid()?, "reset made it permanent");
         Ok(())
     }
 
-    /// What `without_recording` commits is not undone, a direct edit inside it
-    /// included; a call inside another keeps the outer one unrecorded, and
-    /// recording resumes after.
+    /// A group whose edit panics after a direct `layer_mut` edit still records
+    /// that edit in its step: it seals into the group once drained, so one
+    /// undo reverts the group whole.
     #[test]
-    fn without_recording_is_not_undone() -> Result<()> {
+    fn group_unwind_keeps_step() -> Result<()> {
         let undo = UndoStage::from(in_memory_stage()?);
         let root = undo.root_layer().identifier().to_string();
-        undo.without_recording(|stage| -> Result<()> {
-            undo.without_recording(|stage| stage.define_prim("/Nested").map(drop))?;
-            stage.define_prim("/AfterNested")?;
-            let mut layer = stage.layer_mut(&root).expect("root layer");
-            layer.edit(|edit| author_prim(edit, "/Direct"))?;
-            Ok(())
-        })?;
-        assert!(!undo.can_undo());
-        for path in ["/Nested", "/AfterNested", "/Direct"] {
-            assert!(undo.prim(path)?.is_valid()?, "{path}");
-        }
-        undo.define_prim("/Recorded")?;
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            undo.group(|stage| -> Result<()> {
+                stage.define_prim("/Staged")?;
+                let mut layer = stage.layer_mut(&root).expect("root layer");
+                layer.edit(|edit| author_prim(edit, "/Direct"))?;
+                drop(layer);
+                panic!("the edit panics after a direct layer edit")
+            })
+        }));
+        assert!(unwound.is_err());
         assert_eq!(undo.undo_depth(), 1);
+        assert!(undo.undo()?);
+        assert!(!undo.prim("/Staged")?.is_valid()?);
+        assert!(!undo.prim("/Direct")?.is_valid()?);
+        assert!(!undo.can_undo());
         Ok(())
     }
 
-    /// Each step lists the layers it edits, and `retain` drops the steps a
-    /// predicate refuses, keeping the scene and the other steps.
+    /// A group whose only transaction a layer sink vetoes, after the undo
+    /// recorder captured it, records no step and evicts nothing.
     #[test]
-    fn retain_drops_steps_by_layer() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let weak = dir.path().join("weak.usda");
-        std::fs::write(&weak, "#usda 1.0\n")?;
-        let root = dir.path().join("root.usda");
-        std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n")?;
-        let stage = UndoStage::from(Stage::open(root.to_str().unwrap())?);
-        let root = stage.root_layer().identifier().to_string();
-        let weak = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| *identifier != root)
-            .expect("the sublayer is loaded");
-        stage.define_prim("/Strong")?;
-        stage.set_edit_target(EditTarget::for_layer(&weak))?;
-        stage.define_prim("/Weak")?;
-        let steps = stage.steps();
-        assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].layers(), std::slice::from_ref(&root));
-        assert!(steps[1].edits_layer(&weak));
+    fn group_veto_no_step() -> Result<()> {
+        struct Veto;
+        impl sdf::LayerSink for Veto {
+            fn before_commit(&self, _: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+                Err(sdf::sink::Error::new("vetoed"))
+            }
+        }
 
-        stage.retain(|step| !step.edits_layer(&weak));
-        assert_eq!(stage.steps().len(), 1);
-        assert!(stage.prim("/Weak")?.is_valid()?);
-        assert!(stage.undo()?);
-        assert!(!stage.prim("/Strong")?.is_valid()?);
-        assert!(stage.prim("/Weak")?.is_valid()?);
+        let undo = UndoStage::with_capacity(in_memory_stage()?, 1);
+        undo.define_prim("/Kept")?;
+        let root = undo.root_layer().identifier().to_string();
+        let sink = undo.layer_mut(&root).expect("root layer").add_sink(Veto);
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            undo.group(|stage| -> Result<()> {
+                assert!(stage.define_prim("/Vetoed").is_err());
+                panic!("the edit panics after a vetoed transaction")
+            })
+        }));
+        assert!(unwound.is_err());
+        undo.layer_mut(&root).expect("root layer").remove_sink(sink);
+
+        assert_eq!(undo.undo_depth(), 1);
+        assert!(undo.undo()?);
+        assert!(!undo.prim("/Kept")?.is_valid()?);
+        Ok(())
+    }
+
+    /// Inside an open group nothing is undone: the group's own edits are newer
+    /// than every recorded step.
+    #[test]
+    fn undo_inside_group() -> Result<()> {
+        let undo = UndoStage::from(in_memory_stage()?);
+        undo.define_prim("/Old")?;
+        undo.group(|stage| {
+            stage.define_prim("/New")?;
+            assert!(!stage.can_undo());
+            assert!(!stage.undo()?);
+            Ok::<_, crate::Error>(())
+        })?;
+        assert!(undo.prim("/Old")?.is_valid()?);
+        assert_eq!(undo.undo_depth(), 2);
         Ok(())
     }
 
