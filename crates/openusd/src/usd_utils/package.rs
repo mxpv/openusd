@@ -191,7 +191,8 @@ fn free(source: &Source<'_>, entry: &str, entries: &[String], taken: &HashSet<St
 /// The directory a moved source is numbered by and the name it keeps,
 /// spelled with `/` as every entry is: the split before its file name, or
 /// for a set of tiles before the pattern's directory, which keeps a pattern
-/// in a directory with the name.
+/// in a directory with the name. A source inside a package is named by its
+/// entry, within the brackets that enclose it.
 fn moved_name<'s>(source: &'s Source<'_>) -> (&'s str, String) {
     let identifier = source.identifier.as_str();
     let before = match &source.content {
@@ -199,7 +200,13 @@ fn moved_name<'s>(source: &'s Source<'_>) -> (&'s str, String) {
         _ => identifier.len(),
     };
     let (directory, _) = ar::split_file_name(&identifier[..before]);
-    (directory, identifier[directory.len()..].replace('\\', "/"))
+    let mut split = directory.len();
+    let mut end = identifier.len();
+    if ar::is_package_relative_path(identifier) {
+        end = identifier.trim_end_matches(']').len();
+        split += identifier[split..end].rfind('[').map_or(0, |open| open + 1);
+    }
+    (&identifier[..split], identifier[split..end].replace('\\', "/"))
 }
 
 /// The entry a moved source takes: its `name` in the numbered directory of
@@ -806,6 +813,43 @@ def "T"
         assert_eq!(entries(&output).0, ["root.usda", "sub/inner.usda", "tex.png"]);
         let packaged = Stage::open(output.to_str().unwrap())?;
         assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(7)));
+        Ok(())
+    }
+
+    /// A search path inside a package moves its entry under the entry's name,
+    /// clear of the brackets of the identifier it was found by.
+    #[test]
+    fn repackages_search_paths() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("source.usdz");
+        let mut writer = ArchiveWriter::create(&source)?;
+        writer.add_layer(
+            "root.usda",
+            b"#usda 1.0\n(\n    subLayers = [@sub/inner.usda@, @top.usda@]\n)\n",
+        )?;
+        writer.add_layer(
+            "sub/inner.usda",
+            b"#usda 1.0\ndef \"I\" {\n    asset t = @tex/a.png@\n    int probe = 7\n}\n",
+        )?;
+        writer.add_layer("sub/tex/a.png", b"PNG")?;
+        writer.add_layer("top.usda", b"#usda 1.0\ndef \"T\" {\n    int probe = 8\n}\n")?;
+        writer.finish()?;
+
+        let stage = Stage::open(source.to_str().unwrap())?;
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, source.to_str().unwrap(), &output, None)?;
+        assert_eq!(
+            entries(&output).0,
+            ["root.usda", "0/inner.usda", "1/top.usda", "2/a.png"]
+        );
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/I.probe"), Some(vt::Value::Int(7)));
+        assert_eq!(attribute_value(&packaged, "/T.probe"), Some(vt::Value::Int(8)));
+        let Some(vt::Value::AssetPath(asset)) = attribute_value(&packaged, "/I.t") else {
+            panic!("the packaged texture is an asset");
+        };
+        let resolved = asset.resolved_path().expect("the packaged texture resolves");
+        assert!(resolved.ends_with("out.usdz[2/a.png]"), "{resolved}");
         Ok(())
     }
 
