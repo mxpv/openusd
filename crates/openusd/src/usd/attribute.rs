@@ -1544,7 +1544,7 @@ impl AttributeQuery {
         // Settle before the memo is borrowed, not while: draining commits queued
         // edits and fires the stage sinks, and a sink that reads this very query
         // would find the memo already borrowed.
-        stage.process_pending();
+        stage.settle()?;
 
         // Reuse a cached source whose stamp still stands.
         if let Some(cached) = self.cached.borrow().as_ref()
@@ -2846,7 +2846,7 @@ class Marker "Marker"
         f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     ) -> Result<()> {
         let root_id = stage.root_layer().identifier().to_string();
-        stage.layer_mut(&root_id).expect("root layer is live").edit(f)?;
+        stage.layer_handle(&root_id).expect("root layer is live").edit(f)?;
         Ok(())
     }
 
@@ -4711,7 +4711,7 @@ def \"P\" (
             .into_iter()
             .find(|id| file_name(id) == "strong.usda")
             .expect("the layer is on the stage");
-        stage.layer_mut(&strong).expect("the layer is live").edit(|edit| {
+        stage.layer_handle(&strong).expect("the layer is live").edit(|edit| {
             edit.attribute_mut(&path)?
                 .expect("the attribute spec is on the layer")
                 .set(sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock);

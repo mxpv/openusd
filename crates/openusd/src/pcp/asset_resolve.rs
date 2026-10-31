@@ -59,7 +59,7 @@ impl AssetSite {
     /// a value that actually holds asset paths.
     pub(super) fn in_graph(graph: &LayerGraph, stack: LayerStackId, layer: LayerId, query_path: &Path) -> Self {
         Self {
-            anchor: graph.anchor_location(Some(layer)),
+            anchor: graph.anchor_location(Some(layer)).cloned(),
             source_layer: graph.identifier(layer).to_string(),
             stack,
             query_path: query_path.clone(),

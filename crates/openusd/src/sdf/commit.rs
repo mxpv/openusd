@@ -26,7 +26,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use super::{ChangeList, LayerSink, Patch, Path, PathMap, PendingLayerChange};
+use super::{ChangeList, CommittedLayerChange, LayerSink, Patch, Path, PathMap, PendingLayerChange};
 
 /// The id of one atomic transaction: shared by every layer it commits,
 /// distinct from every other transaction's, and increasing in the order
@@ -124,7 +124,6 @@ pub(crate) struct CommitRecord {
     /// The committed layer's identifier.
     pub identifier: String,
     /// The transaction the commit belongs to.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read a record's transaction"))]
     pub txn: TxnId,
     /// The composition record derived from the edit.
     pub changes: ChangeList,
@@ -141,10 +140,12 @@ pub(crate) struct CommitRecord {
 /// the transaction it belongs to.
 pub(crate) struct PendingCommit<'a> {
     /// The pre-edit base, the staged overlay and the derived change list.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests subscribe"))]
     pub change: &'a PendingLayerChange<'a>,
     /// The transaction's context.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests subscribe"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the tests read a pending commit's transaction")
+    )]
     pub txn: &'a TxnContext,
 }
 
@@ -246,7 +247,11 @@ impl Dispatch {
             let Some(Notification { sink, record }) = self.items.borrow_mut().pop_front() else {
                 break;
             };
-            sink.after_commit(&record.identifier, &record.changes);
+            sink.after_commit(&CommittedLayerChange {
+                layer_identifier: &record.identifier,
+                change_list: &record.changes,
+                generation: record.txn.get(),
+            });
         }
     }
 }

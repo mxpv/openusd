@@ -182,6 +182,12 @@ impl From<sdf::sink::Error> for NamespaceEditError {
     }
 }
 
+impl From<sdf::LayerError> for NamespaceEditError {
+    fn from(error: sdf::LayerError) -> Self {
+        NamespaceEditError::Stage(error.into())
+    }
+}
+
 impl NamespaceEditor {
     /// Create an editor with an empty edit queue targeting `stage`.
     pub fn new(stage: &Stage) -> Self {
@@ -453,10 +459,11 @@ impl NamespaceEditor {
         layer_ids: Vec<pcp::LayerId>,
         edit_target: pcp::LayerId,
     ) -> Result<BatchPlan, NamespaceEditError> {
+        self.stage.settle()?;
         // `seeds` (per layer) is the baseline each layer's final list is compared
         // against; the plan tracks per-occurrence freshness so validation blames
         // only the pairs this batch created or changed.
-        let seeds = seed_relocates(&self.stage.layers(), &layer_ids);
+        let seeds = seed_relocates(&self.stage.layer_view(), &layer_ids);
         let projection = NamespaceProjection::new(&self.stage);
         let mut relocates = RelocateStackPlan::new(&layer_ids, &seeds, edit_target);
         let mut per_edit: Vec<EditPlan> = Vec::with_capacity(self.edits.len());
@@ -520,6 +527,7 @@ impl NamespaceEditor {
     /// arc is authored, so authoring it anywhere else would not relink
     /// composition.
     fn plan_mapped(&self, layer_id: pcp::LayerId, target: EditTarget) -> Result<BatchPlan, NamespaceEditError> {
+        self.stage.settle()?;
         let map = |path: &sdf::Path| {
             target
                 .map_to_spec_path(path)
@@ -532,7 +540,7 @@ impl NamespaceEditor {
             .mapped_target_stack_id(layer_id)
             .map_err(NamespaceEditError::Stage)?;
         let (stack_layer_ids, seeds) = {
-            let layers = self.stage.layers();
+            let layers = self.stage.layer_view();
             let ids: Vec<pcp::LayerId> = layers.layer_stack(stack_id).iter().map(|&(id, _)| id).collect();
             let seeds = seed_relocates(&layers, &ids);
             (ids, seeds)
@@ -657,13 +665,14 @@ impl NamespaceEditor {
         sources: &[&sdf::Path],
         rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
     ) -> Result<Vec<String>, NamespaceEditError> {
-        let layers = self.stage.layers();
+        self.stage.settle()?;
+        let layers = self.stage.layer_view();
         let mut result = Vec::new();
         for id in layer_ids {
-            let Some(node) = layers.get(*id) else { continue };
-            let touches = sources.iter().any(|src| node.layer.data().has_spec(src))
+            let Some(layer) = layers.try_layer(*id) else { continue };
+            let touches = sources.iter().any(|src| layer.data().has_spec(src))
                 || resolved.change_for(*id).is_some()
-                || layer_fixup_touches(node.layer.data(), &rewrite)?;
+                || layer_fixup_touches(layer.data(), &rewrite)?;
             if touches {
                 result.push(layers.identifier(*id).to_string());
             }
@@ -886,14 +895,13 @@ struct TargetFacts {
 /// The non-empty `layerRelocates` of each layer in `layer_ids`, keyed by layer:
 /// the per-layer baseline a [`RelocateStackPlan`] seeds from and validation
 /// compares each layer's evolved list against.
-fn seed_relocates(layers: &pcp::LayerGraph, layer_ids: &[pcp::LayerId]) -> HashMap<pcp::LayerId, sdf::RelocateList> {
+fn seed_relocates(layers: &pcp::LayerView<'_>, layer_ids: &[pcp::LayerId]) -> HashMap<pcp::LayerId, sdf::RelocateList> {
     let mut seeds: HashMap<pcp::LayerId, sdf::RelocateList> = HashMap::new();
     for id in layer_ids {
-        if let Some(node) = layers.get(*id) {
-            let pairs = node.layer.relocates();
-            if !pairs.is_empty() {
-                seeds.insert(*id, pairs);
-            }
+        let Some(layer) = layers.try_layer(*id) else { continue };
+        let pairs = layer.relocates();
+        if !pairs.is_empty() {
+            seeds.insert(*id, pairs);
         }
     }
     seeds

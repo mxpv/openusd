@@ -26,8 +26,12 @@ use crate::{Error, Result, ar};
 /// erased, as C++ erases them. A sublayer rewritten to the path of an earlier
 /// one is dropped as a duplicate. C++ 25.05 drops every sublayer offset once
 /// a sublayer path changes; here the offsets stay with their sublayers.
+///
+/// `modify` runs while the layer's registry is read (see
+/// [`sdf::LayerHandle::read`]), and the rewrite commits as one edit of the
+/// layer.
 pub fn modify_asset_paths(
-    layer: &mut sdf::Layer,
+    layer: &sdf::LayerHandle,
     mut modify: impl FnMut(&str) -> String,
     keep_empty_paths_in_arrays: bool,
 ) -> Result<()> {
@@ -37,13 +41,15 @@ pub fn modify_asset_paths(
         keep_empty_paths_in_arrays,
     };
     let mut modified: HashMap<String, String> = HashMap::new();
-    let edits = visit_asset_paths(layer.data(), layer.identifier(), mode, |asset| {
-        if !modified.contains_key(asset.path) {
-            modified.insert(asset.path.to_owned(), modify(asset.path));
-        }
-        let path = &modified[asset.path];
-        Ok((path != asset.path).then(|| path.clone()))
-    })?;
+    let edits = layer.read(|layer| {
+        visit_asset_paths(layer.data(), layer.identifier(), mode, |asset| {
+            if !modified.contains_key(asset.path) {
+                modified.insert(asset.path.to_owned(), modify(asset.path));
+            }
+            let path = &modified[asset.path];
+            Ok((path != asset.path).then(|| path.clone()))
+        })
+    })??;
     if edits.is_empty() {
         return Ok(());
     }
@@ -410,6 +416,14 @@ impl Walk<'_> {
 pub(crate) mod tests {
     use super::*;
 
+    /// The layer `text` parses to, held in a registry of its own.
+    fn held(identifier: &str, text: &[u8]) -> Result<sdf::LayerHandle> {
+        let layer = sdf::Layer::from_bytes(identifier, text.to_vec())?;
+        Ok(sdf::LayerRegistry::default()
+            .adopt(layer)
+            .expect("a new registry holds the layer"))
+    }
+
     pub(crate) const MODIFY: &str = r#"#usda 1.0
 (
     customLayerData = {
@@ -458,7 +472,7 @@ def "I" (
     #[test]
     fn modify_matches_cpp() -> Result<()> {
         for keep_empty in [false, true] {
-            let mut layer = sdf::Layer::from_bytes("modify.usda", MODIFY.as_bytes().to_vec())?;
+            let layer = held("modify.usda", MODIFY.as_bytes())?;
             let mut seen = Vec::new();
             let modify = |path: &str| {
                 seen.push(path.to_owned());
@@ -468,7 +482,7 @@ def "I" (
                     path.replacen("./", "./moved/", 1)
                 }
             };
-            modify_asset_paths(&mut layer, modify, keep_empty)?;
+            modify_asset_paths(&layer, modify, keep_empty)?;
             seen.sort();
             assert_eq!(
                 seen,
@@ -490,7 +504,7 @@ def "I" (
                 ]
             );
 
-            let text = layer.export_to_string()?;
+            let text = layer.read(sdf::Layer::export_to_string)??;
             for path in [
                 "@./moved/a.usda@ (offset = 1",
                 "@./moved/b.usda@ (offset = 3",
@@ -560,14 +574,14 @@ def "B" (
     #[test]
     fn emptied_paths_leave_containers() -> Result<()> {
         for keep_empty in [false, true] {
-            let mut layer = sdf::Layer::from_bytes("emptied.usda", EMPTIED.as_bytes().to_vec())?;
+            let layer = held("emptied.usda", EMPTIED.as_bytes())?;
             let modify = |path: &str| match path {
                 "./b.usda" => "./a.usda".to_owned(),
                 path if path.contains("drop") => String::new(),
                 path => path.to_owned(),
             };
-            modify_asset_paths(&mut layer, modify, keep_empty)?;
-            let text = layer.export_to_string()?;
+            modify_asset_paths(&layer, modify, keep_empty)?;
+            let text = layer.read(sdf::Layer::export_to_string)??;
             assert!(text.contains("@./a.usda@ (offset = 1)"), "{text}");
             assert!(text.contains("string note = \"kept\""), "{text}");
             assert!(text.contains("2: @./keep.png@"), "{text}");
@@ -587,7 +601,7 @@ def "B" (
     /// An emptied clip template leaves its clip set.
     #[test]
     fn emptied_clip_template_removed() -> Result<()> {
-        let mut layer = sdf::Layer::from_bytes("clips.usda", MODIFY.as_bytes().to_vec())?;
+        let layer = held("clips.usda", MODIFY.as_bytes())?;
         let modify = |path: &str| {
             if path == "./clip.#.usda" {
                 String::new()
@@ -595,8 +609,8 @@ def "B" (
                 path.to_owned()
             }
         };
-        modify_asset_paths(&mut layer, modify, true)?;
-        let text = layer.export_to_string()?;
+        modify_asset_paths(&layer, modify, true)?;
+        let text = layer.read(sdf::Layer::export_to_string)??;
         assert!(!text.contains("templateAssetPath"), "{text}");
         assert!(text.contains("manifestAssetPath"), "{text}");
         Ok(())
@@ -607,7 +621,7 @@ def "B" (
     /// arc.
     #[test]
     fn emptied_single_payload_erased() -> Result<()> {
-        let mut layer = sdf::Layer::from_bytes("payload.usda", b"#usda 1.0\ndef \"A\" {\n}\n".to_vec())?;
+        let layer = held("payload.usda", b"#usda 1.0\ndef \"A\" {\n}\n")?;
         let prim = sdf::path("/A")?;
         let payload = FieldKey::Payload.as_str();
         layer.edit(|edit| {
@@ -619,8 +633,8 @@ def "B" (
             edit.data_mut().set_field(&prim, payload, value);
             Ok(())
         })?;
-        modify_asset_paths(&mut layer, |_| String::new(), true)?;
-        assert!(!layer.data().has_field(&prim, payload));
+        modify_asset_paths(&layer, |_| String::new(), true)?;
+        assert!(!layer.read(|layer| layer.data().has_field(&prim, payload))?);
         Ok(())
     }
 }

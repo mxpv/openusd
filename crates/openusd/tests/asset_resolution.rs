@@ -1032,7 +1032,7 @@ fn clip_expression_reevaluated() {
 
     let root = stage.root_layer().identifier().to_string();
     stage
-        .layer_mut(&root)
+        .layer_handle(&root)
         .expect("the root layer is live")
         .edit(|e| {
             e.set_expression_variables(HashMap::from([(
@@ -1181,7 +1181,7 @@ fn clip_expression_remanifests() {
 
     let root = stage.root_layer().identifier().to_string();
     stage
-        .layer_mut(&root)
+        .layer_handle(&root)
         .expect("the root layer is live")
         .edit(|e| {
             e.set_expression_variables(HashMap::from([(

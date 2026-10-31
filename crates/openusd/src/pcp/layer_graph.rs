@@ -26,9 +26,13 @@
 //! save.
 
 use std::borrow::Cow;
+use std::cell::Ref;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
+use std::ops::Deref;
+use std::ptr;
+use std::rc::Rc;
 
 use crate::ar::ResolvedPath;
 use crate::sdf::expr;
@@ -127,8 +131,10 @@ type SublayerEdges = Vec<(LayerId, LayerOffset)>;
 
 /// A single layer in the [`LayerGraph`].
 pub(crate) struct LayerNode {
-    /// The loaded layer (identifier + backing data + authoring surface).
-    pub layer: sdf::Layer,
+    /// The loaded layer, held in the graph's store. Composition reads its
+    /// content through a [`LayerView`]; the graph's own maintenance borrows
+    /// the store directly.
+    handle: sdf::LayerHandle,
     /// This layer's context-free [`SublayerEdges`]: its `subLayers` resolved against
     /// the empty expression-variable set, so literal sublayers resolve and `${VAR}`
     /// sublayers drop out. Shared by every stack with no expression sublayer, where
@@ -153,12 +159,12 @@ pub(crate) struct LayerNode {
 }
 
 impl LayerNode {
-    /// A node wrapping `layer`, with no edges and no relocates. The sublayer
+    /// A node holding `handle`, with no edges and no relocates. The sublayer
     /// edges, expression-sublayer flag, and relocates are filled in by
     /// [`LayerGraph::recompute_sublayers`].
-    fn new(layer: sdf::Layer) -> Self {
+    fn new(handle: sdf::LayerHandle) -> Self {
         Self {
-            layer,
+            handle,
             children: Vec::new(),
             has_expr_sublayer: false,
             relocates: Vec::new(),
@@ -232,6 +238,14 @@ pub(crate) struct LayerGraph {
     /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
     /// Composition opens a reference/payload target on demand through it.
     registry: sdf::LayerRegistry,
+    /// The store holding every layer the graph's nodes name, and only those.
+    /// Stages that share a registry therefore hold layers of their own. A
+    /// [`view`](Self::view) borrows it for as long as it borrows the graph.
+    //
+    // TODO: hold the layers in the registry's store, found and opened through
+    // `LayerRegistry::find_or_open`. Stages on one registry then share each
+    // layer and see each other's edits.
+    store: Rc<sdf::LayerStore>,
     /// Anchored asset paths whose on-demand open failed, each mapped to what
     /// went wrong ([`LoadFailure`]). Consulted at the reference/payload demand
     /// point so a target that cannot be opened is reported
@@ -655,6 +669,7 @@ impl LayerGraph {
             muted: HashSet::new(),
             has_relocates: false,
             diagnostics: GraphDiagnostics::default(),
+            store: Rc::default(),
             registry,
             failed_loads: HashMap::new(),
             stacks: LayerStackRegistry::default(),
@@ -693,7 +708,7 @@ impl LayerGraph {
     /// Returns `(id, fresh)`: an identifier already present is left untouched
     /// (its existing node, children, and relocates survive) and reported as not
     /// fresh, so a re-added layer collapses onto its existing id.
-    fn intern(&mut self, mut layer: sdf::Layer) -> (LayerId, bool) {
+    fn intern(&mut self, layer: sdf::Layer) -> (LayerId, bool) {
         debug_assert_eq!(
             self.registry.in_memory_identifier(layer.identifier()),
             layer.identifier(),
@@ -709,17 +724,25 @@ impl LayerGraph {
             self.by_identifier.insert(layer.identifier().to_string(), id);
             return (id, false);
         }
+        // The layer joins the graph's store, which commits any edit it has
+        // staged, as its content is composed fresh as it joins the graph. The
+        // store holds only this graph's layers, keyed like the graph by
+        // identifier and real path, and holds no duplicate.
+        let identifier = layer.identifier().to_string();
+        let real_path = (layer.real_path() != layer.identifier()).then(|| layer.real_path().to_string());
+        let handle = self.store.insert(layer).unwrap_or_else(|refused| {
+            panic!(
+                "the graph adds layers only between reads and edits of them: {}",
+                refused.error
+            )
+        });
         let id = LayerId::from_raw(self.next_id);
         self.next_id += 1;
-        self.by_identifier.insert(layer.identifier().to_string(), id);
-        if layer.real_path() != layer.identifier() {
-            self.by_real_path.entry(layer.real_path().to_string()).or_insert(id);
+        self.by_identifier.insert(identifier, id);
+        if let Some(real_path) = real_path {
+            self.by_real_path.entry(real_path).or_insert(id);
         }
-        // A layer's content is composed fresh as it joins the graph, so any
-        // change record left by prior write-through edits must not survive to
-        // be drained by a later transaction the stage runs on it.
-        layer.discard_changes();
-        self.nodes.insert(id, LayerNode::new(layer));
+        self.nodes.insert(id, LayerNode::new(handle));
         self.order.push(id);
         (id, true)
     }
@@ -857,17 +880,16 @@ impl LayerGraph {
         mut sink: Option<&mut EdgeSink>,
     ) -> SublayerEdges {
         let root_path = Path::abs_root();
-        let node = &self.nodes[&id];
-        let Ok(Value::StringVec(sub_paths)) = node
-            .layer
+        let view = self.read_view();
+        let layer = view.layer(id);
+        let Ok(Value::StringVec(sub_paths)) = layer
             .data()
             .field(&root_path, FieldKey::SubLayers.as_str())
             .map(|v| v.into_owned())
         else {
             return Vec::new();
         };
-        let offsets: Vec<LayerOffset> = node
-            .layer
+        let offsets: Vec<LayerOffset> = layer
             .data()
             .field(&root_path, FieldKey::SubLayerOffsets.as_str())
             .ok()
@@ -877,7 +899,7 @@ impl LayerGraph {
             })
             .unwrap_or_default();
 
-        let parent_tcps = effective_time_codes_per_second(&node.layer);
+        let parent_tcps = effective_time_codes_per_second(layer);
         let mut edges = Vec::with_capacity(sub_paths.len());
         for (i, sub_path) in sub_paths.into_iter().enumerate() {
             let sub_path = if expr::is_expression(&sub_path) {
@@ -894,7 +916,7 @@ impl LayerGraph {
                     &sub_path,
                     context,
                     ExpressionContext::Sublayer,
-                    node.layer.identifier(),
+                    layer.identifier(),
                     &root_path,
                     record.then_some(&mut expr_errors),
                     record.then_some(&mut expr_used),
@@ -929,7 +951,7 @@ impl LayerGraph {
             if !anchored && let Some(sink) = sink.as_deref_mut() {
                 sink.fallbacks.push(id);
             }
-            let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
+            let ratio = parent_tcps / effective_time_codes_per_second(view.layer(sub_id));
             let effective = offsets
                 .get(i)
                 .copied()
@@ -976,7 +998,7 @@ impl LayerGraph {
                 .anchored_or_bare(anchored, sub_path)
                 .ok_or_else(|| anchored.clone());
         }
-        let anchored = self.layer(parent).absolute_path_with(&self.registry, sub_path);
+        let anchored = self.absolute_path(parent, sub_path);
         let Some(resolved) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
@@ -1202,7 +1224,7 @@ impl LayerGraph {
         for demand in demands {
             if muted
                 && self
-                    .muted_asset_id(&demand.evaluated, self.anchor_location(Some(demand.parent)).as_ref())
+                    .muted_asset_id(&demand.evaluated, self.anchor_location(Some(demand.parent)))
                     .is_some()
             {
                 continue;
@@ -1216,9 +1238,7 @@ impl LayerGraph {
                 // rebuild). A recorded resolve failure is retried once the
                 // resolver finds the asset; any other failure is regenerated
                 // per referrer.
-                let anchored = self
-                    .layer(demand.parent)
-                    .absolute_path_with(&self.registry, &demand.evaluated);
+                let anchored = self.absolute_path(demand.parent, &demand.evaluated);
                 match self.failed_loads.get(&anchored) {
                     Some(LoadFailure::Unresolved) if self.registry.resolve(&anchored).is_some() => {
                         self.failed_loads.remove(&anchored);
@@ -1389,8 +1409,8 @@ impl LayerGraph {
                 }
                 if ancestors.contains(&child) {
                     errors.report(CompositionDiagnostic::SublayerCycle {
-                        root_layer: self.nodes[&id].layer.identifier().to_string(),
-                        seen_layer: self.nodes[&child].layer.identifier().to_string(),
+                        root_layer: self.nodes[&id].handle.identifier().to_string(),
+                        seen_layer: self.nodes[&child].handle.identifier().to_string(),
                     });
                     continue;
                 }
@@ -1407,35 +1427,50 @@ impl LayerGraph {
         self.nodes.get(&id)
     }
 
-    /// Mutable access to a layer node, for routed authoring writes.
-    pub(crate) fn get_mut(&mut self, id: LayerId) -> Option<&mut LayerNode> {
-        self.nodes.get_mut(&id)
+    /// The layer with the given id, as a handle. Panics if the id is unknown.
+    pub(crate) fn handle(&self, id: LayerId) -> &sdf::LayerHandle {
+        &self.nodes[&id].handle
     }
 
-    /// Borrow the layers named by `ids` together, in `ids` order, skipping any
-    /// id with no live layer. Used to open a transaction on each layer of a
-    /// batched edit so they commit all-or-nothing.
-    pub(crate) fn layers_mut(&mut self, ids: &[LayerId]) -> Vec<(LayerId, &mut sdf::Layer)> {
-        let want: HashSet<LayerId> = ids.iter().copied().collect();
-        let mut by_id: HashMap<LayerId, &mut sdf::Layer> = self
-            .nodes
-            .iter_mut()
-            .filter(|(id, _)| want.contains(id))
-            .map(|(id, node)| (*id, &mut node.layer))
-            .collect();
+    /// The store that holds every layer this graph's nodes name.
+    pub(crate) fn store(&self) -> &Rc<sdf::LayerStore> {
+        &self.store
+    }
+
+    /// The layers named by `ids`, in `ids` order, skipping any id with no live
+    /// layer and any id named before (a layer a stack includes twice): the
+    /// handles a batched edit commits through, all-or-nothing.
+    pub(crate) fn handles(&self, ids: &[LayerId]) -> Vec<(LayerId, &sdf::LayerHandle)> {
+        let mut seen = HashSet::new();
         ids.iter()
-            .filter_map(|id| by_id.remove(id).map(|layer| (*id, layer)))
+            .filter(|id| seen.insert(**id))
+            .filter_map(|id| self.nodes.get(id).map(|node| (*id, &node.handle)))
             .collect()
     }
 
-    /// The layer with the given id. Panics if the id is unknown.
-    pub(crate) fn layer(&self, id: LayerId) -> &sdf::Layer {
-        &self.nodes[&id].layer
+    /// Borrow the layers' content for a query. Fails with
+    /// [`LayerError::Busy`](sdf::LayerError::Busy) while an edit holds them.
+    pub(crate) fn view(&self) -> Result<LayerView<'_>, sdf::LayerError> {
+        Ok(LayerView {
+            graph: GraphBorrow::Plain(self),
+            store: self.store.read()?,
+        })
+    }
+
+    /// A [`view`](Self::view) for the graph's own maintenance and for change
+    /// processing, which run between edits of the graph's layers: an
+    /// operation that reaches here began by taking a checked `view`, and
+    /// nothing it runs edits a layer.
+    pub(crate) fn read_view(&self) -> LayerView<'_> {
+        LayerView {
+            graph: GraphBorrow::Plain(self),
+            store: maintenance_read(&self.store),
+        }
     }
 
     /// The identifier of the layer with the given id. Panics if unknown.
     pub(crate) fn identifier(&self, id: LayerId) -> &str {
-        self.nodes[&id].layer.identifier()
+        self.nodes[&id].handle.identifier()
     }
 
     /// The identifier of the layer with the given id, or `None` when the id
@@ -1443,7 +1478,7 @@ impl LayerGraph {
     /// [`identifier`](Self::identifier), for a caller holding an id that may
     /// have outlived its layer.
     pub(crate) fn try_identifier(&self, id: LayerId) -> Option<&str> {
-        self.nodes.get(&id).map(|node| node.layer.identifier())
+        self.nodes.get(&id).map(|node| node.handle.identifier())
     }
 
     /// The registry that opens reference/payload targets on demand.
@@ -1455,8 +1490,14 @@ impl LayerGraph {
     /// `anchor`: its resolved real path, recorded when the loader opened it.
     /// Returns `None` when there is no anchor layer or it is anonymous (no
     /// resolvable location, C++ `SdfLayer::GetRealPath` is empty).
-    pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
-        self.nodes[&anchor?].layer.anchor_location()
+    pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<&ResolvedPath> {
+        self.nodes[&anchor?].handle.anchor_location()
+    }
+
+    /// `asset_path`, authored in the layer `anchor`, as an identifier through
+    /// the graph's registry (C++ `SdfComputeAssetPathRelativeToLayer`).
+    pub(crate) fn absolute_path(&self, anchor: LayerId, asset_path: &str) -> String {
+        sdf::absolute_path_at(&self.registry, self.anchor_location(Some(anchor)), asset_path)
     }
 
     /// Records that an on-demand open of `asset_path` failed, so composition
@@ -1698,9 +1739,11 @@ impl LayerGraph {
     // folding it in as `children` are applied would drop this second decode.
     fn recompute_expr_sublayer_flags(&mut self, only: Option<&HashSet<LayerId>>) {
         let root_path = Path::abs_root();
+        let store = Rc::clone(&self.store);
+        let content = maintenance_read(&store);
         let has_expr = |node: &LayerNode| {
             matches!(
-                node.layer.data().try_field(&root_path, FieldKey::SubLayers.as_str()),
+                content.layer(&node.handle).data().try_field(&root_path, FieldKey::SubLayers.as_str()),
                 Ok(Some(subs)) if matches!(&*subs, Value::StringVec(paths) if paths.iter().any(|p| expr::is_expression(p)))
             )
         };
@@ -1754,7 +1797,7 @@ impl LayerGraph {
     /// composition-time read of the same already-loaded layer cannot abort, so
     /// an unreadable field degrades to no variables.
     fn composed_stack_vars(&self, root: LayerId, seed_vars: &HashMap<String, Value>) -> HashMap<String, Value> {
-        expr::stack_variables(self.nodes[&root].layer.data(), seed_vars).unwrap_or_default()
+        expr::stack_variables(self.read_view().layer(root).data(), seed_vars).unwrap_or_default()
     }
 
     /// The single member-expansion policy for every "stack rooted at `root` under
@@ -1854,7 +1897,7 @@ impl LayerGraph {
     fn session_expression_variables(&self) -> HashMap<String, Value> {
         match self.session_layers().first() {
             Some(&session_root) if !self.is_muted(session_root) => {
-                expr::read_variables(self.nodes[&session_root].layer.data())
+                expr::read_variables(self.read_view().layer(session_root).data())
                     .map(|dict| dict.into_owned())
                     .unwrap_or_default()
             }
@@ -1872,13 +1915,13 @@ impl LayerGraph {
     /// drops out of is [`stack_variables`](Self::stack_variables).
     fn root_stack_structural_vars(&self) -> HashMap<String, Value> {
         let session = match self.session_layers().first() {
-            Some(&session_root) => expr::read_variables(self.nodes[&session_root].layer.data())
+            Some(&session_root) => expr::read_variables(self.read_view().layer(session_root).data())
                 .map(|dict| dict.into_owned())
                 .unwrap_or_default(),
             None => HashMap::new(),
         };
         match self.root {
-            Some(root) => expr::stack_variables(self.nodes[&root].layer.data(), &session).unwrap_or_default(),
+            Some(root) => expr::stack_variables(self.read_view().layer(root).data(), &session).unwrap_or_default(),
             None => session,
         }
     }
@@ -1990,24 +2033,9 @@ impl LayerGraph {
         self.stacks.stacks_using(layer)
     }
 
-    /// The root layer (the first non-session layer), if any. Per spec 12.2.7,
-    /// pseudo-root layer metadata resolves from this layer alone.
-    pub(crate) fn root_layer(&self) -> Option<&sdf::Layer> {
-        self.root.map(|id| self.layer(id))
-    }
-
     /// All layer ids in collection order (session layers first).
     pub(crate) fn all_ids(&self) -> &[LayerId] {
         &self.order
-    }
-
-    /// Whether a layer stage metadata resolves from holds an opinion for
-    /// `field`, a [`Value::ValueBlock`] included: blocking a field is
-    /// authoring it.
-    pub(crate) fn has_stage_metadata(&self, field: &str) -> bool {
-        let root = Path::abs_root();
-        self.stage_metadata_layers()
-            .any(|id| self.layer(id).data().has_field(&root, field))
     }
 
     /// The layers stage metadata resolves from, strongest first: the session
@@ -2021,42 +2049,6 @@ impl LayerGraph {
             .into_iter()
             .chain(self.root_id())
             .filter(|&id| !self.is_muted(id))
-    }
-
-    /// Pseudo-root layer metadata from the root layer only.
-    ///
-    /// Session-layer and sublayer opinions are intentionally ignored here,
-    /// matching spec 12.2.7.
-    pub(crate) fn root_layer_field(&self, field: &str) -> Result<Option<Value>, sdf::DataError> {
-        let root = Path::abs_root();
-        let Some(root_layer) = self.root_layer() else {
-            return Ok(None);
-        };
-        let Some(value) = root_layer.data().try_field(&root, field)? else {
-            return Ok(None);
-        };
-        if matches!(value.as_ref(), Value::ValueBlock) {
-            return Ok(None);
-        }
-        Ok(Some(value.into_owned()))
-    }
-
-    /// The `defaultPrim` token authored on `layer`, if any. Raw metadata: the
-    /// caller decides which layer to ask and what the token means (see
-    /// [`sdf::default_prim_path`](crate::sdf::default_prim_path)).
-    /// `None` for an id naming no layer here, like
-    /// [`try_identifier`](Self::try_identifier): a queued edit reaches this
-    /// holding an id that may have outlived its layer.
-    pub(crate) fn default_prim_token(&self, layer: LayerId) -> Option<tf::Token> {
-        self.nodes.get(&layer)?.layer.pseudo_root()?.default_prim()
-    }
-
-    /// The `defaultPrim` metadata from the root layer, if set.
-    ///
-    /// When session layers are present, `defaultPrim` is read from the first
-    /// non-session layer (the root layer), matching C++ behavior.
-    pub(crate) fn default_prim(&self) -> Option<tf::Token> {
-        self.default_prim_token(self.root_id()?)
     }
 
     /// Layer identifiers in collection order (root-stack first).
@@ -2186,7 +2178,11 @@ impl LayerGraph {
         // Stack deltas matter only to `expressionVariables` change processing,
         // which a join is not.
         let _ = self.build_sublayer_edges(EdgeScope::Joined(joined));
-        if self.has_relocates || joined.iter().any(|id| !self.nodes[id].layer.relocates().is_empty()) {
+        let joined_relocates = {
+            let view = self.read_view();
+            joined.iter().any(|id| !view.layer(*id).relocates().is_empty())
+        };
+        if self.has_relocates || joined_relocates {
             self.recompute_relocates()
         } else {
             HashSet::new()
@@ -2224,7 +2220,7 @@ impl LayerGraph {
     /// layer data, so each layer's new pairs are moved out of `relocates` into
     /// the node cache.
     pub(crate) fn recompute_relocates(&mut self) -> HashSet<LayerId> {
-        let (mut relocates, errors) = validate_layer_relocates(self);
+        let (mut relocates, errors) = validate_layer_relocates(&self.read_view());
         self.has_relocates = false;
         let mut changed = HashSet::new();
         for &id in &self.order {
@@ -2398,9 +2394,7 @@ impl LayerGraph {
     pub(crate) fn relocation_source_layer(&self, ambient: LayerStackId, source: &Path) -> Option<&str> {
         self.incremental_relocate_entries(ambient)
             .into_iter()
-            .find_map(|(relocate_source, _, layer)| {
-                (relocate_source == *source).then(|| self.layer(layer).identifier())
-            })
+            .find_map(|(relocate_source, _, layer)| (relocate_source == *source).then(|| self.identifier(layer)))
     }
 
     /// Ensures `layer` is present as a graph node, returning `(id, fresh)` where
@@ -2477,7 +2471,7 @@ impl LayerGraph {
     /// on-demand loader opens a sublayer demand at, and the key load failures
     /// and open attempts are recorded by.
     pub(crate) fn resolve_relative(&self, asset_path: &str, anchor: LayerId) -> Result<LayerId, String> {
-        let anchored = self.layer(anchor).absolute_path_with(&self.registry, asset_path);
+        let anchored = self.absolute_path(anchor, asset_path);
         self.anchored_or_bare(&anchored, asset_path)
             .map(|(id, _)| id)
             .ok_or(anchored)
@@ -2505,7 +2499,7 @@ impl LayerGraph {
     /// [`rebuild_sublayer_stacks`](Self::rebuild_sublayer_stacks), which
     /// re-materializes the interned muted ids).
     pub(crate) fn mute_layer(&mut self, identifier: String) -> Option<MuteChange> {
-        let canonical = self.canonical_muted_id(&identifier, self.anchor_location(self.root).as_ref());
+        let canonical = self.canonical_muted_id(&identifier, self.anchor_location(self.root));
         if self.is_root_identifier(&canonical) {
             return None;
         }
@@ -2522,7 +2516,7 @@ impl LayerGraph {
     /// muting canonicalized it and resolved to the layer's identity, so any
     /// spelling of one layer unmutes it, whichever spelling muted it.
     pub(crate) fn unmute_layer(&mut self, identifier: &str) -> Option<MuteChange> {
-        let canonical = self.canonical_muted_id(identifier, self.anchor_location(self.root).as_ref());
+        let canonical = self.canonical_muted_id(identifier, self.anchor_location(self.root));
         let changed = match self.id_of(&canonical) {
             Some(id) if self.muted.remove(&id) => self.identity(id),
             _ => self.pending_mutes.take(&canonical)?,
@@ -2532,7 +2526,7 @@ impl LayerGraph {
 
     /// The identity a loaded layer is muted under: its interned identifier.
     fn identity(&self, id: LayerId) -> String {
-        self.nodes[&id].layer.identifier().to_string()
+        self.nodes[&id].handle.identifier().to_string()
     }
 
     /// Recomposes the muting-dependent graph state for a just-changed muted set
@@ -2673,7 +2667,7 @@ impl LayerGraph {
     /// identity, so [`muted_layers`](Self::muted_layers) lists each muted layer
     /// once.
     pub(crate) fn set_muted_identifiers(&mut self, identifiers: impl IntoIterator<Item = String>) {
-        let root_anchor = self.anchor_location(self.root);
+        let root_anchor = self.anchor_location(self.root).cloned();
         for identifier in identifiers {
             let canonical = self.canonical_muted_id(&identifier, root_anchor.as_ref());
             if self.is_root_identifier(&canonical) {
@@ -2698,7 +2692,7 @@ impl LayerGraph {
     pub(crate) fn is_layer_muted(&self, identifier: &str) -> bool {
         self.has_muted_layers()
             && self
-                .muted_entry(&self.canonical_muted_id(identifier, self.anchor_location(self.root).as_ref()))
+                .muted_entry(&self.canonical_muted_id(identifier, self.anchor_location(self.root)))
                 .is_some()
     }
 
@@ -2788,7 +2782,7 @@ impl LayerGraph {
         };
         effective.contains(&referrer)
             && self
-                .muted_asset_id(asset_path, self.anchor_location(Some(referrer)).as_ref())
+                .muted_asset_id(asset_path, self.anchor_location(Some(referrer)))
                 .is_none()
     }
 
@@ -2900,6 +2894,136 @@ impl LayerGraph {
     }
 }
 
+/// The graph releases its layers when it drops: a handle kept past it (one
+/// [`Stage::layer_handle`](crate::usd::Stage::layer_handle) gave out) holds
+/// only its own layer, not every layer the graph loaded.
+impl Drop for LayerGraph {
+    fn drop(&mut self) {
+        self.nodes.clear();
+        self.store.sweep();
+    }
+}
+
+/// A [`LayerGraph`] with its layers' content borrowed for reading: what a
+/// composition query reads layers through. It derefs to the graph for the
+/// structure (stacks, edges, identifiers) and adds [`layer`](Self::layer) for
+/// the content.
+///
+/// A view shares the graph's store for its lifetime. The stage takes one for
+/// a whole query and hands it to the builds, which read only through it.
+// TODO(rayon): a view holds a `Ref` guard on the store's `RefCell`, which is
+// not `Sync`, and parallel builds cannot share one. Lending the builds a
+// plain borrow of the store's slots, taken once by the stage, would let them.
+pub(crate) struct LayerView<'a> {
+    /// The graph whose layers are borrowed.
+    graph: GraphBorrow<'a>,
+    /// The borrow of the graph's store.
+    store: sdf::StoreRead<'a>,
+}
+
+/// How a [`LayerView`] holds its graph: borrowed outright, or through the
+/// `RefCell` the stage keeps it in. The second lets a view outlive the call
+/// that borrowed the cell.
+enum GraphBorrow<'a> {
+    /// A plain borrow.
+    Plain(&'a LayerGraph),
+    /// A borrow of the cell holding the graph.
+    Cell(Ref<'a, LayerGraph>),
+}
+
+impl Deref for LayerView<'_> {
+    type Target = LayerGraph;
+
+    fn deref(&self) -> &LayerGraph {
+        match &self.graph {
+            GraphBorrow::Plain(graph) => graph,
+            GraphBorrow::Cell(graph) => graph,
+        }
+    }
+}
+
+impl<'a> LayerView<'a> {
+    /// A view of the graph in `graph`, whose layers `store` holds: the
+    /// graph's own store, kept by its owner beside the cell. Fails with
+    /// [`LayerError::Busy`](sdf::LayerError::Busy) while an edit holds them.
+    pub(crate) fn of(graph: Ref<'a, LayerGraph>, store: &'a sdf::LayerStore) -> Result<Self, sdf::LayerError> {
+        debug_assert!(ptr::eq(&*graph.store, store), "the store is the graph's own");
+        Ok(Self {
+            store: store.read()?,
+            graph: GraphBorrow::Cell(graph),
+        })
+    }
+}
+
+impl LayerView<'_> {
+    /// The layer with the given id. Panics if the id is unknown.
+    pub(crate) fn layer(&self, id: LayerId) -> &sdf::Layer {
+        // TODO(perf): every per-prim spec probe lands here, and the lookup
+        // goes node map, then the handle's token, then the slot. If the token
+        // hop shows in an open-and-traverse profile, key the slot from a copy
+        // of its key the node keeps.
+        self.store.layer(&self.nodes[&id].handle)
+    }
+
+    /// The layer with the given id, or `None` when the id names no layer in
+    /// this graph: the presence-checking counterpart of
+    /// [`layer`](Self::layer).
+    pub(crate) fn try_layer(&self, id: LayerId) -> Option<&sdf::Layer> {
+        Some(self.store.layer(&self.nodes.get(&id)?.handle))
+    }
+
+    /// The root layer (the first non-session layer), if any. Per spec 12.2.7,
+    /// pseudo-root layer metadata resolves from this layer alone.
+    pub(crate) fn root_layer(&self) -> Option<&sdf::Layer> {
+        self.root.map(|id| self.layer(id))
+    }
+
+    /// Pseudo-root layer metadata from the root layer only.
+    ///
+    /// Session-layer and sublayer opinions are intentionally ignored here,
+    /// matching spec 12.2.7.
+    pub(crate) fn root_layer_field(&self, field: &str) -> Result<Option<Value>, sdf::DataError> {
+        let root = Path::abs_root();
+        let Some(root_layer) = self.root_layer() else {
+            return Ok(None);
+        };
+        let Some(value) = root_layer.data().try_field(&root, field)? else {
+            return Ok(None);
+        };
+        if matches!(value.as_ref(), Value::ValueBlock) {
+            return Ok(None);
+        }
+        Ok(Some(value.into_owned()))
+    }
+
+    /// The `defaultPrim` token authored on `layer`, if any. Raw metadata: the
+    /// caller decides which layer to ask and what the token means (see
+    /// [`sdf::default_prim_path`](crate::sdf::default_prim_path)).
+    /// `None` for an id naming no layer here, like
+    /// [`try_identifier`](LayerGraph::try_identifier): a queued edit reaches
+    /// this holding an id that may have outlived its layer.
+    pub(crate) fn default_prim_token(&self, layer: LayerId) -> Option<tf::Token> {
+        self.try_layer(layer)?.pseudo_root()?.default_prim()
+    }
+
+    /// The `defaultPrim` metadata from the root layer, if set.
+    ///
+    /// When session layers are present, `defaultPrim` is read from the first
+    /// non-session layer (the root layer), matching C++ behavior.
+    pub(crate) fn default_prim(&self) -> Option<tf::Token> {
+        self.default_prim_token(self.root_id()?)
+    }
+
+    /// Whether a layer stage metadata resolves from holds an opinion for
+    /// `field`, a [`Value::ValueBlock`] included: blocking a field is
+    /// authoring it.
+    pub(crate) fn has_stage_metadata(&self, field: &str) -> bool {
+        let root = Path::abs_root();
+        self.stage_metadata_layers()
+            .any(|id| self.layer(id).data().has_field(&root, field))
+    }
+}
+
 /// Depth-first pre-order walk of a sublayer subtree, composing each hop's offset
 /// and pruning muted layers, the shared traversal behind every composed stack.
 /// `children_of` supplies a layer's resolved sublayer edges — the shared
@@ -2943,6 +3067,14 @@ fn collect_sublayers<'a>(
             }
         }
     }
+}
+
+/// Borrow `store`'s layers for the graph's own maintenance, which runs from
+/// stage operations between edits of the layers, never from inside one.
+fn maintenance_read(store: &sdf::LayerStore) -> sdf::StoreRead<'_> {
+    store
+        .read()
+        .expect("the graph is maintained only between edits of its layers")
 }
 
 #[cfg(test)]
@@ -3150,12 +3282,12 @@ mod tests {
 
     /// Authors an `expressionVariables` dictionary on a layer's pseudo-root.
     fn set_expr_var(layer: &mut sdf::Layer, name: &str, value: &str) {
-        edit_layer(layer, |e| {
-            let dict = HashMap::from([(name.to_string(), Value::String(value.to_string()))]);
-            e.pseudo_root_mut()
-                .unwrap()
-                .set(FieldKey::ExpressionVariables.as_str(), Value::Dictionary(dict.into()));
-        });
+        edit_layer(layer, |e| e.set_expression_variables(expr_vars(name, value)).unwrap());
+    }
+
+    /// `name = value` as a layer's only expression variable.
+    fn expr_vars(name: &str, value: &str) -> HashMap<String, Value> {
+        HashMap::from([(name.to_string(), Value::String(value.to_string()))])
     }
 
     /// A variable authored on a **sublayer** is ignored: a layer stack's expression
@@ -3246,7 +3378,10 @@ mod tests {
         );
 
         let root_id = graph.root_id().unwrap();
-        set_expr_var(&mut graph.nodes.get_mut(&root_id).unwrap().layer, "WHICH", "sub.usda");
+        graph
+            .handle(root_id)
+            .edit(|e| e.set_expression_variables(expr_vars("WHICH", "sub.usda")))
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([root_id])));
         assert!(
             graph.errors().is_empty(),
@@ -3595,7 +3730,10 @@ mod tests {
             "the stored set is the target's own V overlaid by the source's W"
         );
 
-        set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
+        graph
+            .handle(target)
+            .edit(|e| e.set_expression_variables(expr_vars("V", "b")))
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([target])));
         assert_eq!(
             graph.stack_variables(id),
@@ -3628,7 +3766,10 @@ mod tests {
             "the muted root's own variables still compose the stored set"
         );
 
-        set_expr_var(&mut graph.nodes.get_mut(&target).unwrap().layer, "V", "b");
+        graph
+            .handle(target)
+            .edit(|e| e.set_expression_variables(expr_vars("V", "b")))
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([target])));
         assert_eq!(
             graph.stack_variables(id),
@@ -3803,7 +3944,10 @@ mod tests {
         };
         assert!(members(&graph, t_stack).contains(&a), "V=a selects a.usda");
 
-        set_expr_var(&mut graph.nodes.get_mut(&src).unwrap().layer, "V", "b");
+        graph
+            .handle(src)
+            .edit(|e| e.set_expression_variables(expr_vars("V", "b")))
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([src])));
 
         let (resolved, fresh) = graph.intern_external(target, src_stack);
@@ -3842,12 +3986,10 @@ mod tests {
         let src_stack = graph.intern_external(src, LayerStackId::ROOT).0;
         let (old_t, fresh) = graph.intern_external(target, src_stack);
         assert!(fresh, "the authoring source mints a contextual instance");
-        edit_layer(&mut graph.nodes.get_mut(&src).unwrap().layer, |e| {
-            e.pseudo_root_mut().unwrap().set(
-                FieldKey::ExpressionVariables.as_str(),
-                Value::Dictionary(HashMap::new().into()),
-            );
-        });
+        graph
+            .handle(src)
+            .edit(|e| e.set_expression_variables(HashMap::new()))
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([src])));
         (graph, src_stack, old_t)
     }
@@ -4298,7 +4440,10 @@ mod tests {
             "the root's V starts at leaf: {ids:?}"
         );
 
-        set_expr_var(&mut graph.nodes.get_mut(&root_id).unwrap().layer, "V", "leaf2");
+        graph
+            .handle(root_id)
+            .edit(|e| e.set_expression_variables(expr_vars("V", "leaf2")))
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([root_id])));
 
         let ids: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
@@ -4342,9 +4487,13 @@ mod tests {
 
         // Add the expression branch under `base` and rebuild with `base` edited: it
         // is a member of the interned target stack, so that stack rebuilds.
-        edit_layer(&mut graph.nodes.get_mut(&base_id).unwrap().layer, |e| {
-            e.pseudo_root_mut().unwrap().set_sublayers(["expr_mid.usda"]);
-        });
+        graph
+            .handle(base_id)
+            .edit(|e| {
+                e.pseudo_root_mut()?.set_sublayers(["expr_mid.usda"]);
+                Ok(())
+            })
+            .expect("authored");
         graph.recompute_sublayers(Some(&HashSet::from([base_id])));
 
         let ids: Vec<LayerId> = graph.sublayer_stack(target_id).iter().map(|&(id, _)| id).collect();

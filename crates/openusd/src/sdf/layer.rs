@@ -413,45 +413,11 @@ impl Layer {
     /// inside a package is anchored to the authoring layer. Where it does not
     /// resolve there, C++ also tries the package's root layer.
     pub fn absolute_path(&self, asset_path: &str) -> String {
+        let anchor = self.anchor_location();
         match &self.resolver {
-            Some(resolver) => self.absolute_path_with(resolver.as_ref(), asset_path),
-            None => self.absolute_path_with(&ar::DefaultResolver::new(), asset_path),
+            Some(resolver) => absolute_path_at(resolver.as_ref(), anchor.as_ref(), asset_path),
+            None => absolute_path_at(&ar::DefaultResolver::new(), anchor.as_ref(), asset_path),
         }
-    }
-
-    /// [`absolute_path`](Self::absolute_path) through `resolver`. The
-    /// counterpart of C++ `SdfComputeAssetPathRelativeToLayer`, less its rules
-    /// for search paths inside a package.
-    //
-    // TODO: port the package rules of C++ `SdfComputeAssetPathRelativeToLayer`
-    // (layerUtils.cpp) into one sdf function over `(resolver, anchor
-    // location, asset_path)`. A search path (C++: not opening with `.`)
-    // authored in a packaged layer is anchored there if that resolves, then
-    // at the package's root layer (`GetPackageRootLayerPath`, expanded
-    // through nested packages by `_ExpandPackagePath`) if that resolves,
-    // then by the plain resolver against the package file. Here the package
-    // handling lives in `DefaultResolver::create_identifier`, which keeps
-    // every such path inside the package and, with no anchor, joins the
-    // current directory where C++ returns the normalized path.
-    //
-    // The rules must apply at every anchoring site at once, or one layer
-    // gets two identifiers: this method's callers in composition and clips,
-    // `LayerRegistry::open_sublayers`, the mute keys (`muted_asset_id`,
-    // `canonical_muted_id`, `sublayer_diagnostic_contributes`), asset-value
-    // resolution in `sdf::asset_path`, and the `usd_utils` discovery. The
-    // fallback probes the resolver, which a prim-index build does not do:
-    // either resolve these paths once per layer stack, or allow the probe in
-    // builds. `failed_loads` keys must stay stable when a path moves from the
-    // authoring layer to the package root.
-    //
-    // TODO(perf): the default resolver canonicalizes through the filesystem,
-    // so each call runs a `canonicalize`. Cache identifiers per
-    // `(anchor location, asset_path)` within an `ar::CacheScope`.
-    pub(crate) fn absolute_path_with(&self, resolver: &dyn ar::Resolver, asset_path: &str) -> String {
-        if asset_path.is_empty() || Self::is_anonymous_identifier(asset_path) {
-            return asset_path.to_owned();
-        }
-        resolver.create_identifier(asset_path, self.anchor_location().as_ref())
     }
 }
 
@@ -786,10 +752,11 @@ pub trait LayerSink {
     }
 
     /// Observe a committed edit, after the overlay has drained into the backend.
-    /// `layer` is the committing layer's identifier and `changes` the record
-    /// derived from the edit.
-    fn after_commit(&self, layer: &str, changes: &ChangeList) {
-        let _ = (layer, changes);
+    /// Its [`generation`](CommittedLayerChange::generation) pairs it with the
+    /// [`before_commit`](Self::before_commit) of the same transaction, which
+    /// another transaction's `before_commit` may have followed.
+    fn after_commit(&self, change: &CommittedLayerChange<'_>) {
+        let _ = change;
     }
 }
 
@@ -798,9 +765,21 @@ pub trait LayerSink {
 /// [`Layer::add_sink`] with no wrapper type. `Fn` (not `FnMut`) because a sink is
 /// invoked through a shared `&self`; capture interior-mutable state to accumulate.
 impl<F: Fn(&str, &ChangeList)> LayerSink for F {
-    fn after_commit(&self, layer: &str, changes: &ChangeList) {
-        self(layer, changes);
+    fn after_commit(&self, change: &CommittedLayerChange<'_>) {
+        self(change.layer_identifier, change.change_list);
     }
+}
+
+/// A committed edit on one layer, handed to [`LayerSink::after_commit`].
+#[derive(Debug)]
+pub struct CommittedLayerChange<'a> {
+    /// Canonical identifier of the edited layer.
+    pub layer_identifier: &'a str,
+    /// The composition record derived from the edit.
+    pub change_list: &'a ChangeList,
+    /// The id of the atomic transaction the commit belongs to, as the matching
+    /// [`PendingLayerChange::generation`] carried it.
+    pub generation: u64,
 }
 
 /// A staged, not-yet-committed edit on one layer, handed to
@@ -1348,6 +1327,46 @@ impl Drop for GroupEditGuard<'_, '_> {
             layer.rollback();
         }
     }
+}
+
+/// `asset_path`, authored in a layer anchored at `anchor`, as an identifier
+/// through `resolver` (C++ `SdfComputeAssetPathRelativeToLayer`, less its
+/// rules for search paths inside a package). An empty path and an anonymous
+/// layer identifier are returned as they are, and `anchor` is `None` for an
+/// anonymous layer.
+//
+// TODO: port the package rules of C++ `SdfComputeAssetPathRelativeToLayer`
+// (layerUtils.cpp) into this function. A search path (C++: not opening with
+// `.`) authored in a packaged layer is anchored there if that resolves, then
+// at the package's root layer (`GetPackageRootLayerPath`, expanded through
+// nested packages by `_ExpandPackagePath`) if that resolves, then by the
+// plain resolver against the package file. Here the package handling lives
+// in `DefaultResolver::create_identifier`, which keeps every such path inside
+// the package and, with no anchor, joins the current directory where C++
+// returns the normalized path.
+//
+// The rules must apply at every anchoring site at once, or one layer gets
+// two identifiers: this function's callers in composition and clips,
+// `LayerRegistry::open_sublayers`, the mute keys (`muted_asset_id`,
+// `canonical_muted_id`, `sublayer_diagnostic_contributes`), asset-value
+// resolution in `sdf::asset_path`, and the `usd_utils` discovery. The
+// fallback probes the resolver, which a prim-index build does not do: either
+// resolve these paths once per layer stack, or allow the probe in builds.
+// `failed_loads` keys must stay stable when a path moves from the authoring
+// layer to the package root.
+//
+// TODO(perf): the default resolver canonicalizes through the filesystem, so
+// each call runs a `canonicalize`. Cache identifiers per `(anchor location,
+// asset_path)` within an `ar::CacheScope`.
+pub(crate) fn absolute_path_at(
+    resolver: &dyn ar::Resolver,
+    anchor: Option<&ar::ResolvedPath>,
+    asset_path: &str,
+) -> String {
+    if asset_path.is_empty() || Layer::is_anonymous_identifier(asset_path) {
+        return asset_path.to_owned();
+    }
+    resolver.create_identifier(asset_path, anchor)
 }
 
 #[cfg(test)]
@@ -1955,7 +1974,7 @@ mod tests {
             }
             Ok(())
         }
-        fn after_commit(&self, _layer: &str, _changes: &ChangeList) {
+        fn after_commit(&self, _change: &CommittedLayerChange<'_>) {
             self.after.set(self.after.get() + 1);
         }
     }

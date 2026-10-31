@@ -119,7 +119,7 @@ pub trait StageSink {
 pub enum Provenance {
     /// An edit to a layer of the local (root) layer stack: stage authoring
     /// through the root edit target, a [`Stage::batch_edit`](super::Stage::batch_edit),
-    /// or a direct [`Stage::layer_mut`](super::Stage::layer_mut) edit to a local
+    /// or a direct [`Stage::layer_handle`](super::Stage::layer_handle) edit to a local
     /// layer. The local layer stack shares the stage's namespace, so paths are
     /// already composed (stage) paths.
     LocalStack,
@@ -131,7 +131,7 @@ pub enum Provenance {
     /// `EditTarget` too; an identity-mapped target needs no translation and is
     /// instead [`LocalStack`](Self::LocalStack) or [`DirectLayerEdit`](Self::DirectLayerEdit).
     EditTarget(pcp::MapFunction),
-    /// A direct [`Stage::layer_mut`](super::Stage::layer_mut) edit to a non-local
+    /// A direct [`Stage::layer_handle`](super::Stage::layer_handle) edit to a non-local
     /// (referenced or payload) layer. Nothing is translated
     /// ([`mapping`](Self::mapping) is `None`): the literal authored paths stay in
     /// the edited layer's own namespace, while the dependency-derived

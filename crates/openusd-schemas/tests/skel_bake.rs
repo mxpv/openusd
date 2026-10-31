@@ -987,7 +987,10 @@ fn bake_anonymous_unsaved() -> Result<(), SchemaError> {
     )
     .expect_err("an anonymous layer has nowhere to save to");
     assert!(
-        matches!(&error, SchemaError::Core(openusd::Error::Export(_))),
+        matches!(
+            &error,
+            SchemaError::Core(openusd::Error::Layer(sdf::LayerError::Export(_)))
+        ),
         "{error:?}"
     );
     // The bake is on the stage all the same.

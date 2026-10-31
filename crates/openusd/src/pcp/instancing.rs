@@ -24,7 +24,7 @@ use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
 use super::index_cache::{IndexCache, OwnStatus};
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerView};
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
 use super::prim_graph::{ArcType, NodeId, extend_reversed};
@@ -495,7 +495,7 @@ impl IndexCache {
     /// parent recursion by construction, and the existence check only through
     /// [`Self::enclosing_instance`], which walks strict ancestors (see
     /// [`Self::is_instance`]).
-    pub(crate) fn is_populated(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+    pub(crate) fn is_populated(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() {
             return Ok(true);
         }
@@ -534,7 +534,7 @@ impl IndexCache {
     /// whatever its own `active` says, as C++ `UsdStage::_ComposeChildren`
     /// composes every child of a populated prim. Nothing at `path` itself is
     /// composed to answer.
-    pub(crate) fn population_reaches(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+    pub(crate) fn population_reaches(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
         if !self.mask_includes(path) {
             return Ok(false);
         }
@@ -557,7 +557,7 @@ impl IndexCache {
     ///
     /// The ancestors are settled from the root down, so nothing below an
     /// inactive one is composed to answer.
-    pub(crate) fn population_excludes(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+    pub(crate) fn population_excludes(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
         if !self.mask_includes(path) {
             return Ok(true);
         }
@@ -578,7 +578,7 @@ impl IndexCache {
     /// and none below a prim that is not populated (C++
     /// `UsdStage::_ComposeChildren`, which discards the descendants of an
     /// inactive prim).
-    pub(crate) fn populated_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>, QueryError> {
+    pub(crate) fn populated_children(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<Vec<Token>, QueryError> {
         if !self.is_populated(graph, path)? {
             return Ok(Vec::new());
         }
@@ -634,7 +634,7 @@ impl IndexCache {
     /// re-enters `is_instance` on the parent to find the enclosing instance
     /// ([`Self::enclosing_instance`]), but each step moves to a shorter path
     /// and bottoms out at the root, so the recursion terminates.
-    pub(crate) fn is_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+    pub(crate) fn is_instance(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
         }
@@ -668,7 +668,7 @@ impl IndexCache {
     /// (spec 11.3.3). Composing the index here (and computing its
     /// [`InstanceKey`]) is the cache's job; the dedup is the
     /// [`PrototypeRegistry`]'s.
-    fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Path, QueryError> {
+    fn register_prototype(&mut self, graph: &LayerView<'_>, instance: &Path) -> Result<Path, QueryError> {
         // A nested instance can itself be an instance proxy. Its shared
         // composition lives at the corresponding prim inside the enclosing
         // prototype, so that is the index defining the nested prototype's key
@@ -744,7 +744,7 @@ impl IndexCache {
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by
     /// `instance`, registering it on first use. `None` when `instance` is not
     /// an instance prim (spec 11.3.3).
-    pub(crate) fn prototype_of(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Option<Path>, QueryError> {
+    pub(crate) fn prototype_of(&mut self, graph: &LayerView<'_>, instance: &Path) -> Result<Option<Path>, QueryError> {
         if !self.is_instance(graph, instance)? {
             return Ok(None);
         }
@@ -890,7 +890,7 @@ impl IndexCache {
     /// an instance that composes to no prim (e.g. a misspelled child) is not a
     /// proxy — mirroring the existence check on [`Self::is_instance`] /
     /// `Prim::is_valid`.
-    pub(crate) fn is_instance_proxy(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool, QueryError> {
+    pub(crate) fn is_instance_proxy(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
         if path.is_abs_root() || self.is_prototype(path) {
             return Ok(false);
         }
@@ -904,7 +904,7 @@ impl IndexCache {
     /// a proxy `instance/tail` maps to `/__Prototype_N/tail` (spec 11.3.3).
     /// `None` when `path` is not an instance proxy (including a path under an
     /// instance that composes to no prim).
-    pub(crate) fn prim_in_prototype(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
+    pub(crate) fn prim_in_prototype(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<Option<Path>, QueryError> {
         if !self.is_instance_proxy(graph, path)? {
             return Ok(None);
         }
@@ -925,7 +925,11 @@ impl IndexCache {
     /// on the path's [`PrimRecord`] unless it is provisional, as in
     /// [`Self::is_populated`], so a top-down traversal answers each prim in
     /// O(1).
-    pub(crate) fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>, QueryError> {
+    pub(crate) fn enclosing_instance(
+        &mut self,
+        graph: &LayerView<'_>,
+        path: &Path,
+    ) -> Result<Option<Path>, QueryError> {
         let Some(parent) = path.parent().filter(|parent| !parent.is_abs_root()) else {
             return Ok(None);
         };
@@ -953,7 +957,7 @@ impl IndexCache {
     /// prototype's namespace, so identical instances share one composed subtree
     /// (spec 11.3.3). Other paths — the prototype namespace itself, an instance
     /// root, and non-instanced prims — pass through unchanged.
-    fn redirect_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path, QueryError> {
+    fn redirect_prim(&mut self, graph: &LayerView<'_>, prim: &Path) -> Result<Path, QueryError> {
         match self.redirect_anchor(graph, prim)? {
             Some((origin, target)) => Ok(prim.replace_prefix(&origin, &target).unwrap_or_else(|| prim.clone())),
             None => Ok(prim.clone()),
@@ -979,7 +983,7 @@ impl IndexCache {
     /// deepening the materialized index), and every non-instanced prim.
     pub(super) fn redirect_anchor(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         prim: &Path,
     ) -> Result<Option<(Path, Path)>, QueryError> {
         if let Some(instance) = self.enclosing_instance(graph, prim)? {
@@ -998,7 +1002,7 @@ impl IndexCache {
     /// (including the identity result for a non-redirected prim, the common
     /// case), so the enclosing instance is looked up once per prim path; the
     /// record is cleared whenever the prototype registry is invalidated.
-    pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path, QueryError> {
+    pub(super) fn effective_path(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<Path, QueryError> {
         let prim = path.prim_path();
         let redirected = self.effective_prim(graph, &prim)?;
         if redirected == prim {
@@ -1011,7 +1015,7 @@ impl IndexCache {
 
     /// The prim-path half of [`Self::effective_path`]: `prim` itself, or the
     /// prototype prim serving it when it is an instance proxy.
-    pub(super) fn effective_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path, QueryError> {
+    pub(super) fn effective_prim(&mut self, graph: &LayerView<'_>, prim: &Path) -> Result<Path, QueryError> {
         if let Some(hit) = self
             .records
             .get(prim)

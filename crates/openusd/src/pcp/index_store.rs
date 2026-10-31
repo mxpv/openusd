@@ -18,7 +18,7 @@ use crate::sdf::{self, Path};
 
 use super::dependencies::Dependencies;
 use super::diagnostics::Diagnostics;
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerView};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::prim_indexer::ExprVarDeps;
@@ -419,7 +419,7 @@ impl IndexStore {
     /// partition it landed in.
     pub(super) fn refresh_specs(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         layer: LayerId,
         path: &Path,
         refreshed: &mut sdf::PathMap<NodeRuns>,
@@ -482,7 +482,7 @@ impl IndexStore {
     /// it consumed, for the caller's resync report. Every path here has a cached
     /// entry: [`refresh_specs`](Self::refresh_specs) records only indices it
     /// found, and the round's dropped set is disjoint from them.
-    pub(super) fn splice_spec_stacks(&mut self, graph: &LayerGraph, refreshed: sdf::PathMap<NodeRuns>) -> Vec<Path> {
+    pub(super) fn splice_spec_stacks(&mut self, graph: &LayerView<'_>, refreshed: sdf::PathMap<NodeRuns>) -> Vec<Path> {
         let mut touched = Vec::with_capacity(refreshed.len());
         for (path, runs) in refreshed {
             debug_assert!(
@@ -622,7 +622,7 @@ impl IndexStore {
     /// once per entry revision ([`PrimEntry::instanceable`]). A path with no
     /// cached entry answers `false`, as the empty stand-in index
     /// [`cached`](Self::cached) returns would.
-    pub(super) fn instanceable(&mut self, graph: &LayerGraph, prim: &Path) -> Result<bool, QueryError> {
+    pub(super) fn instanceable(&mut self, graph: &LayerView<'_>, prim: &Path) -> Result<bool, QueryError> {
         let Some(entry) = self.entries.get_mut(prim) else {
             return Ok(false);
         };
@@ -742,10 +742,16 @@ mod tests {
         let mut store = IndexStore::default();
         register(&mut store, &g, &prim, PrimIndex::default());
         store.seed_instanceable(&prim, true);
-        assert!(store.instanceable(&g, &prim)?, "the recorded answer is read");
+        assert!(
+            store.instanceable(&g.read_view(), &prim)?,
+            "the recorded answer is read"
+        );
 
         store.restale(&prim, &BTreeSet::new());
-        assert!(!store.instanceable(&g, &prim)?, "a new revision answers afresh");
+        assert!(
+            !store.instanceable(&g.read_view(), &prim)?,
+            "a new revision answers afresh"
+        );
         Ok(())
     }
 

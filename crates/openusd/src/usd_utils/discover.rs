@@ -75,7 +75,8 @@ impl<'a> From<&'a sdf::Layer> for Root<'a> {
 /// unevaluated and reports unresolved, return
 /// [`DependencyError`](super::DependencyError).
 pub fn all_dependencies<'a>(stage: &Stage, root: impl Into<Root<'a>>) -> Result<Dependencies> {
-    let graph = stage.layers();
+    stage.settle()?;
+    let graph = stage.layer_view();
     let policy = Discover {
         inactive: false,
         open_packages: true,
@@ -205,7 +206,7 @@ impl Content<'_> {
 /// `graph` holds are walked as they are in memory; any other is read through
 /// the resolver. The root failing to resolve is an error; any other file
 /// failing to is recorded.
-pub(super) fn discover<'a>(graph: &'a pcp::LayerGraph, root: Root<'a>, policy: Discover) -> Result<Discovery<'a>> {
+pub(super) fn discover<'a>(graph: &'a pcp::LayerView<'a>, root: Root<'a>, policy: Discover) -> Result<Discovery<'a>> {
     // One cache scope spans the discovery. Each package it reads into is
     // opened once.
     let _scope = ar::CacheScope::begin();
@@ -243,7 +244,7 @@ fn root_identifier(graph: &pcp::LayerGraph, asset_path: &str) -> String {
 /// of `package`, a path leading back inside it names an entry already in
 /// place and is left as authored.
 fn discover_scope<'a>(
-    graph: &'a pcp::LayerGraph,
+    graph: &'a pcp::LayerView<'a>,
     policy: Discover,
     roots: Vec<Source<'a>>,
     package: Option<String>,
@@ -278,7 +279,7 @@ fn discover_scope<'a>(
 /// inside it, at their entries, and the packages nested in it that hold such
 /// layers deeper down, each with its own scope; then what those layers reach
 /// outside the package. Empty when the stage holds no layer inside it.
-fn discover_inside<'a>(graph: &'a pcp::LayerGraph, policy: Discover, package: &str) -> Result<Discovery<'a>> {
+fn discover_inside<'a>(graph: &'a pcp::LayerView<'a>, policy: Discover, package: &str) -> Result<Discovery<'a>> {
     let prefix = format!("{}[", package.trim_end_matches(']'));
     let mut roots = Vec::new();
     let mut nested = BTreeSet::new();
@@ -321,7 +322,7 @@ fn discover_inside<'a>(graph: &'a pcp::LayerGraph, policy: Discover, package: &s
 
 /// The state of one [`discover_scope`] walk.
 struct Discoverer<'a> {
-    graph: &'a pcp::LayerGraph,
+    graph: &'a pcp::LayerView<'a>,
     policy: Discover,
     /// The scope's package.
     package: Option<String>,
@@ -702,7 +703,7 @@ pub(super) enum SourceLayer<'a> {
 
 impl<'a> SourceLayer<'a> {
     /// The layer at `identifier`, or `None` when it does not resolve.
-    fn open(graph: &'a pcp::LayerGraph, identifier: &str) -> Result<Option<Self>> {
+    fn open(graph: &'a pcp::LayerView<'a>, identifier: &str) -> Result<Option<Self>> {
         if let Some(id) = graph.id_of(identifier) {
             return Ok(Some(Self::Live(graph.layer(id))));
         }
@@ -907,7 +908,7 @@ def "N" (
         write(dir.path(), "extra.usda", "#usda 1.0\ndef \"E\" {\n}\n");
         let (_, stage) = open(dir.path(), "root.usda")?;
         let identifier = stage.root_layer().identifier().to_owned();
-        stage.layer_mut(&identifier).unwrap().edit(|edit| {
+        stage.layer_handle(&identifier).unwrap().edit(|edit| {
             edit.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
@@ -938,7 +939,7 @@ def "N" (
 
         let mut seen = Vec::new();
         modify_asset_paths(
-            &mut stage.layer_mut(&dependencies.layers[0]).unwrap(),
+            &stage.layer_handle(&dependencies.layers[0]).unwrap(),
             |path| {
                 seen.push(path.to_owned());
                 path.to_owned()

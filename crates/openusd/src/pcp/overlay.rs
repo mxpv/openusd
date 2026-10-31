@@ -28,7 +28,7 @@ use crate::vt::Value;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
 use super::prim_resolve::compose_specifier;
-use super::{IndexCache, LayerGraph, LayerId, QueryError};
+use super::{IndexCache, LayerGraph, LayerId, LayerView, QueryError};
 
 /// Pending prim opinions, keyed by the site — a layer and the spec path in
 /// it — they are to be written at.
@@ -106,7 +106,7 @@ impl Overlay {
 
     /// Whether `layer` holds a spec at `path` once the overlay is written:
     /// the layer has one, or the overlay creates one.
-    pub(crate) fn holds_spec(&self, graph: &LayerGraph, layer: LayerId, path: &Path) -> bool {
+    pub(crate) fn holds_spec(&self, graph: &LayerView<'_>, layer: LayerId, path: &Path) -> bool {
         graph.layer(layer).data().has_spec(path) || self.creates_spec(layer, path)
     }
 
@@ -149,7 +149,7 @@ impl PrimIndex {
     // TODO(perf): every layer of every node is probed; the spec stack already
     // lists the ones holding a spec, so only the overlay's own sites need
     // inserting into it.
-    fn overlaid(&self, graph: &LayerGraph, overlay: &Overlay) -> Result<Option<OverlaidOpinions>, QueryError> {
+    fn overlaid(&self, graph: &LayerView<'_>, overlay: &Overlay) -> Result<Option<OverlaidOpinions>, QueryError> {
         if self.revived_by(graph, overlay) {
             return Ok(None);
         }
@@ -218,7 +218,7 @@ impl IndexCache {
     /// [`own_status`](Self::own_status)).
     pub(crate) fn compose_planned(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         path: &Path,
         overlay: &Overlay,
         with_type: bool,
@@ -270,7 +270,7 @@ impl IndexCache {
     /// that only rebuilding that index composes.
     fn compose_prim_fields(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         path: &Path,
         overlay: &Overlay,
     ) -> Result<Option<PrimFields>, QueryError> {

@@ -30,6 +30,7 @@
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
 use std::mem;
+use std::rc::Rc;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
@@ -70,16 +71,18 @@ pub(super) struct CompositionNotice {
 /// What composition needs from the stage that owns it.
 ///
 /// The coordinator drives graph and cache directly; these are the three things
-/// it cannot reach — minting the weak handle an aggregator holds, knowing
+/// it cannot reach — minting the weak handle the stage's layer observers hold, knowing
 /// whether a sink is installed, and delivering to sinks, which re-enters the
 /// stage.
 pub(super) trait CompositionHooks {
-    /// Attaches the stage's change aggregator to a freshly interned layer.
+    /// Attaches the stage's commit observers to a freshly interned layer: the
+    /// recorder that queues its commits and the sink that forwards its staged
+    /// edits.
     ///
     /// Runs while the graph is borrowed mutably, which is safe because it only
     /// installs a sink — it reads no composition state and re-enters nothing.
     /// [`notify`](Self::notify) is the hook that requires the borrows released.
-    fn attach_layer_sink(&self, id: pcp::LayerId, layer: &mut sdf::Layer);
+    fn attach_layer_sink(&self, id: pcp::LayerId, layer: &sdf::LayerHandle);
 
     /// Whether a committed-change payload is worth building, checked once per
     /// transaction group so the no-sink path stays allocation-free.
@@ -94,36 +97,38 @@ pub(super) trait CompositionHooks {
 /// them, and the edits recorded but not yet composed.
 ///
 /// Each is its own cell so a borrow of one leaves the others free: composition
-/// reads layer data while building into the cache, and an aggregator sink
-/// appends to the queue with the graph already borrowed.
+/// reads layer data while building into the cache, and the stage's recorder
+/// appends to the queue as a commit lands, with the graph already borrowed.
 pub(super) struct StageComposition {
     /// The loaded layers and their sublayer DAG.
     layers: RefCell<pcp::LayerGraph>,
+    /// The store holding the graph's layers, kept beside the graph's cell so a
+    /// [`pcp::LayerView`] can borrow both for as long as it lives: a `Ref` of
+    /// the graph cannot lend the graph's own store for that long.
+    store: Rc<sdf::LayerStore>,
     /// Lazily-built composition cache of per-prim indices and contexts.
     cache: RefCell<pcp::IndexCache>,
-    /// Layer edits recorded by each layer's aggregator sink (installed by
-    /// [`intern_layer`](Self::intern_layer)), awaiting composed processing by
-    /// [`process_pending`](Self::process_pending).
+    /// Layer edits recorded by each layer's recorder (subscribed by
+    /// [`intern_layer`](Self::intern_layer)) as their commits land, awaiting
+    /// composed processing by [`process_pending`](Self::process_pending).
     ///
     /// Recording an edit and recomposing for it are deliberately split across
-    /// this queue rather than recomposing straight from the aggregator
-    /// callback, because:
+    /// this queue rather than recomposing straight from the recorder, because:
     ///
-    /// - Borrows. The aggregator fires inside [`Layer::edit`](sdf::Layer::edit)'s
-    ///   commit, which the stage reaches by holding [`layers`](Self::layers) borrowed
-    ///   mutably (the layer lives in the graph). Recomposing needs that same
-    ///   borrow, plus [`cache`](Self::cache) — so the callback can only append
-    ///   to this independent cell, and the drain runs the recompose once the
-    ///   graph borrow is released. A layer cannot recompose the stage from the
-    ///   middle of its own mutation.
+    /// - Borrows. The recorder runs inside the commit, with the layers' store
+    ///   borrowed and, for a stage edit, [`layers`](Self::layers) too.
+    ///   Recomposing needs both, plus [`cache`](Self::cache) — so the recorder
+    ///   can only append to this independent cell, and the drain runs the
+    ///   recompose once the borrows are released. A layer cannot recompose the
+    ///   stage from the middle of its own mutation.
     /// - Batching. A multi-layer edit (a namespace edit across the local stack)
-    ///   commits N layers, each firing its aggregator, so N records accumulate
+    ///   commits N layers, each recording one entry, so N records accumulate
     ///   and the drain drives one recompose for the whole batch instead of N.
-    /// - One path for every editor. A direct edit through `Stage::layer_mut`
-    ///   fires the same aggregator with no stage borrow held; the callback
-    ///   can't tell, so it records uniformly and the recompose happens on the
-    ///   next composed read (drain-on-read). Stage-routed and raw layer edits
-    ///   flow through the identical path.
+    /// - One path for every editor. A direct edit through `Stage::layer_handle`
+    ///   reaches the same recorder with no stage borrow held, so it records
+    ///   uniformly and the recompose happens on the next composed read
+    ///   (drain-on-read). Stage-routed and raw layer edits flow through the
+    ///   identical path.
     pending: RefCell<Vec<PendingEdit>>,
 }
 
@@ -131,6 +136,7 @@ impl StageComposition {
     /// Wraps a freshly built graph and cache.
     pub(super) fn new(layers: pcp::LayerGraph, cache: pcp::IndexCache) -> Self {
         Self {
+            store: Rc::clone(layers.store()),
             layers: RefCell::new(layers),
             cache: RefCell::new(cache),
             pending: RefCell::new(Vec::new()),
@@ -153,12 +159,24 @@ impl StageComposition {
         self.layers.borrow()
     }
 
-    /// The layer graph mutably, for an authoring helper that edits its layers
-    /// directly after a drain; the caller drives composition invalidation from
-    /// the resulting change lists.
-    pub(super) fn settled_graph_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
-        self.assert_settled();
-        self.layers.borrow_mut()
+    /// The layer graph with its layers' content, for a caller that has
+    /// completed `process_pending`. Panics while an edit of the stage's layers
+    /// is in progress, as a borrow of the graph itself does.
+    pub(super) fn settled_view(&self) -> pcp::LayerView<'_> {
+        pcp::LayerView::of(self.settled_graph(), &self.store)
+            .expect("the stage's layers are not read from inside an edit of one of them")
+    }
+
+    /// Fails with [`sdf::LayerError::Busy`] while a read or an edit of one of
+    /// the stage's layers holds them, before a caller loads one.
+    pub(super) fn ensure_writable(&self) -> Result<(), sdf::LayerError> {
+        self.store.ensure_writable()
+    }
+
+    /// Deliver a stage commit's notifications through the layers' store, once
+    /// the caller released the graph, and return whether it changed anything.
+    pub(super) fn deliver(&self, committed: sdf::Committed) -> bool {
+        self.store.deliver(committed)
     }
 
     /// The composition cache, for a caller that has completed `process_pending`.
@@ -206,13 +224,14 @@ impl StageComposition {
     /// caller's reused buffer, so a warmed-up load loop allocates nothing.
     fn query_pass<T>(
         &self,
-        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        query: impl FnOnce(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         demands: &mut Vec<pcp::Demand>,
     ) -> Result<T, pcp::QueryError> {
         self.assert_settled();
         let layers = self.layers.borrow();
+        let view = layers.view()?;
         let mut cache = self.cache.borrow_mut();
-        let result = query(&layers, &mut cache);
+        let result = query(&view, &mut cache);
         cache.swap_pending_loads(demands);
         result
     }
@@ -242,12 +261,6 @@ impl StageComposition {
         self.layers.borrow()
     }
 
-    /// The layer graph mutably for an authoring path, with the same contract as
-    /// [`authoring_graph`](Self::authoring_graph).
-    pub(super) fn authoring_graph_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
-        self.layers.borrow_mut()
-    }
-
     // The pending-edit queue.
 
     /// Appends a committed layer edit for the next drain.
@@ -257,7 +270,7 @@ impl StageComposition {
 
     /// Whether the queue is empty, for the drain's fast path — the check a read
     /// on a clean stage pays before returning.
-    fn pending_is_empty(&self) -> bool {
+    pub(super) fn pending_is_empty(&self) -> bool {
         self.pending.borrow().is_empty()
     }
 
@@ -271,28 +284,28 @@ impl StageComposition {
         self.pending.take()
     }
 
-    /// Drain the layer edits recorded by the aggregators and drive one composition
-    /// recompose per snapshot, delivering the composed
+    /// Drain the layer edits the stage's recorders queued and drive one
+    /// composition recompose per snapshot, delivering the composed
     /// [`CommittedChange`](super::CommittedChange) to the stage sinks. The
-    /// deferred counterpart to a layer commit: an aggregator records the edit
-    /// while the layer graph is borrowed, and this runs once that borrow is
+    /// deferred counterpart to a layer commit: a recorder queues the edit as
+    /// the commit lands, with the layers borrowed, and this runs once they are
     /// released — after each authoring call, and before any composed read. A
     /// no-op when nothing is pending, so a read on a clean stage costs only the
     /// empty check.
     ///
-    /// Runs to quiescence. A sink may author from `after_commit`, and a direct
-    /// [`layer_mut`](super::Stage::layer_mut) commit there records onto a queue this
-    /// call has already snapshotted; without the repeat, that edit would sit
-    /// unprocessed and the read that triggered the drain would compose without
-    /// it. Each snapshot is one whole pass — failure clearing, its transaction
-    /// groups, reclamation, and the requeue all travel with it — so every group
-    /// in a snapshot completes before an edit its own notifications recorded is
-    /// processed, and events stay in commit order.
+    /// Runs to quiescence. A sink may author from `after_commit`, and a
+    /// direct [`layer_handle`](super::Stage::layer_handle) commit there records
+    /// onto a queue this call has already snapshotted; without the repeat, that
+    /// edit would sit unprocessed and the read that triggered the drain would
+    /// compose without it. Each snapshot is one whole pass — failure clearing,
+    /// its transaction groups, reclamation, and the requeue all travel with it
+    /// — so every group in a snapshot completes before an edit its own
+    /// notifications recorded is processed, and events stay in commit order.
     ///
     /// The loop terminates when sinks stop producing edits. A sink that authors
     /// on every notification never does, so this never returns for it —
     /// unbounded recursion through a stage authoring method, an unbounded spin
-    /// through [`layer_mut`](super::Stage::layer_mut).
+    /// through [`layer_handle`](super::Stage::layer_handle).
     //
     // TODO: a re-entrant drain is still possible — a sink authoring through a
     // stage method hits that method's own trailing `process_pending`, which
@@ -304,6 +317,14 @@ impl StageComposition {
     // decision on what a sink reading composed state within itself should see.
     pub(super) fn process_pending(&self, hooks: &dyn CompositionHooks) {
         while !self.pending_is_empty() {
+            // A drain reads, and may load, the stage's layers. From inside a
+            // read or an edit of one of them it would find the store held, so
+            // the edits stay queued for a later drain: a fallible read then
+            // fails with `Busy` (`Stage::settle`), and a settled access panics
+            // (`assert_settled`) before it answers from stale composition.
+            if self.store.ensure_writable().is_err() {
+                return;
+            }
             let mut drained = self.take_pending();
             // An edit changes the layers, so a target that previously failed to read
             // may now be readable: forget recorded load failures and drop the indices
@@ -316,7 +337,7 @@ impl StageComposition {
             // transaction's layers record together, and the id increases across
             // transactions — so grouping by adjacent equal id carves the queue into
             // per-transaction groups. Each group applies as its own composed change,
-            // so unrelated edits (a direct `layer_mut` commit sitting pending when the
+            // so unrelated edits (a direct `layer_handle` commit sitting pending when the
             // next stage edit lands) stay separate rather than merging into one event.
             for group in drained.chunk_by_mut(|a, b| a.generation == b.generation) {
                 let generation = group[0].generation;
@@ -487,12 +508,14 @@ impl StageComposition {
     /// joined (a duplicate identifier collapses onto the existing node). The one
     /// seam by which a layer joins the stage — both opening (`make_stage`) and
     /// [`insert_layer`](super::Stage::insert_layer) go through it. A freshly-added layer
-    /// gets the stage's change aggregator: a [`sdf::LayerSink`] that records the
-    /// layer's commits into [`StageComposition`]'s pending queue for
-    /// [`process_pending`](Self::process_pending) to recompose, so every layer the
-    /// stage owns reports its edits no matter who authors them. The sink holds a
-    /// a weak stage handle, so it does not form a reference cycle (the stage owns the
-    /// layer, which owns the sink).
+    /// gets the stage's commit observers: a recorder that queues the layer's
+    /// commits into [`StageComposition`]'s pending queue for
+    /// [`process_pending`](Self::process_pending) to recompose, so every layer
+    /// the stage holds reports its edits no matter who authors them, and a
+    /// [`sdf::LayerSink`] that forwards its staged edits. They hold a weak
+    /// stage handle, so it does not form a reference cycle (the stage holds
+    /// the layer, which owns the sink), and a handle that outlives the stage
+    /// keeps a sink that records nothing.
     pub(super) fn intern_layer(&self, layer: sdf::Layer, hooks: &dyn CompositionHooks) -> (pcp::LayerId, bool) {
         // Joining is a value-source change for a clip that named this identifier
         // while nothing was interned under it: the clip cache read whatever it
@@ -507,8 +530,7 @@ impl StageComposition {
             if !fresh {
                 return (id, false);
             }
-            let node = layers.get_mut(id).expect("just-interned layer is live");
-            hooks.attach_layer_sink(id, &mut node.layer);
+            hooks.attach_layer_sink(id, layers.handle(id));
             let identifier = self
                 .cache
                 .borrow()
@@ -856,7 +878,7 @@ impl StageComposition {
     /// drives layer loading: an un-visited subtree never loads.
     pub(super) fn query<T>(
         &self,
-        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        mut query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         hooks: &dyn CompositionHooks,
     ) -> Result<T, pcp::QueryError> {
         // Reused across passes: swapped with the cache's queue so neither
@@ -876,6 +898,13 @@ impl StageComposition {
             // pass recomposes its prim — recording the arc unresolved — without it.
             if pending.is_empty() {
                 return result;
+            }
+            // Opening a layer adds it to the store, which a read or an edit of
+            // one of the stage's layers holds. The demands go back to the
+            // cache, for the next query to load.
+            if let Err(busy) = self.store.ensure_writable() {
+                self.cache.borrow_mut().swap_pending_loads(&mut pending);
+                return Err(busy.into());
             }
             scope.get_or_insert_with(ar::CacheScope::begin);
             if !self.load_demanded(&pending, hooks) {
@@ -898,6 +927,12 @@ impl StageComposition {
         mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<pcp::MuteChange>,
         hooks: &dyn CompositionHooks,
     ) -> Option<(String, Vec<sdf::Path>)> {
+        // A mute rebuilds and may load the stage's layers, which a read or an
+        // edit of one of them holds.
+        assert!(
+            self.store.ensure_writable().is_ok(),
+            "a layer of the stage is muted from inside a read or an edit of one of its layers"
+        );
         self.process_pending(hooks);
         let (changed, resynced, demands) = self.update_pair(|graph, cache| {
             let change = mutate(graph)?;
@@ -1111,9 +1146,18 @@ impl StageComposition {
 
     /// Backstop for the settled operations: the queue being empty is necessary
     /// for settledness, not sufficient (see the module doc).
+    /// Edits a drain left queued because a read or an edit held the stage's
+    /// layers would make the access stale. That case panics in every build.
     fn assert_settled(&self) {
+        if self.pending.borrow().is_empty() {
+            return;
+        }
+        assert!(
+            self.store.ensure_writable().is_ok(),
+            "the stage is read from inside a read or an edit of one of its layers, with edits of them queued"
+        );
         debug_assert!(
-            self.pending.borrow().is_empty(),
+            false,
             "settled composition access with edits still queued: drain through Stage::process_pending first"
         );
     }
@@ -1195,7 +1239,7 @@ mod tests {
     struct StubHooks;
 
     impl CompositionHooks for StubHooks {
-        fn attach_layer_sink(&self, _id: pcp::LayerId, _layer: &mut sdf::Layer) {}
+        fn attach_layer_sink(&self, _id: pcp::LayerId, _layer: &sdf::LayerHandle) {}
 
         fn wants_notice(&self) -> bool {
             true
@@ -1233,7 +1277,7 @@ mod tests {
     fn install_rules_keeps_reentrant_change() {
         struct RuleSetter<'a>(&'a StageComposition, Cell<bool>);
         impl CompositionHooks for RuleSetter<'_> {
-            fn attach_layer_sink(&self, _id: pcp::LayerId, _layer: &mut sdf::Layer) {}
+            fn attach_layer_sink(&self, _id: pcp::LayerId, _layer: &sdf::LayerHandle) {}
             fn wants_notice(&self) -> bool {
                 true
             }
@@ -1268,7 +1312,7 @@ mod tests {
     fn notify_runs_unborrowed() {
         struct BorrowProbe<'a>(&'a StageComposition, Cell<bool>);
         impl CompositionHooks for BorrowProbe<'_> {
-            fn attach_layer_sink(&self, _id: pcp::LayerId, _layer: &mut sdf::Layer) {}
+            fn attach_layer_sink(&self, _id: pcp::LayerId, _layer: &sdf::LayerHandle) {}
             fn wants_notice(&self) -> bool {
                 true
             }

@@ -82,7 +82,7 @@ use crate::tf;
 
 use super::clip;
 use super::index_store::{ScopedInvalidation, ValueScope};
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerView};
 use super::layer_stack::StackVarsDelta;
 use super::prim_index::{PropertyTargetKind, TargetMemoKey};
 use super::{IndexCache, LayerId, LayerStackId};
@@ -925,9 +925,12 @@ impl Changes {
             apply_vars_deltas(cache, graph, &vars_deltas)
         };
 
+        // The layers' content, read by the tiers below; the graph's structure is
+        // settled.
+        let view = graph.read_view();
         // `defaultPrim` edits: each evicts the prims that recorded consulting the
         // field and reports the dependents of the prim path it used to name.
-        resynced.extend(apply_default_prim_edits(cache, graph, &self.default_prim_edits));
+        resynced.extend(apply_default_prim_edits(cache, &view, &self.default_prim_edits));
 
         // A prim-tier index invalidation can change which prims are instances or
         // how they compose, so affected entries in the shared-prototype registry
@@ -969,7 +972,7 @@ impl Changes {
             // opinion, so whether that prim composes at all may have moved — a
             // resync of that prim, not a report that its info changed. It stands
             // for itself alone: the refresh touches one site, not a subtree.
-            resynced_prims = cache.rescan_specs(graph, &sites);
+            resynced_prims = cache.rescan_specs(&view, &sites);
         }
 
         // Value tier: the composition graph is intact, so nothing is dropped —
@@ -983,7 +986,7 @@ impl Changes {
         // it is sound against either half of the significant tier. Splitting it
         // on namespace the way that tier is split would let the already-dropped
         // prims be skipped.
-        cache.restale_values(graph, normalize_scopes(mem::take(&mut self.cache.did_change_values)));
+        cache.restale_values(&view, normalize_scopes(mem::take(&mut self.cache.did_change_values)));
 
         // Value-clip tier: an edited layer that a clip set reads restales the
         // values it sources and the manifests synthesized from its content. This
@@ -1095,7 +1098,7 @@ fn asset_path_victims(cache: &IndexCache, deltas: &[StackVarsDelta]) -> Vec<Path
 /// read.
 fn apply_default_prim_edits(
     cache: &mut IndexCache,
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     edits: &[(LayerId, Option<tf::Token>)],
 ) -> Vec<Path> {
     let mut reported: BTreeSet<Path> = BTreeSet::new();

@@ -230,12 +230,15 @@ fn specifier_flips_defined() -> Result<()> {
 
     let root = stage.root_layer().identifier().to_owned();
     let set_specifier = |specifier| -> Result<()> {
-        stage.layer_mut(&root).expect("the root layer is live").edit(|edit| {
-            edit.prim_mut(&sdf::path("/A")?)?
-                .expect("the prim is authored")
-                .set_specifier(specifier);
-            Ok(())
-        })?;
+        stage
+            .layer_handle(&root)
+            .expect("the root layer is live")
+            .edit(|edit| {
+                edit.prim_mut(&sdf::path("/A")?)?
+                    .expect("the prim is authored")
+                    .set_specifier(specifier);
+                Ok(())
+            })?;
         Ok(())
     };
     set_specifier(sdf::Specifier::Over)?;
@@ -452,7 +455,7 @@ def "Source" {
 fn set_target_default_prim(stage: &usd::Stage, name: &str) -> Result<()> {
     let target = identifier_by_leaf(stage, "t.usda");
     stage
-        .layer_mut(&target)
+        .layer_handle(&target)
         .expect("target layer is live")
         .edit(|e| e.set_default_prim(name))?;
     Ok(())
@@ -806,7 +809,7 @@ def "P" {
     let notices = capture_notices(&stage);
     let target_id = identifier_by_leaf(&stage, "t.usda");
     stage
-        .layer_mut(&target_id)
+        .layer_handle(&target_id)
         .expect("target layer is live")
         .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".to_string()))])))?;
 
@@ -1230,7 +1233,7 @@ fn relocated_resync_notice() -> Result<()> {
     // tier rather than being reported as an info change. The edit targets the
     // referenced layer, where the prim is actually authored.
     let source = identifier_by_leaf(&stage, "source.usda");
-    stage.layer_mut(&source).expect("loaded").edit(|edit| {
+    stage.layer_handle(&source).expect("loaded").edit(|edit| {
         edit.prim_mut(&sdf::path("/Source/Inner")?)
             .expect("the source layer parsed")
             .expect("the prim is authored there")
@@ -1266,7 +1269,7 @@ fn relocated_info_notice() -> Result<()> {
 
     let notices = capture_notices(&stage);
     let source = identifier_by_leaf(&stage, "source.usda");
-    stage.layer_mut(&source).expect("loaded").edit(|edit| {
+    stage.layer_handle(&source).expect("loaded").edit(|edit| {
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")

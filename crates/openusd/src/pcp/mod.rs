@@ -374,7 +374,7 @@ pub use index_cache::{GraphStats, SpecSiteRecord};
 pub(crate) use index_store::PrimRevision;
 pub(crate) use instancing::is_prototype_namespace;
 pub use layer_graph::StackIdentity;
-pub(crate) use layer_graph::{LayerGraph, LoadFailure, MuteChange, SublayerDemand};
+pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub use load_rules::{LoadRules, Rule};
@@ -528,6 +528,17 @@ pub enum QueryError {
     /// A value-clip layer demanded during value resolution failed to load.
     #[error(transparent)]
     ClipLoad(Box<ClipLoad>),
+
+    /// The stage's layers could not be read, or a layer could not be added to
+    /// them because a read or an edit of them was in progress.
+    #[error(transparent)]
+    Layer(Box<sdf::LayerError>),
+}
+
+impl From<sdf::LayerError> for QueryError {
+    fn from(error: sdf::LayerError) -> Self {
+        Self::Layer(Box::new(error))
+    }
 }
 
 const _: () = assert!(mem::size_of::<QueryError>() <= 16);
@@ -1120,10 +1131,15 @@ mod tests {
         // Author layerRelocates onto the layer (as an in-place edit would) and
         // refresh the state the way `recompute_relocates` now does. The source is
         // a non-root prim — a root prim cannot be a relocate source.
-        graph.get_mut(id).unwrap().layer = layer(
-            "root.usd",
-            "#usda 1.0\n(\n    relocates = { </Grp/A>: </Grp/B> }\n)\ndef \"Grp\" {\n    def \"A\" {}\n}\n",
-        );
+        let relocates = layer("root.usd", "#usda 1.0\n(\n    relocates = { </Grp/A>: </Grp/B> }\n)\n").relocates();
+        graph
+            .handle(id)
+            .edit(|e| {
+                sdf::PrimSpec::new(e.data_mut(), "/Grp", sdf::Specifier::Def, "")?;
+                sdf::PrimSpec::new(e.data_mut(), "/Grp/A", sdf::Specifier::Def, "")?;
+                e.set_relocates(relocates)
+            })
+            .expect("the edit commits");
         graph.recompute_relocates();
         assert!(
             graph.has_relocates(),

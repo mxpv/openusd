@@ -37,11 +37,12 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
-use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::mem;
+use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -824,6 +825,12 @@ pub enum StageAuthoringError {
         /// The current edit target's layer identifier.
         layer: String,
     },
+
+    /// The layers' store refused the edit, most often because a read or an
+    /// edit of the stage's layers was already in progress
+    /// ([`sdf::LayerError::Busy`]). An edit's own failure is not this variant.
+    #[error(transparent)]
+    Registry(sdf::LayerError),
 }
 
 /// The payload of [`StageAuthoringError::LocalTypeConflict`]: which
@@ -868,6 +875,47 @@ impl From<sdf::EditError> for StageAuthoringError {
             sdf::EditError::Author(e) => Self::from(e),
             sdf::EditError::Rejected(e) => Self::Rejected(e),
         }
+    }
+}
+
+/// An edit's own failure keeps its stage variant; the layer registry's
+/// refusal of the edit is [`Registry`](StageAuthoringError::Registry).
+impl From<sdf::LayerError> for StageAuthoringError {
+    fn from(error: sdf::LayerError) -> Self {
+        match error {
+            sdf::LayerError::Edit(e) => Self::from(e),
+            other => Self::Registry(other),
+        }
+    }
+}
+
+/// A borrow of one of a [`Stage`]'s layers, as [`Stage::root_layer`],
+/// [`Stage::layer`] and [`Stage::session_layer`] hand it out. It derefs to the
+/// [`sdf::Layer`].
+///
+/// It holds the stage's layers borrowed for its lifetime. An authoring call
+/// made while one is live (`insert_layer`, `define_prim`, …) panics with a
+/// `RefCell` double borrow. Taking one from inside a
+/// [`LayerHandle::edit`](sdf::LayerHandle::edit) closure on one of the
+/// stage's layers panics too, as the edit holds the layers' content.
+pub struct LayerRef<'a> {
+    /// The stage's layers.
+    view: pcp::LayerView<'a>,
+    /// The layer.
+    id: pcp::LayerId,
+}
+
+impl Deref for LayerRef<'_> {
+    type Target = sdf::Layer;
+
+    fn deref(&self) -> &sdf::Layer {
+        self.view.layer(self.id)
+    }
+}
+
+impl fmt::Debug for LayerRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
     }
 }
 
@@ -916,20 +964,11 @@ pub struct StageInner {
     /// must not add or remove sinks from within a callback — that would borrow the
     /// set mutably while the fan-out holds it shared, and panic.
     sinks: RefCell<sdf::sink::Set<dyn StageSink>>,
-    /// The [`Provenance`] a stage authoring method publishes for the commit
-    /// currently underway, read by the aggregator as it records into
-    /// [`StageComposition`]'s queue. `None` for a direct edit, which the drain
-    /// resolves from local-layer membership.
-    edit_provenance: RefCell<Option<Provenance>>,
-    /// The transaction id of the layer commit currently draining, cached from its
-    /// [`PendingLayerChange`](sdf::PendingLayerChange) by the aggregator's
-    /// `before_commit` so the matching `after_commit`
-    /// ([`record_pending`](Stage::record_pending)) can stamp it onto the queued
-    /// edit, which [`process_pending`](Stage::process_pending) then groups by. The
-    /// id is minted once per atomic transaction (`sdf::TxnContext`), so a
-    /// stage-authored batch and a direct [`layer_mut`](Stage::layer_mut) edit are
-    /// each one transaction without the stage tracking any boundary of its own.
-    current_generation: Cell<u64>,
+    /// The [`Provenance`] each stage-authored transaction publishes, keyed by
+    /// its transaction id, read by the stage's recorder as it queues the commit into
+    /// [`StageComposition`]'s queue. A direct edit publishes none, and the
+    /// drain resolves it from local-layer membership.
+    edit_provenance: TxnTable<Provenance>,
     /// The schemas this stage resolves fallback values against. Pinned at open,
     /// so the definitions a prim reads never shift under it.
     schema_registry: Arc<SchemaRegistry>,
@@ -1026,12 +1065,19 @@ impl PrimTypeMemo {
 pub struct Stage(Rc<StageInner>);
 
 impl composition::CompositionHooks for Stage {
-    fn attach_layer_sink(&self, id: pcp::LayerId, layer: &mut sdf::Layer) {
-        layer.add_sink(StageAggregator {
-            stage: self.downgrade(),
-            layer_id: id,
-            prior_default_prim: Cell::new(None),
-        });
+    fn attach_layer_sink(&self, id: pcp::LayerId, layer: &sdf::LayerHandle) {
+        let recorder = layer
+            .subscribe(Rc::new(StageRecorder {
+                stage: self.downgrade(),
+                layer_id: id,
+            }))
+            .expect("a layer joins the stage between edits of its layers");
+        layer
+            .add_sink(StageAggregator {
+                stage: self.downgrade(),
+                _recorder: recorder,
+            })
+            .expect("a layer joins the stage between edits of its layers");
     }
 
     fn wants_notice(&self) -> bool {
@@ -1049,11 +1095,11 @@ impl composition::CompositionHooks for Stage {
 }
 
 impl Stage {
-    /// Drain the layer edits recorded by the aggregators and drive one
+    /// Drain the layer edits the stage's recorders queued and drive one
     /// composition recompose per snapshot, delivering each composed
     /// [`CommittedChange`](super::CommittedChange) to the stage sinks. The
-    /// deferred counterpart to a layer commit: an aggregator records the edit
-    /// while the layer graph is borrowed, and this runs once that borrow is
+    /// deferred counterpart to a layer commit: a recorder queues the edit as
+    /// the commit lands, with the layers borrowed, and this runs once they are
     /// released — after each authoring call, and before any composed read.
     ///
     /// The public re-entry boundary for reconciliation; the drain itself, and
@@ -1061,6 +1107,19 @@ impl Stage {
     /// [`StageComposition`].
     pub(crate) fn process_pending(&self) {
         self.composition.process_pending(self);
+    }
+
+    /// [`process_pending`](Self::process_pending) for a fallible read. Fails
+    /// with [`sdf::LayerError::Busy`] from inside a read or an edit of one of
+    /// the stage's layers while edits of them are queued, which stay queued
+    /// for the next drain.
+    pub(crate) fn settle(&self) -> Result<(), pcp::QueryError> {
+        self.process_pending();
+        if self.composition.pending_is_empty() {
+            Ok(())
+        } else {
+            Err(sdf::LayerError::Busy.into())
+        }
     }
 }
 
@@ -1118,75 +1177,137 @@ impl WeakStage {
     }
 }
 
-/// Resets [`StageInner::edit_provenance`] to `None` on drop, so the provenance a
-/// stage edit publishes for its aggregator is cleared on every exit — including a
-/// panicking sink — and never leaks into a later commit.
-struct ClearEditProvenance<'a>(&'a RefCell<Option<Provenance>>);
+/// The [`Provenance`] a stage-authored transaction publishes in
+/// [`StageInner::edit_provenance`] for the stage's recorder, which takes it as
+/// the commit lands. Dropped, it withdraws an entry nothing took: that of a
+/// transaction that failed, was vetoed, panicked or changed nothing.
+struct PublishedProvenance<'a> {
+    table: &'a TxnTable<Provenance>,
+    generation: u64,
+}
 
-impl Drop for ClearEditProvenance<'_> {
+impl Drop for PublishedProvenance<'_> {
     fn drop(&mut self) {
-        self.0.take();
+        self.table.withdraw(self.generation);
     }
 }
 
-/// The [`sdf::LayerSink`] a [`Stage`] installs on every layer it owns (through
-/// [`intern_layer`](composition::StageComposition::intern_layer)) to bridge the low tier of the change
-/// pipeline to the high tier: it records each commit into
-/// [`StageComposition`]'s pending queue for a composed recompose, and forwards the
-/// staged pre-commit edit to the stage's [`StageSink`]s. It holds a
-/// [`WeakStage`] so it forms no reference cycle (the stage owns the layer, which
-/// owns this sink).
+/// Values keyed by the transaction that recorded them, for the transaction's
+/// commit to read back.
+struct TxnTable<T>(RefCell<Vec<(u64, T)>>);
+
+impl<T> Default for TxnTable<T> {
+    fn default() -> Self {
+        Self(RefCell::new(Vec::new()))
+    }
+}
+
+impl<T> TxnTable<T> {
+    /// Record `value` for the transaction `generation`.
+    fn insert(&self, generation: u64, value: T) {
+        self.0.borrow_mut().push((generation, value));
+    }
+
+    /// Run `f` on the value the transaction `generation` recorded, if any.
+    fn with<R>(&self, generation: u64, f: impl FnOnce(Option<&T>) -> R) -> R {
+        let entries = self.0.borrow();
+        f(entries
+            .iter()
+            .find(|(entry, _)| *entry == generation)
+            .map(|(_, value)| value))
+    }
+
+    /// Take the value the transaction `generation` recorded.
+    fn take(&self, generation: u64) -> Option<T> {
+        let mut entries = self.0.borrow_mut();
+        let at = entries.iter().position(|(entry, _)| *entry == generation)?;
+        Some(entries.remove(at).1)
+    }
+
+    /// Drop the value the transaction `generation` recorded.
+    fn withdraw(&self, generation: u64) {
+        self.0.borrow_mut().retain(|(entry, _)| *entry != generation);
+    }
+}
+
+/// The [`sdf::LayerSink`] a [`Stage`] installs on every layer it holds
+/// (through [`intern_layer`](composition::StageComposition::intern_layer)): it
+/// forwards each staged edit to the stage's [`StageSink`]s before it commits.
+/// It holds the layer's [`StageRecorder`] subscription, which therefore lasts
+/// as long as the layer. It reaches the stage through a [`WeakStage`] and
+/// forms no reference cycle (the stage holds the layer, which owns this sink).
 struct StageAggregator {
     stage: WeakStage,
-    layer_id: pcp::LayerId,
-    /// The layer's `defaultPrim` token as `before_commit` saw it, for the
-    /// matching `after_commit` to hand to the composition queue.
-    ///
-    /// Composition classification runs after the commit, by which point the
-    /// pre-edit values are gone, and it needs this one to fan a `defaultPrim`
-    /// edit out the way C++ `PcpChanges` does. One sink is installed per layer,
-    /// and `sdf::edit_layers` runs every `before_commit` ahead of any
-    /// `after_commit`, so sink-local scratch stays correct across a multi-layer
-    /// transaction — and a vetoed commit simply leaves a value the next
-    /// `before_commit` overwrites.
-    prior_default_prim: Cell<Option<Token>>,
+    /// The subscription of the layer's [`StageRecorder`].
+    _recorder: sdf::Subscription,
 }
 
 impl sdf::LayerSink for StageAggregator {
     fn before_commit(&self, change: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
-        // Only a commit that staged something on the pseudo-root can have touched
-        // the field, and the overlay answers that in one probe — the change list
-        // is a flat vector, so scanning it would cost a walk per commit. A
-        // pseudo-root edit that left `defaultPrim` alone reads a value nothing
-        // consumes, which is cheaper than finding out. An absent field, an
-        // unreadable one, and a non-token value all record `None`: no prior prim,
-        // the conservative fanout.
-        let prior = change
+        if let Some(stage) = self.stage.upgrade() {
+            stage.forward_before_commit(change);
+        }
+        Ok(())
+    }
+}
+
+/// The [`sdf::Subscriber`] a [`Stage`] subscribes to every layer it holds: it
+/// records each of the layer's commits into [`StageComposition`]'s pending
+/// queue as the commit lands, before any sink's `after_commit` runs. A read
+/// made from a sink's callback therefore composes with every edit committed
+/// so far.
+struct StageRecorder {
+    stage: WeakStage,
+    layer_id: pcp::LayerId,
+}
+
+impl sdf::Subscriber for StageRecorder {
+    fn prepare(&self, commit: &sdf::PendingCommit<'_>) -> Option<Box<dyn sdf::Prepared>> {
+        // Composition classification runs after the commit, by which point the
+        // pre-edit values are gone, and it needs the prior `defaultPrim` to fan
+        // a `defaultPrim` edit out the way C++ `PcpChanges` does. Only a commit
+        // that staged something on the pseudo-root can have touched the field,
+        // and the overlay answers that in one probe — the change list is a flat
+        // vector, so scanning it would cost a walk per commit. A pseudo-root
+        // edit that left `defaultPrim` alone reads a value nothing consumes,
+        // which is cheaper than finding out. An absent field, an unreadable
+        // one, and a non-token value all record `None`: no prior prim, the
+        // conservative fanout.
+        let change = commit.change;
+        let prior_default_prim = change
             .overlay
             .keys()
             .any(sdf::Path::is_abs_root)
             .then(|| sdf::PseudoRootSpecRef::get(change.base)?.default_prim())
             .flatten();
-        self.prior_default_prim.set(prior);
-        if let Some(stage) = self.stage.upgrade() {
-            // Cache this transaction's id (one per `sdf::TxnContext`) for the
-            // matching `after_commit`'s `record_pending` to read; `before_commit`
-            // fires for a layer before its `after_commit`, and every layer of a
-            // transaction shares one id, so the cache is correct for each.
-            stage.current_generation.set(change.generation);
-            stage.forward_before_commit(change);
-        }
-        Ok(())
-    }
-
-    fn after_commit(&self, _layer: &str, changes: &sdf::ChangeList) {
-        let prior = self.prior_default_prim.take();
-        if let Some(stage) = self.stage.upgrade() {
-            stage.record_pending(self.layer_id, changes.clone(), prior);
-        }
+        Some(Box::new(StageRecording {
+            stage: self.stage.clone(),
+            layer_id: self.layer_id,
+            prior_default_prim,
+        }))
     }
 }
 
+/// One commit a [`StageRecorder`] prepared, queued on the stage when it lands.
+struct StageRecording {
+    stage: WeakStage,
+    layer_id: pcp::LayerId,
+    /// The layer's `defaultPrim` token before the commit.
+    prior_default_prim: Option<Token>,
+}
+
+impl sdf::Prepared for StageRecording {
+    fn commit(self: Box<Self>, record: &sdf::CommitRecord) {
+        if let Some(stage) = self.stage.upgrade() {
+            stage.record_pending(
+                self.layer_id,
+                record.changes.clone(),
+                self.prior_default_prim,
+                record.txn.get(),
+            );
+        }
+    }
+}
 impl Stage {
     /// Opens a stage from a root layer file using the [`ar::DefaultResolver`].
     ///
@@ -1359,13 +1480,15 @@ impl Stage {
         scene_path: &sdf::Path,
         read: impl FnOnce(&sdf::Layer, &sdf::Path) -> T,
     ) -> Result<T, StageAuthoringError> {
+        self.settle()?;
         let (id, spec_path) = self.target_site(scene_path)?;
-        Ok(read(self.layers().layer(id), &spec_path))
+        Ok(read(self.layer_view().layer(id), &spec_path))
     }
 
     /// The current edit target's layer and the spec path `scene_path` maps to
     /// on it: the site an authoring plan records the opinions it queues at.
     pub(super) fn target_site(&self, scene_path: &sdf::Path) -> Result<(pcp::LayerId, sdf::Path), StageAuthoringError> {
+        self.settle()?;
         let (identifier, spec_path) = self.target_spec_path(scene_path)?;
         let id = self
             .layers()
@@ -1419,11 +1542,13 @@ impl Stage {
     /// Edit target for the stage's root layer, with an identity mapping. The
     /// target installed by default when a stage is opened.
     pub fn edit_target_root(&self) -> EditTarget {
-        let identifier = self
-            .layers()
-            .root_layer()
-            .map(|l| l.identifier().to_string())
-            .unwrap_or_default();
+        let identifier = {
+            let layers = self.layers();
+            layers
+                .root_id()
+                .map(|id| layers.identifier(id).to_string())
+                .unwrap_or_default()
+        };
         self.bound_target(identifier, pcp::MapFunction::identity())
     }
 
@@ -1495,6 +1620,7 @@ impl Stage {
     /// An arc target built against a different stage is rejected with
     /// [`StageAuthoringError::EditTargetWrongStage`].
     pub fn set_edit_target(&self, target: EditTarget) -> Result<(), StageAuthoringError> {
+        self.settle()?;
         if target
             .layer_stack
             .as_ref()
@@ -1851,7 +1977,7 @@ impl Stage {
     /// regardless of composition, install an [`sdf::LayerSink`] on the layer
     /// instead.
     pub fn add_sink<S: StageSink + 'static>(&self, sink: S) -> StageSinkId {
-        // Deliver any edit already committed (e.g. a direct `layer_mut` commit
+        // Deliver any edit already committed (e.g. a direct `layer_handle` commit
         // awaiting drain) to the current set before this sink joins, so a sink
         // only ever observes edits committed after it was installed.
         self.process_pending();
@@ -2051,14 +2177,13 @@ impl Stage {
         let notify = !self.sinks.borrow().is_empty();
         let mapping = notify.then(|| self.edit_target.borrow().mapping.clone());
         let edited = {
-            let mut layers = self.composition.authoring_graph_mut();
+            let layers = self.composition.authoring_graph();
             let layer_id = layers
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
-            let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            self.edit_layer(&mut node.layer, mapping.as_ref(), |layer| f(layer, authored))
+            self.commit_layer(&layers, layer_id, mapping.as_ref(), |layer| f(layer, authored))
         };
-        // `edit_layer` reports whether the edit produced a composition change.
+        let edited = edited.map(|committed| self.composition.deliver(committed));
         self.process_pending();
         edited
     }
@@ -2145,38 +2270,32 @@ impl Stage {
         f: impl FnOnce(&[pcp::LayerId], &mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<bool, E>
     where
-        E: From<sdf::sink::Error>,
+        E: From<sdf::sink::Error> + From<sdf::LayerError>,
     {
         let result = {
             // The borrow states the mode's drain contract: a commit may arrive
             // with edits queued and appends to them, while a dry run validates
             // against composed state and so takes the settled borrow, whose
             // backstop catches a caller that stopped settling first.
-            let mut graph = if commit {
-                self.composition.authoring_graph_mut()
+            let graph = if commit {
+                self.composition.authoring_graph()
             } else {
-                self.composition.settled_graph_mut()
+                self.composition.settled_graph()
             };
-            let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(layer_ids).into_iter().collect();
-            // The realized ids, aligned with the edits below: `layers_mut` drops any
+            // The realized ids, aligned with the edits below: `handles` drops any
             // id with no live layer, so the closure keys on these rather than the
             // requested `layer_ids` to stay paired with each `LayerEdit`.
-            let ids: Vec<pcp::LayerId> = layers.iter().map(|(id, _)| *id).collect();
-            let mut batch: Vec<&mut sdf::Layer> = layers.iter_mut().map(|(_, layer)| &mut **layer).collect();
+            let (ids, handles): (Vec<pcp::LayerId>, Vec<&sdf::LayerHandle>) =
+                graph.handles(layer_ids).into_iter().unzip();
+            let store = graph.store();
             if commit {
-                let provenance = mapping
-                    .filter(|m| !m.is_identity())
-                    .map(|m| Provenance::EditTarget(m.clone()));
-                self.edit_provenance.replace(provenance);
-                let _clear = ClearEditProvenance(&self.edit_provenance);
-                // The sinks run under the graph borrow: the aggregator reads the
-                // provenance published above as it records the commit.
-                sdf::edit_layers(&mut batch, sdf::TxnContext::new(None), |edits| f(&ids, edits))
-                    .map(sdf::Committed::dispatch)
+                self.commit_attributed(store, &handles, mapping, |edits| f(&ids, edits))
+                    .map(Some)
             } else {
-                sdf::dry_run_layers(&mut batch, |edits| f(&ids, edits)).map(|()| false)
+                store.dry_run(&handles, |edits| f(&ids, edits)).map(|()| None)
             }
         };
+        let result = result.map(|committed| committed.is_some_and(|committed| self.composition.deliver(committed)));
         if commit {
             self.process_pending();
         }
@@ -2203,6 +2322,8 @@ impl Stage {
         &self,
         target_layer: pcp::LayerId,
     ) -> Result<pcp::LayerStackId, StageAuthoringError> {
+        // Resolving the stack may load one of its layers.
+        self.composition.ensure_writable()?;
         let authoring = self.edit_target.borrow().authoring_stack.clone();
         self.composition
             .resolve_authoring_stack(target_layer, authoring, self)
@@ -2234,46 +2355,66 @@ impl Stage {
         .map(|_changed| ())
     }
 
-    /// Run `f` as one atomic [`Layer::edit`](sdf::Layer::edit) on `layer`: commit
-    /// and return the recorded change list on success, or roll the layer back on
-    /// error (`f`'s authoring error, or a sink veto).
+    /// Run `f` as one atomic [`Layer::edit`](sdf::Layer::edit) on the layer
+    /// `layer` names: commit it and hand back the landed commit, for the caller
+    /// to [`deliver`](composition::StageComposition::deliver) once it releases
+    /// the graph, or roll the layer back on error (`f`'s authoring error, or a
+    /// sink veto).
     ///
-    /// Committing fires the layer's sinks — including the stage's aggregator
-    /// (installed when its layer interned), which records the edit into
-    /// [`StageComposition`]'s pending queue for [`process_pending`](Self::process_pending)
-    /// to recompose. A [`before_commit`](sdf::LayerSink::before_commit) rejection
+    /// Committing queues the edit, through the stage's recorder (subscribed
+    /// when its layer interned), on [`StageComposition`]'s pending queue for
+    /// [`process_pending`](Self::process_pending) to recompose. A [`before_commit`](sdf::LayerSink::before_commit) rejection
     /// surfaces as [`StageAuthoringError::Rejected`]. `mapping` is the edit
-    /// target's namespace mapping; a non-local target publishes
-    /// [`Provenance::EditTarget`] and a local/root one [`Provenance::LocalStack`]
-    /// through [`edit_provenance`](StageInner::edit_provenance) for the aggregator
-    /// to tag the recorded edit with.
-    fn edit_layer<F>(
+    /// target's namespace mapping (see
+    /// [`commit_attributed`](Self::commit_attributed)).
+    fn commit_layer<F>(
         &self,
-        layer: &mut sdf::Layer,
+        layers: &pcp::LayerGraph,
+        layer: pcp::LayerId,
         mapping: Option<&pcp::MapFunction>,
         f: F,
-    ) -> Result<bool, StageAuthoringError>
+    ) -> Result<sdf::Committed, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), StageAuthoringError>,
     {
-        // Publish the provenance for the aggregator firing inside `edit`'s commit,
-        // under a guard that clears it on the way out — including if the edit
-        // panics — so a later commit never inherits a stale provenance. Only a
-        // remapping arc or variant target (a non-identity mapping) is `EditTarget`;
-        // an identity-mapped or unmapped target authors at the layer's own paths,
-        // so it is left unset for the drain to resolve from local-layer membership
-        // (`LocalStack` for a local layer, `DirectLayerEdit` for a non-local one).
-        let provenance = mapping
-            .filter(|m| !m.is_identity())
-            .map(|m| Provenance::EditTarget(m.clone()));
-        self.edit_provenance.replace(provenance);
-        let _clear = ClearEditProvenance(&self.edit_provenance);
         // The stage's own closure error rides through the layer transaction, so
         // a stage-only failure inside it rolls the layer back like a layer one.
-        // The sinks run under the caller's graph borrow, while the provenance
-        // published above is still set.
-        sdf::edit_layers(&mut [layer], sdf::TxnContext::new(None), |edits| f(&mut edits[0]))
-            .map(sdf::Committed::dispatch)
+        self.commit_attributed(layers.store(), &[layers.handle(layer)], mapping, |edits| {
+            f(&mut edits[0])
+        })
+    }
+
+    /// Commit `f` over `handles` as one transaction, publishing its
+    /// [`Provenance`] in [`edit_provenance`](StageInner::edit_provenance) for
+    /// the stage's recorder to tag the queued edit with. Only a remapping arc or
+    /// variant target (a non-identity `mapping`) publishes one,
+    /// [`Provenance::EditTarget`]; an identity-mapped or unmapped target
+    /// authors at the layer's own paths and publishes none, for the drain to
+    /// resolve from local-layer membership ([`Provenance::LocalStack`] for a
+    /// local layer, [`Provenance::DirectLayerEdit`] for a non-local one).
+    ///
+    /// The stage's recorder queues the edit as it lands. The caller delivers
+    /// the landed commit's notifications
+    /// ([`StageComposition::deliver`](composition::StageComposition::deliver))
+    /// once it releases the graph. The layers' sinks can then read the stage.
+    fn commit_attributed<E: From<sdf::sink::Error> + From<sdf::LayerError>>(
+        &self,
+        store: &sdf::LayerStore,
+        handles: &[&sdf::LayerHandle],
+        mapping: Option<&pcp::MapFunction>,
+        f: impl FnOnce(&mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
+    ) -> Result<sdf::Committed, E> {
+        let txn = sdf::TxnContext::new(None);
+        let generation = txn.id.get();
+        let _published = PublishedProvenance {
+            table: &self.edit_provenance,
+            generation,
+        };
+        if let Some(mapping) = mapping.filter(|m| !m.is_identity()) {
+            self.edit_provenance
+                .insert(generation, Provenance::EditTarget(mapping.clone()));
+        }
+        store.commit(handles, txn, f)
     }
 
     /// The layer ids of the root (local) layer stack, strongest first — the
@@ -2298,35 +2439,44 @@ impl Stage {
         // `before_commit` sink observes and must not re-enter authoring (which is
         // what would re-borrow `edit_provenance`), so holding the borrow across the
         // fan-out is safe and avoids a per-commit `MapFunction` clone.
-        let provenance = self.edit_provenance.borrow();
-        let pending = PendingChange {
-            layer_identifier: change.layer_identifier,
-            base: change.base,
-            change_list: change.change_list,
-            mapping: provenance.as_ref().and_then(|p| p.mapping()),
-            generation: change.generation,
-        };
-        for sink in sinks.iter() {
-            sink.before_commit(self, &pending);
-        }
+        self.edit_provenance.with(change.generation, |provenance| {
+            let pending = PendingChange {
+                layer_identifier: change.layer_identifier,
+                base: change.base,
+                change_list: change.change_list,
+                mapping: provenance.and_then(Provenance::mapping),
+                generation: change.generation,
+            };
+            for sink in sinks.iter() {
+                sink.before_commit(self, &pending);
+            }
+        });
     }
 
     /// Record a committed layer edit for [`process_pending`](Self::process_pending),
     /// tagged with the [`Provenance`] staged for it (read from
     /// [`edit_provenance`](StageInner::edit_provenance); `None` for a direct
-    /// edit). Called by the per-layer aggregator sink (installed by
-    /// installed when its layer interned) as a layer commits — while the layer graph
-    /// is borrowed for the edit, which is why it appends to the independent
-    /// [`StageComposition`]'s pending queue rather than recomposing inline.
+    /// edit). Called by the layer's recorder (subscribed when its layer
+    /// interned) as the commit lands — while the layers are borrowed for the
+    /// edit, which is why it appends to the independent [`StageComposition`]'s
+    /// pending queue rather than recomposing inline. `generation` is the
+    /// commit's transaction id, which
+    /// [`process_pending`](Self::process_pending) groups by. It is minted once
+    /// per atomic transaction, so a stage-authored batch and a direct
+    /// [`layer_handle`](Self::layer_handle) edit are each one transaction
+    /// without the stage tracking any boundary of its own.
     pub(super) fn record_pending(
         &self,
         layer_id: pcp::LayerId,
         changes: sdf::ChangeList,
         prior_default_prim: Option<Token>,
+        generation: u64,
     ) {
-        let provenance = self.edit_provenance.take();
+        // The transaction's first record carries its provenance, which the
+        // drain reads for the whole group.
+        let provenance = self.edit_provenance.take(generation);
         self.composition.record_pending(PendingEdit {
-            generation: self.current_generation.get(),
+            generation,
             layer: layer_id,
             changes,
             provenance,
@@ -2394,12 +2544,10 @@ impl Stage {
     /// the stage has no root layer (only possible for a degenerate empty graph,
     /// which `StageBuilder` never produces).
     ///
-    /// The returned [`Ref`] borrows the layer graph, and a `&self` authoring
-    /// call (`insert_layer`, `define_prim`, …) takes `self.layers` mutably,
-    /// so a live `Ref` held across one panics with a `RefCell` double-borrow. In
-    /// particular `stage.insert_layer(stage.root_layer().identifier(), …)`
-    /// panics — the `Ref` temporary lives to the end of the statement. Bind the
-    /// identifier first so the borrow is released:
+    /// The returned [`LayerRef`] borrows the stage's layers (see its borrow
+    /// rules). In particular `stage.insert_layer(stage.root_layer().identifier(),
+    /// …)` panics because the temporary lives to the end of the statement.
+    /// Bind the identifier first so the borrow is released:
     ///
     /// ```no_run
     /// # use openusd::{sdf, usd};
@@ -2408,44 +2556,58 @@ impl Stage {
     /// stage.insert_layer(&id, 0, layer, sdf::LayerOffset::IDENTITY).unwrap();
     /// # }
     /// ```
-    pub fn root_layer(&self) -> Ref<'_, sdf::Layer> {
-        Ref::map(self.layers(), |layers| {
-            layers.root_layer().expect("stage has a root layer")
-        })
+    pub fn root_layer(&self) -> LayerRef<'_> {
+        let view = self.layer_view();
+        let id = view.root_id().expect("stage has a root layer");
+        LayerRef { view, id }
     }
 
     /// Borrow the stage's layer named `identifier`, or `None` if no such layer is
-    /// in the stage. `identifier` is matched by canonical identifier.
-    pub fn layer(&self, identifier: &str) -> Option<Ref<'_, sdf::Layer>> {
-        Ref::filter_map(self.layers(), |layers| {
-            let id = layers.id_of(identifier)?;
-            layers.get(id).map(|node| &node.layer)
-        })
-        .ok()
+    /// in the stage. `identifier` is matched by canonical identifier. The
+    /// [`LayerRef`] borrows the stage's layers (see its borrow rules).
+    pub fn layer(&self, identifier: &str) -> Option<LayerRef<'_>> {
+        let view = self.layer_view();
+        let id = view.id_of(identifier)?;
+        Some(LayerRef { view, id })
     }
 
-    /// Borrow the stage's layer named `identifier` mutably, or `None` if no such
-    /// layer is in the stage — an advanced escape hatch for editing a layer
-    /// directly, or installing an [`sdf::LayerSink`] on it with
-    /// [`Layer::add_sink`](sdf::Layer::add_sink). Prefer the stage's authoring
-    /// methods, which integrate the edit into composition before they return.
+    /// Edit the stage's layer named `identifier` directly, as one atomic
+    /// transaction (see [`sdf::Layer::edit`]), and integrate it into
+    /// composition before returning. Returns whether the edit produced a
+    /// composition change. An advanced escape hatch: prefer the stage's
+    /// authoring methods, which route through the current
+    /// [`EditTarget`](super::EditTarget).
     ///
-    /// An edit committed through the returned layer is recorded and integrated
-    /// lazily, on the next stage access: both the graph and the index cache drain
-    /// any pending edit before they are observed, so a structural edit (sublayers,
-    /// offsets, relocates) never leaves [`sub_layers`](Self::sub_layers) and
-    /// friends reading stale topology. A direct edit to a non-local (referenced or
-    /// payload) layer reports its [`CommittedChange`](super::CommittedChange) paths
-    /// in that layer's own namespace, flagged
-    /// [`Provenance::DirectLayerEdit`](super::Provenance::DirectLayerEdit). Holds
-    /// the layer graph borrowed for the guard's lifetime; drop it before any other
-    /// stage call.
-    pub fn layer_mut(&self, identifier: &str) -> Option<RefMut<'_, sdf::Layer>> {
-        RefMut::filter_map(self.layers_mut(), |layers| {
-            let id = layers.id_of(identifier)?;
-            layers.get_mut(id).map(|node| &mut node.layer)
+    /// The edit authors at the layer's own paths. Edited through a non-local
+    /// (referenced or payload) layer, its [`CommittedChange`](super::CommittedChange)
+    /// paths are in that layer's own namespace, flagged
+    /// [`Provenance::DirectLayerEdit`](super::Provenance::DirectLayerEdit).
+    /// Returns [`StageAuthoringError::LayerNotFound`] if no such layer is in the
+    /// stage.
+    pub fn edit_layer(
+        &self,
+        identifier: &str,
+        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
+    ) -> Result<bool, StageAuthoringError> {
+        self.batch_edit(&[identifier], |edits| {
+            f(&mut edits[0]).map_err(StageAuthoringError::from)
         })
-        .ok()
+    }
+
+    /// A handle to the stage's layer named `identifier`, or `None` if no such
+    /// layer is in the stage. An edit through the handle is not attributed to
+    /// the stage: the stage integrates it like any direct layer edit, flagged
+    /// [`Provenance::DirectLayerEdit`](super::Provenance::DirectLayerEdit)
+    /// on a non-local layer.
+    ///
+    /// From inside a [`read`](sdf::LayerHandle::read) or an
+    /// [`edit`](sdf::LayerHandle::edit) of one of the stage's layers, while
+    /// an earlier edit of them is still queued, a fallible stage read fails
+    /// with [`sdf::LayerError::Busy`], and one that cannot fail (such as
+    /// [`sub_layers`](Self::sub_layers)) panics.
+    pub fn layer_handle(&self, identifier: &str) -> Option<sdf::LayerHandle> {
+        let layers = self.layers();
+        Some(layers.handle(layers.id_of(identifier)?).clone())
     }
 
     /// Edit several of the stage's layers as one atomic transaction, then drive a
@@ -2461,7 +2623,7 @@ impl Stage {
     /// change.
     ///
     /// For a single layer, prefer the stage's typed authoring methods (which route
-    /// through the current [`EditTarget`]) or [`layer_mut`](Self::layer_mut).
+    /// through the current [`EditTarget`]) or [`edit_layer`](Self::edit_layer).
     /// Returns [`StageAuthoringError::LayerNotFound`] if a name is not in the stage
     /// and [`StageAuthoringError::DuplicateLayer`] if a name is repeated. On any
     /// error the stage is left untouched.
@@ -2470,6 +2632,7 @@ impl Stage {
         layers: &[&str],
         f: impl FnOnce(&mut [sdf::LayerEdit<'_>]) -> Result<(), StageAuthoringError>,
     ) -> Result<bool, StageAuthoringError> {
+        self.settle()?;
         let mut ids = Vec::with_capacity(layers.len());
         {
             let graph = self.layers();
@@ -2525,6 +2688,9 @@ impl Stage {
     /// This implements Pcp/Stage-level muting. Sdf-level layer muting
     /// (`SdfLayer::SetMuted`, a process-global data swap) is a separate feature
     /// and is not implemented.
+    ///
+    /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
+    /// [`edit`](sdf::LayerHandle::edit) of one of the stage's layers.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
         if let Some((changed, resynced)) = self
             .composition
@@ -2536,6 +2702,9 @@ impl Stage {
 
     /// Unmutes the layer with the given identifier, restoring its opinions to
     /// composition (C++ `UsdStage::UnmuteLayer`).
+    ///
+    /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
+    /// [`edit`](sdf::LayerHandle::edit) of one of the stage's layers.
     pub fn unmute_layer(&self, identifier: &str) {
         if let Some((changed, resynced)) = self
             .composition
@@ -2827,15 +2996,12 @@ impl Stage {
     /// Borrows the stage's strongest session layer, if one was provided (C++
     /// `UsdStage::GetSessionLayer`).
     ///
-    /// Like [`root_layer`](Self::root_layer), the returned [`Ref`] borrows the
-    /// layer graph. Drop it before calling an authoring method that mutably
-    /// borrows the graph.
-    pub fn session_layer(&self) -> Option<Ref<'_, sdf::Layer>> {
-        Ref::filter_map(self.layers(), |layers| {
-            let id = *layers.session_layers().first()?;
-            Some(layers.layer(id))
-        })
-        .ok()
+    /// The returned [`LayerRef`] borrows the stage's layers (see its borrow
+    /// rules).
+    pub fn session_layer(&self) -> Option<LayerRef<'_>> {
+        let view = self.layer_view();
+        let id = *view.session_layers().first()?;
+        Some(LayerRef { view, id })
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
@@ -3061,6 +3227,7 @@ impl Stage {
         attr_path: &sdf::Path,
         time: Option<f64>,
     ) -> Result<Option<super::SpecSite>> {
+        self.settle()?;
         let (identifier, spec_path) = self.target_spec_path(attr_path)?;
         let outside = || StageAuthoringError::OutsideEditTarget {
             path: attr_path.clone(),
@@ -3163,6 +3330,7 @@ impl Stage {
         &self,
         path: impl sdf::IntoPath,
     ) -> Result<Arc<PrimTypeInfo>, pcp::QueryError> {
+        self.settle()?;
         let path = sdf::try_into_path(path)?;
         let epochs = self.type_epochs();
         if let Some(info) = self.prim_types.borrow().lookup(epochs, &path) {
@@ -3343,6 +3511,7 @@ impl Stage {
         T: TryFrom<vt::Value>,
         T::Error: Into<pcp::QueryError>,
     {
+        self.settle()?;
         let path = sdf::try_into_path(path)?;
         let field = field.as_ref();
         let mut raw = self.field_with(&path, field, pcp::AssetMode::Resolve)?;
@@ -3364,7 +3533,7 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
         self.query_at(path, true, Reads::Source, query)
     }
@@ -3377,7 +3546,7 @@ impl Stage {
     pub(crate) fn masked_opinions<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
         self.query_at(path, true, Reads::Opinions, query)
     }
@@ -3387,7 +3556,7 @@ impl Stage {
     pub(crate) fn opinions<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
         self.query_at(path, false, Reads::Opinions, query)
     }
@@ -3402,7 +3571,7 @@ impl Stage {
         path: &sdf::Path,
         gated: bool,
         reads: Reads,
-        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        mut query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
         let prim = path.prim_path();
         // Before the borrow, not inside it: a prototype path is unanswerable
@@ -3440,6 +3609,7 @@ impl Stage {
     /// Completes stage population unless it is already current for the live
     /// population epoch.
     fn ensure_prototypes_discovered(&self) -> Result<(), pcp::QueryError> {
+        self.settle()?;
         if self.prototypes_discovered.get() == Some(self.population_epoch()) {
             return Ok(());
         }
@@ -3581,6 +3751,7 @@ impl Stage {
     /// no prototypes until this call has walked it. Only a prim the mask
     /// exposes can register, so no filtering is applied here.
     pub fn prototypes(&self) -> Result<Vec<sdf::Path>> {
+        self.settle()?;
         self.ensure_prototypes_discovered()?;
         Ok(self.cache().prototypes())
     }
@@ -3649,6 +3820,7 @@ impl Stage {
         predicate: PrimPredicate,
         composed: Option<ComposedStatus>,
     ) -> Result<Vec<(super::Prim, ComposedStatus)>> {
+        self.settle()?;
         let epoch = self.population_epoch();
         let composed = composed.filter(|composed| {
             composed.epoch == epoch && composed.prim.path() == parent && composed.prim.stage() == self
@@ -3697,6 +3869,7 @@ impl Stage {
     /// prim and lists it first (C++ `UsdPrimRange(start, predicate)`), or
     /// `None` where the prim does not match or nothing composes it.
     pub(super) fn matching_status(&self, prim: &sdf::Path, predicate: PrimPredicate) -> Result<Option<ComposedStatus>> {
+        self.settle()?;
         if !self.has_spec(prim)? {
             return Ok(None);
         }
@@ -3718,7 +3891,7 @@ impl Stage {
     /// include. A prim nothing composes has no status.
     fn status_below(
         cache: &mut pcp::IndexCache,
-        graph: &pcp::LayerGraph,
+        graph: &pcp::LayerView<'_>,
         parent: PrimStatus,
         prim: &sdf::Path,
     ) -> Result<PrimStatus, pcp::QueryError> {
@@ -3794,12 +3967,13 @@ impl Stage {
         layer: sdf::Layer,
         offset: sdf::LayerOffset,
     ) -> Result<(), StageAuthoringError> {
+        self.settle()?;
         let identifier = layer.identifier().to_string();
         // Author the parent's metadata first; the child node is added only after
         // this succeeds (the authored asset path is a plain string, so the node
         // need not exist yet — only the later rebuild's edge resolution needs it).
         let edited = {
-            let mut layers = self.composition.authoring_graph_mut();
+            let layers = self.composition.authoring_graph();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
@@ -3810,8 +3984,7 @@ impl Stage {
                     identifier,
                 });
             }
-            let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-            self.edit_layer(&mut node.layer, None, |l| {
+            self.commit_layer(&layers, parent_id, None, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
                     .map_err(StageAuthoringError::from)
@@ -3820,10 +3993,14 @@ impl Stage {
         // Add the child node only once the parent edit succeeded, so a failed
         // insert never leaves an orphan node. Interning attaches
         // the aggregator (skipping a duplicate identifier that collapses onto an
-        // already-loaded node), the same path opening a stage uses.
+        // already-loaded node), the same path opening a stage uses. It runs
+        // before the parent's sinks hear of the edit. A sink that reads the
+        // stage then composes the child given here, not a copy read from its
+        // file.
         if edited.is_ok() {
             self.composition.intern_layer(layer, self);
         }
+        let edited = edited.map(|committed| self.composition.deliver(committed));
         self.process_pending();
         edited.map(|_| ())
     }
@@ -3842,8 +4019,9 @@ impl Stage {
     /// `parent` is not in the stage, and [`StageAuthoringError::Layer`] if
     /// `parent` is read-only.
     pub fn remove_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
+        self.settle()?;
         let edited = {
-            let mut layers = self.composition.authoring_graph_mut();
+            let layers = self.composition.authoring_graph();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
@@ -3853,14 +4031,16 @@ impl Stage {
             // authored relative to `parent`, so anchoring it the way the load path
             // interned the sublayer makes the entry's canonical id comparable to
             // `child_id` even when the entry string differs from the canonical id.
-            let authored = layers.find_relative(child, parent_id).and_then(|child_id| {
-                let subs = layers.get(parent_id)?.layer.pseudo_root()?.sublayers()?.clone();
-                subs.into_iter()
-                    .find(|entry| layers.find_relative(entry, parent_id) == Some(child_id))
-            });
+            let authored = {
+                let view = layers.view()?;
+                view.find_relative(child, parent_id).and_then(|child_id| {
+                    let subs = view.layer(parent_id).pseudo_root()?.sublayers()?;
+                    subs.into_iter()
+                        .find(|entry| view.find_relative(entry, parent_id) == Some(child_id))
+                })
+            };
             authored.map(|entry| {
-                let node = layers.get_mut(parent_id).expect("parent_id is a live id");
-                self.edit_layer(&mut node.layer, None, move |l| {
+                self.commit_layer(&layers, parent_id, None, move |l| {
                     l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
                         .map(|_| ())
@@ -3872,7 +4052,7 @@ impl Stage {
         // sublayer was removed; no authored entry means nothing to remove.
         match edited {
             Some(edited) => {
-                // `edit_layer` reports whether the edit changed anything.
+                let edited = edited.map(|committed| self.composition.deliver(committed));
                 self.process_pending();
                 edited
             }
@@ -3883,19 +4063,19 @@ impl Stage {
     /// Borrows the stage's layer graph, first draining any pending layer edits so
     /// the graph reflects every commit before it is read — a structural edit
     /// (sublayers, offsets, relocates) leaves the topology stale until then. The
-    /// drain is a no-op when nothing is pending.
+    /// drain is a no-op when nothing is pending. The graph's structure only:
+    /// [`layer_view`](Self::layer_view) reads the layers' content too.
     pub(crate) fn layers(&self) -> Ref<'_, pcp::LayerGraph> {
         self.process_pending();
         self.composition.settled_graph()
     }
 
-    /// Borrows the stage's layer graph mutably, behind the guard
-    /// [`layer_mut`](Self::layer_mut) hands out for direct authoring. Drains
-    /// pending edits first so the graph is current before it is re-authored; the
-    /// commit's own aggregator records the new change list for the next drain.
-    fn layers_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
+    /// [`layers`](Self::layers) with the layers' content borrowed beside the
+    /// graph. Panics from inside a [`LayerHandle::edit`](sdf::LayerHandle::edit)
+    /// closure on one of the stage's layers, which holds the content.
+    pub(crate) fn layer_view(&self) -> pcp::LayerView<'_> {
         self.process_pending();
-        self.composition.settled_graph_mut()
+        self.composition.settled_view()
     }
 
     /// Drains, then runs a composed query against the settled stage through
@@ -3903,9 +4083,9 @@ impl Stage {
     /// owns the query/load fixpoint.
     pub(crate) fn with_cache<T>(
         &self,
-        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
     ) -> Result<T, pcp::QueryError> {
-        self.process_pending();
+        self.settle()?;
         self.composition.query(query, self)
     }
 
@@ -3960,6 +4140,7 @@ impl Stage {
     /// that admits it, [`PrimPredicate::ALL`] included, visits the prim and
     /// nothing below it (C++ `UsdPrimRange` under `UsdPrimAllPrimsPredicate`).
     pub fn traverse(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
+        self.settle()?;
         let needed = predicate.consulted_bits();
         // Each prim carries its parent's status and the population epoch it
         // was read under. While the population is unchanged the prim composes
@@ -4404,8 +4585,7 @@ impl StageBuilder {
             edit_target: RefCell::new(edit_target),
             layer_stack_id,
             sinks: RefCell::default(),
-            edit_provenance: RefCell::new(None),
-            current_generation: Cell::new(0),
+            edit_provenance: TxnTable::default(),
             schema_registry: self.schema_registry.unwrap_or_else(|| SchemaRegistry::global().clone()),
             prim_types: RefCell::default(),
         }));
@@ -4696,7 +4876,7 @@ pub(crate) mod tests {
 
         let mid1 = identifier_by_leaf(stage, "mid1.usda");
         stage
-            .layer_mut(&mid1)
+            .layer_handle(&mid1)
             .expect("mid1 is live")
             .edit(|e| e.set_expression_variables(HashMap::new()))?;
         // The drain seam drops /M1's index — the stack's only owner — and the
@@ -4865,7 +5045,7 @@ pub(crate) mod tests {
         // drain seam of the next composed read sweeps it.
         let mid = identifier_by_leaf(&stage, "mid.usda");
         stage
-            .layer_mut(&mid)
+            .layer_handle(&mid)
             .expect("mid is live")
             .edit(|e| e.set_expression_variables(HashMap::new()))?;
         assert!(stage.prim("/P0")?.is_defined()?);
@@ -5122,7 +5302,7 @@ pub(crate) mod tests {
         let root_id = identifier_by_leaf(&stage, "root.usda");
         let d_path = sdf::Path::new("/D")?;
         stage
-            .layer_mut(&root_id)
+            .layer_handle(&root_id)
             .expect("root is live")
             .edit(|e| e.remove_spec(&d_path).map(|_| ()))?;
         assert!(
@@ -5351,7 +5531,7 @@ pub(crate) mod tests {
         stage.define_prim("/Prim/child")?;
 
         let landed = {
-            let layers = stage.layers();
+            let layers = stage.layer_view();
             let root_id = layers.id_of(&root).unwrap();
             layers
                 .layer(root_id)
@@ -5376,7 +5556,7 @@ pub(crate) mod tests {
         stage.create_attribute("/Prim.size", "double")?;
 
         let landed = {
-            let layers = stage.layers();
+            let layers = stage.layer_view();
             let root_id = layers.id_of(&root).unwrap();
             layers
                 .layer(root_id)
@@ -6306,9 +6486,10 @@ def "T" {
 
         let stage = Stage::builder().in_memory("root.usda")?;
         let root_id = stage.root_layer().identifier().to_string();
-        edit_layer(&mut stage.layer_mut(&root_id).expect("root layer"), |e| {
-            e.pseudo_root_mut().unwrap().set_sublayers([sub]);
-        });
+        stage.edit_layer(&root_id, |e| {
+            e.pseudo_root_mut()?.set_sublayers([sub]);
+            Ok(())
+        })?;
         assert!(stage.prim("/Sub")?.is_defined()?, "the root's authored sublayer loads");
         assert!(stage.composition_errors().is_empty());
         Ok(())
@@ -6341,6 +6522,23 @@ def \"Sub\" {}
         Ok(())
     }
 
+    /// Stages opened on one registry each hold a layer of their own: an edit
+    /// through one is not seen by the other.
+    #[test]
+    fn shared_registry_private_layers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("root.usda");
+        fs::write(&path, "#usda 1.0\ndef \"A\" {}\n")?;
+        let path = path.to_str().expect("utf-8 path");
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(path)?;
+        let b = Stage::builder().registry(registry).open(path)?;
+        a.define_prim("/B")?;
+        assert!(a.prim("/B")?.is_valid()?);
+        assert!(!b.prim("/B")?.is_valid()?, "each stage holds a layer of its own");
+        Ok(())
+    }
+
     /// An anonymous layer's sublayer entry that names no asset reports an
     /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer)
     /// diagnostic rather than vanishing (C++ `PcpErrorInvalidSublayerPath`).
@@ -6350,11 +6548,11 @@ def \"Sub\" {}
         let missing = dir.path().join("missing.usda");
         let stage = Stage::builder().in_memory("root.usda")?;
         let root_id = stage.root_layer().identifier().to_string();
-        edit_layer(&mut stage.layer_mut(&root_id).expect("root layer"), |e| {
-            e.pseudo_root_mut()
-                .unwrap()
+        stage.edit_layer(&root_id, |e| {
+            e.pseudo_root_mut()?
                 .set_sublayers([missing.to_str().expect("utf-8 path")]);
-        });
+            Ok(())
+        })?;
         assert!(
             stage
                 .composition_errors()
@@ -6855,7 +7053,7 @@ def \"Sub\" {}
         Ok(())
     }
 
-    /// A direct `layer_mut` edit to `subLayers` rebuilds the graph's edges before
+    /// A direct `layer_handle` edit to `subLayers` rebuilds the graph's edges before
     /// any graph query observes it: `sub_layers` reflects the removal with no
     /// intervening composed read to trigger the flush.
     #[test]
@@ -6879,7 +7077,7 @@ def \"Sub\" {}
         );
 
         {
-            let mut root = stage.layer_mut("root.usda").expect("root layer");
+            let root = stage.layer_handle("root.usda").expect("root layer");
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set_sublayers(["weak2.usda"]);
                 Ok(())
@@ -6889,7 +7087,7 @@ def \"Sub\" {}
         Ok(())
     }
 
-    /// The aggregator tags each committed edit with its origin: a stage edit on a
+    /// The stage tags each committed edit with its origin: a stage edit on a
     /// local layer reports [`Provenance::LocalStack`], while a direct edit to a
     /// non-local (referenced) layer reports [`Provenance::DirectLayerEdit`].
     #[test]
@@ -6929,7 +7127,7 @@ def \"Sub\" {}
         assert_eq!(seen.get(), Some("local"), "a local stage edit reports LocalStack");
 
         {
-            let mut target = stage.layer_mut("target.usda").expect("target layer");
+            let target = stage.layer_handle("target.usda").expect("target layer");
             target.edit(|e| {
                 sdf::PrimSpec::new(e.data_mut(), "/Target/Child", sdf::Specifier::Def, "").unwrap();
                 Ok(())
@@ -6975,6 +7173,263 @@ def \"Sub\" {}
         assert!(changed);
         assert!(stage.prim("/FromRoot")?.is_valid()?);
         assert!(stage.prim("/FromWeak")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A sink on the first layer of a `batch_edit` that reads the stage from its
+    /// `after_commit` composes the whole batch, which the stage reports as one
+    /// change.
+    #[test]
+    fn batch_read_in_sink() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
+        let events = Rc::new(Cell::new(0));
+        {
+            let events = events.clone();
+            stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1));
+        }
+        let seen = Rc::new(Cell::new(None));
+        let layer = stage.layer_handle("root.usda").expect("root layer");
+        let sink = {
+            let (stage, seen) = (stage.clone(), seen.clone());
+            layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+                seen.set(Some(
+                    stage
+                        .prim("/FromWeak")
+                        .expect("a valid path")
+                        .is_valid()
+                        .expect("a read"),
+                ));
+            })?
+        };
+        stage.batch_edit(&["root.usda", "weak.usda"], |edits| {
+            sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;
+            sdf::PrimSpec::new(edits[1].data_mut(), "/FromWeak", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        layer.remove_sink(sink)?;
+        assert_eq!(seen.get(), Some(true), "the sink composes the batch's other layer");
+        assert_eq!(events.get(), 1, "the batch is one change");
+        Ok(())
+    }
+
+    /// A layer sink can read the stage from its `after_commit` during a stage
+    /// edit, as it can during a direct edit: the stage delivers its commit
+    /// once it has released the graph.
+    #[test]
+    fn sink_reads_stage_edit() -> Result<()> {
+        let stage = Stage::builder().in_memory("root.usda")?;
+        stage.define_prim("/A")?;
+        let root = stage.root_layer().identifier().to_string();
+        let seen = Rc::new(Cell::new(None));
+        let sink = {
+            let (stage, seen) = (stage.clone(), seen.clone());
+            stage
+                .layer_handle(&root)
+                .expect("root layer")
+                .add_sink(move |_: &str, _: &sdf::ChangeList| {
+                    seen.set(Some(stage.root_layer().identifier().to_owned()));
+                })?
+        };
+        stage.define_prim("/Outer")?;
+        stage.layer_handle(&root).expect("root layer").remove_sink(sink)?;
+        assert_eq!(seen.take().as_deref(), Some(root.as_str()));
+        Ok(())
+    }
+
+    /// A composed query made from inside an edit of the stage's layer, with
+    /// an earlier direct edit still queued, fails with `Busy` and loses
+    /// nothing: once the edit returns, the queued edit composes.
+    #[test]
+    fn query_inside_edit_busy() -> Result<()> {
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root = stage.root_layer().identifier().to_string();
+        let layer = stage.layer_handle(&root).expect("root layer");
+        layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/First", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let mut inside = None;
+        let mut traversed = None;
+        layer.edit(|_| {
+            inside = Some(stage.prim("/First").expect("a valid path").is_valid());
+            traversed = Some(stage.traverse(PrimPredicate::DEFAULT, |_| {}));
+            Ok(())
+        })?;
+        assert!(traversed.expect("the closure ran").is_err(), "a traversal fails too");
+        let inside = inside.expect("the closure ran");
+        assert!(
+            inside.as_ref().is_err_and(|error| error.to_string().contains("in use")),
+            "{inside:?}"
+        );
+        assert!(stage.prim("/First")?.is_valid()?, "the queued edit composes");
+        Ok(())
+    }
+
+    /// Cached reads made from inside a read of the stage's layer, with an
+    /// earlier direct edit still queued, fail with `Busy` as composed queries
+    /// do: a warmed attribute query and a prim's type.
+    #[test]
+    fn cached_reads_busy() -> Result<()> {
+        let stage = Stage::builder().in_memory("root.usda")?;
+        stage.define_prim("/A")?;
+        let attribute = stage.create_attribute("/A.x", sdf::ValueTypeName::FLOAT)?;
+        let query = usd::AttributeQuery::new(&attribute);
+        assert_eq!(query.get_at::<f32>(None)?, None);
+        stage.prim_type_info("/A")?;
+        let root = stage.root_layer().identifier().to_string();
+        let layer = stage.layer_handle(&root).expect("root layer");
+        layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let (value, type_info) = layer.read(|_| (query.get_at::<f32>(None), stage.prim_type_info("/A")))?;
+        assert!(value.is_err(), "{value:?}");
+        assert!(type_info.is_err(), "the type read fails too");
+        assert_eq!(query.get_at::<f32>(None)?, None);
+        assert!(stage.prim("/Queued")?.is_valid()?, "the queued edit composes");
+        Ok(())
+    }
+
+    /// A composed query made from inside a read of the stage's layer that
+    /// reaches an unloaded reference fails with `Busy`, and a later query
+    /// loads the reference.
+    #[test]
+    fn query_inside_read_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"Ref\" (references = @./ref.usda@</Model>) {}\n",
+        )?;
+        fs::write(
+            dir.path().join("ref.usda"),
+            "#usda 1.0\ndef \"Model\" {\n    def \"Child\" {}\n}\n",
+        )?;
+        let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        let root = stage.root_layer().identifier().to_string();
+        let layer = stage.layer_handle(&root).expect("root layer");
+        let inside = layer.read(|_| stage.prim("/Ref/Child").expect("a valid path").is_valid())?;
+        assert!(
+            inside.as_ref().is_err_and(|error| error.to_string().contains("in use")),
+            "{inside:?}"
+        );
+        assert!(
+            stage.prim("/Ref/Child")?.is_valid()?,
+            "a later query loads the reference"
+        );
+        Ok(())
+    }
+
+    /// A handle kept past its stage holds its own layer; every other layer
+    /// the stage loaded is freed with the stage.
+    #[test]
+    fn kept_handle_frees_rest() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
+        let sentinel = Rc::new(());
+        let freed = Rc::downgrade(&sentinel);
+        stage
+            .layer_handle("weak.usda")
+            .expect("weak layer")
+            .add_sink(move |_: &str, _: &sdf::ChangeList| {
+                let _ = &sentinel;
+            })?;
+        let root = stage.layer_handle("root.usda").expect("root layer");
+        drop(stage);
+        assert!(freed.upgrade().is_none(), "the unheld sublayer is freed");
+        assert_eq!(root.read(|layer| layer.identifier().to_owned())?, "root.usda");
+        Ok(())
+    }
+
+    /// A stage dropped inside a read of a handle it gave out frees its other
+    /// layers once the read ends.
+    #[test]
+    fn drop_inside_read_frees() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
+        let sentinel = Rc::new(());
+        let freed = Rc::downgrade(&sentinel);
+        stage
+            .layer_handle("weak.usda")
+            .expect("weak layer")
+            .add_sink(move |_: &str, _: &sdf::ChangeList| {
+                let _ = &sentinel;
+            })?;
+        let root = stage.layer_handle("root.usda").expect("root layer");
+        let held = root.read(|_| {
+            drop(stage);
+            freed.upgrade().is_some()
+        })?;
+        assert!(held, "the read holds the store while the stage drops");
+        assert!(freed.upgrade().is_none(), "the read's end frees the unheld sublayer");
+        Ok(())
+    }
+
+    /// A direct edit a layer sink makes while a `batch_edit` delivers queues
+    /// behind the whole batch: the stage sees the batch as one change, then
+    /// the nested edit as another.
+    #[test]
+    fn nested_edit_after_batch() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
+        let events = Rc::new(Cell::new(0));
+        {
+            let events = events.clone();
+            stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1));
+        }
+        let layer = stage.layer_handle("root.usda").expect("root layer");
+        let nested = layer.clone();
+        let fired = Rc::new(Cell::new(false));
+        let once = fired.clone();
+        let sink = layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+            if !once.replace(true) {
+                nested
+                    .edit(|e| {
+                        sdf::PrimSpec::new(e.data_mut(), "/Nested", sdf::Specifier::Def, "")?;
+                        Ok(())
+                    })
+                    .expect("nested edit");
+            }
+        })?;
+
+        stage.batch_edit(&["root.usda", "weak.usda"], |edits| {
+            sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;
+            sdf::PrimSpec::new(edits[1].data_mut(), "/FromWeak", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        layer.remove_sink(sink)?;
+        stage.process_pending();
+
+        assert!(stage.prim("/Nested")?.is_valid()?);
+        assert_eq!(events.get(), 2, "the batch is one change and the nested edit another");
         Ok(())
     }
 
@@ -7052,7 +7507,7 @@ def \"Sub\" {}
         let root = stage.root_layer().identifier().to_string();
         let root_id = stage.layers().id_of(&root).expect("root layer id");
         stage
-            .layer_mut(&root)
+            .layer_handle(&root)
             .expect("root layer")
             .edit(|e| {
                 sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;

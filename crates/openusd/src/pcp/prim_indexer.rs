@@ -107,7 +107,7 @@ use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeDesc, NodeFlags, NodeId, PrimIndexGraph, is_class_based_arc};
 use super::prim_index::{CompositionContext, Demand, PrimEntry, first_spec_layer, stack_has_spec};
 use super::{
-    CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerGraph, LayerId, QueryError, VariantFallbackMap,
+    CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerId, LayerView, QueryError, VariantFallbackMap,
 };
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
@@ -414,7 +414,7 @@ pub(crate) struct BuildOutput {
 #[derive(Clone, Copy)]
 struct Inputs<'a> {
     /// The layer stack being composed.
-    stack: &'a LayerGraph,
+    stack: &'a LayerView<'a>,
     /// Composition context flowing from the parent prim.
     ctx: &'a CompositionContext,
     /// The stage's variant fallbacks (C++
@@ -525,7 +525,7 @@ pub(crate) struct Indexer<'a, 'f> {
 
 impl<'a, 'f> Indexer<'a, 'f> {
     pub(crate) fn new(
-        stack: &'a LayerGraph,
+        stack: &'a LayerView<'a>,
         ctx: &'a CompositionContext,
         variant_fallbacks: &'a VariantFallbackMap,
         cached_indices: &'a sdf::PathTable<PrimEntry>,
@@ -3170,7 +3170,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         graph
             .layer_stack(self.node(node).layer_stack_id())
             .iter()
-            .find_map(|&(layer, _)| graph.muted_asset_id(asset_path, graph.anchor_location(Some(layer)).as_ref()))
+            .find_map(|&(layer, _)| graph.muted_asset_id(asset_path, graph.anchor_location(Some(layer))))
     }
 
     /// Builds the cycle chain for a [`CompositionDiagnostic::ArcCycle`]: the arcs from the
@@ -3459,10 +3459,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::VariantFallbackMap;
     use super::super::index_store::PrimRevision;
     use super::super::prim_index::PrimIndex;
     use super::super::prim_index::tests::build_with_fallbacks;
+    use super::super::{LayerGraph, VariantFallbackMap};
     use super::*;
 
     fn stack(text: &str) -> LayerGraph {
@@ -3485,7 +3485,7 @@ mod tests {
         loop {
             let ambient = LayerStackId::ROOT;
             let out = Indexer::new(
-                stack,
+                &stack.read_view(),
                 &ctx,
                 &VariantFallbackMap::new(),
                 &sdf::PathTable::new(),
@@ -4087,8 +4087,8 @@ mod tests {
         let ctx = CompositionContext::default();
         let ambient = LayerStackId::ROOT;
         // Seed the child build with the parent's composed index, as the cache does.
-        let root_index =
-            PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &s, &ctx).expect("root index build");
+        let root_index = PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &s.read_view(), &ctx)
+            .expect("root index build");
         let mut cached = sdf::PathTable::new();
         cached.insert(
             Path::new("/Root").unwrap(),
@@ -4102,7 +4102,7 @@ mod tests {
                 revision: PrimRevision::placeholder(),
             },
         );
-        let child = Indexer::new(&s, &ctx, &VariantFallbackMap::new(), &cached, ambient, true)
+        let child = Indexer::new(&s.read_view(), &ctx, &VariantFallbackMap::new(), &cached, ambient, true)
             .build(&Path::new("/Root/Child").unwrap())
             .expect("indexer build")
             .graph

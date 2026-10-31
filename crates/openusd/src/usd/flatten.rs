@@ -102,6 +102,7 @@ impl Stage {
     // a flattened layer loses what the clips supplied. C++ writes the
     // clip-derived samples out instead (`MakeTimeSampleMapForFlatten`).
     pub fn flatten_with(&self, assets: FlattenAssets) -> Result<sdf::Layer> {
+        self.settle()?;
         let assets = assets.mode();
         let root = sdf::Path::abs_root();
         let mut data = sdf::Data::new();
@@ -241,9 +242,10 @@ fn write_property(
 /// C++ keeps `expressionVariables`. A flattened layer holds every expression
 /// already evaluated, so here it is dropped with the other stack fields.
 fn stage_fields(stage: &Stage, assets: pcp::AssetMode) -> Result<Vec<(String, vt::Value)>> {
+    stage.settle()?;
     let names = {
         let root = sdf::Path::abs_root();
-        let layers = stage.layers();
+        let layers = stage.layer_view();
         layers
             .stage_metadata_layers()
             .flat_map(|id| layers.layer(id).data().list_fields(&root).unwrap_or_default())

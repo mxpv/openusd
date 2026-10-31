@@ -20,7 +20,7 @@ use crate::sdf::{self, Path, RelocateList, element_cmp};
 use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerView};
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::ArcType;
@@ -180,7 +180,7 @@ pub(crate) fn apply_child_relocates(
 /// invalid pair becomes a [`CompositionDiagnostic::InvalidRelocate`] reported in authored order
 /// (C++ `PcpErrorInvalidAuthoredRelocates`). Conflicts are scoped to a single
 /// layer stack via [`LayerGraph::relocate_conflict_scopes`].
-pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, Diagnostics) {
+pub(crate) fn validate_layer_relocates(graph: &LayerView<'_>) -> (LayerRelocates, Diagnostics) {
     let mut errors = Diagnostics::default();
     // Collect every structurally valid authored relocate, recording its layer.
     // Conflict diagnostics are computed over the layer-stack scopes below.

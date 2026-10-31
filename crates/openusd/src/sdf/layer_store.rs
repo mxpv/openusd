@@ -9,15 +9,19 @@
 //! next [`sweep`](LayerStore::sweep) and its epoch moves on. A key kept from
 //! before never names the layer the slot holds next.
 
-use std::cell::{BorrowMutError, RefCell, RefMut};
+use std::cell::{BorrowMutError, Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::fmt;
 use std::mem;
 use std::ptr;
 use std::rc::{Rc, Weak};
 
-use super::commit::{Dispatch, Subscriber, TxnContext};
-use super::{AuthoringError, EditError, Layer, LayerEdit, edit_layers, sink};
+use crate::ar;
+
+use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
+use super::{
+    AuthoringError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, dry_run_layers, edit_layers, sink,
+};
 
 /// A failure to read, edit or add a layer of a
 /// [`LayerRegistry`](super::LayerRegistry).
@@ -54,6 +58,11 @@ pub enum LayerError {
     /// The edit itself failed; nothing was committed.
     #[error(transparent)]
     Edit(#[from] EditError),
+
+    /// Saving the layer through its handle failed (see
+    /// [`LayerHandle::save`]).
+    #[error(transparent)]
+    Export(#[from] ExportError),
 }
 
 /// A layer a [`LayerRegistry`](super::LayerRegistry) declined to hold, handed
@@ -144,6 +153,9 @@ struct SlotToken {
     key: SlotKey,
     /// The layer's identifier, which never changes while the layer is held.
     identifier: String,
+    /// The location anchoring the layer's relative asset paths, which is
+    /// fixed with its identifier (see [`Layer::anchor_location`]).
+    anchor: Option<ar::ResolvedPath>,
     /// The store, told of the token's end so a sweep can free the slot.
     store: Weak<LayerStore>,
 }
@@ -176,8 +188,8 @@ impl Drop for SlotToken {
 /// an edit that meets a held borrow is [`LayerError::Busy`], having read or
 /// staged nothing. User code runs under a borrow only in the closure given to
 /// `read` or `edit` and in a sink's
-/// [`before_commit`](super::LayerSink::before_commit); an
-/// [`after_commit`](super::LayerSink::after_commit) runs once the borrow is
+/// [`before_commit`](LayerSink::before_commit); an
+/// [`after_commit`](LayerSink::after_commit) runs once the borrow is
 /// released.
 #[derive(Clone)]
 pub struct LayerHandle {
@@ -194,14 +206,18 @@ impl LayerHandle {
         &self.token.identifier
     }
 
+    /// The location that anchors the relative asset paths the layer authors
+    /// (see [`Layer::anchor_location`]).
+    pub(crate) fn anchor_location(&self) -> Option<&ar::ResolvedPath> {
+        self.token.anchor.as_ref()
+    }
+
     /// Run `f` on the layer. The closure runs with the registry shared: it can
     /// read through other handles but not edit through any. Fails with
     /// [`LayerError::Busy`] when called from inside an edit on the same
     /// registry.
     pub fn read<R>(&self, f: impl FnOnce(&Layer) -> R) -> Result<R, LayerError> {
-        let slots = self.store.slots.try_borrow().map_err(|_| LayerError::Busy)?;
-        let layer = slots.get(self.token.key).expect("a handle keeps its slot filled");
-        Ok(f(layer))
+        Ok(f(self.store.read()?.layer(self)))
     }
 
     /// Author a batch of edits on the layer as one atomic transaction (see
@@ -221,17 +237,48 @@ impl LayerHandle {
         })
     }
 
+    /// Save the layer to the file its identifier names (see
+    /// [`Layer::save`]). Fails with [`LayerError::Busy`] from inside a read
+    /// or an edit on the same registry.
+    pub fn save(&self) -> Result<(), LayerError> {
+        self.with_layer_mut(Layer::save)?.map_err(LayerError::from)
+    }
+
+    /// Install a [`LayerSink`] on the layer (see
+    /// [`Layer::add_sink`]). Fails with [`LayerError::Busy`] from inside a
+    /// read or an edit on the same registry.
+    pub fn add_sink<S: LayerSink + 'static>(&self, sink: S) -> Result<LayerSinkId, LayerError> {
+        self.with_layer_mut(|layer| layer.add_sink(sink))
+    }
+
+    /// Remove the sink with `id` (see [`Layer::remove_sink`]). Fails with
+    /// [`LayerError::Busy`] from inside a read or an edit on the same
+    /// registry.
+    pub fn remove_sink(&self, id: LayerSinkId) -> Result<(), LayerError> {
+        self.with_layer_mut(|layer| layer.remove_sink(id))
+    }
+
     /// Subscribe `subscriber` to the layer's commits, until the returned
     /// [`Subscription`] drops.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests subscribe"))]
     pub(crate) fn subscribe(&self, subscriber: Rc<dyn Subscriber>) -> Result<Subscription, LayerError> {
-        let mut slots = self.store.slots_mut().map_err(|_| LayerError::Busy)?;
-        let layer = slots.get_mut(self.token.key).expect("a handle keeps its slot filled");
+        let id = self.with_layer_mut(|layer| layer.subscribe(subscriber))?;
         Ok(Subscription {
             store: Rc::downgrade(&self.store),
             key: self.token.key,
-            id: layer.subscribe(subscriber),
+            id,
         })
+    }
+
+    /// Run `f` on the layer with the registry borrowed mutably. Fails with
+    /// [`LayerError::Busy`] from inside a read or an edit on the same
+    /// registry.
+    fn with_layer_mut<R>(&self, f: impl FnOnce(&mut Layer) -> R) -> Result<R, LayerError> {
+        let result = {
+            let mut slots = self.store.slots_mut().map_err(|_| LayerError::Busy)?;
+            f(slots.get_mut(self.token.key).expect("a handle keeps its slot filled"))
+        };
+        self.store.sweep_dead();
+        Ok(result)
     }
 }
 
@@ -277,7 +324,45 @@ impl Drop for Subscription {
     }
 }
 
+/// A shared borrow of a store's layers, through which a caller holding
+/// several handles reads them all under one borrow. Dropped, it releases the
+/// borrow and frees the slots whose last handle dropped while it was held.
+pub(crate) struct StoreRead<'a> {
+    /// The borrow, `None` only while the read drops.
+    slots: Option<Ref<'a, Slots>>,
+    /// The store the borrow is of.
+    store: &'a LayerStore,
+}
+
+impl StoreRead<'_> {
+    /// The layer `handle` names. The handle belongs to this store.
+    pub(crate) fn layer(&self, handle: &LayerHandle) -> &Layer {
+        self.slots
+            .as_ref()
+            .expect("a read holds its borrow until it drops")
+            .get(handle.token.key)
+            .expect("a handle keeps its slot filled in its own store")
+    }
+}
+
+impl Drop for StoreRead<'_> {
+    fn drop(&mut self) {
+        self.slots.take();
+        self.store.sweep_dead();
+    }
+}
+
 impl LayerStore {
+    /// Borrow the layers for reading. Fails with [`LayerError::Busy`] while
+    /// an edit holds them.
+    pub(crate) fn read(&self) -> Result<StoreRead<'_>, LayerError> {
+        let slots = self.slots.try_borrow().map_err(|_| LayerError::Busy)?;
+        Ok(StoreRead {
+            slots: Some(slots),
+            store: self,
+        })
+    }
+
     /// A handle to the live layer whose identifier is `identifier`, or, with
     /// `real_path`, the one read from that location.
     pub(crate) fn find(
@@ -329,6 +414,7 @@ impl LayerStore {
         let token = Rc::new(SlotToken {
             key,
             identifier: layer.identifier().to_owned(),
+            anchor: layer.anchor_location(),
             store: Rc::downgrade(self),
         });
         slot.entry = Some((layer, Rc::downgrade(&token)));
@@ -347,6 +433,15 @@ impl LayerStore {
     /// reading it.
     pub(crate) fn ensure_writable(&self) -> Result<(), LayerError> {
         self.slots.try_borrow_mut().map(drop).map_err(|_| LayerError::Busy)
+    }
+
+    /// [`sweep`](Self::sweep) when a handle dropped while the store was
+    /// borrowed left a slot to free. A no-op under an enclosing borrow, whose
+    /// own release sweeps.
+    fn sweep_dead(&self) {
+        if !self.dead.borrow().is_empty() {
+            self.sweep();
+        }
     }
 
     /// Free every slot whose last handle has dropped, and apply the
@@ -376,6 +471,47 @@ impl LayerStore {
         txn: TxnContext,
         f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<bool, E> {
+        Ok(self.deliver(self.commit(handles, txn, f)?))
+    }
+
+    /// The commit half of [`edit`](Self::edit): the transaction lands, and
+    /// its notifications wait for [`deliver`](Self::deliver).
+    pub(crate) fn commit<E: From<sink::Error> + From<LayerError>>(
+        &self,
+        handles: &[&LayerHandle],
+        txn: TxnContext,
+        f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
+    ) -> Result<Committed, E> {
+        self.with_layers(handles, |layers| edit_layers(layers, txn, f))
+    }
+
+    /// Deliver `committed`'s notifications through the store's queue, after
+    /// those queued ahead of them, and return whether it changed anything.
+    pub(crate) fn deliver(&self, committed: Committed) -> bool {
+        committed.dispatch_via(&self.dispatch)
+    }
+
+    /// Stage `f` over the layers `handles` name to check it applies, then
+    /// discard it, firing nothing ([`dry_run_layers`]). Fails as
+    /// [`edit`](Self::edit) does.
+    pub(crate) fn dry_run<E: From<LayerError>>(
+        &self,
+        handles: &[&LayerHandle],
+        f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.with_layers(handles, |layers| dry_run_layers(layers, f))
+    }
+
+    /// Run `f` over the layers `handles` name, in order, with the slots
+    /// borrowed mutably. Fails, having run nothing, with
+    /// [`LayerError::Busy`] when the store is already borrowed, and with
+    /// [`LayerError::Foreign`] or [`LayerError::Repeated`] for a handle of
+    /// another registry or one named twice.
+    fn with_layers<R, E: From<LayerError>>(
+        &self,
+        handles: &[&LayerHandle],
+        f: impl FnOnce(&mut [&mut Layer]) -> Result<R, E>,
+    ) -> Result<R, E> {
         for (position, handle) in handles.iter().enumerate() {
             let identifier = || handle.identifier().to_owned();
             if !ptr::eq(&*handle.store, self) {
@@ -391,13 +527,18 @@ impl LayerStore {
                 .into());
             }
         }
-        let committed = {
+        let result = {
             let mut slots = self.slots_mut().map_err(|_| LayerError::Busy)?;
-            let keys: Vec<SlotKey> = handles.iter().map(|handle| handle.token.key).collect();
-            let mut layers = slots.layers_mut(&keys);
-            edit_layers(&mut layers, txn, f)?
+            if let [handle] = handles {
+                let layer = slots.get_mut(handle.token.key).expect("a handle keeps its slot filled");
+                f(&mut [layer])
+            } else {
+                let keys: Vec<SlotKey> = handles.iter().map(|handle| handle.token.key).collect();
+                f(&mut slots.layers_mut(&keys))
+            }
         };
-        Ok(committed.dispatch_via(&self.dispatch))
+        self.sweep_dead();
+        result
     }
 
     /// Borrow the slots mutably, first applying the subscriptions that ended
@@ -445,9 +586,6 @@ impl Slots {
     /// The layers `keys` name, in `keys` order: distinct live slots, as every
     /// handle's key is.
     fn layers_mut(&mut self, keys: &[SlotKey]) -> Vec<&mut Layer> {
-        if let [key] = keys {
-            return self.get_mut(*key).into_iter().collect();
-        }
         let position: HashMap<u32, usize> = keys.iter().enumerate().map(|(at, key)| (key.index, at)).collect();
         let mut layers: Vec<(usize, &mut Layer)> = self
             .slots
@@ -755,6 +893,9 @@ mod tests {
         };
         assert!(matches!(edit(&[&a, &a]), Err(LayerError::Repeated { .. })));
         assert!(matches!(edit(&[&a, &elsewhere]), Err(LayerError::Foreign { .. })));
+        let dry_run = |handles: &[&LayerHandle]| a.store.dry_run(handles, |_| Ok::<(), LayerError>(()));
+        assert!(matches!(dry_run(&[&a, &a]), Err(LayerError::Repeated { .. })));
+        assert!(matches!(dry_run(&[&a, &elsewhere]), Err(LayerError::Foreign { .. })));
     }
 
     /// A layer stays held until its last handle drops and a sweep runs; the

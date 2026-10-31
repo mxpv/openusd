@@ -198,8 +198,9 @@ pub enum ApplyMode<'a> {
 /// carries that edit target's namespace mapping so [`Stage::apply_diff`] can lift
 /// the paths back to stage namespace when replaying through a different target.
 pub(super) fn forward_diff(stage: &Stage, objects: &CommittedChange<'_>) -> Result<Vec<Diff>> {
+    stage.settle()?;
     let mapping = objects.provenance.mapping();
-    let layers = stage.layers();
+    let layers = stage.layer_view();
     let mut diffs = Vec::new();
     for (layer_identifier, change_list) in objects.layer_changes {
         let Some(layer_id) = layers.id_of(layer_identifier) else {
@@ -394,6 +395,7 @@ impl Stage {
     /// tag or suppress the echo itself — that is an application-level concern
     /// this method does not arbitrate.
     pub fn apply_diff(&self, diff: &Diff, mode: ApplyMode<'_>) -> Result<(), StageAuthoringError> {
+        self.settle()?;
         match mode {
             ApplyMode::ExactLayer(identifier) => {
                 let layer_id = self

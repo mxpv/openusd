@@ -177,7 +177,10 @@ fn main() -> Result<()> {
             Ok(())
         })?;
         let identifier = stage.root_layer().identifier().to_owned();
-        stage.layer_mut(&identifier).expect("the root layer is live").save()?;
+        stage
+            .layer_handle(&identifier)
+            .expect("the root layer is live")
+            .save()?;
         phase.end("");
     }
 

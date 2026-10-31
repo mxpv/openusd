@@ -84,8 +84,10 @@ source of truth for specifics.
   LIVERPS strength ordering across layers, kept a pure function of `(graph,
   context, cached indices)` so it stays parallelizable. Composition drives layer
   loading: a reference/payload target opens on first use and the demand travels
-  out through `BuildOutput` to the stage's load barrier. Start at `pcp/mod.rs` —
-  it has the LIVERPS overview and a per-file structure table.
+  out through `BuildOutput` to the stage's load barrier. A build reads layer
+  content through `LayerView`, the graph with one borrow of its layers' store.
+  Start at `pcp/mod.rs` — it has the LIVERPS overview and a per-file structure
+  table.
 
 - **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that
   delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`,

@@ -230,8 +230,9 @@ pub fn bake_roots(roots: &[Root], interval: impl Into<gf::Interval>) -> Result<(
 /// With [`BakeOptions::save_layers`], each layer the bindings name is saved
 /// last, and so is the edit target's layer where a hint was authored there,
 /// where C++ saves only the bindings' layers. A layer that fails to save,
-/// an anonymous one among them, fails the bake with its export error, the
-/// layers saved before it staying saved.
+/// an anonymous one among them, fails the bake with its export error
+/// ([`sdf::LayerError::Export`] inside [`openusd::Error::Layer`]), the layers
+/// saved before it staying saved.
 ///
 /// Fails after the geometry committed, with [`SchemaError::BakeExtents`]
 /// where the extents stage fails and leaves every extent of the other
@@ -380,7 +381,7 @@ pub fn bake_skinning(
     if options.save_layers {
         // TODO(rayon): each layer saves independently of the others.
         for identifier in &saves {
-            if let Some(mut layer) = stage.layer_mut(identifier) {
+            if let Some(layer) = stage.layer_handle(identifier) {
                 layer.save().map_err(openusd::Error::from)?;
             }
         }

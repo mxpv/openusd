@@ -35,7 +35,7 @@ use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};
 use super::diagnostics::Diagnostics;
 use super::index_cache::block_to_none;
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerView};
 use super::prim_graph::Node;
 use super::prim_resolve::Supplied;
 use super::value_resolve::ValueState;
@@ -823,7 +823,7 @@ impl ClipCache {
     /// value source.
     fn declaring_manifest(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         prim: &Path,
@@ -842,7 +842,7 @@ impl ClipCache {
     /// manifest declares, where it has a schedule to select a clip by.
     fn sourced(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -862,7 +862,7 @@ impl ClipCache {
     /// read of it at any numeric time with a value or a block.
     pub(super) fn sources_in_set(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -874,7 +874,7 @@ impl ClipCache {
     /// set does not source the attribute of `query`.
     fn active_clip<'a>(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &'a ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -896,7 +896,7 @@ impl ClipCache {
     /// missing values use the manifest and neighboring contributing clips.
     pub(super) fn value_in_set(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -961,7 +961,7 @@ impl ClipCache {
     /// does not source the attribute.
     fn value_at_active_clip(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -998,7 +998,7 @@ impl ClipCache {
     #[allow(clippy::too_many_arguments)] // See the `ClipEval` TODO on `interpolate_missing_value`.
     fn value_in_clip(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         clip: &ActiveClip<'_>,
@@ -1064,7 +1064,7 @@ impl ClipCache {
     /// `None` when the set does not source the property at `time`.
     pub(super) fn clip_spec_site_in_set(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -1103,7 +1103,7 @@ impl ClipCache {
     /// every time (spec 12.3.4.6) rather than supplying a value.
     pub(super) fn untimed_answer_in_set(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -1127,7 +1127,7 @@ impl ClipCache {
     /// judges a layer's own samples. `None` when it does not participate.
     pub(super) fn stage_samples_in_set(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -1155,7 +1155,7 @@ impl ClipCache {
     /// resolution reads.
     pub(super) fn generate_manifest(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         resolved: &ResolvedClipSet,
         prim: &Path,
         tag: &str,
@@ -1210,7 +1210,7 @@ impl ClipCache {
     /// `diagnostics`.
     fn manifest_id(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         prim: &Path,
@@ -1259,7 +1259,7 @@ impl ClipCache {
     /// Re-registration replaces the set's previous sources outright, so an
     /// expression that steps a clip path from one asset to another stops
     /// depending on the one it left.
-    pub(super) fn register_set_sources(&mut self, graph: &LayerGraph, anchor: &Path, resolved: &ResolvedClipSet) {
+    pub(super) fn register_set_sources(&mut self, graph: &LayerView<'_>, anchor: &Path, resolved: &ResolvedClipSet) {
         // Value resolution reaches here on every clipped attribute read, so the
         // unchanged case must resolve no asset path and build no key: the probe
         // borrows both halves of the identity out of the nested map.
@@ -1292,7 +1292,7 @@ impl ClipCache {
 
     /// The clip and manifest layer identifiers `resolved` reads: every scheduled
     /// clip, plus the manifest it authors if it authors one.
-    fn set_identifiers(graph: &LayerGraph, resolved: &ResolvedClipSet) -> HashSet<String> {
+    fn set_identifiers(graph: &LayerView<'_>, resolved: &ResolvedClipSet) -> HashSet<String> {
         let mut identifiers: HashSet<String> = resolved
             .set
             .resolution_paths()
@@ -1382,7 +1382,7 @@ impl ClipCache {
     /// than falling through to weaker sources.
     fn manifest_declares(
         &self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         manifest: Option<&str>,
         clip_path: &Path,
     ) -> Result<bool, sdf::PathParseError> {
@@ -1405,7 +1405,7 @@ impl ClipCache {
     /// through the same offset before comparing, so the two meet in stage time.
     fn manifest_blocks(
         &self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         resolved: &ResolvedClipSet,
         manifest: &str,
         clip_path: &Path,
@@ -1431,7 +1431,7 @@ impl ClipCache {
     /// the manifest blocks the attribute there (see [`Self::manifest_blocks`]).
     fn clip_contributes(
         &self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         resolved: &ResolvedClipSet,
         manifest: &str,
         clip_path: &Path,
@@ -1449,7 +1449,7 @@ impl ClipCache {
     /// Returns `Ok(None)` when the asset path cannot be resolved.
     fn ensure_clip_layer(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         asset_path: &str,
         anchor_layer: LayerId,
     ) -> Result<Option<String>, QueryError> {
@@ -1489,7 +1489,7 @@ impl ClipCache {
     // only one and no edit can arrive for it. Closing that needs
     // `sdf::LayerRegistry` find-or-open dedup, after which this cache and the
     // graph would share one layer whatever brought it in.
-    fn layer<'a>(&'a self, graph: &'a LayerGraph, id: &str) -> Option<&'a sdf::Layer> {
+    fn layer<'a>(&'a self, graph: &'a LayerView<'a>, id: &str) -> Option<&'a sdf::Layer> {
         match graph.id_of(id) {
             Some(interned) => Some(graph.layer(interned)),
             None => self.clip_layers.get(id),
@@ -1503,7 +1503,7 @@ impl ClipCache {
     /// set's clips from its schedule: an unscheduled clip is never selected.
     fn clip_set_participates(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
@@ -1558,7 +1558,7 @@ impl ClipCache {
     /// time.
     fn clip_in_clip_samples(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         asset: &str,
         anchor_layer: LayerId,
         clip_path: &Path,
@@ -1583,7 +1583,7 @@ impl ClipCache {
     /// repeat the resolver's filesystem work.
     fn clip_time_samples(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         asset: &str,
         anchor_layer: LayerId,
         clip_path: &Path,
@@ -1617,7 +1617,7 @@ impl ClipCache {
     /// ([`Self::resolve_asset_in`]).
     fn clip_sample_at(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         resolved: &ResolvedClipSet,
         asset: &str,
         clip_path: &Path,
@@ -1642,7 +1642,7 @@ impl ClipCache {
     #[allow(clippy::too_many_arguments)] // See the `ClipEval` TODO on `interpolate_missing_value`.
     fn resolve_asset_in(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         identifier: &str,
         resolved: &ResolvedClipSet,
@@ -1669,7 +1669,7 @@ impl ClipCache {
     /// does, since generation copies declarations only.
     fn manifest_default(
         &self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         manifest: &str,
         clip_path: &Path,
     ) -> Result<Option<Value>, QueryError> {
@@ -1709,7 +1709,7 @@ impl ClipCache {
     #[allow(clippy::too_many_arguments)]
     fn interpolate_missing_value(
         &mut self,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
         manifest: &str,
@@ -1853,9 +1853,7 @@ pub(crate) fn asset_input<'a>(set: &'a HashMap<String, Value>, field: &str) -> O
 /// clip by its anchored form would leave it unreadable, and would key its
 /// registrations under a name no edit to it is ever reported with.
 fn clip_identifier(graph: &LayerGraph, asset_path: &str, anchor_layer: LayerId) -> String {
-    let anchored = graph
-        .layer(anchor_layer)
-        .absolute_path_with(graph.layer_registry(), asset_path);
+    let anchored = graph.absolute_path(anchor_layer, asset_path);
     if graph.id_of(&anchored).is_some() {
         return anchored;
     }
@@ -1899,19 +1897,24 @@ mod tests {
 
         let mut clips = ClipCache::default();
         let id = clips
-            .ensure_clip_layer(&graph, "./clip.usda", root_id)?
+            .ensure_clip_layer(&graph.read_view(), "./clip.usda", root_id)?
             .expect("clip resolves");
         {
-            let clip = clips.layer(&graph, &id).expect("the clip is held");
+            let view = graph.read_view();
+            let clip = clips.layer(&view, &id).expect("the clip is held");
             assert!(clip.identifier().contains("clip.usda"));
             assert!(clip.data().has_spec(&sdf::path("/Model.size")?));
         }
 
         // Second lookup is a cache hit; a bogus path resolves to None.
-        assert!(clips.ensure_clip_layer(&graph, "./clip.usda", root_id)?.is_some());
         assert!(
             clips
-                .ensure_clip_layer(&graph, "./does_not_exist.usda", root_id)?
+                .ensure_clip_layer(&graph.read_view(), "./clip.usda", root_id)?
+                .is_some()
+        );
+        assert!(
+            clips
+                .ensure_clip_layer(&graph.read_view(), "./does_not_exist.usda", root_id)?
                 .is_none()
         );
         Ok(())
@@ -1935,7 +1938,7 @@ mod tests {
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data), clip], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
-        let identifier = clip_identifier(&graph, "in_memory_clip.usda", root_id);
+        let identifier = clip_identifier(&graph.read_view(), "in_memory_clip.usda", root_id);
         assert_eq!(
             graph.id_of(&identifier),
             graph.id_of("in_memory_clip.usda"),
@@ -1945,13 +1948,13 @@ mod tests {
         let mut clips = ClipCache::default();
         assert_eq!(
             clips
-                .ensure_clip_layer(&graph, "in_memory_clip.usda", root_id)?
+                .ensure_clip_layer(&graph.read_view(), "in_memory_clip.usda", root_id)?
                 .as_deref(),
             Some(identifier.as_str()),
             "resolving must find the interned layer rather than opening a file",
         );
         assert!(
-            clips.layer(&graph, &identifier).is_some(),
+            clips.layer(&graph.read_view(), &identifier).is_some(),
             "and reading it must reach the graph's layer",
         );
         Ok(())
@@ -1993,12 +1996,12 @@ mod tests {
 
         let mut clips = ClipCache::default();
         let first = clips
-            .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+            .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?
             .expect("synthesized");
         let layers = clips.clip_layers.len();
         assert_eq!(
             clips
-                .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+                .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?
                 .as_deref(),
             Some(&*first)
         );
@@ -2006,8 +2009,8 @@ mod tests {
 
         // clip0 samples `size`, so the synthesized manifest declares it as
         // varying and the set owns the attribute.
-        assert!(clips.manifest_declares(&graph, Some(&first), &sdf::path("/Model.size")?)?);
-        assert!(!clips.manifest_declares(&graph, Some(&first), &sdf::path("/Model.absent")?)?);
+        assert!(clips.manifest_declares(&graph.read_view(), Some(&first), &sdf::path("/Model.size")?)?);
+        assert!(!clips.manifest_declares(&graph.read_view(), Some(&first), &sdf::path("/Model.absent")?)?);
 
         // Re-authoring the set supersedes the manifest — an edit that only moves
         // an activation time, or one that only changes the clip-internal prim
@@ -2016,7 +2019,7 @@ mod tests {
         let mut retimed = resolved.clone();
         retimed.set.active = vec![(0.0, 0), (5.0, 1)];
         let second = clips
-            .manifest_id(&graph, &mut Diagnostics::default(), &retimed, &model)?
+            .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &retimed, &model)?
             .expect("synthesized");
         assert_ne!(second, first);
         assert!(!clips.clip_layers.contains_key(&first));
@@ -2025,7 +2028,7 @@ mod tests {
         let mut repathed = retimed.clone();
         repathed.set.prim_path = Some(sdf::path("/Other")?);
         let third = clips
-            .manifest_id(&graph, &mut Diagnostics::default(), &repathed, &model)?
+            .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &repathed, &model)?
             .expect("synthesized");
         assert_ne!(third, second);
         assert!(!clips.clip_layers.contains_key(&second));
@@ -2039,21 +2042,21 @@ mod tests {
         elsewhere.set.asset_paths = vec![AssetPath::new("./clip1.usda")];
         elsewhere.set.active = vec![(0.0, 0)];
         let mine = clips
-            .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+            .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?
             .expect("synthesized");
         let theirs = clips
-            .manifest_id(&graph, &mut Diagnostics::default(), &elsewhere, &other_prim)?
+            .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &elsewhere, &other_prim)?
             .expect("synthesized");
         assert_ne!(mine, theirs);
         assert_eq!(
             clips
-                .manifest_id(&graph, &mut Diagnostics::default(), &resolved, &model)?
+                .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?
                 .as_deref(),
             Some(&*mine)
         );
         assert_eq!(
             clips
-                .manifest_id(&graph, &mut Diagnostics::default(), &elsewhere, &other_prim)?
+                .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &elsewhere, &other_prim)?
                 .as_deref(),
             Some(&*theirs)
         );

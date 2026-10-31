@@ -25,7 +25,7 @@ use super::index_cache::SpecSiteRecord;
 use super::layer_graph::StackIdentity;
 use super::prim_graph::{ArcType, Node};
 use super::prim_resolve::Supplied;
-use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, MapFunction};
+use super::{LayerGraph, LayerId, LayerStackId, LayerStackIdentifier, LayerView, MapFunction};
 
 /// Which value-resolution walk to run — the Rust form of C++
 /// `UsdStage::_GetResolveInfoImpl`'s three-way dispatch on
@@ -415,7 +415,7 @@ impl OpinionSite<'_> {
 /// clip's times.
 pub(crate) struct ClipProbe<'a> {
     pub(crate) cache: &'a mut ClipCache,
-    pub(crate) graph: &'a LayerGraph,
+    pub(crate) graph: &'a LayerView<'a>,
     /// The channel a clip query's diagnostics report into, lent by the caller
     /// for the length of the probe — a clip answers through a value, so its
     /// diagnostics travel beside the walk rather than in its result.

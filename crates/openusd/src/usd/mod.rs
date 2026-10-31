@@ -63,8 +63,8 @@ pub use schema_registry::{
 };
 pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
-    ComposedStatus, EditContext, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus,
-    Stage, StageAuthoringError, StageBuilder, TypeConflict, WeakStage,
+    ComposedStatus, EditContext, EditTarget, EditTargetArc, InitialLoadSet, LayerRef, LoadPolicy, PrimPredicate,
+    PrimStatus, Stage, StageAuthoringError, StageBuilder, TypeConflict, WeakStage,
 };
 
 /// The core `usd` family, generated from OpenUSD's own `usd/schema.usda` and

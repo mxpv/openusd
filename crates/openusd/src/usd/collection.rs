@@ -837,7 +837,7 @@ mod tests {
 
         let root = stage.root_layer().identifier().to_string();
         let overwrite = |attr: Attribute, value: Value| -> Result<()> {
-            stage.layer_mut(&root).expect("root layer is live").edit(|e| {
+            stage.layer_handle(&root).expect("root layer is live").edit(|e| {
                 e.attribute_mut(attr.path())?
                     .expect("authored above")
                     .set("default", value);

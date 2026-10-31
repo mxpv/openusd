@@ -20,7 +20,7 @@ use crate::vt::Value;
 use super::diagnostics::Diagnostics;
 use super::layer_stack::LayerStackId;
 use super::prim_graph::Node;
-use super::{CompositionDiagnostic, ExpressionContext, LayerGraph, LayerId, QueryError};
+use super::{CompositionDiagnostic, ExpressionContext, LayerId, LayerView, QueryError};
 
 /// Composes the `references` list-op, folding each authoring sublayer's offset
 /// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
@@ -31,7 +31,7 @@ use super::{CompositionDiagnostic, ExpressionContext, LayerGraph, LayerId, Query
 /// `${VAR}` asset path reads land in `used_vars` (see [`evaluate_expression`]).
 pub(super) fn compose_references_in(
     nodes: &[Node<'_>],
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
     errors: &mut Diagnostics,
@@ -78,7 +78,7 @@ pub(super) fn compose_references_in(
 /// `${VAR}` asset path reads land in `used_vars`.
 pub(super) fn collect_payloads_in(
     nodes: &[Node<'_>],
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
     errors: &mut Diagnostics,
@@ -126,7 +126,7 @@ pub(super) fn collect_payloads_in(
 pub(super) fn compose_arc_list_in<T: Clone + PartialEq + Hash>(
     nodes: &[Node<'_>],
     field: FieldKey,
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
 ) -> Result<Vec<T>, QueryError>
 where
     Value: TryInto<ListOp<T>>,
@@ -146,7 +146,7 @@ where
 /// layer listing it gives (C++ `PcpComposeSiteVariantSetOptions` reads
 /// `variantChildren` this way).
 pub(super) fn compose_token_children(
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     stack: LayerStackId,
     path: &Path,
     key: ChildrenKey,
@@ -179,7 +179,7 @@ pub(super) fn compose_token_children(
 fn compose_list_op_in<T, D, R, A>(
     nodes: &[Node<'_>],
     field: &str,
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     decode: D,
     mut retime: R,
     mut anchor: A,
@@ -265,7 +265,7 @@ where
 fn resolve_arc_asset_path(
     asset_path: &mut String,
     authoring_layer: LayerId,
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     expr_vars: &HashMap<String, Value>,
     context: ExpressionContext,
     site: &Path,
@@ -290,9 +290,7 @@ fn resolve_arc_asset_path(
     }
     // The same relative path authored in different layers names distinct
     // targets. An empty path, an internal reference, stays empty.
-    *asset_path = graph
-        .layer(authoring_layer)
-        .absolute_path_with(graph.layer_registry(), asset_path);
+    *asset_path = graph.absolute_path(authoring_layer, asset_path);
     Some(arc_tcps_scale(graph.layer(authoring_layer), asset_path, graph))
 }
 
@@ -388,7 +386,7 @@ pub(super) fn evaluate_expression(
 // the duplicate can't be hoisted trivially — the ratio's numerator is the
 // per-member authoring rate, knowable only here inside the in-place list-op fold,
 // while the target stack is needed there — but both are cheap hash hits.
-fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, graph: &LayerGraph) -> f64 {
+fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, graph: &LayerView<'_>) -> f64 {
     if asset_path.is_empty() {
         return 1.0;
     }

@@ -889,6 +889,7 @@ impl Prim {
     /// populated can register (see `IndexCache::is_populated`), so every
     /// instance here is one the mask exposes.
     pub fn instances(&self) -> Result<Vec<sdf::Path>> {
+        self.stage.settle()?;
         self.stage.resolve_prototype_path(&self.path)?;
         Ok(self.stage.cache().instances_of(&self.path))
     }
@@ -896,6 +897,7 @@ impl Prim {
     /// Returns `true` if this prim is a prototype root (`/__Prototype_N`).
     /// Mirrors C++ `UsdPrim::IsPrototype`.
     pub fn is_prototype(&self) -> Result<bool> {
+        self.stage.settle()?;
         self.stage.resolve_prototype_path(&self.path)?;
         Ok(self.stage.cache().is_prototype(&self.path))
     }
@@ -909,6 +911,7 @@ impl Prim {
     /// only ask this of a prim it instantiated, so a path under a registered
     /// root that composes to nothing answers `false`.
     pub fn is_in_prototype(&self) -> Result<bool> {
+        self.stage.settle()?;
         self.stage.resolve_prototype_path(&self.path)?;
         let in_namespace = self.stage.cache().is_in_prototype(&self.path);
         Ok(in_namespace && self.is_valid()?)
@@ -946,6 +949,7 @@ impl Prim {
     // changes; a memo here needs an epoch a `kind` edit advances, which no
     // existing epoch does.
     fn model_flags(&self) -> Result<ModelFlags> {
+        self.stage.settle()?;
         const GROUP: ModelFlags = ModelFlags {
             model: true,
             group: true,
@@ -2208,7 +2212,7 @@ mod tests {
 
         let root_id = stage.root_layer().identifier().to_owned();
         {
-            let mut root = stage.layer_mut(&root_id).expect("root layer");
+            let root = stage.layer_handle(&root_id).expect("root layer");
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set(
                     "fallbackPrimTypes",

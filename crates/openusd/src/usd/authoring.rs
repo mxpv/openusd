@@ -632,6 +632,7 @@ impl PlanState {
         stage: &Stage,
         property: PlannedProperty,
     ) -> Result<PlannedProperty, StageAuthoringError> {
+        stage.settle()?;
         if self.properties.contains(&property.path) {
             return Err(StageAuthoringError::DuplicateProperty { path: property.path });
         }
@@ -640,7 +641,7 @@ impl PlanState {
             return Err(StageAuthoringError::PlannedTypeChanged { path: prim });
         }
         let (layer, spec_path) = stage.target_site(&prim)?;
-        if !self.overlay.holds_spec(&stage.layers(), layer, &spec_path) {
+        if !self.overlay.holds_spec(&stage.layer_view(), layer, &spec_path) {
             let mut overlay = self.overlay.clone();
             write_spec(stage, &mut overlay, &prim, &SpecWrite::default())?;
             self.revalidate(stage, &overlay)?;
@@ -656,6 +657,7 @@ impl PlanState {
     /// read once until the overlay changes or a change outside the batch
     /// moves what the stage composes, when it is read again.
     pub(super) fn schema(&mut self, stage: &Stage, prim: &sdf::Path) -> Result<Arc<PrimTypeInfo>, StageAuthoringError> {
+        stage.settle()?;
         let epoch = stage.edit_epoch();
         if let Some((read_at, schema)) = self.schemas.get(prim)
             && *read_at == epoch
@@ -702,6 +704,7 @@ impl PlanState {
     /// plan opened moved a prim it read; the first such prim in path order is
     /// the one reported.
     fn check_fresh(&self, stage: &Stage) -> Result<(), StageAuthoringError> {
+        stage.settle()?;
         let Some(epoch) = self.epoch else {
             return Ok(());
         };
@@ -857,7 +860,7 @@ fn write_spec(
     spec: &SpecWrite,
 ) -> Result<(), StageAuthoringError> {
     let (layer, spec_path) = stage.target_site(path)?;
-    let graph = stage.layers();
+    let graph = stage.layer_view();
     // Leaf first: a spec the layer or the overlay already holds has every
     // spec above it.
     for (site, kind) in sdf::prim_chain(&spec_path)?.rev() {
@@ -2301,7 +2304,7 @@ mod tests {
             let a = edit.prim("/A")?;
             a.attribute_builder("inputs:angle", "double").set(1.0_f32).build()?;
             let root = stage.root_layer().identifier().to_owned();
-            stage.layer_mut(&root).expect("the root layer").edit(|layer| {
+            stage.layer_handle(&root).expect("the root layer").edit(|layer| {
                 layer.pseudo_root_mut().expect("a pseudo-root").set(
                     "fallbackPrimTypes",
                     vt::Value::Dictionary(vt::Dictionary::from([(

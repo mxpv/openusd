@@ -21,7 +21,7 @@ use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite, extend_reversed};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
-use super::{LayerGraph, LayerId, QueryError, VariantFallbackMap};
+use super::{LayerGraph, LayerId, LayerView, QueryError, VariantFallbackMap};
 
 /// How much of the composition graph a value-resolution walk visits
 /// ([`PrimIndex::live_sites`]) — C++ `Usd_Resolver`'s `skipEmptyNodes`.
@@ -628,7 +628,7 @@ impl PrimIndex {
         &mut self,
         layer: LayerId,
         path: &Path,
-        graph: &LayerGraph,
+        graph: &LayerView<'_>,
         runs: &mut NodeRuns,
     ) -> SpecRefresh {
         let mut refresh = SpecRefresh::default();
@@ -689,7 +689,7 @@ impl PrimIndex {
 
     /// Installs the spec stack and clip flag this index composes, replacing
     /// whatever it held. Run by the index builder, the single composition seam.
-    fn finalize_spec_stack(&mut self, graph: &LayerGraph) {
+    fn finalize_spec_stack(&mut self, graph: &LayerView<'_>) {
         let (stack, authors_clips) = self.build_spec_stack(graph);
         self.spec_stack = stack;
         self.authors_clips = authors_clips;
@@ -774,7 +774,7 @@ impl PrimIndex {
     ///
     /// A node's members are probed from its [`spec_from`](Node::spec_from):
     /// the indexer already found the stronger ones to author no spec.
-    fn build_spec_stack(&self, graph: &LayerGraph) -> (Vec<SpecSite>, bool) {
+    fn build_spec_stack(&self, graph: &LayerView<'_>) -> (Vec<SpecSite>, bool) {
         let mut stack = Vec::new();
         let mut authors_clips = false;
         for &id in self.graph.strength_order() {
@@ -810,7 +810,7 @@ impl PrimIndex {
     /// node's entries landed and whether the clip flag survived, not whether a
     /// flag is itself current. The flag transitions are covered by
     /// [`refresh_has_specs_at`](Self::refresh_has_specs_at)'s rebuild rules.
-    pub(super) fn spec_stack_matches_rebuild(&self, graph: &LayerGraph) -> bool {
+    pub(super) fn spec_stack_matches_rebuild(&self, graph: &LayerView<'_>) -> bool {
         let (rebuilt, authors_clips) = self.build_spec_stack(graph);
         self.authors_clips == authors_clips
             && self.spec_stack.len() == rebuilt.len()
@@ -925,7 +925,7 @@ impl PrimIndex {
     /// The metadata is read first: few prims author it, and the node test
     /// partitions the whole graph. A failed read counts only for an index
     /// that has an instanceable node.
-    pub(crate) fn is_instanceable(&self, graph: &LayerGraph, depth: u16) -> Result<bool, QueryError> {
+    pub(crate) fn is_instanceable(&self, graph: &LayerView<'_>, depth: u16) -> Result<bool, QueryError> {
         match self.resolve_field(
             FieldKey::Instanceable.as_str(),
             graph,
@@ -1082,7 +1082,7 @@ impl PrimIndex {
     /// which the caller registers with the cached prim's dependencies.
     pub(crate) fn build_with_cache(
         path: &Path,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         ctx: &CompositionContext,
         fallbacks: &VariantFallbackMap,
         cached_indices: &sdf::PathTable<PrimEntry>,
@@ -1116,7 +1116,7 @@ impl PrimIndex {
     #[allow(clippy::too_many_arguments)] // each input is a distinct composition parameter
     pub(crate) fn build_with_cache_in(
         path: &Path,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         ctx: &CompositionContext,
         fallbacks: &VariantFallbackMap,
         cached_indices: &sdf::PathTable<PrimEntry>,
@@ -1223,7 +1223,7 @@ impl PrimIndex {
     /// where the strongest node declaring it lists it (C++
     /// `UsdVariantSets::GetNames` over `PcpComposeSiteVariantSets`). Every
     /// node is read, inert ones included, as C++ reads its whole node range.
-    pub(crate) fn variant_set_names(&self, graph: &LayerGraph) -> Result<Vec<String>, QueryError> {
+    pub(crate) fn variant_set_names(&self, graph: &LayerView<'_>) -> Result<Vec<String>, QueryError> {
         let mut names: Vec<String> = Vec::new();
         for node in self.ordered_nodes() {
             for name in compose_arc_list_in::<String>(&[node], FieldKey::VariantSetNames, graph)? {
@@ -1239,7 +1239,7 @@ impl PrimIndex {
     /// `UsdVariantSet::GetVariantNames`): each node at a prim or
     /// variant-selection site reads `variantChildren` at its own site's set
     /// across its layer stack (C++ `PcpComposeSiteVariantSetOptions`).
-    pub(crate) fn variant_names(&self, graph: &LayerGraph, set: &str) -> Result<Vec<String>, QueryError> {
+    pub(crate) fn variant_names(&self, graph: &LayerView<'_>, set: &str) -> Result<Vec<String>, QueryError> {
         let mut names = BTreeSet::new();
         for node in self.ordered_nodes() {
             let path = node.path();
@@ -1364,7 +1364,7 @@ impl Deref for PrimIndexView<'_> {
 /// so the flag the refresh derives from it agrees with the one the indexer
 /// computes by asking directly.
 fn push_node_run(
-    graph: &LayerGraph,
+    graph: &LayerView<'_>,
     node: Node<'_>,
     id: NodeId,
     from: usize,
@@ -1418,14 +1418,14 @@ pub(super) fn registers_site(node: Node<'_>, prim_path: &Path) -> bool {
 ///
 /// Short-circuits on the first member that answers yes, which is all its callers
 /// want.
-pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Path) -> bool {
+pub(super) fn stack_has_spec(graph: &LayerView<'_>, stack: LayerStackId, path: &Path) -> bool {
     first_spec_layer(graph, stack, path).is_some()
 }
 
 /// The position in `stack` of the strongest layer that authors a spec at
 /// `path`, the probe behind [`stack_has_spec`] for a caller that records
 /// where it stopped ([`Node::spec_from`]).
-pub(super) fn first_spec_layer(graph: &LayerGraph, stack: LayerStackId, path: &Path) -> Option<u16> {
+pub(super) fn first_spec_layer(graph: &LayerView<'_>, stack: LayerStackId, path: &Path) -> Option<u16> {
     let position = graph
         .layer_stack(stack)
         .iter()
@@ -1480,7 +1480,7 @@ pub(crate) mod tests {
         /// ancestors, since the indexer seeds a child from its cached parent.
         pub(crate) fn build_with_context(
             path: &Path,
-            stack: &LayerGraph,
+            stack: &LayerView<'_>,
             ctx: &CompositionContext,
         ) -> BuildResult<Self> {
             Self::build_with_cache(
@@ -1554,7 +1554,7 @@ pub(crate) mod tests {
             let mut pending: Vec<Demand> = Vec::new();
             for ancestor in &chain {
                 let (index, _errors, demands, _deps, _copied) =
-                    PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &fallbacks, &cache, true)
+                    PrimIndex::build_with_cache(ancestor, &stack.read_view(), &parent_ctx, &fallbacks, &cache, true)
                         .expect("index build failed");
                 pending.extend(demands);
                 parent_ctx = index.context_for_children(&parent_ctx);
@@ -1601,7 +1601,7 @@ pub(crate) mod tests {
 
     /// The arc and target path of each unresolved-prim-path diagnostic that
     /// composing `prim` in `stack` reports.
-    fn unresolved_targets(stack: &LayerGraph, prim: &str) -> Result<Vec<(ArcType, String)>> {
+    fn unresolved_targets(stack: &LayerView<'_>, prim: &str) -> Result<Vec<(ArcType, String)>> {
         let (_, errors, _, _, _) = PrimIndex::build_with_cache(
             &Path::new(prim)?,
             stack,
@@ -2112,7 +2112,7 @@ def \"B\" { custom double y = 2 }
         let a_idx = stack.find_by_leaf("A.usd").unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
-            stack.layer(a_idx).data().has_spec(&a_attr_path),
+            stack.read_view().layer(a_idx).data().has_spec(&a_attr_path),
             "A.usd should have spec at /A.A_attr"
         );
         Ok(())
@@ -2245,7 +2245,7 @@ def "World" (
         let fallbacks = VariantFallbackMap::new().add("v", ["hi"]);
         let (index, ..) = PrimIndex::build_with_cache(
             &Path::new("/World").unwrap(),
-            &stack,
+            &stack.read_view(),
             &CompositionContext::default(),
             &fallbacks,
             &sdf::PathTable::new(),
@@ -2331,7 +2331,7 @@ def "Root" (
 
         let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
-            &stack,
+            &stack.read_view(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2360,7 +2360,10 @@ def "Root" (
             ));
             let model = parse_usda("#usda 1.0\ndef Scope \"Present\" {}\n");
             let stack = two_layer_stack(root, model);
-            assert_eq!(unresolved_targets(&stack, "/Mounted")?, [(arc, target.to_string())]);
+            assert_eq!(
+                unresolved_targets(&stack.read_view(), "/Mounted")?,
+                [(arc, target.to_string())]
+            );
         }
         Ok(())
     }
@@ -2400,7 +2403,7 @@ def Scope "NestedMissing" (references = </Outer/ToAbsent>) {}
 "#,
         );
         let stack = one_layer_stack(layer);
-        let unresolved = |prim: &str| unresolved_targets(&stack, prim);
+        let unresolved = |prim: &str| unresolved_targets(&stack.read_view(), prim);
         assert_eq!(
             unresolved("/RootMissing")?,
             [(ArcType::Reference, "/Absent".to_string())]
@@ -2460,7 +2463,7 @@ def "Outer" (
 
         let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
-            &stack,
+            &stack.read_view(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2515,7 +2518,7 @@ def "Outer"
 
         let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
-            &stack,
+            &stack.read_view(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2548,7 +2551,7 @@ def "Prim" (
         let build = |stack: &LayerGraph| {
             PrimIndex::build_with_cache(
                 &Path::new("/Prim").unwrap(),
-                stack,
+                &stack.read_view(),
                 &CompositionContext::default(),
                 &VariantFallbackMap::new(),
                 &sdf::PathTable::new(),
@@ -2602,7 +2605,7 @@ def "Prim" (
 
         let (index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Prim").unwrap(),
-            &stack,
+            &stack.read_view(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -3076,11 +3079,14 @@ def "Model"
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index =
-            PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &stack, &CompositionContext::default())?;
+        let index = PrimIndex::build_with_context(
+            &Path::new("/Root").unwrap(),
+            &stack.read_view(),
+            &CompositionContext::default(),
+        )?;
 
         let samples = index
-            .resolve_time_samples(&stack, Some(".radius"))?
+            .resolve_time_samples(&stack.read_view(), Some(".radius"))?
             .expect("retimed samples");
         let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
         assert_eq!(times, vec![12.0, 20.0]);
@@ -3105,8 +3111,11 @@ def "Root" (
         let model = parse_usda("#usda 1.0\ndef \"Model\" { custom double radius = 1.0 }\n");
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index =
-            PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &stack, &CompositionContext::default())?;
+        let index = PrimIndex::build_with_context(
+            &Path::new("/Root").unwrap(),
+            &stack.read_view(),
+            &CompositionContext::default(),
+        )?;
 
         let sites = |index: &PrimIndex| -> Vec<(NodeId, f64, f64)> {
             index
@@ -3280,7 +3289,7 @@ over "P" (
 
         // Strongest-only resolution would drop the weaker "b"; folding keeps it.
         assert_eq!(
-            index.clip_sets_order(&stack)?,
+            index.clip_sets_order(&stack.read_view())?,
             Some(vec!["a".to_string(), "b".to_string()])
         );
         Ok(())
@@ -3299,7 +3308,7 @@ def "P" {}
         let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&mut stack, "/P");
 
-        assert_eq!(index.clip_sets_order(&stack)?, None);
+        assert_eq!(index.clip_sets_order(&stack.read_view())?, None);
         Ok(())
     }
 
@@ -3322,7 +3331,7 @@ def "P" (
         let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&mut stack, "/P");
 
-        assert_eq!(index.clip_sets_order(&stack)?, Some(Vec::new()));
+        assert_eq!(index.clip_sets_order(&stack.read_view())?, Some(Vec::new()));
         Ok(())
     }
 
@@ -3359,10 +3368,10 @@ over "P" (
         let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&mut stack, "/P");
 
-        assert_eq!(index.clip_sets_order(&stack)?, Some(vec!["a".to_string()]));
+        assert_eq!(index.clip_sets_order(&stack.read_view())?, Some(vec!["a".to_string()]));
         // The list-op form (behind `ClipsAPI::clip_sets`) stays canonical, so
         // flattening it agrees with the resolved order rather than dropping "a".
-        let list_op = index.clip_sets_list_op(&stack)?.expect("authored");
+        let list_op = index.clip_sets_list_op(&stack.read_view())?.expect("authored");
         assert_eq!(list_op.flatten(), vec!["a".to_string()]);
         Ok(())
     }

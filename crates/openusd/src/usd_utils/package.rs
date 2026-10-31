@@ -61,7 +61,8 @@ pub fn create_usdz_package<'a>(
     usdz_file_path: impl AsRef<Path>,
     first_layer_name: Option<&str>,
 ) -> Result<Vec<String>> {
-    let graph = stage.layers();
+    stage.settle()?;
+    let graph = stage.layer_view();
     let policy = Discover {
         inactive: true,
         open_packages: false,
@@ -860,7 +861,7 @@ def "T"
             .find(|layer| layer.ends_with("pkg.usdz"))
             .expect("the package's default layer");
         let probe = sdf::path("/R.probe")?;
-        stage.layer_mut(default_layer).unwrap().edit(|edit| {
+        stage.layer_handle(default_layer).unwrap().edit(|edit| {
             edit.data_mut()
                 .set_field(&probe, sdf::FieldKey::Default.as_str(), vt::Value::Int(42));
             Ok(())
@@ -993,7 +994,7 @@ def "T"
         let dependencies = all_dependencies(&stage, &root)?;
         let probe = sdf::path("/R.probe")?;
         for identifier in dependencies.layers.iter().filter(|layer| layer.contains("pkg.usdz")) {
-            stage.layer_mut(identifier).unwrap().edit(|edit| {
+            stage.layer_handle(identifier).unwrap().edit(|edit| {
                 edit.data_mut()
                     .set_field(&probe, sdf::FieldKey::Default.as_str(), vt::Value::Int(42));
                 Ok(())

@@ -159,12 +159,12 @@ impl UndoStage {
     /// Inside an open [`group`](Self::group) nothing is undone, and this
     /// returns `false`: the group's own edits are newer than every step.
     pub fn undo(&self) -> Result<bool, StageAuthoringError> {
-        // A direct `layer_mut` edit does not drain on its own, so seal any edit
+        // A direct `layer_handle` edit does not drain on its own, so seal any edit
         // still pending into the stack before reading it — otherwise it is
         // invisible to the pop, and the replay's own drain below would then skip
         // its seal and lose it. Draining on a query is the stage's normal
         // drain-on-read.
-        self.capture.process_pending();
+        self.capture.settle()?;
         let step = {
             let mut journal = self.capture.log().borrow_mut();
             if journal.group.is_some() {
@@ -241,6 +241,7 @@ impl UndoStage {
     /// [`author_layers_txn`] (all-or-nothing) through its shared edit-target
     /// mapping. A layer no longer in the stage is skipped.
     fn replay(&self, transaction: &Transaction) -> Result<(), StageAuthoringError> {
+        self.capture.settle()?;
         // Resolve recorded identifiers to live layer ids under a short graph
         // borrow, pairing each with its inverse edits. The borrow is released
         // before `author_layers_txn` re-borrows the graph mutably.
@@ -388,7 +389,7 @@ impl Drop for CloseGroup<'_> {
             return;
         }
         // A group closed by unwinding skips its final drain, so a transaction
-        // it began, such as a direct `layer_mut` edit, may still be in flight.
+        // it began, such as a direct `layer_handle` edit, may still be in flight.
         // It seals into this step when it seals, and runs no user code here; a
         // capture whose transaction rolled back never seals.
         let stepped = !own.is_empty();
@@ -619,6 +620,7 @@ impl<L> Drop for CaptureStage<L> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::panic::{self, AssertUnwindSafe};
 
     use super::*;
@@ -689,7 +691,7 @@ mod tests {
         Ok(())
     }
 
-    /// A direct `layer_mut` edit left pending when a stage edit lands keeps its
+    /// A direct `layer_handle` edit left pending when a stage edit lands keeps its
     /// own step — the two transactions do not coalesce, and neither inverse is
     /// discarded.
     #[test]
@@ -699,7 +701,7 @@ mod tests {
         // it sits pending when the stage edit below commits.
         let root = stage.root_layer().identifier().to_string();
         {
-            let mut layer = stage.layer_mut(&root).expect("root layer");
+            let layer = stage.layer_handle(&root).expect("root layer");
             layer.edit(|l| author_prim(l, "/Direct"))?;
         }
         stage.define_prim("/Staged")?;
@@ -718,7 +720,7 @@ mod tests {
         Ok(())
     }
 
-    /// A direct `layer_mut` edit is undoable with no intervening composed read or
+    /// A direct `layer_handle` edit is undoable with no intervening composed read or
     /// stage edit: `undo` (and `can_undo`/`undo_depth`) drains the still-pending
     /// edit into the stack first, so it is neither invisible nor lost to the
     /// replay's own drain.
@@ -727,12 +729,41 @@ mod tests {
         let stage = UndoStage::from(in_memory_stage()?);
         let root = stage.root_layer().identifier().to_string();
         {
-            let mut layer = stage.layer_mut(&root).expect("root layer");
+            let layer = stage.layer_handle(&root).expect("root layer");
             layer.edit(|l| author_prim(l, "/Direct"))?;
         }
         // No composed read or stage edit drains the pending edit before undo.
         assert!(stage.undo()?, "the pending direct edit is undone");
         assert!(!stage.prim("/Direct")?.is_valid()?);
+        assert!(!stage.can_undo());
+        Ok(())
+    }
+
+    /// Two direct edits a layer sink makes from its `after_commit` are
+    /// delivered after it returns, behind each other, and each still records
+    /// its own undo step.
+    #[test]
+    fn nested_direct_edits_undo() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        let root = stage.root_layer().identifier().to_string();
+        let layer = stage.layer_handle(&root).expect("root layer");
+        let nested = layer.clone();
+        let fired = Rc::new(Cell::new(false));
+        let once = Rc::clone(&fired);
+        let sink = layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+            if !once.replace(true) {
+                nested.edit(|l| author_prim(l, "/First")).expect("first nested edit");
+                nested.edit(|l| author_prim(l, "/Second")).expect("second nested edit");
+            }
+        })?;
+        layer.edit(|l| author_prim(l, "/Outer"))?;
+        layer.remove_sink(sink)?;
+
+        assert_eq!(stage.undo_depth(), 3);
+        for path in ["/Second", "/First", "/Outer"] {
+            assert!(stage.undo()?);
+            assert!(!stage.prim(path)?.is_valid()?, "{path} is undone");
+        }
         assert!(!stage.can_undo());
         Ok(())
     }
@@ -866,7 +897,7 @@ mod tests {
         Ok(())
     }
 
-    /// A group whose edit panics after a direct `layer_mut` edit still records
+    /// A group whose edit panics after a direct `layer_handle` edit still records
     /// that edit in its step: it seals into the group once drained, so one
     /// undo reverts the group whole.
     #[test]
@@ -876,7 +907,7 @@ mod tests {
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
             undo.group(|stage| -> Result<()> {
                 stage.define_prim("/Staged")?;
-                let mut layer = stage.layer_mut(&root).expect("root layer");
+                let layer = stage.layer_handle(&root).expect("root layer");
                 layer.edit(|edit| author_prim(edit, "/Direct"))?;
                 drop(layer);
                 panic!("the edit panics after a direct layer edit")
@@ -905,7 +936,7 @@ mod tests {
         let undo = UndoStage::with_capacity(in_memory_stage()?, 1);
         undo.define_prim("/Kept")?;
         let root = undo.root_layer().identifier().to_string();
-        let sink = undo.layer_mut(&root).expect("root layer").add_sink(Veto);
+        let sink = undo.layer_handle(&root).expect("root layer").add_sink(Veto)?;
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
             undo.group(|stage| -> Result<()> {
                 assert!(stage.define_prim("/Vetoed").is_err());
@@ -913,7 +944,7 @@ mod tests {
             })
         }));
         assert!(unwound.is_err());
-        undo.layer_mut(&root).expect("root layer").remove_sink(sink);
+        undo.layer_handle(&root).expect("root layer").remove_sink(sink)?;
 
         assert_eq!(undo.undo_depth(), 1);
         assert!(undo.undo()?);

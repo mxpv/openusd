@@ -22,7 +22,7 @@ use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
 use super::value_resolve::{self, OpinionSite, Step};
-use super::{LayerGraph, LayerId, QueryError};
+use super::{LayerGraph, LayerId, LayerView, QueryError};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -34,7 +34,7 @@ struct Opinion<'a> {
     node: Node<'a>,
     /// Id of the contributing layer, as yielded by
     /// [`Node::layers`](super::prim_graph::Node::layers) and used with
-    /// [`LayerGraph::layer`](super::LayerGraph::layer) — not a position within
+    /// [`LayerView::layer`](super::LayerView::layer) — not a position within
     /// the node's layer stack.
     layer: LayerId,
     /// The path queried in the contributing layer (the node path with the
@@ -582,7 +582,7 @@ impl PrimIndex {
     pub(crate) fn resolve_field(
         &self,
         field: &str,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
         assets: AssetMode,
         errors: &mut Diagnostics,
@@ -633,7 +633,7 @@ impl PrimIndex {
     fn resolve_list_op(
         &self,
         field: &str,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
         strongest: Value,
     ) -> Result<Value, QueryError> {
@@ -696,7 +696,7 @@ impl PrimIndex {
     pub(crate) fn resolve_path_list_op_validated(
         &self,
         field: FieldKey,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
         instance_targets: &InstanceTargets,
     ) -> Result<(Vec<Path>, Vec<InvalidTarget>), QueryError> {
@@ -786,7 +786,7 @@ impl PrimIndex {
     fn collect_path_list_ops(
         &self,
         field: FieldKey,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
     ) -> Result<Vec<sdf::PathListOp>, QueryError> {
         let field = field.as_str();
@@ -818,7 +818,7 @@ impl PrimIndex {
     pub(crate) fn resolve_path_list_op_deleted(
         &self,
         field: FieldKey,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
     ) -> Result<Vec<Path>, QueryError> {
         // `collect_path_list_ops` yields strongest first; deletions accumulate as
@@ -925,7 +925,7 @@ impl PrimIndex {
     fn opinions<'a>(
         &'a self,
         field: &'a str,
-        stack: &'a LayerGraph,
+        stack: &'a LayerView<'a>,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<Opinion<'a>, QueryError>> + 'a {
         self.opinions_in_layer_time(field, stack, prop_suffix)
@@ -941,7 +941,7 @@ impl PrimIndex {
     fn opinions_in_layer_time<'a>(
         &'a self,
         field: &'a str,
-        stack: &'a LayerGraph,
+        stack: &'a LayerView<'a>,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<Opinion<'a>, QueryError>> + 'a {
         self.contributing_sites(prop_suffix).filter_map(move |site| {
@@ -984,7 +984,7 @@ impl PrimIndex {
     pub(crate) fn resolve_strongest(
         &self,
         field: &str,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
         assets: AssetMode,
         errors: &mut Diagnostics,
@@ -1019,7 +1019,7 @@ impl PrimIndex {
     /// strongest authored opinion wins as a whole.
     pub(crate) fn resolve_time_samples(
         &self,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>, QueryError> {
         self.first_time_samples(stack, prop_suffix, |map, opinion| {
@@ -1046,7 +1046,7 @@ impl PrimIndex {
     /// borrowed map directly.
     fn first_time_samples<R>(
         &self,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         prop_suffix: Option<&str>,
         extract: impl FnOnce(&sdf::TimeSampleMap, &Opinion<'_>) -> R,
     ) -> Result<Option<R>, QueryError> {
@@ -1082,7 +1082,7 @@ impl PrimIndex {
     /// accepted, since USDC backends may decode the field either way. A
     /// `ValueBlock` with no stronger opinion leaves the field unauthored
     /// (`None`), falling back to name order.
-    pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>, QueryError> {
+    pub(crate) fn clip_sets_order(&self, stack: &LayerView<'_>) -> Result<Option<Vec<String>>, QueryError> {
         // Fold directly into the applied order. This shares the opinion-gather
         // (`clip_sets_ops`) with `clip_sets_list_op` but composes into a `Vec`
         // in one pass, rather than building an intermediate list-op — value
@@ -1100,7 +1100,7 @@ impl PrimIndex {
     /// `SdfListOp::ApplyOperations` over the inner op);
     /// [`clip_sets_order`](Self::clip_sets_order) is the applied order.
     /// `None` when unauthored.
-    pub(crate) fn clip_sets_list_op(&self, stack: &LayerGraph) -> Result<Option<sdf::StringListOp>, QueryError> {
+    pub(crate) fn clip_sets_list_op(&self, stack: &LayerView<'_>) -> Result<Option<sdf::StringListOp>, QueryError> {
         // `clip_sets_ops` yields strongest first; fold each weaker op under the
         // accumulated stronger one.
         let ops = self.clip_sets_ops(stack)?;
@@ -1121,7 +1121,7 @@ impl PrimIndex {
     /// stopping at a `ValueBlock`. The `String`/`Token` list-op encodings and
     /// bare vecs (treated as explicit) are all accepted, since USDC backends may
     /// decode the field either way (spec 12.2.6).
-    fn clip_sets_ops(&self, stack: &LayerGraph) -> Result<Vec<sdf::StringListOp>, QueryError> {
+    fn clip_sets_ops(&self, stack: &LayerView<'_>) -> Result<Vec<sdf::StringListOp>, QueryError> {
         let mut ops = Vec::new();
         for opinion in self.opinions_in_layer_time(FieldKey::ClipSets.as_str(), stack, None) {
             match opinion?.value.into_owned() {
@@ -1154,7 +1154,7 @@ impl PrimIndex {
     /// attributes and metadata", which these are, so the promise is kept here.
     pub(crate) fn resolve_clip_sets(
         &self,
-        stack: &LayerGraph,
+        stack: &LayerView<'_>,
         errors: &mut Diagnostics,
     ) -> Result<Vec<clip::ResolvedClipSet>, QueryError> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
@@ -1322,7 +1322,11 @@ impl PrimIndex {
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.
     /// Iterates strongest-to-weakest tracking the latest match, so a
     /// [`Value::ValueBlock`] still blocks weaker opinions.
-    fn resolve_variability(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
+    fn resolve_variability(
+        &self,
+        stack: &LayerView<'_>,
+        prop_suffix: Option<&str>,
+    ) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Variability.as_str();
         let mut weakest = None;
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -1341,7 +1345,7 @@ impl PrimIndex {
     /// Returns `Bool(true)` as soon as any opinion is true, `Bool(false)` if
     /// at least one opinion was authored but none were true, and `None`
     /// otherwise.
-    fn resolve_custom(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
+    fn resolve_custom(&self, stack: &LayerView<'_>, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Custom.as_str();
         let mut saw_opinion = false;
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -1359,7 +1363,7 @@ impl PrimIndex {
 
     /// Specifier resolution per spec 12.2.1, over the opinions in strength
     /// order up to the first block ([`compose_specifier`]).
-    fn resolve_specifier(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
+    fn resolve_specifier(&self, stack: &LayerView<'_>, prop_suffix: Option<&str>) -> Result<Option<Value>, QueryError> {
         let field = FieldKey::Specifier.as_str();
         let mut specs: Vec<(Specifier, ArcType)> = Vec::new();
         for opinion in self.opinions(field, stack, prop_suffix) {
