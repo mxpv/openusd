@@ -6,8 +6,9 @@
 //! [`find_by_id`](LayerRegistry::find_by_id)) to the
 //! [`FileFormat`](super::FileFormat) claiming each layer's extension. It is the
 //! Rust seam for C++ `Sdf_LayerRegistry` and `SdfFileFormat::FindByExtension`:
-//! a future `find_or_open` cache (the registry will own loaded layers and dedup
-//! them) and custom format registration grow here.
+//! it holds the layers [`find_or_open`](LayerRegistry::find_or_open) opens,
+//! one per identifier, shared through [`sdf::LayerHandle`]s. Custom format
+//! registration grows here too.
 //!
 //! References and payloads are not followed here. Composition opens each
 //! reference/payload target layer on demand when it reaches the arc (see
@@ -17,9 +18,10 @@
 //! (spec 10.3.1.1).
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::SystemTime;
 
 use crate::sdf::{self, expr};
@@ -142,11 +144,47 @@ impl From<LoadError> for crate::Error {
 /// demand through it. The resolver is private: every path that resolves and
 /// reads a layer is a method here, and the registry stands in as the
 /// [`ar::Resolver`] it fronts where one is asked for, with the identifier
-/// rules below applied. This is the Rust analog of C++ `Sdf_LayerRegistry`;
-/// it will grow a ref-counted loaded-layer cache (`find_or_open` dedup) and
-/// custom format registration.
+/// rules below applied. This is the Rust analog of C++ `Sdf_LayerRegistry`,
+/// less custom format registration.
+///
+/// The registry also holds layers, one per identifier, shared through
+/// [`sdf::LayerHandle`]s: [`find_or_open`](Self::find_or_open) returns the
+/// layer already open at an identifier, unsaved edits included, and opens it
+/// only when none is (C++ `SdfLayer::FindOrOpen`). Cloning the registry shares
+/// its resolver and the layers it holds. A stage's layer graph opens its layers
+/// through the registry but holds its own copy of each, outside the shared
+/// set.
+///
+/// A layer stays held while any handle to it exists. Once its last handle
+/// drops, it is freed at the next [`sweep`](Self::sweep), or at once when no
+/// handle into the registry remains. The registry itself refers to its layers
+/// weakly, as C++ `Sdf_LayerRegistry` does. A registry kept by a layer it
+/// holds, as that layer's resolver, therefore does not keep the layer alive.
+/// The registry holds its layers behind one borrow: a read or an edit through
+/// one handle conflicts with any other (see [`sdf::LayerHandle`]).
+#[derive(Clone)]
 pub struct LayerRegistry {
     resolver: Rc<dyn ar::Resolver>,
+    /// The store of the layers handles share, shared by every clone of the
+    /// registry. Weak: the handles own the store, and the registry starts a
+    /// new one when it next holds a layer after the last handle has dropped.
+    store: Rc<Cell<Weak<sdf::LayerStore>>>,
+}
+
+/// Where a [`LayerRegistry`] lookup of an asset path ends.
+enum Located {
+    /// At a layer open in the registry.
+    Open(sdf::LayerHandle),
+    /// At a location no open layer was read from.
+    Closed {
+        /// The canonical identifier the path names.
+        identifier: String,
+        /// The location it resolves to.
+        resolved: ar::ResolvedPath,
+    },
+    /// Nowhere: the path does not resolve, or names an anonymous layer that
+    /// is not open.
+    Unresolved,
 }
 
 /// A layer as [`LayerRegistry::open`] reads it: its canonical identifier,
@@ -159,6 +197,9 @@ pub(crate) struct PreparedLayer {
     pub resolved: ar::ResolvedPath,
     /// The layer's data.
     pub data: sdf::LayerData,
+    /// The format the data was read in, or `None` for data that was never
+    /// read in one (a layer built in memory).
+    pub format: Option<&'static dyn sdf::FileFormat>,
 }
 
 impl PreparedLayer {
@@ -234,6 +275,108 @@ impl LayerRegistry {
     pub fn new(resolver: Box<dyn ar::Resolver>) -> Self {
         Self {
             resolver: Rc::from(resolver),
+            store: Rc::default(),
+        }
+    }
+
+    /// The layer open in this registry at `asset_path`, if any, unsaved edits
+    /// included (C++ `SdfLayer::Find`). The path is canonicalized first, as
+    /// [`find_or_open`](Self::find_or_open) does, and a layer read from the
+    /// file it resolves to under another identifier is found too. Fails with
+    /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
+    /// edit on this registry.
+    pub fn find(&self, asset_path: &str) -> Result<Option<sdf::LayerHandle>, sdf::LayerError> {
+        Ok(match self.locate(asset_path)? {
+            Located::Open(handle) => Some(handle),
+            Located::Closed { .. } | Located::Unresolved => None,
+        })
+    }
+
+    /// The layer open in this registry at `asset_path`, or else that layer
+    /// read and held here, or `None` when the path does not resolve (C++
+    /// `SdfLayer::FindOrOpen`). A layer already open is returned as it is,
+    /// with any edits not yet saved; a changed file is read again only by a
+    /// reload. Only the layer itself is opened: the sublayers, references and
+    /// payloads it declares stay the asset paths it authored. Fails with
+    /// [`LayerError::Busy`](sdf::LayerError::Busy), before reading anything,
+    /// when it would have to open a layer from inside a read or an edit on
+    /// this registry.
+    pub fn find_or_open(&self, asset_path: &str) -> crate::Result<Option<sdf::LayerHandle>> {
+        let _scope = ar::CacheScope::begin();
+        Ok(match self.locate(asset_path)? {
+            Located::Open(handle) => Some(handle),
+            Located::Closed { identifier, resolved } => {
+                if let Some(store) = self.held() {
+                    store.ensure_writable()?;
+                }
+                let layer = sdf::Layer::new_resolved(self.read(identifier, resolved)?, Rc::clone(&self.resolver));
+                Some(self.store().insert(layer).map_err(sdf::LayerError::from)?)
+            }
+            Located::Unresolved => None,
+        })
+    }
+
+    /// Where `asset_path`, canonicalized, leads: to a layer open here under
+    /// its identifier or read from the location it resolves to, or to that
+    /// location, or nowhere. An anonymous layer is found by identifier only.
+    fn locate(&self, asset_path: &str) -> Result<Located, sdf::LayerError> {
+        let identifier = self.create_identifier(asset_path, None);
+        let store = self.held();
+        if let Some(store) = &store
+            && let Some(handle) = store.find(&identifier, None)?
+        {
+            return Ok(Located::Open(handle));
+        }
+        if sdf::Layer::is_anonymous_identifier(&identifier) {
+            return Ok(Located::Unresolved);
+        }
+        let Some(resolved) = self.resolve_layer(&identifier) else {
+            return Ok(Located::Unresolved);
+        };
+        if let Some(store) = &store
+            && let Some(handle) = store.find(&identifier, Some(&resolved.to_string()))?
+        {
+            return Ok(Located::Open(handle));
+        }
+        Ok(Located::Closed { identifier, resolved })
+    }
+
+    /// The store, while any handle keeps it.
+    fn held(&self) -> Option<Rc<sdf::LayerStore>> {
+        let weak = self.store.take();
+        let store = weak.upgrade();
+        self.store.set(weak);
+        store
+    }
+
+    /// The store, started anew when no handle keeps one.
+    fn store(&self) -> Rc<sdf::LayerStore> {
+        self.held().unwrap_or_else(|| {
+            let store = Rc::default();
+            self.store.set(Rc::downgrade(&store));
+            store
+        })
+    }
+
+    /// Hold `layer` here, where [`find`](Self::find) returns it, and return a
+    /// handle to it. Any edit it has staged is committed, without notifying its
+    /// sinks. Fails, handing the layer back in the [`sdf::AdoptError`], with
+    /// [`LayerError::Duplicate`](sdf::LayerError::Duplicate) when a layer with
+    /// its identifier, or read from its file, is already open here, and with
+    /// [`LayerError::Busy`](sdf::LayerError::Busy) from inside a read or an
+    /// edit on this registry.
+    pub fn adopt(&self, layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
+        self.store().insert(layer)
+    }
+
+    /// Free the layers whose last handle has dropped. A dropped handle leaves
+    /// its layer in memory until a sweep, which [`find_or_open`](Self::find_or_open)
+    /// and [`adopt`](Self::adopt) run before they add a layer, unless it was the
+    /// last handle into the registry, which frees every layer it held. A no-op
+    /// while a read or an edit on this registry is in progress.
+    pub fn sweep(&self) {
+        if let Some(store) = self.held() {
+            store.sweep();
         }
     }
 
@@ -330,13 +473,18 @@ impl LayerRegistry {
     /// A package has no content signature, so a `.usdz` is read from its asset
     /// rather than from bytes. `source_name` names their origin, for
     /// diagnostics that quote a location.
-    pub fn read_bytes(bytes: ar::AssetBuffer, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
-        DEFAULT_FORMATS
+    ///
+    /// Returns the data with the format that read it.
+    pub fn read_bytes(
+        bytes: ar::AssetBuffer,
+        source_name: &str,
+    ) -> Result<(sdf::LayerData, &'static dyn sdf::FileFormat), sdf::FormatError> {
+        let format = DEFAULT_FORMATS
             .iter()
             .copied()
             .find(|format| format.matches_content(&bytes))
-            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?
-            .read_bytes(bytes, source_name)
+            .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?;
+        Ok((format.read_bytes(bytes, source_name)?, format))
     }
 
     /// Find the format claiming `ext` (without the leading dot, case-insensitive),
@@ -390,12 +538,7 @@ impl LayerRegistry {
         let Some(resolved) = self.resolve_layer(identifier) else {
             return Ok(None);
         };
-        let data = self.read(&resolved)?;
-        Ok(Some(PreparedLayer {
-            identifier: identifier.to_owned(),
-            resolved,
-            data,
-        }))
+        Ok(Some(self.read(identifier.to_owned(), resolved)?))
     }
 
     /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
@@ -404,7 +547,7 @@ impl LayerRegistry {
     pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
         Ok(self
             .open(identifier)?
-            .map(|layer| sdf::Layer::new_resolved(identifier, &layer.resolved, layer.data, Rc::clone(&self.resolver))))
+            .map(|layer| sdf::Layer::new_resolved(layer, Rc::clone(&self.resolver))))
     }
 
     /// Reads the single layer at `asset_path` (anchored against `anchor`)
@@ -564,26 +707,32 @@ impl LayerRegistry {
         Ok(Some(layers))
     }
 
-    /// Opens the layer at `resolved`, dispatching to the registered format for
-    /// its extension. The `.usd` extension is the one ambiguous case — binary
-    /// crate or text — so it reads the bytes once and lets
-    /// [`read_bytes`](Self::read_bytes) choose by content.
-    /// C++ `SdfFileFormat::FindByExtension` + `CanRead`.
-    fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData, LoadError> {
+    /// Reads the layer `identifier` resolved to at `resolved`, dispatching to
+    /// the registered format for its extension. The `.usd` extension is the
+    /// one ambiguous case — binary crate or text — so it reads the bytes once
+    /// and lets [`read_bytes`](Self::read_bytes) choose by content. C++
+    /// `SdfFileFormat::FindByExtension` + `CanRead`.
+    fn read(&self, identifier: String, resolved: ar::ResolvedPath) -> Result<PreparedLayer, LoadError> {
         let ext = resolved.extension();
-        if ext.eq_ignore_ascii_case("usd") {
+        let (data, format) = if ext.eq_ignore_ascii_case("usd") {
             let bytes = self
                 .resolver
-                .open_asset(resolved)
+                .open_asset(&resolved)
                 .and_then(|asset| asset.into_buffer())
                 .map_err(sdf::FormatError::from)?;
-            return Ok(Self::read_bytes(bytes, &resolved.to_string())?);
-        }
-        Ok(Self::find_by_extension(&ext)
-            .ok_or_else(|| LoadError::UnsupportedFormat {
+            Self::read_bytes(bytes, &resolved.to_string())?
+        } else {
+            let format = Self::find_by_extension(&ext).ok_or_else(|| LoadError::UnsupportedFormat {
                 resolved: resolved.to_string(),
-            })?
-            .read(self.resolver.as_ref(), resolved)?)
+            })?;
+            (format.read(self.resolver.as_ref(), &resolved)?, format)
+        };
+        Ok(PreparedLayer {
+            identifier,
+            resolved,
+            data,
+            format: Some(format),
+        })
     }
 
     /// Emits an already-read layer and recursively opens its sublayers.
@@ -611,12 +760,8 @@ impl LayerRegistry {
         layers: &mut Vec<sdf::Layer>,
     ) -> Result<(), LoadError> {
         let anchor = layer.anchor().cloned();
-        let PreparedLayer {
-            identifier,
-            resolved,
-            data,
-        } = layer;
-        let sub_paths = Self::sublayer_paths(data.as_ref());
+        let sub_paths = Self::sublayer_paths(layer.data.as_ref());
+        let identifier = layer.identifier.clone();
 
         // Emit this layer ahead of its sublayers so the collected stack is
         // strongest-first: a layer overrides the layers it sublayers, and earlier
@@ -624,12 +769,7 @@ impl LayerRegistry {
         // reload pass an already-interned layer is re-walked (to reach a `${VAR}`
         // sublayer the new context now resolves) but not re-emitted.
         if !already_present(&identifier) {
-            layers.push(sdf::Layer::new_resolved(
-                identifier.clone(),
-                &resolved,
-                data,
-                Rc::clone(&self.resolver),
-            ));
+            layers.push(sdf::Layer::new_resolved(layer, Rc::clone(&self.resolver)));
         }
 
         // Failed sublayer identifiers already reported for *this* layer, so a layer
@@ -702,8 +842,8 @@ impl LayerRegistry {
             // like a missing one — reported at this referencing site and, being a
             // leaf, left out of `visited` (dropping only this layer; the root's read
             // failure propagated from `open_stack`).
-            let sub_data = match self.read(&sub_resolved) {
-                Ok(data) => data,
+            let sublayer = match self.read(sub_id.clone(), sub_resolved) {
+                Ok(read) => read,
                 Err(reason) => {
                     on_error(Error::UnreadableAsset {
                         asset_path: sub_asset,
@@ -716,21 +856,9 @@ impl LayerRegistry {
             };
             // A readable layer is interned and its subtree walked once; claim it in
             // `visited` before recursing so a diamond or cycle does not re-emit it.
-            visited.insert(sub_id.clone());
+            visited.insert(sub_id);
 
-            self.open_sublayers(
-                PreparedLayer {
-                    identifier: sub_id,
-                    resolved: sub_resolved,
-                    data: sub_data,
-                },
-                stack_vars,
-                reload,
-                on_error,
-                already_present,
-                visited,
-                layers,
-            )?;
+            self.open_sublayers(sublayer, stack_vars, reload, on_error, already_present, visited, layers)?;
         }
 
         Ok(())
@@ -781,27 +909,23 @@ pub(crate) mod tests {
             return Ok(());
         };
         visited.insert(identifier.clone());
-        let data = registry.read(&resolved)?;
+        let layer = registry.read(identifier, resolved)?;
+        let (data, resolved) = (layer.data.as_ref(), &layer.resolved);
         // Resolve this layer's arc/sublayer paths against its stack context (root
         // own overlaid by the inherited overrides). This eager test closure loads a
         // superset of what any one stack references; the `LayerGraph` re-derives the
         // actual per-stack membership with the same stack-level context, so a layer
         // reached here that no stack includes is simply an unused node.
-        let stack_vars = expr::stack_variables(data.as_ref(), ancestor_expr_vars)?;
-        for dep in arc_dependencies(data.as_ref())? {
+        let stack_vars = expr::stack_variables(data, ancestor_expr_vars)?;
+        for dep in arc_dependencies(data)? {
             // An unevaluable dependency loads nothing, mirroring the graph's
             // drop-the-edge handling.
             let Some(dep_asset) = expr::evaluate_string(&dep, &stack_vars).value else {
                 continue;
             };
-            collect_with_arcs_in(registry, &dep_asset, Some(&resolved), &stack_vars, layers, visited)?;
+            collect_with_arcs_in(registry, &dep_asset, Some(resolved), &stack_vars, layers, visited)?;
         }
-        layers.push(sdf::Layer::new_resolved(
-            identifier,
-            &resolved,
-            data,
-            Rc::clone(&registry.resolver),
-        ));
+        layers.push(sdf::Layer::new_resolved(layer, Rc::clone(&registry.resolver)));
         Ok(())
     }
 
@@ -905,7 +1029,8 @@ pub(crate) mod tests {
             "text",
         )
         .expect("text is recognized");
-        assert!(text.has_spec(&sdf::Path::abs_root()));
+        assert!(text.0.has_spec(&sdf::Path::abs_root()));
+        assert_eq!(text.1.format_id(), "usda");
 
         let unknown = LayerRegistry::read_bytes(b"nothing claims this".as_slice().into(), "mystery");
         assert!(
@@ -970,8 +1095,8 @@ pub(crate) mod tests {
     fn expression_sublayer() -> Result<()> {
         let layers = open_stack(&fixture_path("expr_sublayer.usda"))?;
         assert_eq!(layers.len(), 2, "root + 1 expression-resolved sublayer");
-        assert!(layers[0].identifier.contains("expr_sublayer.usda"));
-        assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
+        assert!(layers[0].identifier().contains("expr_sublayer.usda"));
+        assert!(layers[1].identifier().contains("expr_sublayer_target.usda"));
         Ok(())
     }
 
@@ -979,8 +1104,8 @@ pub(crate) mod tests {
     fn sublayer_same_folder() -> Result<()> {
         let layers = open_stack(&composition_path("subLayer/sublayer_same_folder.usda"))?;
         assert_eq!(layers.len(), 2, "root + 1 sublayer");
-        assert!(layers[0].identifier.contains("sublayer_same_folder.usda"));
-        assert!(layers[1].identifier.contains("_stage.usda"));
+        assert!(layers[0].identifier().contains("sublayer_same_folder.usda"));
+        assert!(layers[1].identifier().contains("_stage.usda"));
         Ok(())
     }
 
@@ -988,7 +1113,7 @@ pub(crate) mod tests {
     fn sublayer_child_folder() -> Result<()> {
         let layers = open_stack(&composition_path("subLayer/sublayer_child_folder.usda"))?;
         assert_eq!(layers.len(), 2);
-        assert!(layers[1].identifier.contains("_child_stage.usda"));
+        assert!(layers[1].identifier().contains("_child_stage.usda"));
         Ok(())
     }
 
@@ -996,7 +1121,7 @@ pub(crate) mod tests {
     fn sublayer_parent_folder() -> Result<()> {
         let layers = open_stack(&composition_path("subLayer/sublayer_parent_folder.usda"))?;
         assert_eq!(layers.len(), 2);
-        assert!(layers[1].identifier.contains("_parent_stage.usda"));
+        assert!(layers[1].identifier().contains("_parent_stage.usda"));
         Ok(())
     }
 
@@ -1006,7 +1131,7 @@ pub(crate) mod tests {
     fn reference_not_followed() -> Result<()> {
         let layers = open_stack(&composition_path("references/reference_same_folder.usda"))?;
         assert_eq!(layers.len(), 1, "only the root; the reference is composed lazily");
-        assert!(layers[0].identifier.contains("reference_same_folder.usda"));
+        assert!(layers[0].identifier().contains("reference_same_folder.usda"));
         Ok(())
     }
 
@@ -1019,7 +1144,7 @@ pub(crate) mod tests {
             "{}vendor/usd-wg-assets/test_assets/RelationshipEncapsulationTests/SublayeredInternalReferenceTest.usda",
             env!("CARGO_WORKSPACE_DIR")
         );
-        let names: Vec<String> = open_stack(&root)?.iter().map(|l| l.identifier.clone()).collect();
+        let names: Vec<String> = open_stack(&root)?.iter().map(|l| l.identifier().to_owned()).collect();
         assert_eq!(names.len(), 4, "root + 3 sublayers");
         assert!(names[0].contains("SublayeredInternalReferenceTest.usda"));
         assert!(names[1].contains("Environment.usda"));
@@ -1054,7 +1179,7 @@ pub(crate) mod tests {
 
         // The root still loads despite the missing sublayer.
         assert_eq!(layers.len(), 1);
-        assert!(layers[0].identifier.contains("sublayer_invalid.usda"));
+        assert!(layers[0].identifier().contains("sublayer_invalid.usda"));
 
         let errors = errors.into_inner();
         assert_eq!(errors.len(), 1);

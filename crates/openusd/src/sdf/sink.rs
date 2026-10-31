@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 /// A sink's rejection of a staged edit, returned from a sink's pre-commit hook
 /// to abort and roll the edit back. Shared across the sink tiers.
@@ -70,9 +71,11 @@ impl<K: ?Sized> fmt::Debug for Id<K> {
 ///
 /// Mutation takes `&mut self`; each tier supplies its own interior mutability
 /// where it installs sinks through a shared handle (the stage wraps this in a
-/// `RefCell`, a layer owns it directly behind `&mut Layer`).
+/// `RefCell`, a layer owns it directly behind `&mut Layer`). Sinks are held by
+/// `Rc`: a [`snapshot`](Self::snapshot) taken at a commit notifies them after
+/// the borrow that reached the set is released.
 pub struct Set<T: ?Sized> {
-    sinks: Vec<(Id<T>, Box<T>)>,
+    sinks: Vec<(Id<T>, Rc<T>)>,
 }
 
 impl<T: ?Sized> Default for Set<T> {
@@ -83,7 +86,7 @@ impl<T: ?Sized> Default for Set<T> {
 
 impl<T: ?Sized> Set<T> {
     /// Install `sink` and return its [`Id`].
-    pub fn add(&mut self, sink: Box<T>) -> Id<T> {
+    pub fn add(&mut self, sink: Rc<T>) -> Id<T> {
         let id = Id::next();
         self.sinks.push((id, sink));
         id
@@ -102,5 +105,11 @@ impl<T: ?Sized> Set<T> {
     /// Iterate the installed sinks in installation order.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.sinks.iter().map(|(_, s)| &**s)
+    }
+
+    /// The installed sinks, in installation order, as shared handles that
+    /// outlive the borrow of this set.
+    pub fn snapshot(&self) -> Vec<Rc<T>> {
+        self.sinks.iter().map(|(_, s)| Rc::clone(s)).collect()
     }
 }

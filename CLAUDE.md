@@ -49,7 +49,9 @@ source of truth for specifics.
   friends). Also here: the pluggable `FileFormat` read/write seam, the
   `LayerRegistry` that owns asset loading and format dispatch (composition opens
   reference/payload targets on demand through it, so an un-visited subtree never
-  loads), the variable-expression engine (`sdf/expr.rs`), the asset-path
+  loads) and holds layers shared through `LayerHandle`s (C++
+  `SdfLayer::FindOrOpen`, `sdf/layer_store.rs`, with the commit protocol its
+  edits run in `sdf/commit.rs`), the variable-expression engine (`sdf/expr.rs`), the asset-path
   resolution tail that anchors an `asset` value against its authoring layer and
   evaluates any expression in it (`sdf/asset_path.rs`, C++
   `SdfResolveAssetPaths`; `pcp` and `usd` each supply their own anchor and

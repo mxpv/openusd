@@ -1903,7 +1903,7 @@ mod tests {
             .expect("clip resolves");
         {
             let clip = clips.layer(&graph, &id).expect("the clip is held");
-            assert!(clip.identifier.contains("clip.usda"));
+            assert!(clip.identifier().contains("clip.usda"));
             assert!(clip.data().has_spec(&sdf::path("/Model.size")?));
         }
 

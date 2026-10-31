@@ -2300,7 +2300,7 @@ mod tests {
         let failed = stage.edit(|edit| {
             let a = edit.prim("/A")?;
             a.attribute_builder("inputs:angle", "double").set(1.0_f32).build()?;
-            let root = stage.root_layer().identifier.clone();
+            let root = stage.root_layer().identifier().to_owned();
             stage.layer_mut(&root).expect("the root layer").edit(|layer| {
                 layer.pseudo_root_mut().expect("a pseudo-root").set(
                     "fallbackPrimTypes",

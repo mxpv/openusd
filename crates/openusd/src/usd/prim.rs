@@ -2206,7 +2206,7 @@ mod tests {
         // No registry knows `MyStudioLight`, so it resolves nothing on its own.
         assert!(stage.prim("/Sun")?.prim_definition()?.is_empty());
 
-        let root_id = stage.root_layer().identifier.clone();
+        let root_id = stage.root_layer().identifier().to_owned();
         {
             let mut root = stage.layer_mut(&root_id).expect("root layer");
             root.edit(|e| {

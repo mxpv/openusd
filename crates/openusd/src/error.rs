@@ -39,6 +39,10 @@ pub enum Error {
     #[error(transparent)]
     Data(#[from] sdf::DataError),
 
+    /// A layer registry refused a read or a lookup.
+    #[error(transparent)]
+    Layer(#[from] sdf::LayerError),
+
     /// A value does not cast to the requested type.
     #[error(transparent)]
     Cast(#[from] vt::CastError),

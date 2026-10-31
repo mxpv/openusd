@@ -126,7 +126,7 @@ impl Stage {
             write_prim(&mut data, &self.prim(&path)?, assets)?;
         }
 
-        let tag = format!("flattened {}", self.root_layer().identifier);
+        let tag = format!("flattened {}", self.root_layer().identifier());
         Ok(sdf::Layer::new(sdf::Layer::anonymous_identifier(tag), Box::new(data)))
     }
 }

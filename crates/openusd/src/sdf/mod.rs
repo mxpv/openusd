@@ -15,12 +15,14 @@ use crate::vt::{Dictionary, Value};
 
 mod asset_path;
 mod change;
+mod commit;
 mod copy;
 mod data;
 pub mod expr;
 mod file_format;
 mod layer;
 pub(crate) mod layer_registry;
+mod layer_store;
 mod ordering;
 pub(crate) mod path;
 pub mod path_expr;
@@ -37,6 +39,7 @@ pub(crate) use asset_path::{
     resolve_asset_paths,
 };
 pub use change::{ChangeEntry, ChangeFlags, ChangeList, FieldChange};
+pub(crate) use commit::{Committed, TxnContext};
 pub use copy::{
     CopyChildren, CopyChildrenArgs, CopyValue, CopyValueArgs, copy_spec, copy_spec_with, copy_spec_within,
     should_copy_children, should_copy_value,
@@ -53,6 +56,8 @@ pub use layer::{
 pub(crate) use layer::{dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub(crate) use layer_registry::PreparedLayer;
+pub(crate) use layer_store::LayerStore;
+pub use layer_store::{AdoptError, LayerError, LayerHandle};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{
     IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,

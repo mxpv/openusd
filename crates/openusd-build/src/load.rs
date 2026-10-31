@@ -121,7 +121,7 @@ pub fn open_stage(builder: &Builder, path: &Path) -> Result<usd::Stage, Error> {
 /// the relative path it was asked for by. An anonymous layer was read from
 /// nowhere and so is watched nowhere.
 pub fn watched_layers(stage: &usd::Stage) -> Vec<PathBuf> {
-    let root = stage.root_layer().identifier.clone();
+    let root = stage.root_layer().identifier().to_owned();
     let identifiers = stage.layer_identifiers();
     iter::once(&root)
         .chain(identifiers.iter().filter(|id| **id != root))
@@ -134,7 +134,7 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
     let stage = open_stage(builder, schema)?;
 
     let identifiers = stage.layer_stack();
-    let root = stage.root_layer().identifier.clone();
+    let root = stage.root_layer().identifier().to_owned();
 
     // The root layer first, so what this run generates leads the list.
     let mut globals = Vec::new();

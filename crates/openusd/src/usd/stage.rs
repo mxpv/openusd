@@ -926,7 +926,7 @@ pub struct StageInner {
     /// `before_commit` so the matching `after_commit`
     /// ([`record_pending`](Stage::record_pending)) can stamp it onto the queued
     /// edit, which [`process_pending`](Stage::process_pending) then groups by. The
-    /// id is minted once per atomic transaction by `sdf::edit_layers`, so a
+    /// id is minted once per atomic transaction (`sdf::TxnContext`), so a
     /// stage-authored batch and a direct [`layer_mut`](Stage::layer_mut) edit are
     /// each one transaction without the stage tracking any boundary of its own.
     current_generation: Cell<u64>,
@@ -1169,7 +1169,7 @@ impl sdf::LayerSink for StageAggregator {
             .flatten();
         self.prior_default_prim.set(prior);
         if let Some(stage) = self.stage.upgrade() {
-            // Cache this transaction's id (minted by `sdf::edit_layers`) for the
+            // Cache this transaction's id (one per `sdf::TxnContext`) for the
             // matching `after_commit`'s `record_pending` to read; `before_commit`
             // fires for a layer before its `after_commit`, and every layer of a
             // transaction shares one id, so the cache is correct for each.
@@ -1855,7 +1855,7 @@ impl Stage {
         // awaiting drain) to the current set before this sink joins, so a sink
         // only ever observes edits committed after it was installed.
         self.process_pending();
-        self.sinks.borrow_mut().add(Box::new(sink))
+        self.sinks.borrow_mut().add(Rc::new(sink))
     }
 
     /// Remove the sink with the given [`StageSinkId`]; the inverse of
@@ -2169,7 +2169,10 @@ impl Stage {
                     .map(|m| Provenance::EditTarget(m.clone()));
                 self.edit_provenance.replace(provenance);
                 let _clear = ClearEditProvenance(&self.edit_provenance);
-                sdf::edit_layers(&mut batch, |edits| f(&ids, edits))
+                // The sinks run under the graph borrow: the aggregator reads the
+                // provenance published above as it records the commit.
+                sdf::edit_layers(&mut batch, sdf::TxnContext::new(None), |edits| f(&ids, edits))
+                    .map(sdf::Committed::dispatch)
             } else {
                 sdf::dry_run_layers(&mut batch, |edits| f(&ids, edits)).map(|()| false)
             }
@@ -2267,7 +2270,10 @@ impl Stage {
         let _clear = ClearEditProvenance(&self.edit_provenance);
         // The stage's own closure error rides through the layer transaction, so
         // a stage-only failure inside it rolls the layer back like a layer one.
-        sdf::edit_layers(&mut [layer], |edits| f(&mut edits[0]))
+        // The sinks run under the caller's graph borrow, while the provenance
+        // published above is still set.
+        sdf::edit_layers(&mut [layer], sdf::TxnContext::new(None), |edits| f(&mut edits[0]))
+            .map(sdf::Committed::dispatch)
     }
 
     /// The layer ids of the root (local) layer stack, strongest first — the
@@ -6935,6 +6941,15 @@ def \"Sub\" {}
             Some("direct"),
             "a direct non-local edit reports DirectLayerEdit"
         );
+
+        // A variant edit target remaps its paths, so its commit reports the
+        // target's mapping.
+        stage.set_edit_target(usd::EditTarget::for_local_direct_variant(
+            "root.usda",
+            sdf::path("/Q{set=sel}")?,
+        )?)?;
+        stage.create_attribute("/Q.v", sdf::ValueTypeName::FLOAT)?;
+        assert_eq!(seen.get(), Some("target"), "a variant edit reports EditTarget");
         Ok(())
     }
 

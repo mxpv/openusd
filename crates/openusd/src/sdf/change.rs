@@ -260,8 +260,8 @@ impl ChangeList {
 
     /// Refresh this list from `cow`'s staged overlay, clearing it first and reusing
     /// its buffer. The in-place counterpart of [`from_overlay`](Self::from_overlay):
-    /// a layer keeps one record and refreshes it on each commit rather than
-    /// allocating a fresh list.
+    /// a layer keeps one record and refreshes it on each commit, and a commit
+    /// whose observers keep the record hands it on and starts the next anew.
     pub(crate) fn update<T: AbstractData>(&mut self, cow: &CowData<T>) {
         self.entries.clear();
         let base = cow.base();

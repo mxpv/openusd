@@ -1393,7 +1393,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 .layer_stack(node_ambient)
                 .iter()
                 .find(|&&(li, _)| self.inputs.stack.layer(li).data().has_spec(&source))
-                .map(|&(li, _)| self.inputs.stack.layer(li).identifier.clone())
+                .map(|&(li, _)| self.inputs.stack.layer(li).identifier().to_owned())
         };
 
         // Ancestral arcs superseded by this relocation contribute nothing; a
@@ -2958,7 +2958,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // An unusable target `defaultPrim` is recoverable: record it and
                 // skip the arc; the prim's other opinions still compose.
                 self.errors.report(CompositionDiagnostic::UnresolvedDefaultPrim {
-                    layer_id: self.inputs.stack.layer(target_root).identifier.clone(),
+                    layer_id: self.inputs.stack.layer(target_root).identifier().to_owned(),
                     arc,
                     site_path: parent_path,
                 });
@@ -2998,7 +2998,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 site: parent_path.clone(),
                 site_layer: self.introducing_layer(parent),
                 target: source.clone(),
-                target_layer: self.inputs.stack.layer(target_root).identifier.clone(),
+                target_layer: self.inputs.stack.layer(target_root).identifier().to_owned(),
                 reloc_source,
                 reloc_layer,
                 composing: self.site.path.clone(),
@@ -3100,7 +3100,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     ) -> CompositionDiagnostic {
         CompositionDiagnostic::UnresolvedPrimPath {
             arc,
-            target_layer: self.inputs.stack.layer(target_root).identifier.clone(),
+            target_layer: self.inputs.stack.layer(target_root).identifier().to_owned(),
             prim_path: target.clone(),
             introduced_by: self.introducing_layer(parent),
             site_path: parent_path.clone(),
@@ -3135,7 +3135,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// representative (strongest) layer. Used to name the introducing layer in
     /// recoverable arc errors.
     fn introducing_layer(&self, node: NodeId) -> String {
-        self.inputs.stack.layer(self.node(node).layer_id()).identifier.clone()
+        self.inputs
+            .stack
+            .layer(self.node(node).layer_id())
+            .identifier()
+            .to_owned()
     }
 
     /// The canonical identifier the muted set matched for the reference/payload
@@ -3211,11 +3215,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         while let Some(f) = frame {
             frame_hops.push(CycleHop {
                 arc: f.arc,
-                layer: self.inputs.stack.layer(f.requested_layer).identifier.clone(),
+                layer: self.inputs.stack.layer(f.requested_layer).identifier().to_owned(),
                 path: composing.clone(),
             });
             composing = f.root_path.clone();
-            root_layer = self.inputs.stack.layer(f.requested_layer).identifier.clone();
+            root_layer = self.inputs.stack.layer(f.requested_layer).identifier().to_owned();
             frame = f.previous;
         }
         frame_hops.reverse();
@@ -3223,7 +3227,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let mut hops = frame_hops;
         hops.push(CycleHop {
             arc: closing_arc,
-            layer: self.inputs.stack.layer(closing_layer).identifier.clone(),
+            layer: self.inputs.stack.layer(closing_layer).identifier().to_owned(),
             path: closing_path,
         });
         CycleChain {

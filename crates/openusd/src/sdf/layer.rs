@@ -43,12 +43,16 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Cursor, Write};
+use std::mem;
 use std::path::Path as FsPath;
 use std::rc::Rc;
 
 use crate::vt::Value;
 use crate::{ar, sdf, tf};
 
+use super::commit::{
+    CommitRecord, Committed, Footprint, Notification, PendingCommit, Prepared, Subscriber, TxnContext,
+};
 use super::schema::FieldKey;
 use super::{
     AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, FormatError, IntoPath,
@@ -65,8 +69,10 @@ const ANONYMOUS_PREFIX: &str = "anon:";
 
 /// A single loaded layer in the composition.
 pub struct Layer {
-    /// Resolved, canonical identifier for this layer.
-    pub identifier: String,
+    /// Resolved, canonical identifier for this layer, read through
+    /// [`identifier`](Self::identifier). It never changes once the layer
+    /// exists: a registry indexes the layers it holds by it.
+    identifier: String,
     /// The layer's resolved physical location when it differs from
     /// [`identifier`](Self::identifier) — the anchor for the relative asset
     /// paths it authors (C++ `SdfLayer::GetRealPath`). `None` (the common case)
@@ -88,16 +94,24 @@ pub struct Layer {
     /// specifiers, …) in force.
     data: CowData<LayerData>,
     /// The change record for the edit in progress, derived from the overlay at
-    /// commit and handed to the layer's sinks. Owned and refilled in place each
-    /// commit (reusing its buffer) rather than reallocated; empty between edits.
+    /// commit. Refilled in place each commit; a commit with sinks or
+    /// subscribers moves it into the transaction's record.
     changes: ChangeList,
-    /// Per-layer change sinks fired at the commit seam — the low tier of the
+    /// Per-layer change sinks notified of each commit — the low tier of the
     /// change pipeline, where a stage installs an aggregator so it stays in sync
     /// with any edit. Empty by default.
     sinks: sink::Set<dyn LayerSink>,
+    /// The crate-internal observers a [`LayerHandle`](super::LayerHandle)
+    /// subscribes, prepared ahead of each commit and committed with it (see
+    /// [`edit_layers`]). Empty for a layer no registry holds.
+    subscribers: sink::Set<dyn Subscriber>,
     /// The resolver the layer was opened through, which a save reopens the
     /// saved file with. `None` for a layer that was not read from an asset.
     resolver: Option<Rc<dyn ar::Resolver>>,
+    /// The format the layer was read in (C++ `SdfLayer::GetFileFormat`), which
+    /// a [`save`](Self::save) writes it back in. `None` for a layer built in
+    /// memory, which saves in the format its identifier's extension names.
+    format: Option<&'static dyn super::FileFormat>,
 }
 
 impl Layer {
@@ -148,8 +162,10 @@ impl Layer {
     /// as in [`new_anonymous`](Self::new_anonymous).
     pub fn from_bytes(tag: impl fmt::Display, bytes: impl Into<ar::AssetBuffer>) -> Result<Self, FormatError> {
         let identifier = Self::anonymous_identifier(tag);
-        let data = sdf::LayerRegistry::read_bytes(bytes.into(), &identifier)?;
-        Ok(Self::new(identifier, data))
+        let (data, format) = sdf::LayerRegistry::read_bytes(bytes.into(), &identifier)?;
+        let mut layer = Self::new(identifier, data);
+        layer.format = Some(format);
+        Ok(layer)
     }
 
     /// Construct a loaded layer recording its resolved physical location.
@@ -161,28 +177,31 @@ impl Layer {
     /// in-package. Only a real path that differs from the identifier is
     /// stored. The layer keeps `resolver`, the one it was read through, for
     /// [`save`](Self::save) to reopen its file with.
-    pub(crate) fn new_resolved(
-        identifier: impl Into<String>,
-        real_path: &ar::ResolvedPath,
-        data: LayerData,
-        resolver: Rc<dyn ar::Resolver>,
-    ) -> Self {
-        let identifier = identifier.into();
-        let real_path = real_path.to_string();
+    pub(crate) fn new_resolved(prepared: sdf::PreparedLayer, resolver: Rc<dyn ar::Resolver>) -> Self {
+        let sdf::PreparedLayer {
+            identifier,
+            resolved,
+            data,
+            format,
+        } = prepared;
+        let real_path = resolved.to_string();
         let real_path = (real_path != identifier).then_some(real_path);
         let mut layer = Self::build(identifier, real_path, data);
         layer.resolver = Some(resolver);
+        layer.format = format;
         layer
     }
 
     /// The layer as a read root: its identifier, the location its paths anchor
-    /// against, and its data. Its sinks and resolver are dropped.
+    /// against, its data and the format it was read in. Its sinks and resolver
+    /// are dropped.
     pub(crate) fn into_prepared(self) -> sdf::PreparedLayer {
         let resolved = ar::ResolvedPath::new(self.real_path());
         sdf::PreparedLayer {
             identifier: self.identifier,
             resolved,
             data: self.data.into_inner(),
+            format: self.format,
         }
     }
 
@@ -195,7 +214,9 @@ impl Layer {
             data: CowData::new(data),
             changes: ChangeList::new(),
             sinks: sink::Set::default(),
+            subscribers: sink::Set::default(),
             resolver: None,
+            format: None,
         }
     }
 
@@ -206,7 +227,7 @@ impl Layer {
     /// `Fn(&str, &ChangeList)` closure is a `LayerSink`, so this takes either a
     /// full sink type or a closure observer.
     pub fn add_sink<S: LayerSink + 'static>(&mut self, sink: S) -> LayerSinkId {
-        self.sinks.add(Box::new(sink))
+        self.sinks.add(Rc::new(sink))
     }
 
     /// Remove the layer sink with `id`; a no-op if it was already removed.
@@ -269,50 +290,65 @@ impl Layer {
         &mut self,
         f: impl FnOnce(&mut LayerEdit<'_>) -> Result<(), AuthoringError>,
     ) -> Result<bool, EditError> {
-        edit_layers(&mut [self], |edits| f(&mut edits[0]).map_err(EditError::from))
+        let committed = edit_layers(&mut [self], TxnContext::new(None), |edits| {
+            f(&mut edits[0]).map_err(EditError::from)
+        })?;
+        Ok(committed.dispatch())
     }
 
     /// Refill this layer's change record from the staged overlay against the
     /// still-pristine base, and offer it to each sink's
     /// [`before_commit`](LayerSink::before_commit) while the overlay is intact,
-    /// tagged with the enclosing transaction's `generation`. A sink's rejection
-    /// leaves the overlay staged for the caller to roll back. Does not touch the
+    /// tagged with the enclosing transaction's id. A sink's rejection leaves
+    /// the overlay staged for the caller to roll back. Does not touch the
     /// backend.
-    fn prepare_commit(&mut self, generation: u64) -> Result<(), sink::Error> {
+    fn veto(&mut self, txn: &TxnContext) -> Result<(), sink::Error> {
         self.changes.update(&self.data);
         if !self.changes.is_empty() && !self.sinks.is_empty() {
-            let change = PendingLayerChange {
-                layer_identifier: &self.identifier,
-                base: &**self.data.base(),
-                overlay: self.data.overlay(),
-                change_list: &self.changes,
-                generation,
-            };
+            let change = self.pending_change(txn);
             self.sinks.iter().try_for_each(|sink| sink.before_commit(&change))?;
         }
         Ok(())
     }
 
-    /// Drain the overlay into the backend — the irreversible half of a commit,
-    /// run once [`prepare_commit`](Self::prepare_commit) has accepted the edit.
-    /// Returns whether the edit produced any composition change. The derived
-    /// record stays in [`changes`](Self::changes) for a following
-    /// [`notify_after_commit`](Self::notify_after_commit).
-    fn commit_data(&mut self) -> bool {
-        self.data.commit();
-        !self.changes.is_empty()
+    /// Offer the accepted edit to each [`Subscriber`], collecting what they
+    /// capture, and read its [`Footprint`] for them while the overlay is
+    /// intact. Empty for a layer with no subscriber.
+    fn prepare(&self, txn: &TxnContext) -> (Footprint, Vec<Box<dyn Prepared>>) {
+        if self.subscribers.is_empty() {
+            return Default::default();
+        }
+        let change = self.pending_change(txn);
+        let commit = PendingCommit { change: &change, txn };
+        let prepared = self.subscribers.iter().filter_map(|s| s.prepare(&commit)).collect();
+        (Footprint::of(self.data.overlay()), prepared)
     }
 
-    /// Fire each sink's [`after_commit`](LayerSink::after_commit) with the record
-    /// [`prepare_commit`](Self::prepare_commit) derived. Run only after every layer
-    /// in a group has committed its data, so a panicking sink cannot strand a
-    /// partially committed group.
-    fn notify_after_commit(&self) {
-        if !self.changes.is_empty() {
-            for sink in self.sinks.iter() {
-                sink.after_commit(&self.identifier, &self.changes);
-            }
+    /// Whether a commit to this layer has anyone to hand a record to.
+    fn observed(&self) -> bool {
+        !self.changes.is_empty() && (!self.sinks.is_empty() || !self.subscribers.is_empty())
+    }
+
+    /// The staged edit as its observers see it.
+    fn pending_change(&self, txn: &TxnContext) -> PendingLayerChange<'_> {
+        PendingLayerChange {
+            layer_identifier: &self.identifier,
+            base: &**self.data.base(),
+            overlay: self.data.overlay(),
+            change_list: &self.changes,
+            generation: txn.id.get(),
         }
+    }
+
+    /// Subscribe `subscriber` to this layer's commits, returning the id that
+    /// [`unsubscribe`](Self::unsubscribe) takes.
+    pub(crate) fn subscribe(&mut self, subscriber: Rc<dyn Subscriber>) -> sink::Id<dyn Subscriber> {
+        self.subscribers.add(subscriber)
+    }
+
+    /// End the subscription with `id`; a no-op if it already ended.
+    pub(crate) fn unsubscribe(&mut self, id: sink::Id<dyn Subscriber>) {
+        self.subscribers.remove(id);
     }
 
     /// Whether the layer has edits staged in its overlay but not yet committed.
@@ -516,21 +552,27 @@ impl Layer {
                 identifier: self.identifier.clone(),
             });
         }
-        // Saving overwrites the layer's own file in place, so the format must
+        // The layer is written back in the format it was read in (C++
+        // `SdfLayer::Save` writes through the layer's own `_fileFormat`), so a
+        // text `.usd` stays text. A layer built in memory has none and takes
+        // the one its identifier's extension names.
+        //
+        // The destination is the file the identifier names, whatever the layer
+        // was read in: its extension must name a format, and that format must
         // support in-place editing — unlike `export`, which only writes a copy.
-        // A package format (usdz) is writable as a fresh archive but not
-        // editable in place: a loaded package's other assets (textures, sibling
-        // layers) are not held by the layer, so saving over it would discard
-        // them. An unknown extension is left for `export` to reject.
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        if let Some(format) = super::LayerRegistry::find_by_extension(ext)
-            && !format.caps().can_edit()
-        {
+        // A package (usdz) is writable as a fresh archive but not editable in
+        // place: its other assets (textures, sibling layers) are not held by
+        // the layer, so saving over it would discard them. That holds for a
+        // layer opened from the package too, which reads in its root layer's
+        // format while its identifier names the archive.
+        let destination = super::LayerRegistry::export_format(&self.identifier)?;
+        if !destination.caps().can_edit() {
             return Err(ExportError::NotEditable {
                 identifier: self.identifier.clone(),
-                format: format.format_id(),
+                format: destination.format_id(),
             });
         }
+        let format = self.format.unwrap_or(destination);
         // TODO(layer-registry): save writes to `identifier` as a literal
         // filesystem path. A layer loaded through a custom resolver may carry a
         // logical identifier (e.g. `scheme://…`); save should resolve it through
@@ -540,11 +582,6 @@ impl Layer {
         // `OpenAssetForWrite` then `OpenAsset` do, the reopen below would
         // know the asset it opens is the one it wrote, and its byte
         // comparison would have nothing left to prove.
-        // TODO(layer-registry): save re-selects the format from the identifier's
-        // extension, so a textual `.usd` layer is rewritten as binary. Once the
-        // load path records the FileFormat a layer was read with (C++
-        // `_fileFormat`), save should reuse it to preserve the original encoding.
-        let format = super::LayerRegistry::export_format(&self.identifier)?;
         let written = format.write_bytes(self.data())?;
         let create = |source| ExportError::Create {
             filename: self.identifier.clone(),
@@ -726,13 +763,18 @@ pub enum EditError {
 }
 
 /// An observer of a single [`Layer`]'s committed edits — the low tier of the
-/// change pipeline, fired synchronously at the layer's commit seam so a sink
-/// sees every edit, by any editor, the moment it lands. A [`Stage`](crate::usd::Stage)
-/// installs an aggregating sink on each layer it owns to stay in sync;
-/// composition-level observation lives one tier up on the stage.
+/// change pipeline. A sink sees every edit, by any editor. A
+/// [`Stage`](crate::usd::Stage) installs an aggregating sink on each layer it
+/// owns to stay in sync; composition-level observation lives one tier up on the
+/// stage.
 ///
 /// Both methods default to doing nothing, so a sink implements only the phase it
-/// cares about. Sinks fire in installation order.
+/// cares about. Sinks fire in installation order. `before_commit` runs inside
+/// the edit. `after_commit` runs once the edit's borrows are released: for a
+/// layer outside any registry, before the edit returns; for one a
+/// [`LayerRegistry`](super::LayerRegistry) holds, in commit order after every
+/// notification queued ahead of it, which may be after the edit returns when
+/// the edit was made from inside another sink's callback.
 pub trait LayerSink {
     /// Inspect a staged edit before it commits. Returning `Err` rolls the edit
     /// back: the overlay is discarded and the error surfaces to the author. The
@@ -1190,21 +1232,23 @@ pub fn default_prim_path(token: &str) -> Option<Path> {
     Some(Path::abs_root().make_absolute(&path))
 }
 
-/// Author across several layers as one atomic transaction: run `f` to stage
-/// edits into every layer through its [`LayerEdit`] view, then commit them
-/// together. Commit is two-phase — every layer's
-/// [`before_commit`](LayerSink::before_commit) runs first, and only once all
-/// accept does any layer's overlay drain into its backend — so a single vetoing
-/// sink, an authoring error from `f`, or a panic rolls every layer back, leaving
-/// none partially applied. Returns whether any layer's edit produced a
-/// composition change. Each committed layer fires its sinks, so the change records
-/// reach a stage through its aggregator rather than through this return.
+/// Author across several layers as one atomic transaction `txn`: run `f` to
+/// stage edits into every layer through its [`LayerEdit`] view, then commit
+/// them together, in the order the [`commit`](super::commit) module sets out.
+///
+/// Every layer's [`before_commit`](LayerSink::before_commit) runs first, and
+/// only once all accept are the subscribers prepared and the overlays drained,
+/// so a single vetoing sink, an authoring error from `f`, or a panic rolls
+/// every layer back, leaving none partially applied. The returned
+/// [`Committed`] holds the sinks' `after_commit` notifications for the caller
+/// to dispatch once it has released its borrows.
 ///
 /// [`Layer::edit`] is the single-layer case of this.
 pub(crate) fn edit_layers<E: From<sink::Error>>(
     layers: &mut [&mut Layer],
+    txn: TxnContext,
     f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
-) -> Result<bool, E> {
+) -> Result<Committed, E> {
     let mut guard = GroupEditGuard {
         layers,
         committed: false,
@@ -1215,29 +1259,57 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
         // `edits` drops at the block end, releasing the per-layer borrows for the
         // commit phase below.
     }
-    // One id for the whole atomic group, so an observer sees every layer this
-    // transaction commits under a single transaction id.
-    let generation = crate::next_id();
-    // Phase 1: refill each layer's record and offer it to that layer's
-    // `before_commit`; a veto aborts before any layer commits.
+    // Refill each layer's record and offer it to that layer's `before_commit`; a
+    // veto aborts before any subscriber sees the transaction.
     for layer in guard.layers.iter_mut() {
-        layer.prepare_commit(generation)?;
+        layer.veto(&txn)?;
     }
-    // Phase 2: every layer accepted, so drain each overlay into its backend. Commit
-    // all layers before notifying any, so the whole group's data lands even if a
-    // later `after_commit` panics.
-    let mut changed = false;
+    // Every layer accepted: prepare the subscribers while the old data exists.
+    // An unwind from here on drops the prepared objects uncommitted.
+    let prepared: Vec<_> = guard
+        .layers
+        .iter()
+        .map(|layer| layer.observed().then(|| layer.prepare(&txn)))
+        .collect();
+    // Drain each overlay into its backend, all layers before any record is
+    // handed on, so the whole group's data lands together.
+    let changed = guard.layers.iter().any(|layer| !layer.changes.is_empty());
     for layer in guard.layers.iter_mut() {
-        changed |= layer.commit_data();
+        layer.data.commit();
     }
     // The group is committed, so the guard's drop leaves every overlay in place.
     guard.committed = true;
-    // Phase 3: deliver each layer's `after_commit`. A panic here interrupts only
-    // notification — the group's data is already committed.
-    for layer in guard.layers.iter() {
-        layer.notify_after_commit();
+    // Every record and notification is built before any subscriber is handed
+    // its record, so the transaction's notifications are whole however a
+    // subscriber's `commit` ends.
+    let mut notifications = Vec::new();
+    let mut landed = Vec::new();
+    for (layer, prepared) in guard.layers.iter_mut().zip(prepared) {
+        let Some((footprint, prepared)) = prepared else {
+            continue;
+        };
+        // TODO(perf): an observed commit moves its change list into the record
+        // and the layer's next commit grows a fresh one; a record that shares
+        // the list (`Rc<ChangeList>`) would keep one buffer per layer.
+        let record = Rc::new(CommitRecord {
+            identifier: layer.identifier.clone(),
+            txn: txn.id,
+            changes: mem::take(&mut layer.changes),
+            footprint,
+            origin: txn.origin,
+        });
+        notifications.extend(layer.sinks.snapshot().into_iter().map(|sink| Notification {
+            sink,
+            record: Rc::clone(&record),
+        }));
+        landed.push((record, prepared));
     }
-    Ok(changed)
+    for (record, prepared) in landed {
+        for subscriber in prepared {
+            subscriber.commit(&record);
+        }
+    }
+    Ok(Committed::new(notifications, changed))
 }
 
 /// Stage edits across `layers` to verify they apply, then discard them all — the
@@ -1774,11 +1846,12 @@ mod tests {
         a.add_sink(|_: &str, _: &ChangeList| panic!("boom"));
 
         let panicked = catch_unwind(AssertUnwindSafe(|| {
-            let _ = edit_layers(&mut [&mut a, &mut b], |edits| {
+            let _ = edit_layers(&mut [&mut a, &mut b], TxnContext::new(None), |edits| {
                 PrimSpec::new(edits[0].data_mut(), "/A", Specifier::Def, "Xform").expect("authored a");
                 PrimSpec::new(edits[1].data_mut(), "/B", Specifier::Def, "Xform").expect("authored b");
                 Ok::<(), EditError>(())
-            });
+            })
+            .map(Committed::dispatch);
         }));
         assert!(panicked.is_err(), "the after_commit panic propagates");
         assert!(
@@ -2055,6 +2128,28 @@ mod tests {
         Ok(())
     }
 
+    /// A layer saves in the format it was read in, so text read from a `.usd`
+    /// file stays text, where the extension alone would pick binary.
+    #[test]
+    fn save_keeps_format() -> Result<()> {
+        use crate::sdf::{PrimSpec, Specifier};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("text.usd");
+        fs::write(&path, "#usda 1.0\n")?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        layer.edit(|edit| {
+            PrimSpec::new(edit.data_mut(), "/Saved", Specifier::Def, "Xform")?;
+            Ok(())
+        })?;
+        layer.save()?;
+
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.starts_with("#usda"), "a text .usd saves as text");
+        assert!(saved.contains("Saved"));
+        Ok(())
+    }
+
     #[test]
     fn save_rejects_anonymous() {
         let mut layer = sdf::Layer::new_anonymous("scratch");
@@ -2086,6 +2181,30 @@ mod tests {
         let mut layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
         let err = layer.save().unwrap_err();
         assert!(err.to_string().contains("not editable"));
+    }
+
+    /// A layer opened from a package reads in its root layer's format, but
+    /// saving it would write over the archive, so save refuses it and the
+    /// package is left whole. So does a layer opened inside the package.
+    #[test]
+    fn save_rejects_opened_package() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let package = dir.path().canonicalize()?.join("pkg.usdz");
+        let mut writer = usdz::ArchiveWriter::create(&package)?;
+        writer.add_layer("root.usda", b"#usda 1.0\n")?;
+        writer.add_layer("sub/inner.usda", b"#usda 1.0\n")?;
+        writer.finish()?;
+        let before = fs::read(&package)?;
+        let package_path = package.to_string_lossy();
+
+        let mut root = Layer::open(&package_path)?;
+        assert!(matches!(root.save(), Err(ExportError::NotEditable { .. })));
+        let mut inner = Layer::open(format!("{package_path}[sub/inner.usda]"))?;
+        assert!(inner.save().is_err(), "a packaged layer has no file of its own");
+
+        assert_eq!(fs::read(&package)?, before, "the package is untouched");
+        assert_eq!(fs::read_dir(dir.path())?.count(), 1, "nothing was written beside it");
+        Ok(())
     }
 
     #[test]
