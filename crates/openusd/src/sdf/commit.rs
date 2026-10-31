@@ -19,8 +19,11 @@
 //!    the returned [`Committed`], which runs each layer's
 //!    [`LayerSink::after_commit`].
 //!
-//! Nothing a subscriber is handed runs user code: user observers are
-//! [`LayerSink`]s, and only their callbacks run outside the crate.
+//! A subscriber is crate-internal, but its [`prepare`](Subscriber::prepare)
+//! may forward the staged edit to user observers of its own (a stage's
+//! `StageSink::before_commit`), which run under the same borrow and can
+//! panic there, dropping every prepared object uncommitted.
+//! [`Prepared::commit`] and a prepared object's `Drop` run no user code.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -54,10 +57,6 @@ pub(crate) struct EditorId(u64);
 
 impl EditorId {
     /// A fresh editor identity.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only the tests attribute an edit to an editor")
-    )]
     pub(crate) fn next() -> Self {
         Self(crate::next_id())
     }
@@ -142,10 +141,6 @@ pub(crate) struct PendingCommit<'a> {
     /// The pre-edit base, the staged overlay and the derived change list.
     pub change: &'a PendingLayerChange<'a>,
     /// The transaction's context.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only the tests read a pending commit's transaction")
-    )]
     pub txn: &'a TxnContext,
 }
 
@@ -156,8 +151,9 @@ pub(crate) struct PendingCommit<'a> {
 pub(crate) trait Subscriber {
     /// Capture what this subscriber needs from `commit` before the old data
     /// is gone, into an object the transaction owns, or `None` when it needs
-    /// nothing. It runs with the layer's registry borrowed, and reads only
-    /// `commit`, never a layer or a stage.
+    /// nothing. It runs with the layer's registry borrowed and reads no layer
+    /// through a handle. A pre-commit observer it forwards to runs under that
+    /// borrow too.
     fn prepare(&self, commit: &PendingCommit<'_>) -> Option<Box<dyn Prepared>>;
 }
 
@@ -256,8 +252,9 @@ impl Dispatch {
     }
 }
 
-/// Clears [`Dispatch::running`] when a run ends, a callback's panic included.
-struct StopRunning<'a>(&'a Cell<bool>);
+/// Clears a running flag when the run it guards ends, a callback's panic
+/// included.
+pub(crate) struct StopRunning<'a>(pub(crate) &'a Cell<bool>);
 
 impl Drop for StopRunning<'_> {
     fn drop(&mut self) {

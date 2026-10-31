@@ -11,9 +11,8 @@
 //! [`ReplayStage`](super::ReplayStage) records the forward diff of each
 //! committed edit — its new authored values — for replay or cross-stage
 //! mirroring, and [`UndoStage`](super::UndoStage) records the inverse — the
-//! old values, for undo. Both are [`StageSink`](super::StageSink) clients; the
-//! derivation of a forward or inverse diff from a committed edit lives here
-//! ([`forward_diff`], [`inverse_diff`]).
+//! old values, for undo. The derivation of a forward or inverse diff from a
+//! committed edit lives here ([`forward_diff`], [`inverse_diff`]).
 //!
 //! [`Stage::apply_diff`] is the consume half. [`ApplyMode`] names the two
 //! replication flavors:
@@ -181,9 +180,8 @@ pub enum ApplyMode<'a> {
 
 /// Derive the forward diffs of the committed edit `objects` — the operations
 /// that reproduce it — by reading the new authored values out of each edited
-/// layer. Used by [`ReplayStage`](super::ReplayStage) from
-/// [`StageSink::after_commit`](super::StageSink::after_commit), where the layers
-/// hold the committed state.
+/// layer. Used by [`ReplayStage`](super::ReplayStage) as the edit reconciles,
+/// while the layers hold its committed state.
 ///
 /// One [`Diff`] per edited layer ([`layer_changes`](CommittedChange::layer_changes)):
 /// a multi-layer transaction (a batch or namespace edit) records one change list
@@ -198,9 +196,8 @@ pub enum ApplyMode<'a> {
 /// carries that edit target's namespace mapping so [`Stage::apply_diff`] can lift
 /// the paths back to stage namespace when replaying through a different target.
 pub(super) fn forward_diff(stage: &Stage, objects: &CommittedChange<'_>) -> Result<Vec<Diff>> {
-    stage.settle()?;
     let mapping = objects.provenance.mapping();
-    let layers = stage.layer_view();
+    let layers = stage.current_view();
     let mut diffs = Vec::new();
     for (layer_identifier, change_list) in objects.layer_changes {
         let Some(layer_id) = layers.id_of(layer_identifier) else {
@@ -774,6 +771,7 @@ mod tests {
             layer_changes: &layer_changes,
             provenance: &provenance,
             generation: 0,
+            own: true,
         };
         let diffs = forward_diff(&stage, &change)?;
         assert_eq!(diffs.len(), 1);

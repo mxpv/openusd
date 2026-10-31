@@ -97,9 +97,7 @@ pub struct Layer {
     /// commit. Refilled in place each commit; a commit with sinks or
     /// subscribers moves it into the transaction's record.
     changes: ChangeList,
-    /// Per-layer change sinks notified of each commit — the low tier of the
-    /// change pipeline, where a stage installs an aggregator so it stays in sync
-    /// with any edit. Empty by default.
+    /// Per-layer change sinks notified of each commit. Empty by default.
     sinks: sink::Set<dyn LayerSink>,
     /// The crate-internal observers a [`LayerHandle`](super::LayerHandle)
     /// subscribes, prepared ahead of each commit and committed with it (see
@@ -729,10 +727,8 @@ pub enum EditError {
 }
 
 /// An observer of a single [`Layer`]'s committed edits — the low tier of the
-/// change pipeline. A sink sees every edit, by any editor. A
-/// [`Stage`](crate::usd::Stage) installs an aggregating sink on each layer it
-/// owns to stay in sync; composition-level observation lives one tier up on the
-/// stage.
+/// change pipeline. A sink sees every edit, by any editor. Composition-level
+/// observation lives one tier up, on the [`Stage`](crate::usd::Stage).
 ///
 /// Both methods default to doing nothing, so a sink implements only the phase it
 /// cares about. Sinks fire in installation order. `before_commit` runs inside

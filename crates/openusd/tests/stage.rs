@@ -13313,11 +13313,10 @@ fn listener_reentrant_author() -> Result<()> {
     Ok(())
 }
 
-/// Two sinks, the first authoring once from `after_commit`, pin the delivery
-/// order of each authoring route. A stage-routed edit drains inside the outer
-/// fan-out, so the nested event reaches both sinks before the outer event
-/// reaches the second; a direct layer edit is picked up by the quiescence loop
-/// instead, so both sinks see the outer event first.
+/// Two sinks, the first authoring once from `after_commit`, see the outer
+/// event before the nested one whichever route the nested edit takes: a
+/// stage-routed edit reconciles inside the fan-out but is delivered after it,
+/// and a direct layer edit is picked up by the quiescence loop.
 #[test]
 fn two_sink_reentrant_order() -> Result<()> {
     fn record(tag: &'static str, log: &Rc<RefCell<Vec<String>>>, change: &CommittedChange<'_>) {
@@ -13330,7 +13329,7 @@ fn two_sink_reentrant_order() -> Result<()> {
         log.borrow_mut().push(format!("{tag}:{prim}"));
     }
 
-    // Stage-routed: the nested `define_prim` drains inside the fan-out.
+    // Stage-routed: the nested `define_prim` is delivered after the fan-out.
     let stage = in_memory_stage()?;
     let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let _first = {
@@ -13350,8 +13349,8 @@ fn two_sink_reentrant_order() -> Result<()> {
     stage.define_prim("/World")?;
     assert_eq!(
         log.borrow().clone(),
-        vec!["s1:/World", "s1:/Nested", "s2:/Nested", "s2:/World"],
-        "a stage-routed re-entrant edit drains inside the outer fan-out"
+        vec!["s1:/World", "s2:/World", "s1:/Nested", "s2:/Nested"],
+        "a stage-routed re-entrant edit is delivered after the outer fan-out"
     );
 
     // Direct: the nested edit waits for the quiescence loop.
@@ -13389,9 +13388,9 @@ fn two_sink_reentrant_order() -> Result<()> {
     Ok(())
 }
 
-/// A layer that joins through the load barrier gets the stage's change
-/// aggregator, so editing it directly invalidates composition — the aggregator
-/// reaches the load path, not only construction.
+/// A layer that joins through the load barrier gets the stage's recorder, so
+/// editing it directly invalidates composition: the recorder reaches the load
+/// path, not only construction.
 #[test]
 fn lazy_layer_aggregated() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -13435,7 +13434,7 @@ def \"P\" {
     assert_eq!(
         stage.attribute("/A.v")?.get::<f64>()?,
         Some(7.0),
-        "the demand-loaded layer's aggregator drove a recompose"
+        "the demand-loaded layer's recorder drove a recompose"
     );
     Ok(())
 }

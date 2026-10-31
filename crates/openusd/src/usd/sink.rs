@@ -1,10 +1,10 @@
 //! Stage-tier change sinks: observers of a [`Stage`]'s composed-scene changes.
 //!
 //! A [`StageSink`] is the high tier of the two-level change pipeline. The low
-//! tier is [`sdf::LayerSink`], fired at each layer's commit seam; the stage
-//! installs an aggregating layer sink on every layer it owns, which records the
-//! committed edit so the stage can recompose and, once composition is
-//! invalidated, deliver a composed [`CommittedChange`] to every `StageSink`.
+//! tier is [`sdf::LayerSink`], fired at each layer's commit seam. The stage
+//! subscribes to every layer it holds and records each committed edit as it
+//! lands, so it can recompose and, once composition is invalidated, deliver a
+//! composed [`CommittedChange`] to every `StageSink`.
 //! Higher-level features (change notification, undo/redo, replay, validation)
 //! are built as sinks; `Stage` installs none by default, so the no-sink path
 //! costs nothing extra.
@@ -41,15 +41,14 @@ pub trait StageSink {
     /// asset-path-resynced prim paths in stage namespace, after PCP has
     /// invalidated the affected indices.
     ///
-    /// The two are bridged by an aggregating [`sdf::LayerSink`] the stage installs
-    /// on each layer it owns: each layer commit records its edit, and the recorded
-    /// edits are processed together in one recompose. So an authoring operation
-    /// that touches several
-    /// layers at once — a batched namespace edit spanning the local layer stack —
-    /// fires this once with the union of every layer's effect on the composed
-    /// scene, not once per layer. (The single [`change`](CommittedChange) reports
-    /// the merged record under the strongest edited layer; see
-    /// [`CommittedChange::change_list`].)
+    /// The two are bridged by the stage's subscription to each layer it holds:
+    /// each layer commit records its edit, and the recorded edits are processed
+    /// together in one recompose. So an authoring operation that touches
+    /// several layers at once — a batched namespace edit spanning the local
+    /// layer stack — fires this once with the union of every layer's effect on
+    /// the composed scene, not once per layer. (The single
+    /// [`change`](CommittedChange) reports the merged record under the
+    /// strongest edited layer; see [`CommittedChange::change_list`].)
     fn after_commit(&self, stage: &Stage, change: &CommittedChange<'_>) {
         let _ = (stage, change);
     }
@@ -64,10 +63,9 @@ pub trait StageSink {
     /// record here; after the commit drains, those values are gone. Every
     /// `before_commit` of one atomic transaction fires (in phase order, before
     /// any [`after_commit`](Self::after_commit)) sharing one
-    /// [`generation`](PendingChange::generation); a transaction that a later
-    /// veto or a panic rolls back fires no `after_commit`, so a sink keys its
-    /// per-transaction scratch on the generation to discard the orphaned
-    /// captures when the next transaction opens.
+    /// [`generation`](PendingChange::generation). A transaction that a panic
+    /// stops after this, in this sink or a later one, fires no `after_commit`;
+    /// the sink hears of it through [`aborted`](Self::aborted) instead.
     ///
     /// The layer graph is mid-edit for the duration, so a `before_commit` sink
     /// must derive only from the values `change` carries — it must not re-enter
@@ -75,6 +73,15 @@ pub trait StageSink {
     /// [`sdf::LayerSink::before_commit`] this cannot veto: it observes.
     fn before_commit(&self, stage: &Stage, change: &PendingChange<'_>) {
         let _ = (stage, change);
+    }
+
+    /// Observe that the transaction `generation`, whose
+    /// [`before_commit`](Self::before_commit) this sink may have seen, did not
+    /// land. It arrives in transaction order with the
+    /// [`after_commit`](Self::after_commit) notices, and lets a sink drop what
+    /// it captured for the transaction.
+    fn aborted(&self, stage: &Stage, generation: u64) {
+        let _ = (stage, generation);
     }
 
     /// Observe an edit-target change (C++ `UsdNotice::StageEditTargetChanged`).
@@ -241,9 +248,18 @@ pub struct CommittedChange<'a> {
     /// [`UndoStage`](super::UndoStage) pairs the two to seal one transaction's
     /// captured inverses.
     pub generation: u64,
+    /// Whether this stage made the edit (see [`is_own`](Self::is_own)).
+    pub(crate) own: bool,
 }
 
 impl CommittedChange<'_> {
+    /// Whether this stage made the edit, through its authoring methods or
+    /// [`Stage::edit_layer`](super::Stage::edit_layer). An edit made through a
+    /// [`sdf::LayerHandle`], or by another stage holding the layer, is not.
+    pub fn is_own(&self) -> bool {
+        self.own
+    }
+
     /// The field names authored at `path` by this edit (C++ `GetChangedFields`),
     /// empty if `path` was not touched. `path` is in stage namespace, the same
     /// as the paths in [`resynced`](Self::resynced) and
@@ -304,6 +320,35 @@ pub struct PendingChange<'a> {
     /// commit — e.g. an [`UndoStage`](super::UndoStage) buffers per-layer inverses
     /// by it and seals them when the commit arrives.
     pub generation: u64,
+    /// Whether this stage is making the edit (see [`is_own`](Self::is_own)).
+    pub(crate) own: bool,
+}
+
+impl PendingChange<'_> {
+    /// Whether this stage is making the edit, through its authoring methods
+    /// or [`Stage::edit_layer`](super::Stage::edit_layer). An edit made
+    /// through a [`sdf::LayerHandle`], or by another stage holding the layer,
+    /// is not.
+    pub fn is_own(&self) -> bool {
+        self.own
+    }
+}
+
+/// A crate-internal observer of a stage's transaction outcomes, told as each
+/// transaction is reconciled, before its notices are delivered. It is current
+/// even while a delivery is pending. It runs no user code. It reads
+/// the stage's layers as they stand when the transaction reconciles (through
+/// `Stage::current_view`): a stage edit reconciles as its authoring call
+/// ends, before the next edit, while edits made through a layer handle and
+/// drained together are read as the last of them left the layers.
+pub(crate) trait TxnObserver {
+    /// The transaction `change` reports landed.
+    fn committed(&self, stage: &Stage, change: &CommittedChange<'_>);
+
+    /// The transaction `generation` began committing and did not land.
+    fn aborted(&self, generation: u64) {
+        let _ = generation;
+    }
 }
 
 /// A bare closure is a [`StageSink`] that only observes committed edits — the
@@ -556,6 +601,7 @@ impl Payload {
         layer_identifier: &'a str,
         provenance: &'a Provenance,
         generation: u64,
+        own: bool,
     ) -> CommittedChange<'a> {
         CommittedChange {
             resynced: &self.stage.resynced,
@@ -566,6 +612,7 @@ impl Payload {
             layer_changes: &self.layer_changes,
             provenance,
             generation,
+            own,
         }
     }
 }

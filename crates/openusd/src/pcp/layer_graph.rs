@@ -131,6 +131,9 @@ type SublayerEdges = Vec<(LayerId, LayerOffset)>;
 
 /// A single layer in the [`LayerGraph`].
 pub(crate) struct LayerNode {
+    /// The stage's subscription to the layer's commits, ended before the
+    /// handle is released (fields drop in declaration order).
+    subscription: Option<sdf::Subscription>,
     /// The loaded layer, held in the graph's store. Composition reads its
     /// content through a [`LayerView`]; the graph's own maintenance borrows
     /// the store directly.
@@ -164,6 +167,7 @@ impl LayerNode {
     /// [`LayerGraph::recompute_sublayers`].
     fn new(handle: sdf::LayerHandle) -> Self {
         Self {
+            subscription: None,
             handle,
             children: Vec::new(),
             has_expr_sublayer: false,
@@ -1432,6 +1436,12 @@ impl LayerGraph {
         &self.nodes[&id].handle
     }
 
+    /// Hold `subscription` to the layer `id`'s commits for as long as the
+    /// layer is in the graph.
+    pub(crate) fn subscribe(&mut self, id: LayerId, subscription: sdf::Subscription) {
+        self.nodes.get_mut(&id).expect("the layer is in the graph").subscription = Some(subscription);
+    }
+
     /// The store that holds every layer this graph's nodes name.
     pub(crate) fn store(&self) -> &Rc<sdf::LayerStore> {
         &self.store
@@ -2402,8 +2412,8 @@ impl LayerGraph {
     /// layer (matched by identifier) is left untouched (its existing children and
     /// relocates survive, since the same layer may be sublayered from several
     /// places) and reported as not fresh; an absent one joins with a freshly
-    /// minted id. Callers key one-time per-layer setup (e.g. attaching a change
-    /// aggregator) off `fresh` so a re-added identifier is not set up twice.
+    /// minted id. Callers key one-time per-layer setup (e.g. subscribing the
+    /// stage's recorder) off `fresh` so a re-added identifier is not set up twice.
     ///
     /// The node must exist before a `subLayers` edit naming its asset path is
     /// rebuilt, so that [`build_sublayer_edges`](Self::build_sublayer_edges)'s
