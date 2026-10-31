@@ -343,6 +343,16 @@ impl StoreRead<'_> {
             .get(handle.token.key)
             .expect("a handle keeps its slot filled in its own store")
     }
+
+    /// The live layer whose identifier is `identifier`, or, with `real_path`,
+    /// the one read from that location.
+    pub(crate) fn find(&self, identifier: &str, real_path: Option<&str>) -> Option<&Layer> {
+        let slots = self.slots.as_ref().expect("a read holds its borrow until it drops");
+        let (layer, _) = slots.slots[slots.find(identifier, real_path)? as usize]
+            .entry
+            .as_ref()?;
+        Some(layer)
+    }
 }
 
 impl Drop for StoreRead<'_> {
@@ -371,8 +381,9 @@ impl LayerStore {
         real_path: Option<&str>,
     ) -> Result<Option<LayerHandle>, LayerError> {
         let slots = self.slots.try_borrow().map_err(|_| LayerError::Busy)?;
-        let live = |index: Option<&u32>| index.and_then(|&index| self.live(&slots, index));
-        Ok(live(slots.by_identifier.get(identifier)).or_else(|| live(slots.by_real_path.get(real_path?))))
+        Ok(slots
+            .find(identifier, real_path)
+            .and_then(|index| self.live(&slots, index)))
     }
 
     /// Hold `layer`, committing any edit it has staged without notifying its
@@ -564,6 +575,17 @@ impl LayerStore {
 }
 
 impl Slots {
+    /// The slot of the live layer whose identifier is `identifier`, or, with
+    /// `real_path`, of the one read from that location.
+    fn find(&self, identifier: &str, real_path: Option<&str>) -> Option<u32> {
+        let live = |index: Option<&u32>| {
+            let &index = index?;
+            let (_, token) = self.slots[index as usize].entry.as_ref()?;
+            (token.strong_count() > 0).then_some(index)
+        };
+        live(self.by_identifier.get(identifier)).or_else(|| live(self.by_real_path.get(real_path?)))
+    }
+
     /// The layer in the slot `key` names, while it holds the filling `key`
     /// came from.
     fn get(&self, key: SlotKey) -> Option<&Layer> {
@@ -629,11 +651,11 @@ impl Slots {
 mod tests {
     use super::*;
     use crate::sdf::commit::{CommitRecord, EditorId, Footprint, PendingCommit, Prepared, TxnId};
+    use crate::sdf::layer_registry::tests::counting_registry;
     use crate::{ar, sdf, vt};
 
     use std::cell::Cell;
     use std::fs;
-    use std::io;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     /// The footprint and origin of each commit a [`Footprints`] subscriber saw.
@@ -641,31 +663,6 @@ mod tests {
 
     /// What a test observer saw, in order.
     type Log = Rc<RefCell<Vec<String>>>;
-
-    /// A filesystem resolver that counts the assets it opens.
-    struct Counting {
-        inner: ar::DefaultResolver,
-        opens: Rc<Cell<usize>>,
-    }
-
-    impl ar::Resolver for Counting {
-        fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
-            self.inner.create_identifier(asset_path, anchor)
-        }
-
-        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            self.inner.resolve(asset_path)
-        }
-
-        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-            self.inner.resolve_for_new_asset(asset_path)
-        }
-
-        fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            self.opens.set(self.opens.get() + 1);
-            self.inner.open_asset(resolved_path)
-        }
-    }
 
     /// A subscriber that logs each transaction's commit or abort, with the
     /// `documentation` of `/P` its prepare saw in the pre-edit base.
@@ -704,10 +701,11 @@ mod tests {
     }
 
     impl Prepared for Capture {
-        fn commit(mut self: Box<Self>, record: &CommitRecord) {
+        fn commit(mut self: Box<Self>, record: &CommitRecord) -> Option<Rc<dyn sdf::LayerSink>> {
             assert_eq!(record.txn, self.txn, "committed with its own transaction's record");
             self.log.borrow_mut().push(format!("commit {}", self.before));
             self.committed = true;
+            None
         }
     }
 
@@ -732,8 +730,9 @@ mod tests {
     }
 
     impl Prepared for Keep {
-        fn commit(self: Box<Self>, record: &CommitRecord) {
+        fn commit(self: Box<Self>, record: &CommitRecord) -> Option<Rc<dyn sdf::LayerSink>> {
             self.0.borrow_mut().push((record.footprint.clone(), record.origin));
+            None
         }
     }
 
@@ -788,11 +787,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("shared.usda");
         fs::write(&path, "#usda 1.0\n\ndef Xform \"P\"\n{\n}\n")?;
-        let opens = Rc::new(Cell::new(0));
-        let registry = sdf::LayerRegistry::new(Box::new(Counting {
-            inner: ar::DefaultResolver::new(),
-            opens: Rc::clone(&opens),
-        }));
+        let (registry, opens) = counting_registry();
 
         let first = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
         let second = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
@@ -812,11 +807,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("later.usda");
         fs::write(&path, "#usda 1.0\n")?;
-        let opens = Rc::new(Cell::new(0));
-        let registry = sdf::LayerRegistry::new(Box::new(Counting {
-            inner: ar::DefaultResolver::new(),
-            opens: Rc::clone(&opens),
-        }));
+        let (registry, opens) = counting_registry();
         let held = registry.adopt(layer_with_prim("held.usda")).unwrap();
 
         let inner = held.read(|_| registry.find_or_open(&path.to_string_lossy()))?;

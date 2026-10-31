@@ -118,6 +118,10 @@ pub(crate) enum LoadError {
     /// load failure, aborting the load with it.
     #[error(transparent)]
     Rejected(#[from] Error),
+
+    /// The registry refused to hold a layer it read, or its layers were in use.
+    #[error(transparent)]
+    Layer(#[from] sdf::LayerError),
 }
 
 /// Projects a load failure onto the public [`crate::Error`]: resolution and
@@ -133,6 +137,7 @@ impl From<LoadError> for crate::Error {
             LoadError::Format(error) => error.into(),
             LoadError::Data(error) => error.into(),
             LoadError::Rejected(error) => crate::Error::Format(sdf::FormatError::Decode(Box::new(error))),
+            LoadError::Layer(error) => error.into(),
         }
     }
 }
@@ -151,9 +156,9 @@ impl From<LoadError> for crate::Error {
 /// [`sdf::LayerHandle`]s: [`find_or_open`](Self::find_or_open) returns the
 /// layer already open at an identifier, unsaved edits included, and opens it
 /// only when none is (C++ `SdfLayer::FindOrOpen`). Cloning the registry shares
-/// its resolver and the layers it holds. A stage's layer graph opens its layers
-/// through the registry but holds its own copy of each, outside the shared
-/// set.
+/// its resolver and the layers it holds. Every stage opened on the registry
+/// holds its layers here, so stages on one registry share each layer and see
+/// each other's edits.
 ///
 /// A layer stays held while any handle to it exists. Once its last handle
 /// drops, it is freed at the next [`sweep`](Self::sweep), or at once when no
@@ -187,7 +192,7 @@ enum Located {
     Unresolved,
 }
 
-/// A layer as [`LayerRegistry::open`] reads it: its canonical identifier,
+/// A layer as the registry reads it: its canonical identifier,
 /// the location it resolved to, and its parsed data, ahead of the
 /// [`sdf::Layer`] or sublayer walk built from it.
 pub(crate) struct PreparedLayer {
@@ -202,12 +207,23 @@ pub(crate) struct PreparedLayer {
     pub format: Option<&'static dyn sdf::FileFormat>,
 }
 
-impl PreparedLayer {
-    /// The location the layer's relative paths anchor against, or `None` for
-    /// an anonymous layer, which has none (C++
-    /// `SdfComputeAssetPathRelativeToLayer`).
-    pub(crate) fn anchor(&self) -> Option<&ar::ResolvedPath> {
-        (!sdf::Layer::is_anonymous_identifier(&self.identifier)).then_some(&self.resolved)
+/// A layer a load reached, with the identifier the load asked for it under.
+/// That is another spelling of the layer's own identifier when the registry
+/// held the file under the layer's, so the graph can record it as an alias.
+pub(crate) struct LoadedLayer {
+    /// The identifier the load asked for.
+    pub(crate) identifier: String,
+    /// The layer, which the registry holds.
+    pub(crate) handle: sdf::LayerHandle,
+}
+
+impl From<sdf::LayerHandle> for LoadedLayer {
+    /// The layer `handle` names, asked for under its own identifier.
+    fn from(handle: sdf::LayerHandle) -> Self {
+        Self {
+            identifier: handle.identifier().to_owned(),
+            handle,
+        }
     }
 }
 
@@ -286,7 +302,7 @@ impl LayerRegistry {
     /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
     /// edit on this registry.
     pub fn find(&self, asset_path: &str) -> Result<Option<sdf::LayerHandle>, sdf::LayerError> {
-        Ok(match self.locate(asset_path)? {
+        Ok(match self.locate(self.create_identifier(asset_path, None))? {
             Located::Open(handle) => Some(handle),
             Located::Closed { .. } | Located::Unresolved => None,
         })
@@ -303,24 +319,14 @@ impl LayerRegistry {
     /// this registry.
     pub fn find_or_open(&self, asset_path: &str) -> crate::Result<Option<sdf::LayerHandle>> {
         let _scope = ar::CacheScope::begin();
-        Ok(match self.locate(asset_path)? {
-            Located::Open(handle) => Some(handle),
-            Located::Closed { identifier, resolved } => {
-                if let Some(store) = self.held() {
-                    store.ensure_writable()?;
-                }
-                let layer = sdf::Layer::new_resolved(self.read(identifier, resolved)?, Rc::clone(&self.resolver));
-                Some(self.store().insert(layer).map_err(sdf::LayerError::from)?)
-            }
-            Located::Unresolved => None,
-        })
+        let identifier = self.create_identifier(asset_path, None);
+        Ok(self.find_or_read(&identifier)?.map(|layer| layer.handle))
     }
 
-    /// Where `asset_path`, canonicalized, leads: to a layer open here under
-    /// its identifier or read from the location it resolves to, or to that
-    /// location, or nowhere. An anonymous layer is found by identifier only.
-    fn locate(&self, asset_path: &str) -> Result<Located, sdf::LayerError> {
-        let identifier = self.create_identifier(asset_path, None);
+    /// Where the canonical `identifier` leads: to a layer open here under it
+    /// or read from the location it resolves to, or to that location, or
+    /// nowhere. An anonymous layer is found by identifier only.
+    fn locate(&self, identifier: String) -> Result<Located, sdf::LayerError> {
         let store = self.held();
         if let Some(store) = &store
             && let Some(handle) = store.find(&identifier, None)?
@@ -334,7 +340,7 @@ impl LayerRegistry {
             return Ok(Located::Unresolved);
         };
         if let Some(store) = &store
-            && let Some(handle) = store.find(&identifier, Some(&resolved.to_string()))?
+            && let Some(handle) = store.find(&identifier, resolved.to_str())?
         {
             return Ok(Located::Open(handle));
         }
@@ -349,8 +355,16 @@ impl LayerRegistry {
         store
     }
 
+    /// Fails with [`LayerError::Busy`](sdf::LayerError::Busy) while a read or
+    /// an edit holds the registry's layers. A load that joins its layers to a
+    /// stage checks first, as the stage subscribes to each layer, held already
+    /// or not.
+    fn ensure_writable(&self) -> Result<(), sdf::LayerError> {
+        self.held().map_or(Ok(()), |store| store.ensure_writable())
+    }
+
     /// The store, started anew when no handle keeps one.
-    fn store(&self) -> Rc<sdf::LayerStore> {
+    pub(crate) fn store(&self) -> Rc<sdf::LayerStore> {
         self.held().unwrap_or_else(|| {
             let store = Rc::default();
             self.store.set(Rc::downgrade(&store));
@@ -360,12 +374,14 @@ impl LayerRegistry {
 
     /// Hold `layer` here, where [`find`](Self::find) returns it, and return a
     /// handle to it. Any edit it has staged is committed, without notifying its
-    /// sinks. Fails, handing the layer back in the [`sdf::AdoptError`], with
+    /// sinks, and the registry's resolver anchors, reads and saves it from then
+    /// on, as it does a layer the registry reads. Fails, handing the layer back in the [`sdf::AdoptError`], with
     /// [`LayerError::Duplicate`](sdf::LayerError::Duplicate) when a layer with
     /// its identifier, or read from its file, is already open here, and with
     /// [`LayerError::Busy`](sdf::LayerError::Busy) from inside a read or an
     /// edit on this registry.
-    pub fn adopt(&self, layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
+    pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
+        layer.set_resolver(Rc::clone(&self.resolver));
         self.store().insert(layer)
     }
 
@@ -523,47 +539,65 @@ impl LayerRegistry {
         DEFAULT_FORMATS.iter().copied().find(|f| f.format_id() == id)
     }
 
-    /// Resolves `identifier` and reads the layer there in its file format, or
-    /// `None` when it does not resolve: the one resolve-and-read step every
-    /// open builds on. Value-clip and manifest layers, which compose outside
-    /// the layer graph (spec 12.3.4), use it directly.
-    ///
-    /// The resolved location comes back with the data because it is what anchors
-    /// the relative asset paths the layer authors, and it is not always the
-    /// identifier: a package resolves to its package-relative default layer.
-    /// [`open_layer`](Self::open_layer) builds the [`sdf::Layer`] that keeps
-    /// it.
-    pub(crate) fn open(&self, identifier: &str) -> Result<Option<PreparedLayer>, LoadError> {
+    /// The layer the registry holds under the canonical `identifier` or read
+    /// from the file it resolves to, unsaved edits included, or else that
+    /// layer read and held from then on, or `None` when it does not resolve.
+    /// Fails with [`LayerError::Busy`](sdf::LayerError::Busy), before reading
+    /// anything, when it would have to hold a layer from inside a read or an
+    /// edit on this registry.
+    fn find_or_read(&self, identifier: &str) -> Result<Option<LoadedLayer>, LoadError> {
         let _scope = ar::CacheScope::begin();
-        let Some(resolved) = self.resolve_layer(identifier) else {
-            return Ok(None);
+        let handle = match self.locate(identifier.to_owned())? {
+            Located::Open(handle) => handle,
+            Located::Closed { identifier, resolved } => {
+                self.ensure_writable()?;
+                let layer = self.read_layer(&identifier, resolved)?;
+                self.store().insert(layer).map_err(|refused| refused.error)?
+            }
+            Located::Unresolved => return Ok(None),
         };
-        Ok(Some(self.read(identifier.to_owned(), resolved)?))
+        Ok(Some(LoadedLayer {
+            identifier: identifier.to_owned(),
+            handle,
+        }))
     }
 
     /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
     /// location it resolved to, which for a package is its default packaged
-    /// layer, or `None` when it does not resolve.
+    /// layer, or `None` when it does not resolve. The registry does not hold it.
+    /// Value-clip and manifest layers, which compose outside the layer graph
+    /// (spec 12.3.4), open through it.
     pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
-        Ok(self
-            .open(identifier)?
-            .map(|layer| sdf::Layer::new_resolved(layer, Rc::clone(&self.resolver))))
+        let _scope = ar::CacheScope::begin();
+        let Some(resolved) = self.resolve_layer(identifier) else {
+            return Ok(None);
+        };
+        self.read_layer(identifier, resolved).map(Some)
     }
 
-    /// Reads the single layer at `asset_path` (anchored against `anchor`)
-    /// without opening its sublayers: the shallow read the stage root stack
-    /// needs to compose its root and session layers' own expression variables
-    /// into one context before either region's sublayer subtree is collected.
-    /// The read is then handed to
-    /// [`open_prepared_stack`](Self::open_prepared_stack), so the layer is
-    /// parsed once at open. A path that does not resolve, the empty path
+    /// The layer at `identifier`, which resolved to `resolved`, read from its
+    /// asset.
+    pub(crate) fn read_layer(&self, identifier: &str, resolved: ar::ResolvedPath) -> Result<sdf::Layer, LoadError> {
+        let prepared = self.read(identifier.to_owned(), resolved)?;
+        Ok(sdf::Layer::new_resolved(prepared, Rc::clone(&self.resolver)))
+    }
+
+    /// The layer at `asset_path` (anchored against `anchor`), the one the
+    /// registry holds or else one read and held from then on, without opening
+    /// its sublayers: the shallow read the stage root stack needs to compose
+    /// its root and session layers' own expression variables into one context
+    /// before either region's sublayer subtree is collected. The layer is then
+    /// handed to [`open_prepared_stack`](Self::open_prepared_stack), and a
+    /// sublayer walk that reaches it finds it held, so the layer is parsed
+    /// once at open. A path that does not resolve, the empty path
     /// among them, is [`Unresolved`](LoadError::Unresolved); a read failure
     /// propagates.
     pub(crate) fn prepare_root(
         &self,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
-    ) -> Result<PreparedLayer, LoadError> {
+    ) -> Result<LoadedLayer, LoadError> {
+        self.ensure_writable()?;
         let identifier = self.create_identifier(asset_path, anchor);
         let unresolved = || LoadError::Unresolved {
             asset_path: asset_path.to_owned(),
@@ -571,7 +605,7 @@ impl LayerRegistry {
         if identifier.is_empty() {
             return Err(unresolved());
         }
-        self.open(&identifier)?.ok_or_else(unresolved)
+        self.find_or_read(&identifier)?.ok_or_else(unresolved)
     }
 
     /// Opens the layer at `identifier` — a canonical identifier, as
@@ -604,7 +638,8 @@ impl LayerRegistry {
     /// variables, so the context is fixed for the whole walk.
     ///
     /// With `reload`, an already-interned root and its already-present
-    /// sublayers are re-read and re-walked (but not re-emitted). A re-open
+    /// sublayers are walked again, as the registry holds them, but not
+    /// re-emitted. A re-open
     /// under a new expression-variable context then loads the `${VAR}`
     /// sublayers that context resolves, including ones nested below a literal
     /// sublayer, which a first, variable-free open left unresolved. The caller
@@ -615,7 +650,7 @@ impl LayerRegistry {
     /// muting. Whether such a failure is a stage diagnostic depends on composition
     /// reachability — a failure under a muted branch contributes nothing — which the
     /// composition layer decides once the muted-aware graph exists (see
-    /// [`StageBuilder::make_stage`](crate::usd::Stage)). Keeping the muted policy out
+    /// [`Stage`](crate::usd::Stage)'s construction). Keeping the muted policy out
     /// of the load walk avoids attributing a diagnostic to whichever branch happened
     /// to reach a shared layer first.
     pub(crate) fn open_stack(
@@ -625,25 +660,26 @@ impl LayerRegistry {
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
+    ) -> Result<Option<Vec<LoadedLayer>>, LoadError> {
+        self.ensure_writable()?;
         if identifier.is_empty() {
             return Ok(None);
         }
-        self.open(identifier)?
+        self.find_or_read(identifier)?
             .map(|root| self.open_prepared_stack(root, ancestor_expr_vars, reload, on_error, already_present))
             .transpose()
     }
 
-    /// [`open_stack`](Self::open_stack) from a root layer already read by
-    /// [`prepare_root`](Self::prepare_root).
+    /// [`open_stack`](Self::open_stack) from a root layer
+    /// [`prepare_root`](Self::prepare_root) holds.
     pub(crate) fn open_prepared_stack(
         &self,
-        root: PreparedLayer,
+        root: LoadedLayer,
         ancestor_expr_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<sdf::Layer>, LoadError> {
+    ) -> Result<Vec<LoadedLayer>, LoadError> {
         let mut layers = Vec::new();
         let mut visited = HashSet::from([root.identifier.clone()]);
 
@@ -651,7 +687,9 @@ impl LayerRegistry {
         // `PcpExpressionVariables`): the root layer's own `expressionVariables`
         // overlaid by the inherited overrides. Sublayers contribute nothing, so it
         // is fixed for the walk.
-        let stack_vars = expr::stack_variables(root.data.as_ref(), ancestor_expr_vars)?;
+        let stack_vars = root
+            .handle
+            .read(|layer| expr::stack_variables(layer.data(), ancestor_expr_vars))??;
 
         self.open_sublayers(
             root,
@@ -689,8 +727,9 @@ impl LayerRegistry {
         identifier: &str,
         stack_vars: &HashMap<String, vt::Value>,
         already_present: &dyn Fn(&str) -> bool,
-    ) -> Result<Option<Vec<sdf::Layer>>, LoadError> {
-        let Some(layer) = self.open(identifier)? else {
+    ) -> Result<Option<Vec<LoadedLayer>>, LoadError> {
+        self.ensure_writable()?;
+        let Some(layer) = self.find_or_read(identifier)? else {
             return Ok(None);
         };
         let mut layers = Vec::new();
@@ -751,16 +790,16 @@ impl LayerRegistry {
     #[allow(clippy::too_many_arguments)]
     fn open_sublayers(
         &self,
-        layer: PreparedLayer,
+        layer: LoadedLayer,
         stack_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
         already_present: &dyn Fn(&str) -> bool,
         visited: &mut HashSet<String>,
-        layers: &mut Vec<sdf::Layer>,
+        layers: &mut Vec<LoadedLayer>,
     ) -> Result<(), LoadError> {
-        let anchor = layer.anchor().cloned();
-        let sub_paths = Self::sublayer_paths(layer.data.as_ref());
+        let anchor = layer.handle.anchor_location().cloned();
+        let sub_paths = layer.handle.read(|layer| Self::sublayer_paths(layer.data()))?;
         let identifier = layer.identifier.clone();
 
         // Emit this layer ahead of its sublayers so the collected stack is
@@ -769,7 +808,7 @@ impl LayerRegistry {
         // reload pass an already-interned layer is re-walked (to reach a `${VAR}`
         // sublayer the new context now resolves) but not re-emitted.
         if !already_present(&identifier) {
-            layers.push(sdf::Layer::new_resolved(layer, Rc::clone(&self.resolver)));
+            layers.push(layer);
         }
 
         // Failed sublayer identifiers already reported for *this* layer, so a layer
@@ -825,25 +864,27 @@ impl LayerRegistry {
             if visited.contains(&sub_id) || failed.contains(&sub_id) || (already_present(&sub_id) && !reload) {
                 continue;
             }
-            // Resolve the sublayer; a missing one is a raw load failure reported at
+            // Find or read the sublayer. A missing one is a raw load failure reported at
             // this referencing site. It is a leaf (no subtree to walk), so it is not
             // added to the pass-wide `visited`: each referencing layer records its own
             // edge, so a shared missing layer reached from several layers is reported
             // once per referrer and the composition layer can suppress by referrer.
-            let Some(sub_resolved) = self.resolve_layer(&sub_id) else {
-                on_error(Error::UnresolvedAsset {
-                    asset_path: sub_asset,
-                    referencing_layer: identifier.clone(),
-                })?;
-                failed.insert(sub_id);
-                continue;
-            };
-            // Read the sublayer; a resolved-but-unreadable one is a raw load failure
-            // like a missing one — reported at this referencing site and, being a
-            // leaf, left out of `visited` (dropping only this layer; the root's read
-            // failure propagated from `open_stack`).
-            let sublayer = match self.read(sub_id.clone(), sub_resolved) {
-                Ok(read) => read,
+            // A resolved-but-unreadable one is a raw load failure like a missing one,
+            // reported at this referencing site and, being a leaf, left out of
+            // `visited` (dropping only this layer; the root's read failure propagated
+            // from `open_stack`).
+            let sublayer = match self.find_or_read(&sub_id) {
+                Ok(Some(sublayer)) => sublayer,
+                Ok(None) => {
+                    on_error(Error::UnresolvedAsset {
+                        asset_path: sub_asset,
+                        referencing_layer: identifier.clone(),
+                    })?;
+                    failed.insert(sub_id);
+                    continue;
+                }
+                // A borrow conflict is not the sublayer's failure: the load fails.
+                Err(LoadError::Layer(sdf::LayerError::Busy)) => return Err(sdf::LayerError::Busy.into()),
                 Err(reason) => {
                     on_error(Error::UnreadableAsset {
                         asset_path: sub_asset,
@@ -877,6 +918,57 @@ pub(crate) mod tests {
     use super::*;
     use crate::Result;
     use crate::sdf::FileFormatCaps;
+
+    /// `layer` held in `store`, or the live layer already carrying its
+    /// identifier or real path, which a fixture repeating a layer collapses
+    /// onto. It is asked for under `layer`'s identifier.
+    pub(crate) fn hold(store: &Rc<sdf::LayerStore>, layer: sdf::Layer) -> LoadedLayer {
+        let identifier = layer.identifier().to_owned();
+        let handle = match store.insert(layer) {
+            Ok(handle) => handle,
+            Err(refused) => store
+                .find(refused.layer.identifier(), Some(refused.layer.real_path()))
+                .expect("the store is free")
+                .expect("a refused duplicate is held"),
+        };
+        LoadedLayer { identifier, handle }
+    }
+
+    /// A registry over a filesystem resolver, with the count of the assets it
+    /// has opened.
+    pub(crate) fn counting_registry() -> (LayerRegistry, Rc<Cell<usize>>) {
+        let opens = Rc::new(Cell::new(0));
+        let resolver = Counting {
+            inner: ar::DefaultResolver::new(),
+            opens: Rc::clone(&opens),
+        };
+        (LayerRegistry::new(Box::new(resolver)), opens)
+    }
+
+    /// A filesystem resolver that counts the assets it opens.
+    struct Counting {
+        inner: ar::DefaultResolver,
+        opens: Rc<Cell<usize>>,
+    }
+
+    impl ar::Resolver for Counting {
+        fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+            self.inner.create_identifier(asset_path, anchor)
+        }
+
+        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            self.inner.resolve(asset_path)
+        }
+
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            self.inner.resolve_for_new_asset(asset_path)
+        }
+
+        fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+            self.opens.set(self.opens.get() + 1);
+            self.inner.open_asset(resolved_path)
+        }
+    }
 
     /// Opens a root layer and the full transitive closure of its sublayers,
     /// references, and payloads — the layer set a fully-composed (and fully-
@@ -1045,7 +1137,7 @@ pub(crate) mod tests {
 
     /// Opens a root layer and its sublayer stack, erroring on a missing sublayer
     /// or an unresolvable root.
-    fn open_stack(path: &str) -> Result<Vec<sdf::Layer>> {
+    fn open_stack(path: &str) -> Result<Vec<LoadedLayer>> {
         let registry = registry();
         let identifier = registry.create_identifier(path, None);
         Ok(registry
@@ -1095,8 +1187,8 @@ pub(crate) mod tests {
     fn expression_sublayer() -> Result<()> {
         let layers = open_stack(&fixture_path("expr_sublayer.usda"))?;
         assert_eq!(layers.len(), 2, "root + 1 expression-resolved sublayer");
-        assert!(layers[0].identifier().contains("expr_sublayer.usda"));
-        assert!(layers[1].identifier().contains("expr_sublayer_target.usda"));
+        assert!(layers[0].identifier.contains("expr_sublayer.usda"));
+        assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
         Ok(())
     }
 
@@ -1104,8 +1196,8 @@ pub(crate) mod tests {
     fn sublayer_same_folder() -> Result<()> {
         let layers = open_stack(&composition_path("subLayer/sublayer_same_folder.usda"))?;
         assert_eq!(layers.len(), 2, "root + 1 sublayer");
-        assert!(layers[0].identifier().contains("sublayer_same_folder.usda"));
-        assert!(layers[1].identifier().contains("_stage.usda"));
+        assert!(layers[0].identifier.contains("sublayer_same_folder.usda"));
+        assert!(layers[1].identifier.contains("_stage.usda"));
         Ok(())
     }
 
@@ -1113,7 +1205,7 @@ pub(crate) mod tests {
     fn sublayer_child_folder() -> Result<()> {
         let layers = open_stack(&composition_path("subLayer/sublayer_child_folder.usda"))?;
         assert_eq!(layers.len(), 2);
-        assert!(layers[1].identifier().contains("_child_stage.usda"));
+        assert!(layers[1].identifier.contains("_child_stage.usda"));
         Ok(())
     }
 
@@ -1121,7 +1213,7 @@ pub(crate) mod tests {
     fn sublayer_parent_folder() -> Result<()> {
         let layers = open_stack(&composition_path("subLayer/sublayer_parent_folder.usda"))?;
         assert_eq!(layers.len(), 2);
-        assert!(layers[1].identifier().contains("_parent_stage.usda"));
+        assert!(layers[1].identifier.contains("_parent_stage.usda"));
         Ok(())
     }
 
@@ -1131,7 +1223,7 @@ pub(crate) mod tests {
     fn reference_not_followed() -> Result<()> {
         let layers = open_stack(&composition_path("references/reference_same_folder.usda"))?;
         assert_eq!(layers.len(), 1, "only the root; the reference is composed lazily");
-        assert!(layers[0].identifier().contains("reference_same_folder.usda"));
+        assert!(layers[0].identifier.contains("reference_same_folder.usda"));
         Ok(())
     }
 
@@ -1144,7 +1236,7 @@ pub(crate) mod tests {
             "{}vendor/usd-wg-assets/test_assets/RelationshipEncapsulationTests/SublayeredInternalReferenceTest.usda",
             env!("CARGO_WORKSPACE_DIR")
         );
-        let names: Vec<String> = open_stack(&root)?.iter().map(|l| l.identifier().to_owned()).collect();
+        let names: Vec<String> = open_stack(&root)?.iter().map(|l| l.identifier.clone()).collect();
         assert_eq!(names.len(), 4, "root + 3 sublayers");
         assert!(names[0].contains("SublayeredInternalReferenceTest.usda"));
         assert!(names[1].contains("Environment.usda"));
@@ -1179,7 +1271,7 @@ pub(crate) mod tests {
 
         // The root still loads despite the missing sublayer.
         assert_eq!(layers.len(), 1);
-        assert!(layers[0].identifier().contains("sublayer_invalid.usda"));
+        assert!(layers[0].identifier.contains("sublayer_invalid.usda"));
 
         let errors = errors.into_inner();
         assert_eq!(errors.len(), 1);

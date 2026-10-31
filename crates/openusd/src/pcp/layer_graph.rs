@@ -134,7 +134,7 @@ pub(crate) struct LayerNode {
     /// The stage's subscription to the layer's commits, ended before the
     /// handle is released (fields drop in declaration order).
     subscription: Option<sdf::Subscription>,
-    /// The loaded layer, held in the graph's store. Composition reads its
+    /// The loaded layer, held in the registry's store. Composition reads its
     /// content through a [`LayerView`]; the graph's own maintenance borrows
     /// the store directly.
     handle: sdf::LayerHandle,
@@ -242,13 +242,9 @@ pub(crate) struct LayerGraph {
     /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
     /// Composition opens a reference/payload target on demand through it.
     registry: sdf::LayerRegistry,
-    /// The store holding every layer the graph's nodes name, and only those.
-    /// Stages that share a registry therefore hold layers of their own. A
-    /// [`view`](Self::view) borrows it for as long as it borrows the graph.
-    //
-    // TODO: hold the layers in the registry's store, found and opened through
-    // `LayerRegistry::find_or_open`. Stages on one registry then share each
-    // layer and see each other's edits.
+    /// The registry's store, which holds every layer the graph's nodes name,
+    /// shared with every stage on the registry. Held so a [`view`](Self::view)
+    /// can borrow it for as long as it borrows the graph.
     store: Rc<sdf::LayerStore>,
     /// Anchored asset paths whose on-demand open failed, each mapped to what
     /// went wrong ([`LoadFailure`]). Consulted at the reference/payload demand
@@ -673,7 +669,7 @@ impl LayerGraph {
             muted: HashSet::new(),
             has_relocates: false,
             diagnostics: GraphDiagnostics::default(),
-            store: Rc::default(),
+            store: registry.store(),
             registry,
             failed_loads: HashMap::new(),
             stacks: LayerStackRegistry::default(),
@@ -707,45 +703,59 @@ impl LayerGraph {
         self.recompute_relocates();
     }
 
-    /// Adds `layer` as a node, minting a fresh [`LayerId`] and recording it in
-    /// [`by_identifier`](Self::by_identifier) and [`order`](Self::order).
-    /// Returns `(id, fresh)`: an identifier already present is left untouched
-    /// (its existing node, children, and relocates survive) and reported as not
-    /// fresh, so a re-added layer collapses onto its existing id.
-    fn intern(&mut self, layer: sdf::Layer) -> (LayerId, bool) {
+    /// Adds the layer `handle` names as a node, minting a fresh [`LayerId`]
+    /// and recording it in [`by_identifier`](Self::by_identifier) and
+    /// [`order`](Self::order). Returns `(id, fresh)`: an identifier already
+    /// present is left untouched (its existing node, children, and relocates
+    /// survive) and reported as not fresh, so a re-added layer collapses onto
+    /// its existing id. Callers key one-time per-layer setup (e.g. subscribing
+    /// the stage's recorder) off `fresh` so a re-added identifier is not set
+    /// up twice.
+    ///
+    /// The node must exist before a `subLayers` edit naming its asset path is
+    /// rebuilt, so that [`build_sublayer_edges`](Self::build_sublayer_edges)'s
+    /// [`find_relative`](Self::find_relative) resolves the path to it.
+    pub(crate) fn ensure_layer(&mut self, layer: sdf::LoadedLayer) -> (LayerId, bool) {
+        let sdf::LoadedLayer {
+            identifier: requested,
+            handle,
+        } = layer;
         debug_assert_eq!(
-            self.registry.in_memory_identifier(layer.identifier()),
-            layer.identifier(),
+            self.registry.in_memory_identifier(&requested),
+            requested,
             "a layer joins the graph under its canonical identifier"
         );
-        if let Some(&id) = self.by_identifier.get(layer.identifier()) {
+        if let Some(&id) = self.by_identifier.get(&requested) {
             return (id, false);
         }
         // A second identifier for a file already interned names that layer (C++
         // `Sdf_LayerRegistry::_Layers::Insert` collides on real path): the new
-        // identifier becomes an alias of the existing id.
-        if let Some(id) = self.id_of(layer.real_path()) {
-            self.by_identifier.insert(layer.identifier().to_string(), id);
+        // identifier becomes an alias of the existing id. The registry may hand
+        // back a layer it holds under another spelling of the requested file,
+        // which the graph may already name.
+        let identifier = handle.identifier();
+        let real_path = handle
+            .anchor_location()
+            .and_then(|real_path| real_path.to_str())
+            .filter(|real_path| *real_path != identifier);
+        let existing = self
+            .by_identifier
+            .get(identifier)
+            .copied()
+            .or_else(|| self.id_of(real_path?));
+        if let Some(id) = existing {
+            self.by_identifier.insert(requested, id);
             return (id, false);
         }
-        // The layer joins the graph's store, which commits any edit it has
-        // staged, as its content is composed fresh as it joins the graph. The
-        // store holds only this graph's layers, keyed like the graph by
-        // identifier and real path, and holds no duplicate.
-        let identifier = layer.identifier().to_string();
-        let real_path = (layer.real_path() != layer.identifier()).then(|| layer.real_path().to_string());
-        let handle = self.store.insert(layer).unwrap_or_else(|refused| {
-            panic!(
-                "the graph adds layers only between reads and edits of them: {}",
-                refused.error
-            )
-        });
         let id = LayerId::from_raw(self.next_id);
         self.next_id += 1;
-        self.by_identifier.insert(identifier, id);
         if let Some(real_path) = real_path {
-            self.by_real_path.entry(real_path).or_insert(id);
+            self.by_real_path.entry(real_path.to_owned()).or_insert(id);
         }
+        if requested != identifier {
+            self.by_identifier.insert(identifier.to_owned(), id);
+        }
+        self.by_identifier.insert(requested, id);
         self.nodes.insert(id, LayerNode::new(handle));
         self.order.push(id);
         (id, true)
@@ -2407,21 +2417,6 @@ impl LayerGraph {
             .find_map(|(relocate_source, _, layer)| (relocate_source == *source).then(|| self.identifier(layer)))
     }
 
-    /// Ensures `layer` is present as a graph node, returning `(id, fresh)` where
-    /// `fresh` is `true` when the layer newly joined the graph. An already-loaded
-    /// layer (matched by identifier) is left untouched (its existing children and
-    /// relocates survive, since the same layer may be sublayered from several
-    /// places) and reported as not fresh; an absent one joins with a freshly
-    /// minted id. Callers key one-time per-layer setup (e.g. subscribing the
-    /// stage's recorder) off `fresh` so a re-added identifier is not set up twice.
-    ///
-    /// The node must exist before a `subLayers` edit naming its asset path is
-    /// rebuilt, so that [`build_sublayer_edges`](Self::build_sublayer_edges)'s
-    /// [`find_relative`](Self::find_relative) resolves the path to it.
-    pub(crate) fn ensure_layer(&mut self, layer: sdf::Layer) -> (LayerId, bool) {
-        self.intern(layer)
-    }
-
     /// The id of the layer interned under exactly `identifier` (the canonical,
     /// resolver-produced form), or failing that the layer whose resolved real
     /// path is `identifier`, or `None` (C++ `SdfLayer::Find`: by identifier,
@@ -2881,7 +2876,7 @@ impl LayerGraph {
 
     /// The canonical identifier a muted-layer path resolves to (C++
     /// `Pcp_MutedLayers::_GetCanonicalLayerId`). A path is reduced to the
-    /// identifier its layer is interned under (see [`intern`](Self::intern)): with
+    /// identifier its layer is interned under (see [`ensure_layer`](Self::ensure_layer)): with
     /// no filesystem `anchor` — an in-memory or anonymous root — a relative path
     /// has nothing to resolve against and an added layer keeps its bare
     /// identifier, so the path passes through. Every other path is canonicalized
@@ -2966,6 +2961,13 @@ impl<'a> LayerView<'a> {
 }
 
 impl LayerView<'_> {
+    /// The layer the graph's registry holds under `identifier`, or, with
+    /// `real_path`, the one it read from that location, whether or not the
+    /// graph names it.
+    pub(crate) fn held(&self, identifier: &str, real_path: Option<&str>) -> Option<&sdf::Layer> {
+        self.store.find(identifier, real_path)
+    }
+
     /// The layer with the given id. Panics if the id is unknown.
     pub(crate) fn layer(&self, id: LayerId) -> &sdf::Layer {
         // TODO(perf): every per-prim spec probe lands here, and the lookup
@@ -3168,6 +3170,13 @@ mod tests {
             .expect("authored");
     }
 
+    /// Adds `layer` to the graph's store and the graph, as a stage does when a
+    /// layer joins it.
+    fn join(graph: &mut LayerGraph, layer: sdf::Layer) -> (LayerId, bool) {
+        let handle = graph.store.insert(layer).expect("the layer is new to the store");
+        graph.ensure_layer(handle.into())
+    }
+
     impl LayerGraph {
         /// Build a graph from `layers` in one step: intern each, then
         /// [`finalize`](Self::finalize). The first `session_layer_count` layers
@@ -3184,7 +3193,8 @@ mod tests {
             let mut root = None;
             let mut session_count = 0;
             for (i, layer) in layers.into_iter().enumerate() {
-                let (id, fresh) = graph.intern(layer);
+                let layer = sdf::layer_registry::tests::hold(&graph.store, layer);
+                let (id, fresh) = graph.ensure_layer(layer);
                 if i == session_layer_count {
                     root = Some(id);
                 }
@@ -4532,7 +4542,7 @@ mod tests {
             "the not-yet-interned sublayer contributes no edge"
         );
 
-        graph.ensure_layer(sdf::Layer::new_in_memory("leaf.usda"));
+        join(&mut graph, sdf::Layer::new_in_memory("leaf.usda"));
         graph.recompute_sublayers(None);
         let leaf = graph.id_of("leaf.usda").unwrap();
         let ids: Vec<LayerId> = graph.sublayer_stack(root_id).iter().map(|&(id, _)| id).collect();
@@ -4563,7 +4573,7 @@ mod tests {
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.root_id().unwrap();
 
-        let (leaf, _) = graph.ensure_layer(sdf::Layer::new_in_memory("leaf.usda"));
+        let (leaf, _) = join(&mut graph, sdf::Layer::new_in_memory("leaf.usda"));
         graph.wire_joined(&HashSet::from([leaf]));
         assert_eq!(root_members(&graph), vec![root_id, leaf]);
     }
@@ -4582,7 +4592,7 @@ mod tests {
         let root_id = graph.root_id().unwrap();
         assert_eq!(root_members(&graph), vec![root_id]);
 
-        let (sub, _) = graph.ensure_layer(sdf::Layer::new_in_memory("sub.usda"));
+        let (sub, _) = join(&mut graph, sdf::Layer::new_in_memory("sub.usda"));
         graph.wire_joined(&HashSet::from([sub]));
         assert_eq!(root_members(&graph), vec![root_id, sub]);
     }
@@ -4613,7 +4623,10 @@ mod tests {
         let bare = graph.id_of("sub.usda").unwrap();
         assert_eq!(root_members(&graph), vec![root_id, bare]);
 
-        let (anchored, _) = graph.ensure_layer(sdf::Layer::new(canonical("sub.usda"), Box::new(sdf::Data::new())));
+        let (anchored, _) = join(
+            &mut graph,
+            sdf::Layer::new(canonical("sub.usda"), Box::new(sdf::Data::new())),
+        );
         graph.wire_joined(&HashSet::from([anchored]));
         assert_eq!(root_members(&graph), vec![root_id, anchored]);
     }
@@ -4647,7 +4660,7 @@ mod tests {
         edit_layer(&mut combo, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["s1.usda", "s2.usda"]);
         });
-        let (combo, _) = graph.ensure_layer(combo);
+        let (combo, _) = join(&mut graph, combo);
         graph.wire_joined(&HashSet::from([combo]));
         assert!(same_target(&graph), "combo's stack holds both relocates");
     }

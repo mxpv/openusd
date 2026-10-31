@@ -1730,6 +1730,7 @@ mod tests {
 
     use super::*;
     use crate::sdf::{self, FieldKey, LayerOffset, Specifier, Variability, path};
+    use crate::usd::stage::tests::MakeStage;
     use crate::usd::{EditTarget, EditTargetArc, Stage};
 
     /// Author into `layer` and commit, for building a test layer before it joins a

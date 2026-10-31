@@ -164,8 +164,9 @@ pub(crate) trait Subscriber {
 pub(crate) trait Prepared {
     /// The transaction landed with `record`. Runs before the transaction
     /// returns, with the registry still borrowed: it records and runs no user
-    /// code.
-    fn commit(self: Box<Self>, record: &CommitRecord);
+    /// code. It may hand back a sink, which the transaction notifies with
+    /// `record` after every layer sink, once the borrows are released.
+    fn commit(self: Box<Self>, record: &CommitRecord) -> Option<Rc<dyn LayerSink>>;
 }
 
 /// A landed transaction whose [`LayerSink::after_commit`] notifications are

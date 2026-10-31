@@ -1484,11 +1484,12 @@ impl ClipCache {
     /// values retains one layer per value visited. Bounding it needs the cache
     /// to drop layers no live set names.
     //
-    // TODO: a clip layer no graph layer shares is reachable by nobody — the
-    // registry hands out a fresh `sdf::Layer` per open, so the copy below is the
-    // only one and no edit can arrive for it. Closing that needs
-    // `sdf::LayerRegistry` find-or-open dedup, after which this cache and the
-    // graph would share one layer whatever brought it in.
+    // TODO: hold clip layers as registry handles (C++ opens a clip through
+    // `SdfLayer::FindOrOpenRelativeToLayer`). A clip layer the graph does not
+    // name is read privately, so the layer another stage on the registry holds,
+    // unsaved edits included, does not reach it, and no edit arrives for the
+    // copy. The read runs under the view's borrow of the registry's layers, so
+    // holding one needs the clip load moved outside that borrow.
     fn layer<'a>(&'a self, graph: &'a LayerView<'a>, id: &str) -> Option<&'a sdf::Layer> {
         match graph.id_of(id) {
             Some(interned) => Some(graph.layer(interned)),
@@ -1891,8 +1892,8 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let data = registry.open(&root).expect("open root").expect("root resolves").data;
-        let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
+        let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
+        let graph = LayerGraph::from_layers(vec![layer], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
         let mut clips = ClipCache::default();
@@ -1932,10 +1933,10 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let data = registry.open(&root).expect("open root").expect("root resolves").data;
+        let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
         // A second layer interned under a bare name, as an in-memory layer is.
         let clip = sdf::Layer::new_in_memory("in_memory_clip.usda");
-        let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data), clip], 0, registry);
+        let graph = LayerGraph::from_layers(vec![layer, clip], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
         let identifier = clip_identifier(&graph.read_view(), "in_memory_clip.usda", root_id);
@@ -1970,8 +1971,8 @@ mod tests {
         );
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
-        let data = registry.open(&root).expect("open root").expect("root resolves").data;
-        let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
+        let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
+        let graph = LayerGraph::from_layers(vec![layer], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
         let model = sdf::path("/Model")?;

@@ -693,7 +693,7 @@ impl StageComposition {
 
     /// Add `layer` to the stage's graph, returning its id and whether it newly
     /// joined (a duplicate identifier collapses onto the existing node). The one
-    /// seam by which a layer joins the stage — both opening (`make_stage`) and
+    /// seam by which a layer joins the stage — both opening (`StageBuilder::assemble`) and
     /// [`insert_layer`](super::Stage::insert_layer) go through it. A freshly-added layer
     /// gets the stage's recorder, subscribed to its commits: it forwards each
     /// staged edit to the stage's sinks and queues the commit into
@@ -702,7 +702,7 @@ impl StageComposition {
     /// the stage holds reports its edits no matter who authors them. The
     /// layer's node holds the subscription, which ends when the layer leaves
     /// the graph.
-    pub(super) fn intern_layer(&self, layer: sdf::Layer, hooks: &dyn CompositionHooks) -> (pcp::LayerId, bool) {
+    pub(super) fn intern_layer(&self, layer: sdf::LoadedLayer, hooks: &dyn CompositionHooks) -> (pcp::LayerId, bool) {
         // Joining is a value-source change for a clip that named this identifier
         // while nothing was interned under it: the clip cache read whatever it
         // could open on its own — or nothing at all — and now reads the graph's
@@ -710,29 +710,34 @@ impl StageComposition {
         // otherwise reach the prims sourcing from it. A stage with no clips never
         // pays for the identifier, which every demand-loaded layer would
         // otherwise allocate.
-        let (id, identifier) = {
+        // A clip names the layer by the spelling it asked for, which also names
+        // the layer when it joins as an alias of a held layer's other spelling.
+        let (id, fresh, named) = {
             let mut layers = self.layers.borrow_mut();
-            let (id, fresh) = layers.ensure_layer(layer);
-            if !fresh {
-                return (id, false);
+            let clips = self.cache.borrow().has_clip_sources();
+            let mut named = Vec::new();
+            if clips && layers.id_of(&layer.identifier).is_none() {
+                named.push(layer.identifier.clone());
             }
-            let subscription = hooks.subscribe_layer(id, layers.handle(id));
-            layers.subscribe(id, subscription);
-            let identifier = self
-                .cache
-                .borrow()
-                .has_clip_sources()
-                .then(|| layers.identifier(id).to_owned());
-            (id, identifier)
+            let (id, fresh) = layers.ensure_layer(layer);
+            if fresh {
+                let subscription = hooks.subscribe_layer(id, layers.handle(id));
+                layers.subscribe(id, subscription);
+                let own = layers.identifier(id);
+                if clips && !named.iter().any(|requested| requested == own) {
+                    named.push(own.to_owned());
+                }
+            }
+            (id, fresh, named)
         };
-        if let Some(identifier) = identifier {
+        for identifier in named {
             // The anchors it restaled go unreported: a join carries no payload to
             // add them to, the same gap the demand-loading `TODO` beside
             // `Payload::finish` records. Values are correct either way; an
             // observer is simply not told, and learns on its next read.
             let _restaled = self.cache.borrow_mut().invalidate_clip_source(&identifier);
         }
-        (id, true)
+        (id, fresh)
     }
 
     /// Opens the layers a composition pass demanded but that were not yet loaded.
@@ -761,6 +766,9 @@ impl StageComposition {
         let mut joined: HashSet<pcp::LayerId> = HashSet::new();
         let mut newly_failed = false;
         let mut newly_interned = false;
+        // Whether a demanded identifier the graph did not name now names a layer:
+        // one that joined, or one the registry held under another spelling.
+        let mut resolved = false;
         // Whether an open ran for each demand this pass: the mint loop below
         // trusts such a demand's contextual selection to be loaded, while a
         // demand whose open decision was made against a target that joined only
@@ -780,7 +788,12 @@ impl StageComposition {
                 let graph = self.layers.borrow();
                 let retry_blocked = match graph.load_failure(asset_path) {
                     Some(pcp::LoadFailure::Unreadable(_)) => true,
-                    Some(pcp::LoadFailure::Unresolved) => graph.layer_registry().resolve(asset_path).is_none(),
+                    Some(pcp::LoadFailure::Unresolved) => {
+                        let registry = graph.layer_registry();
+                        // A layer the registry has come to hold, an adopted or
+                        // anonymous one among them, is found without resolving.
+                        registry.resolve(asset_path).is_none() && !matches!(registry.find(asset_path), Ok(Some(_)))
+                    }
                     None => false,
                 };
                 if retry_blocked {
@@ -818,6 +831,7 @@ impl StageComposition {
                                 joined.insert(id);
                             }
                         }
+                        resolved |= !reload;
                         None
                     }
                     // No layer resolved. When the raw asset still resolves —
@@ -835,6 +849,9 @@ impl StageComposition {
                             }
                         })
                     }
+                    // A borrow conflict clears with the borrow: the demand stays for a later
+                    // pass.
+                    Err(sdf::layer_registry::LoadError::Layer(sdf::LayerError::Busy)) => None,
                     Err(err) => Some(pcp::LoadFailure::Unreadable(tf::error_chain(&err))),
                 };
                 if let Some(failure) = failure {
@@ -916,7 +933,7 @@ impl StageComposition {
         // target's own self-selected sublayer under an empty inherited context;
         // open them under each demanding stack's composed variables.
         let sublayers_loaded = self.resolve_recorded_demands(hooks);
-        grew || newly_failed || newly_interned || sublayers_loaded
+        grew || resolved || newly_failed || newly_interned || sublayers_loaded
     }
 
     /// Opens the sublayers a graph recompose or stack mint demanded — a
@@ -1015,6 +1032,9 @@ impl StageComposition {
                         None
                     }
                     Ok(None) => Some(pcp::LoadFailure::Unresolved),
+                    // A borrow conflict clears with the borrow: the demand stays for a later
+                    // pass.
+                    Err(sdf::layer_registry::LoadError::Layer(sdf::LayerError::Busy)) => None,
                     Err(err) => Some(pcp::LoadFailure::Unreadable(tf::error_chain(&err))),
                 };
                 if let Some(load_failure) = failure {
@@ -1085,7 +1105,7 @@ impl StageComposition {
                 return result;
             }
             // Opening a layer adds it to the store, which a read or an edit of
-            // one of the stage's layers holds. The demands go back to the
+            // any layer of the stage's registry holds. The demands go back to the
             // cache, for the next query to load.
             if let Err(busy) = self.store.ensure_writable() {
                 self.cache.borrow_mut().swap_pending_loads(&mut pending);
@@ -1116,7 +1136,7 @@ impl StageComposition {
         // edit of one of them holds.
         assert!(
             self.store.ensure_writable().is_ok(),
-            "a layer of the stage is muted from inside a read or an edit of one of its layers"
+            "a layer of the stage is muted from inside a read or an edit of its registry's layers"
         );
         self.process_pending(hooks);
         let (changed, resynced, demands) = self.update_pair(|graph, cache| {
@@ -1221,7 +1241,7 @@ impl StageComposition {
     /// span and the root is captured at its original slot.
     pub(super) fn initialize(
         &self,
-        layers: Vec<sdf::Layer>,
+        layers: Vec<sdf::LoadedLayer>,
         session_layer_count: usize,
         muted: HashSet<String>,
         failures: Vec<(String, String, pcp::LoadFailure)>,
@@ -1339,7 +1359,7 @@ impl StageComposition {
         }
         assert!(
             self.store.ensure_writable().is_ok(),
-            "the stage is read from inside a read or an edit of one of its layers, with edits of them queued"
+            "the stage is read from inside a read or an edit of its registry's layers, with edits queued"
         );
         debug_assert!(
             false,

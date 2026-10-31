@@ -190,17 +190,9 @@ impl Layer {
         layer
     }
 
-    /// The layer as a read root: its identifier, the location its paths anchor
-    /// against, its data and the format it was read in. Its sinks and resolver
-    /// are dropped.
-    pub(crate) fn into_prepared(self) -> sdf::PreparedLayer {
-        let resolved = ar::ResolvedPath::new(self.real_path());
-        sdf::PreparedLayer {
-            identifier: self.identifier,
-            resolved,
-            data: self.data.into_inner(),
-            format: self.format,
-        }
+    /// Anchor, read and save the layer through `resolver` from then on.
+    pub(crate) fn set_resolver(&mut self, resolver: Rc<dyn ar::Resolver>) {
+        self.resolver = Some(resolver);
     }
 
     /// Shared constructor backing [`new`](Self::new) and
@@ -1281,7 +1273,12 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     }
     for (record, prepared) in landed {
         for subscriber in prepared {
-            subscriber.commit(&record);
+            if let Some(sink) = subscriber.commit(&record) {
+                notifications.push(Notification {
+                    sink,
+                    record: Rc::clone(&record),
+                });
+            }
         }
     }
     Ok(Committed::new(notifications, changed))
@@ -2102,9 +2099,9 @@ mod tests {
 
         // The registry's content-sniff must accept it as binary.
         let round = sdf::LayerRegistry::default()
-            .open(path.to_str().unwrap())?
-            .expect("the layer opens")
-            .data;
+            .open_layer(path.to_str().unwrap())?
+            .expect("the layer opens");
+        let round = round.data();
         assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));
         assert_eq!(
             round.field(&bar, "typeName").unwrap().into_owned(),

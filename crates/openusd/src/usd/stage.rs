@@ -37,6 +37,7 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -1347,17 +1348,30 @@ struct StageRecording {
 }
 
 impl sdf::Prepared for StageRecording {
-    fn commit(mut self: Box<Self>, record: &sdf::CommitRecord) {
+    fn commit(mut self: Box<Self>, record: &sdf::CommitRecord) -> Option<Rc<dyn sdf::LayerSink>> {
         self.landed = true;
-        if let Some(stage) = self.stage.upgrade() {
-            stage.composition.record_pending(PendingEdit {
-                generation: self.generation,
-                own: self.own,
-                layer: self.layer_id,
-                changes: record.changes.clone(),
-                provenance: self.provenance.take(),
-                prior_default_prim: self.prior_default_prim.take(),
-            });
+        let stage = self.stage.upgrade()?;
+        stage.composition.record_pending(PendingEdit {
+            generation: self.generation,
+            own: self.own,
+            layer: self.layer_id,
+            changes: record.changes.clone(),
+            provenance: self.provenance.take(),
+            prior_default_prim: self.prior_default_prim.take(),
+        });
+        Some(Rc::new(StageDelivery(self.stage.clone())))
+    }
+}
+
+/// The sink a [`StageRecording`] hands its transaction, so the registry's
+/// dispatch delivers the stage's notices for an edit made through any stage
+/// or handle on the registry, after the edited layer's own sinks.
+struct StageDelivery(WeakStage);
+
+impl sdf::LayerSink for StageDelivery {
+    fn after_commit(&self, _change: &sdf::CommittedLayerChange<'_>) {
+        if let Some(stage) = self.0.upgrade() {
+            stage.process_pending();
         }
     }
 }
@@ -2656,7 +2670,7 @@ impl Stage {
     /// on a non-local layer.
     ///
     /// From inside a [`read`](sdf::LayerHandle::read) or an
-    /// [`edit`](sdf::LayerHandle::edit) of one of the stage's layers, while
+    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry, while
     /// an earlier edit of them is still queued, a fallible stage read fails
     /// with [`sdf::LayerError::Busy`], and one that cannot fail (such as
     /// [`sub_layers`](Self::sub_layers)) panics.
@@ -2745,7 +2759,7 @@ impl Stage {
     /// and is not implemented.
     ///
     /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
-    /// [`edit`](sdf::LayerHandle::edit) of one of the stage's layers.
+    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
         if let Some((changed, resynced)) = self
             .composition
@@ -2759,7 +2773,7 @@ impl Stage {
     /// composition (C++ `UsdStage::UnmuteLayer`).
     ///
     /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
-    /// [`edit`](sdf::LayerHandle::edit) of one of the stage's layers.
+    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry.
     pub fn unmute_layer(&self, identifier: &str) {
         if let Some((changed, resynced)) = self
             .composition
@@ -4001,14 +4015,19 @@ impl Stage {
     ///
     /// `layer` joins the stage under its own identifier, which must be the
     /// spelling the stage's resolver gives a layer of that name; an anonymous
-    /// identifier always is.
+    /// identifier always is. The stage's registry takes `layer`, as
+    /// [`LayerRegistry::adopt`](sdf::LayerRegistry::adopt) does.
     ///
     /// Returns [`StageAuthoringError::LayerNotFound`] if `parent` is not in the
     /// stage, [`StageAuthoringError::IncompatibleLayerIdentifier`] if the
     /// stage's resolver spells `layer`'s identifier another way, and
-    /// [`StageAuthoringError::Layer`] if `parent` is read-only. In
+    /// [`StageAuthoringError::Layer`] if `parent` is read-only, and
+    /// [`StageAuthoringError::Registry`] with
+    /// [`sdf::LayerError::Duplicate`] when the registry already holds a layer
+    /// with `layer`'s identifier or read from its file. In
     /// every case the graph is left untouched — `layer` only joins it once the
-    /// parent edit succeeds, so a failed insert never leaves an orphan node.
+    /// parent edit succeeds, so a failed insert never leaves an orphan node —
+    /// and `layer` is dropped.
     ///
     /// If `layer` authors its own `subLayers` naming layers not yet loaded,
     /// the recompose records them as sublayer demands and the load barrier
@@ -4039,23 +4058,24 @@ impl Stage {
                     identifier,
                 });
             }
+            let joined = sdf::LoadedLayer::from(layers.layer_registry().adopt(layer).map_err(|refused| refused.error)?);
             self.commit_layer(&layers, parent_id, None, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
                     .map_err(StageAuthoringError::from)
             })
+            .map(|committed| (committed, joined))
         };
         // Add the child node only once the parent edit succeeded, so a failed
         // insert never leaves an orphan node. Interning subscribes
-        // the stage's recorder (skipping a duplicate identifier that collapses onto an
-        // already-loaded node), the same path opening a stage uses. It runs
+        // the stage's recorder, the same path opening a stage uses. It runs
         // before the parent's sinks hear of the edit. A sink that reads the
         // stage then composes the child given here, not a copy read from its
         // file.
-        if edited.is_ok() {
-            self.composition.intern_layer(layer, self);
-        }
-        let edited = edited.map(|committed| self.composition.deliver(committed, self));
+        let edited = edited.map(|(committed, joined)| {
+            self.composition.intern_layer(joined, self);
+            self.composition.deliver(committed, self);
+        });
         self.process_pending();
         edited.map(|_| ())
     }
@@ -4275,7 +4295,7 @@ pub struct StageBuilder {
 
 #[derive(Default)]
 struct CollectedLayers {
-    layers: Vec<sdf::Layer>,
+    layers: Vec<sdf::LoadedLayer>,
     diagnostics: pcp::Diagnostics,
 }
 
@@ -4294,7 +4314,12 @@ impl StageBuilder {
     }
 
     /// Sets the [`LayerRegistry`](sdf::LayerRegistry) the stage loads layers
-    /// through — its resolver and (in the future) registered file formats.
+    /// through and holds them in. Stages on one registry share each layer: a
+    /// layer one of them holds is read once, and an edit through any of them
+    /// reaches the others.
+    ///
+    /// Opening a stage from inside a read or an edit of the registry's layers
+    /// fails with [`sdf::LayerError::Busy`].
     pub fn registry(mut self, registry: sdf::LayerRegistry) -> Self {
         self.registry = registry;
         self
@@ -4427,7 +4452,7 @@ impl StageBuilder {
         // its default-layer lookup, its probes and its entry reads.
         let _scope = ar::CacheScope::begin();
         let root = self.registry.prepare_root(root_path, None)?;
-        self.open_prepared(root)
+        self.open_root(root)
     }
 
     /// Opens a stage whose root is `layer`, a layer already read (C++
@@ -4435,17 +4460,19 @@ impl StageBuilder {
     /// as it stands, unsaved edits included, and its sublayers open through
     /// the builder's registry, as [`open`](Self::open)'s do.
     ///
-    /// The root keeps the layer's identifier as given. The stage takes
-    /// ownership of the layer: its sinks do not carry over, and the stage reads
-    /// and saves it through the builder's registry.
+    /// The root keeps the layer's identifier as given. The builder's registry
+    /// takes the layer, sinks and all, and holds it for every stage on the
+    /// registry. Fails with [`sdf::LayerError::Duplicate`] when the registry
+    /// already holds a layer with its identifier or read from its file.
     pub fn open_layer(self, layer: sdf::Layer) -> Result<Stage> {
         let _scope = ar::CacheScope::begin();
-        self.open_prepared(layer.into_prepared())
+        let root = self.registry.adopt(layer).map_err(|refused| refused.error)?;
+        self.open_root(root.into())
     }
 
-    /// Opens a stage over `root`, a root layer already read, with the session
-    /// layer the builder names.
-    fn open_prepared(self, root: sdf::PreparedLayer) -> Result<Stage> {
+    /// Opens a stage over `root`, a root layer the builder's registry holds,
+    /// with the session layer the builder names.
+    fn open_root(self, root: sdf::LoadedLayer) -> Result<Stage> {
         // The stage root stack is one layer stack whose single expression-variable
         // context (C++ `PcpExpressionVariables`) — the root layer's own variables
         // overlaid by the session root's own — resolves the `${VAR}` sublayers of
@@ -4464,7 +4491,7 @@ impl StageBuilder {
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
         let diagnostics = session.diagnostics.into_iter().chain(root.diagnostics).collect();
-        Ok(self.make_stage(layers, session_layer_count, diagnostics))
+        Ok(self.assemble(layers, session_layer_count, diagnostics))
     }
 
     /// Create an in-memory stage backed by a single writable anonymous root
@@ -4487,9 +4514,9 @@ impl StageBuilder {
         self.open_layer(sdf::Layer::new_anonymous(identifier.into()))
     }
 
-    /// The configured session layer read ahead of its stack, or `None` when
+    /// The configured session layer, held ahead of its stack, or `None` when
     /// the builder has none.
-    fn prepare_session(&self) -> Result<Option<sdf::PreparedLayer>> {
+    fn prepare_session(&self) -> Result<Option<sdf::LoadedLayer>> {
         Ok(self
             .session_layer
             .as_deref()
@@ -4498,7 +4525,7 @@ impl StageBuilder {
     }
 
     /// Opens the sublayer stack of `root`, a root layer
-    /// [`LayerRegistry::prepare_root`] read.
+    /// [`LayerRegistry::prepare_root`] holds.
     ///
     /// References and payloads are not followed here — composition opens those
     /// target layers on demand (see [`Stage::with_cache`]), so the population
@@ -4507,10 +4534,10 @@ impl StageBuilder {
     /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer) collection error
     /// rather than aborting the open; one under a muted branch is filtered out
     /// later, once the muted-aware graph exists (see
-    /// [`StageBuilder::make_stage`](Self::make_stage)).
+    /// [`StageBuilder::assemble`](Self::assemble)).
     fn collect_layers(
         &self,
-        root: sdf::PreparedLayer,
+        root: sdf::LoadedLayer,
         ancestor_expr_vars: &HashMap<String, vt::Value>,
     ) -> Result<CollectedLayers> {
         let diagnostics = RefCell::new(pcp::Diagnostics::default());
@@ -4553,26 +4580,30 @@ impl StageBuilder {
     /// and the root region's `${VAR}` sublayers resolve against.
     fn root_stack_expression_variables(
         &self,
-        root: &sdf::PreparedLayer,
-        session: Option<&sdf::PreparedLayer>,
+        root: &sdf::LoadedLayer,
+        session: Option<&sdf::LoadedLayer>,
     ) -> Result<HashMap<String, vt::Value>> {
-        let mut vars = sdf::expr::read_variables(root.data.as_ref())?.into_owned();
+        let own = |layer: &sdf::LoadedLayer| -> Result<HashMap<String, vt::Value>> {
+            Ok(layer
+                .handle
+                .read(|layer| sdf::expr::read_variables(layer.data()).map(Cow::into_owned))??)
+        };
+        let mut vars = own(root)?;
         if let Some(session) = session
-            && !self.mutes(root.anchor(), &session.identifier)
+            && !self.mutes(root.handle.anchor_location(), &session.identifier)
         {
-            let session_own = sdf::expr::read_variables(session.data.as_ref())?.into_owned();
+            let session_own = own(session)?;
             sdf::expr::compose_over(&mut vars, &session_own);
         }
         Ok(vars)
     }
 
-    /// Assemble a [`Stage`] from already-collected layers: the construction
-    /// tail every open of the builder ends in. Any new `Stage` field must be
-    /// wired in here once. Crate-visible so tests can assemble a multi-layer stage
-    /// (references, sublayers) from hand-built [`sdf::Layer`]s.
-    pub(crate) fn make_stage(
+    /// Assemble a [`Stage`] from collected layers: the construction tail every
+    /// open of the builder ends in. Any new `Stage` field must be wired in here
+    /// once.
+    fn assemble(
         self,
-        layers: Vec<sdf::Layer>,
+        layers: Vec<sdf::LoadedLayer>,
         session_layer_count: usize,
         collection_diagnostics: pcp::Diagnostics,
     ) -> Stage {
@@ -4587,9 +4618,9 @@ impl StageBuilder {
         let layer_stack_id = pcp::LayerStackIdentifier {
             root_layer: layers
                 .get(session_layer_count)
-                .map(|l| l.identifier().to_string())
+                .map(|l| l.handle.identifier().to_string())
                 .unwrap_or_default(),
-            session_layer: (session_layer_count > 0).then(|| layers[0].identifier().to_string()),
+            session_layer: (session_layer_count > 0).then(|| layers[0].handle.identifier().to_string()),
             resolver: self.registry.identity(),
         };
         // The root layer is the strongest authoring target by default; an empty
@@ -4661,6 +4692,37 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::usd;
+
+    /// Assembles a [`Stage`] from hand-built layers, which the builder's
+    /// registry takes, so a test can build a multi-layer stage (references,
+    /// sublayers) without files. A layer repeating an earlier one's identifier
+    /// collapses onto it.
+    pub(crate) trait MakeStage {
+        /// The stage over `layers`, the first `session_layer_count` of them
+        /// session layers.
+        fn make_stage(
+            self,
+            layers: Vec<sdf::Layer>,
+            session_layer_count: usize,
+            collection_diagnostics: pcp::Diagnostics,
+        ) -> Stage;
+    }
+
+    impl MakeStage for StageBuilder {
+        fn make_stage(
+            self,
+            layers: Vec<sdf::Layer>,
+            session_layer_count: usize,
+            collection_diagnostics: pcp::Diagnostics,
+        ) -> Stage {
+            let store = self.registry.store();
+            let layers = layers
+                .into_iter()
+                .map(|layer| sdf::layer_registry::tests::hold(&store, layer))
+                .collect();
+            self.assemble(layers, session_layer_count, collection_diagnostics)
+        }
+    }
 
     /// The numbers of [`StageSink`]s and transaction observers installed on
     /// `stage`, for tests asserting a wrapper's recorders are installed and
@@ -5646,11 +5708,11 @@ pub(crate) mod tests {
         root.pseudo_root().and_then(|pr| pr.sublayers()).unwrap_or_default()
     }
 
-    /// `ensure_layer` must not clobber an already-loaded node: re-inserting a
-    /// layer whose identifier is already in the graph keeps the existing node's
-    /// data (and therefore its derived sublayer children), not the fresh empty
-    /// layer passed in. Anonymous layers are unique, so the colliding identifier
-    /// is fabricated with [`sdf::Layer::new_in_memory`].
+    /// Re-inserting a layer whose identifier the stage already holds is refused
+    /// with [`sdf::LayerError::Duplicate`], as C++ refuses a new layer under an
+    /// open identifier, and the loaded node keeps its data and its derived
+    /// sublayer children. Anonymous layers are unique, so the colliding
+    /// identifier is fabricated with [`sdf::Layer::new_in_memory`].
     #[test]
     fn insert_layer_keeps_loaded_node() -> Result<()> {
         // Build root → mid → leaf incrementally so `mid` is a loaded node with a
@@ -5669,14 +5731,21 @@ pub(crate) mod tests {
         );
 
         // Re-insert `mid` by its identifier, passing a fresh empty layer with the
-        // same identifier. The graph must keep the loaded `mid` (whose
-        // `subLayers` still names `leaf`), so `leaf`'s opinion survives.
-        stage.insert_layer(
+        // same identifier. The loaded `mid` (whose `subLayers` still names
+        // `leaf`) stays, so `leaf`'s opinion survives.
+        let reinserted = stage.insert_layer(
             &root_id,
             0,
             sdf::Layer::new_in_memory(&mid_id),
             sdf::LayerOffset::IDENTITY,
-        )?;
+        );
+        assert!(
+            matches!(
+                reinserted,
+                Err(StageAuthoringError::Registry(sdf::LayerError::Duplicate { .. }))
+            ),
+            "{reinserted:?}"
+        );
         assert_eq!(
             stage
                 .attribute("/A.x")?
@@ -6041,7 +6110,7 @@ def "T" {
     }
 
     /// A root layer sublayering each `(identifier, value)` opinion in strength
-    /// order, followed by the opinion sublayers — the layer list for `make_stage`
+    /// order, followed by the opinion sublayers — the layer list for `MakeStage::make_stage`
     /// or a configured builder in the muting tests.
     fn sublayer_layers(opinions: &[(&str, f64)]) -> Result<Vec<sdf::Layer>> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
@@ -6581,20 +6650,222 @@ def \"Sub\" {}
         Ok(())
     }
 
-    /// Stages opened on one registry each hold a layer of their own: an edit
-    /// through one is not seen by the other.
+    /// A reference that reaches a loaded layer under a second spelling of its
+    /// file composes on the first read.
     #[test]
-    fn shared_registry_private_layers() -> Result<()> {
+    fn reference_second_spelling() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("root.usda");
-        fs::write(&path, "#usda 1.0\ndef \"A\" {}\n")?;
-        let path = path.to_str().expect("utf-8 path");
+        fs::write(
+            dir.path().join("lib.usda"),
+            "#usda 1.0\ndef \"S\" {\n    def \"Child\" {}\n}\n",
+        )?;
+        let absolute = dir.path().join("lib.usda").canonicalize()?;
+        let absolute = absolute.to_str().expect("utf-8 path").to_owned();
+        let stage = Stage::builder()
+            .resolver(ar::DefaultResolver::with_search_paths([dir.path()]))
+            .in_memory("root.usda")?;
+        let root = stage.root_layer().identifier().to_string();
+        stage.edit_layer(&root, |e| {
+            for (prim, asset_path) in [("/A", absolute.as_str()), ("/B", "lib.usda")] {
+                sdf::PrimSpec::new(e.data_mut(), prim, sdf::Specifier::Def, "")?;
+                e.data_mut().set_field(
+                    &sdf::path(prim)?,
+                    sdf::FieldKey::References.as_str(),
+                    vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                        asset_path: asset_path.into(),
+                        prim_path: sdf::path("/S")?,
+                        ..Default::default()
+                    }])),
+                );
+            }
+            Ok(())
+        })?;
+        assert!(stage.prim("/A/Child")?.is_valid()?);
+        assert!(
+            stage.prim("/B/Child")?.is_valid()?,
+            "the second spelling composes at once"
+        );
+        Ok(())
+    }
+
+    /// Two spellings of one file, a search-path one and its absolute path,
+    /// name one layer, whichever the stage reaches first.
+    #[test]
+    fn two_spellings_one_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        let absolute = dir.path().join("sub.usda").canonicalize()?;
+        let absolute = absolute.to_str().expect("utf-8 path").to_owned();
+        for (first, second) in [("sub.usda", absolute.as_str()), (absolute.as_str(), "sub.usda")] {
+            let stage = Stage::builder()
+                .resolver(ar::DefaultResolver::with_search_paths([dir.path()]))
+                .in_memory("root.usda")?;
+            let root_id = stage.root_layer().identifier().to_string();
+            stage.edit_layer(&root_id, |e| {
+                e.pseudo_root_mut()?.set_sublayers([first]);
+                Ok(())
+            })?;
+            assert!(stage.prim("/Sub")?.is_defined()?);
+            let mut other = sdf::Layer::new_in_memory("other.usda");
+            edit_layer(&mut other, |e| {
+                e.pseudo_root_mut().unwrap().set_sublayers([second]);
+            });
+            stage.insert_layer(&root_id, 1, other, sdf::LayerOffset::IDENTITY)?;
+            assert!(
+                stage.composition_errors().is_empty(),
+                "{:?}",
+                stage.composition_errors()
+            );
+            assert_eq!(stage.layer_count(), 3, "the root, other.usda and one sub.usda");
+            let other = stage.layers().id_of("other.usda").expect("other.usda is in the graph");
+            assert_eq!(
+                stage.layers().sublayer_stack(other).len(),
+                2,
+                "{second} reaches the sub.usda {first} loaded"
+            );
+        }
+        Ok(())
+    }
+
+    /// A root layer sublayering `sub.usda`, both written to `dir`, and the
+    /// root's path.
+    fn shared_fixture(dir: &FsPath) -> Result<String> {
+        fs::write(
+            dir.join("root.usda"),
+            "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"A\" {}\n",
+        )?;
+        fs::write(dir.join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        Ok(dir.join("root.usda").to_str().expect("utf-8 path").to_owned())
+    }
+
+    /// Stages opened on one registry read each layer once.
+    #[test]
+    fn shared_registry_one_read() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = shared_fixture(dir.path())?;
+        let (registry, opens) = sdf::layer_registry::tests::counting_registry();
+        let a = Stage::builder().registry(registry.clone()).open(&path)?;
+        assert_eq!(opens.get(), 2, "the root and its sublayer");
+        let b = Stage::builder().registry(registry).open(&path)?;
+        assert_eq!(opens.get(), 2, "the second stage finds both layers");
+        assert!(a.prim("/Sub")?.is_valid()?);
+        assert!(b.prim("/Sub")?.is_valid()?);
+        Ok(())
+    }
+
+    /// An edit through one stage on a registry reaches another stage's
+    /// composed reads, even ones it cached, and its sinks, as an edit the
+    /// other stage did not make.
+    #[test]
+    fn shared_registry_fans_out() -> Result<()> {
+        struct Own(Rc<RefCell<Vec<bool>>>);
+        impl StageSink for Own {
+            fn after_commit(&self, _: &Stage, change: &usd::CommittedChange<'_>) {
+                self.0.borrow_mut().push(change.is_own());
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let path = shared_fixture(dir.path())?;
         let registry = sdf::LayerRegistry::default();
-        let a = Stage::builder().registry(registry.clone()).open(path)?;
-        let b = Stage::builder().registry(registry).open(path)?;
-        a.define_prim("/B")?;
-        assert!(a.prim("/B")?.is_valid()?);
-        assert!(!b.prim("/B")?.is_valid()?, "each stage holds a layer of its own");
+        let a = Stage::builder().registry(registry.clone()).open(&path)?;
+        let b = Stage::builder().registry(registry).open(&path)?;
+        let (seen_a, seen_b) = (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(Vec::new())));
+        a.add_sink(Own(Rc::clone(&seen_a)));
+        b.add_sink(Own(Rc::clone(&seen_b)));
+        assert!(!b.prim("/A/B")?.is_valid()?);
+
+        a.define_prim("/A/B")?;
+        assert_eq!(*seen_a.borrow(), [true]);
+        assert_eq!(
+            *seen_b.borrow(),
+            [false],
+            "B's sink hears A's edit as it commits, as foreign"
+        );
+        assert!(b.prim("/A/B")?.is_valid()?, "B composes A's edit");
+
+        let sub = b.layer_handle(&b.sub_layers(b.root_layer().identifier())[0]);
+        sub.expect("B holds the sublayer").edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Direct", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert_eq!(*seen_b.borrow(), [false, false], "B hears a handle edit as it commits");
+        assert!(a.prim("/Direct")?.is_valid()?, "A composes a direct handle edit");
+        assert_eq!(*seen_a.borrow(), [true, false], "a handle edit is no stage's own");
+        Ok(())
+    }
+
+    /// A stage opened on a registry composes the layers it already holds as
+    /// they stand, unsaved edits included.
+    #[test]
+    fn open_finds_unsaved_edit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = shared_fixture(dir.path())?;
+        let (registry, opens) = sdf::layer_registry::tests::counting_registry();
+        let a = Stage::builder().registry(registry.clone()).open(&path)?;
+        a.define_prim("/Unsaved")?;
+        let b = Stage::builder().registry(registry).open(&path)?;
+        assert!(b.prim("/Unsaved")?.is_valid()?);
+        assert_eq!(opens.get(), 2, "nothing is read again");
+        Ok(())
+    }
+
+    /// A registry holds a layer while any stage on it does.
+    #[test]
+    fn shared_layer_outlives_stage() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = shared_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(&path)?;
+        let b = Stage::builder().registry(registry.clone()).open(&path)?;
+        drop(a);
+        assert!(registry.find(&path)?.is_some(), "B still holds the root");
+        drop(b);
+        assert!(registry.find(&path)?.is_none(), "no stage holds the root");
+
+        let sub = dir.path().join("sub.usda").to_str().expect("utf-8 path").to_owned();
+        let a = Stage::builder().registry(registry.clone()).open(&path)?;
+        let b = Stage::builder().registry(registry.clone()).open(&sub)?;
+        drop(a);
+        assert!(registry.find(&path)?.is_none(), "only A held the root");
+        assert!(registry.find(&sub)?.is_some(), "B holds the sublayer");
+        drop(b);
+        Ok(())
+    }
+
+    /// A stage opened from inside a read of its registry's layers fails with
+    /// [`sdf::LayerError::Busy`].
+    #[test]
+    fn open_inside_read_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = shared_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(&path)?;
+        let root = a.layer_handle(a.root_layer().identifier()).expect("A holds its root");
+        let opened = root.read(|_| Stage::builder().registry(registry.clone()).open(&path).map(drop))?;
+        assert!(
+            matches!(opened, Err(crate::Error::Layer(sdf::LayerError::Busy))),
+            "{opened:?}"
+        );
+        Ok(())
+    }
+
+    /// A stage opened over a layer the registry takes refuses a layer whose
+    /// identifier the registry already holds.
+    #[test]
+    fn open_layer_refuses_duplicate() -> Result<()> {
+        let registry = sdf::LayerRegistry::default();
+        let held = registry
+            .adopt(sdf::Layer::new_in_memory("root.usda"))
+            .map_err(|refused| refused.error)?;
+        let opened = Stage::builder()
+            .registry(registry)
+            .open_layer(sdf::Layer::new_in_memory("root.usda"));
+        assert!(matches!(
+            opened,
+            Err(crate::Error::Layer(sdf::LayerError::Duplicate { .. }))
+        ));
+        drop(held);
         Ok(())
     }
 
@@ -7419,6 +7690,30 @@ def \"Sub\" {}
         Ok(())
     }
 
+    /// Runs `f` on `stage` from a sink of its root layer, after a direct edit
+    /// of the root lands and before the stage's delivery reconciles it, so the
+    /// edit is still queued on the stage.
+    fn while_queued(stage: &Stage, f: impl Fn(&Stage) + 'static) -> Result<()> {
+        struct Run<F>(WeakStage, F);
+        impl<F: Fn(&Stage)> sdf::LayerSink for Run<F> {
+            fn after_commit(&self, _change: &sdf::CommittedLayerChange<'_>) {
+                if let Some(stage) = self.0.upgrade() {
+                    (self.1)(&stage);
+                }
+            }
+        }
+        let root = stage.root_layer().identifier().to_string();
+        let layer = stage.layer_handle(&root).expect("root layer");
+        let sink = layer.add_sink(Run(stage.downgrade(), f))?;
+        let edited = layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
+            Ok(())
+        });
+        layer.remove_sink(sink)?;
+        edited?;
+        Ok(())
+    }
+
     /// Cached reads made from inside a read of the stage's layer, with an
     /// earlier direct edit still queued, fail with `Busy` as composed queries
     /// do: a warmed attribute query and a prim's type.
@@ -7432,14 +7727,16 @@ def \"Sub\" {}
         stage.prim_type_info("/A")?;
         let root = stage.root_layer().identifier().to_string();
         let layer = stage.layer_handle(&root).expect("root layer");
-        layer.edit(|e| {
-            sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
-            Ok(())
+        let failed = Rc::new(Cell::new(None));
+        while_queued(&stage, {
+            let failed = Rc::clone(&failed);
+            move |stage| {
+                let read = layer.read(|_| (query.get_at::<f32>(None).is_err(), stage.prim_type_info("/A").is_err()));
+                failed.set(Some(read.expect("a read beside the sink's own")));
+            }
         })?;
-        let (value, type_info) = layer.read(|_| (query.get_at::<f32>(None), stage.prim_type_info("/A")))?;
-        assert!(value.is_err(), "{value:?}");
-        assert!(type_info.is_err(), "the type read fails too");
-        assert_eq!(query.get_at::<f32>(None)?, None);
+        assert_eq!(failed.get(), Some((true, true)), "the value and type reads fail");
+        assert_eq!(usd::AttributeQuery::new(&attribute).get_at::<f32>(None)?, None);
         assert!(stage.prim("/Queued")?.is_valid()?, "the queued edit composes");
         Ok(())
     }
@@ -7652,21 +7949,15 @@ def \"Sub\" {}
         let stage = in_memory_stage().expect("stage");
         let root = stage.root_layer().identifier().to_string();
         let root_id = stage.layers().id_of(&root).expect("root layer id");
-        stage
-            .layer_handle(&root)
-            .expect("root layer")
-            .edit(|e| {
-                sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
-                Ok(())
-            })
-            .expect("direct edit commits");
-        // No composed read since that commit, so the edit is still queued.
-        let _ = stage.author_layers_txn(
-            &[root_id],
-            None,
-            false,
-            |_ids, _edits| Ok::<(), StageAuthoringError>(()),
-        );
+        while_queued(&stage, move |stage| {
+            let _ = stage.author_layers_txn(
+                &[root_id],
+                None,
+                false,
+                |_ids, _edits| Ok::<(), StageAuthoringError>(()),
+            );
+        })
+        .expect("direct edit commits");
     }
 
     /// A batch that authors nothing reports no change; the flag comes from the

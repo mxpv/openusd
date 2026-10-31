@@ -4182,8 +4182,8 @@ def "Unrelated"
     fn single_layer_stack(path: &str) -> (LayerGraph, IndexCache) {
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(path, None);
-        let data = registry.open(path).expect("open root").expect("root resolves").data;
-        let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
+        let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
+        let graph = LayerGraph::from_layers(vec![layer], 0, registry);
         (graph, fresh_cache())
     }
 

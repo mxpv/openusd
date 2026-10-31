@@ -58,17 +58,25 @@ impl AssetPreviewsAPI {
         Ok(Self(prim))
     }
 
-    /// The previews of the asset at `layer_path`, the
-    /// [`layer_default_previews`](Self::layer_default_previews) of the layer
-    /// read from it (C++ `GetAssetDefaultPreviews(layerPath)`). A layer that
-    /// fails to open is an error, where C++ answers no previews.
-    // TODO: C++ reuses a layer already open at `layer_path`, which needs
-    // layers shared between stages (C++ `SdfLayer::FindOrOpen`).
-    pub fn asset_default_previews(layer_path: &str) -> Result<Option<Self>> {
+    /// The previews of the asset at `layer_path`: the API on the default prim
+    /// of the layer `registry` holds there, or else reads from it (C++
+    /// `GetAssetDefaultPreviews(layerPath)`, through `SdfLayer::FindOrOpen`).
+    /// The view is on a stage over `registry`, masked as
+    /// [`layer_default_previews`](Self::layer_default_previews) masks it. A
+    /// layer that fails to open is an error, where C++ answers no previews.
+    pub fn asset_default_previews(registry: &sdf::LayerRegistry, layer_path: &str) -> Result<Option<Self>> {
         // One cache scope spans the read and the stage open, so a package is
         // opened once.
         let _scope = ar::CacheScope::begin();
-        Self::layer_default_previews(sdf::Layer::open(layer_path)?)
+        let layer = registry
+            .find_or_open(layer_path)?
+            .ok_or_else(|| openusd::Error::UnresolvedAsset(layer_path.to_owned()))?;
+        let Some(default_prim) = layer.read(default_prim)? else {
+            return Ok(None);
+        };
+        // The stage finds the layer the handle holds open.
+        let stage = masked(&default_prim)?.registry(registry.clone()).open(layer_path)?;
+        Self::from_prim(stage.prim(default_prim)?)
     }
 
     /// The previews of the asset `layer` holds: the API on its default prim
@@ -80,22 +88,31 @@ impl AssetPreviewsAPI {
     /// ancestors, which the view keeps open. `layer` moves into that stage, and
     /// an edit through the view changes it there.
     pub fn layer_default_previews(layer: sdf::Layer) -> Result<Option<Self>> {
-        let Some(default_prim) = layer
-            .pseudo_root()
-            .and_then(|root| root.default_prim())
-            .and_then(|name| sdf::default_prim_path(&name))
-        else {
+        let Some(default_prim) = default_prim(&layer) else {
             return Ok(None);
         };
-        // A child that no prim has keeps the mask to the default prim and its
-        // ancestors, without the prims beneath it.
-        let mask = usd::StagePopulationMask::new([default_prim.append_path(NO_SUCH_PRIM)?])?;
-        let stage = usd::Stage::builder()
-            .schema_registry(crate::schema_registry())
-            .mask(mask)
-            .open_layer(layer)?;
+        let stage = masked(&default_prim)?.open_layer(layer)?;
         Self::from_prim(stage.prim(default_prim)?)
     }
+}
+
+/// The path of the default prim `layer` names, if any.
+fn default_prim(layer: &sdf::Layer) -> Option<sdf::Path> {
+    layer
+        .pseudo_root()
+        .and_then(|root| root.default_prim())
+        .and_then(|name| sdf::default_prim_path(&name))
+}
+
+/// A stage builder over the domain schemas, masked to `default_prim` and its
+/// ancestors.
+fn masked(default_prim: &sdf::Path) -> Result<usd::StageBuilder> {
+    // A child that no prim has keeps the mask to the default prim and its
+    // ancestors, without the prims beneath it.
+    let mask = usd::StagePopulationMask::new([default_prim.append_path(NO_SUCH_PRIM)?])?;
+    Ok(usd::Stage::builder()
+        .schema_registry(crate::schema_registry())
+        .mask(mask))
 }
 
 /// A child name no prim has (C++ `__No_Such_Prim__`).
@@ -253,7 +270,8 @@ mod tests {
     #[test]
     fn asset_default_previews() -> Result<()> {
         let (_dir, path) = asset(Some("Chair"))?;
-        let previews = AssetPreviewsAPI::asset_default_previews(&path)?.expect("default previews");
+        let previews =
+            AssetPreviewsAPI::asset_default_previews(&sdf::LayerRegistry::default(), &path)?.expect("default previews");
         assert_eq!(previews.path().as_str(), "/Chair");
         let thumbnails = previews.default_thumbnails()?.expect("thumbnails");
         assert_eq!(thumbnails.default_image.asset_path(), "./chair_thumb.jpg");
@@ -263,7 +281,7 @@ mod tests {
     #[test]
     fn previews_no_default_prim() -> Result<()> {
         let (_dir, path) = asset(None)?;
-        assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        assert!(AssetPreviewsAPI::asset_default_previews(&sdf::LayerRegistry::default(), &path)?.is_none());
         Ok(())
     }
 
@@ -278,12 +296,25 @@ mod tests {
         Ok(())
     }
 
+    /// The asset at a path a stage on the registry holds answers through the
+    /// stage's unsaved default prim.
+    #[test]
+    fn asset_previews_unsaved() -> Result<()> {
+        let (_dir, path) = asset(None)?;
+        let registry = sdf::LayerRegistry::default();
+        let stage = usd::Stage::builder().registry(registry.clone()).open(&path)?;
+        stage.set_default_prim("Chair")?;
+        let previews = AssetPreviewsAPI::asset_default_previews(&registry, &path)?.expect("default previews");
+        assert_eq!(previews.path().as_str(), "/Chair");
+        Ok(())
+    }
+
     /// A default prim without the API has no previews, as C++'s view of it
     /// tests false.
     #[test]
     fn previews_without_api() -> Result<()> {
         let (_dir, path) = asset(Some("Bare"))?;
-        assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        assert!(AssetPreviewsAPI::asset_default_previews(&sdf::LayerRegistry::default(), &path)?.is_none());
         Ok(())
     }
 
@@ -291,7 +322,7 @@ mod tests {
     #[test]
     fn previews_missing_default_prim() -> Result<()> {
         let (_dir, path) = asset(Some("Missing"))?;
-        assert!(AssetPreviewsAPI::asset_default_previews(&path)?.is_none());
+        assert!(AssetPreviewsAPI::asset_default_previews(&sdf::LayerRegistry::default(), &path)?.is_none());
         Ok(())
     }
 
@@ -299,7 +330,8 @@ mod tests {
     #[test]
     fn previews_masked_children() -> Result<()> {
         let (_dir, path) = asset(Some("Chair"))?;
-        let previews = AssetPreviewsAPI::asset_default_previews(&path)?.expect("default previews");
+        let previews =
+            AssetPreviewsAPI::asset_default_previews(&sdf::LayerRegistry::default(), &path)?.expect("default previews");
         assert!(previews.prim().is_valid()?);
         assert!(!previews.stage().prim("/Chair/Seat")?.is_valid()?);
         Ok(())

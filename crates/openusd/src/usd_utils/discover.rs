@@ -690,24 +690,40 @@ impl Source<'_> {
     }
 }
 
-/// A layer read for the dependency walk: one the stage holds, or one read
-/// through its resolver.
+/// A layer read for the dependency walk: one the stage's registry holds, or
+/// one read through its resolver.
 ///
-/// TODO: a ref-counted `LayerRegistry::find_or_open` (C++
-/// `SdfLayer::FindOrOpen`) would serve both cases and let a layer read here be
-/// read once across walks; this lookup stands in until it exists.
+/// TODO(perf): the walk holds the registry's layers borrowed through its
+/// `LayerView`, so a layer it reads cannot join the registry and the next walk
+/// reads it again. Holding the walk's layers as handles read one at a time
+/// would let it find-or-open each (C++ `SdfLayer::FindOrOpen`).
 pub(super) enum SourceLayer<'a> {
     Live(&'a sdf::Layer),
     Read(sdf::Layer),
 }
 
 impl<'a> SourceLayer<'a> {
-    /// The layer at `identifier`, or `None` when it does not resolve.
+    /// The layer at `identifier`, as the registry holds it (C++
+    /// `SdfLayer::FindOrOpen`), or `None` when it does not resolve.
     fn open(graph: &'a pcp::LayerView<'a>, identifier: &str) -> Result<Option<Self>> {
         if let Some(id) = graph.id_of(identifier) {
             return Ok(Some(Self::Live(graph.layer(id))));
         }
-        Ok(graph.layer_registry().open_layer(identifier)?.map(Self::Read))
+        if let Some(layer) = graph.held(identifier, None) {
+            return Ok(Some(Self::Live(layer)));
+        }
+        if sdf::Layer::is_anonymous_identifier(identifier) {
+            return Ok(None);
+        }
+        let registry = graph.layer_registry();
+        let _scope = ar::CacheScope::begin();
+        let Some(resolved) = registry.resolve_layer(identifier) else {
+            return Ok(None);
+        };
+        if let Some(layer) = graph.held(identifier, resolved.to_str()) {
+            return Ok(Some(Self::Live(layer)));
+        }
+        Ok(Some(Self::Read(registry.read_layer(identifier, resolved)?)))
     }
 }
 
@@ -918,6 +934,37 @@ def "N" (
         })?;
         let dependencies = all_dependencies(&stage, &identifier)?;
         assert_eq!(relative(dir.path(), &dependencies.layers), ["extra.usda", "root.usda"]);
+        Ok(())
+    }
+
+    /// A layer outside the stage that another stage on its registry holds is
+    /// walked as that stage has it, unsaved edits included.
+    #[test]
+    fn held_layer_unsaved() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"P\" {\n    asset a = @./dep.usda@\n}\n",
+        );
+        write(dir.path(), "dep.usda", "#usda 1.0\n");
+        write(dir.path(), "extra.usda", "#usda 1.0\n");
+        let registry = sdf::LayerRegistry::default();
+        let dep = dir.path().join("dep.usda").to_str().unwrap().to_owned();
+        let other = Stage::builder().registry(registry.clone()).open(&dep)?;
+        let dep = other.root_layer().identifier().to_owned();
+        other.edit_layer(&dep, |e| {
+            e.pseudo_root_mut()?.set_sublayers(["./extra.usda"]);
+            Ok(())
+        })?;
+        let root = dir.path().join("root.usda").to_str().unwrap().to_owned();
+        let stage = Stage::builder().registry(registry).open(&root)?;
+        let dependencies = all_dependencies(&stage, &root)?;
+        assert_eq!(
+            relative(dir.path(), &dependencies.layers),
+            ["dep.usda", "extra.usda", "root.usda"],
+            "the walk reads the sublayer only the held layer names"
+        );
         Ok(())
     }
 

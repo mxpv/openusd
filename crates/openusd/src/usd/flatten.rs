@@ -397,6 +397,7 @@ mod tests {
     use std::path::Path as FsPath;
 
     use super::*;
+    use crate::usd::stage::tests::MakeStage;
     use crate::{pcp, usd};
 
     /// Authors one layer, since every test here builds its input by hand.
