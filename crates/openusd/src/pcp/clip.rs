@@ -24,6 +24,7 @@
 //! the evaluation and carries the same note.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::gf;
 use crate::sdf::schema::FieldKey;
@@ -35,7 +36,7 @@ use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};
 use super::diagnostics::Diagnostics;
 use super::index_cache::block_to_none;
-use super::layer_graph::{LayerGraph, LayerView};
+use super::layer_graph::{LayerGraph, LayerView, LoadFailure};
 use super::prim_graph::Node;
 use super::prim_resolve::Supplied;
 use super::value_resolve::ValueState;
@@ -719,20 +720,24 @@ fn get<T: TryFrom<Value>>(set: &HashMap<String, Value>, key: &str) -> Option<T> 
 }
 
 /// Value-clip resolution state owned by
-/// [`IndexCache`](super::index_cache::IndexCache): the lazily-loaded clip and
-/// manifest layers, plus the per-anchor clip-value and participation queries the
-/// cache's clip orchestration delegates to (C++ `Usd_Clips`). Clip layers never
-/// enter the composition [`LayerGraph`](super::layer_graph::LayerGraph) (spec
-/// 12.3.4); they are held here, keyed by resolved identifier.
+/// [`IndexCache`](super::index_cache::IndexCache): the synthesized manifest
+/// layers and the clips still to open, plus the per-anchor clip-value and participation queries the
+/// cache's clip orchestration delegates to (C++ `Usd_Clips`). A clip or
+/// manifest layer joins the [`LayerGraph`](super::layer_graph::LayerGraph) as a
+/// layer no stack holds, so it contributes no opinions (spec 12.3.4).
 ///
 /// Every clip set resolves through a manifest: the one its `manifestAssetPath`
 /// names, or — for a set that authors none — one synthesized from the clips its
 /// `active` schedule names and memoized by [`ClipSetKey`]. A synthesized
-/// manifest is an anonymous layer and joins `clip_layers` under its own
+/// manifest is an anonymous layer held in `generated` under its own
 /// identifier, so both kinds are read the same way.
 #[derive(Default)]
 pub(crate) struct ClipCache {
-    clip_layers: HashMap<String, sdf::Layer>,
+    /// The synthesized manifests' layers, by identifier.
+    generated: HashMap<String, sdf::Layer>,
+    /// The clip and manifest layers reads named that the graph does not hold,
+    /// for the stage's query loop to open before it reads again.
+    pub(super) pending: Vec<String>,
     /// Manifests synthesized for clip sets that author none: one entry per
     /// (prim, clip set), superseded in place whenever the set it was generated
     /// from no longer matches.
@@ -761,6 +766,19 @@ pub(crate) struct ClipCache {
     dependents: HashMap<String, HashSet<ClipSetKey>>,
 }
 
+/// Where a clip or manifest layer a read names stands
+/// ([`ClipCache::ensure_clip_layer`]).
+enum ClipLayer {
+    /// The graph holds it, or it is a synthesized manifest, under this
+    /// identifier.
+    Held(String),
+    /// The stage's query loop opens it before the read runs again, so the
+    /// pass reads nothing from it.
+    Pending,
+    /// Its asset path does not resolve.
+    Missing,
+}
+
 /// The identifiers one clip set names, with the resolved set they were derived
 /// from so an unchanged set is recognized without resolving an asset path.
 struct SetSources {
@@ -775,7 +793,7 @@ struct ManifestEntry {
     /// The set as resolved when the manifest was generated; a lookup reuses the
     /// manifest only while the set still compares equal.
     generated_from: ResolvedClipSet,
-    /// Identifier the manifest layer is held under in `clip_layers`.
+    /// Identifier the manifest layer is held under in `generated`.
     layer: String,
     /// Whether every clip the schedule names was read. An incomplete manifest
     /// is still recorded, so its layer is freed when the next generation
@@ -814,23 +832,38 @@ struct ActiveClip<'a> {
 
 impl ClipCache {
     /// Adds to `kept` every layer a clip set on a prim `cached` names is
-    /// anchored at or reads its manifest from. A set on a prim no cached index
-    /// holds keeps nothing: the prim resolves its sets afresh when it next
-    /// composes.
-    pub(crate) fn mark_live_layers(&self, kept: &mut HashSet<LayerId>, cached: impl Fn(&Path) -> bool) {
-        let sources = self
-            .set_sources
-            .iter()
-            .filter(|(prim, _)| cached(prim))
-            .flat_map(|(_, sets)| sets.values().map(|sources| &sources.from));
-        let manifests = self
-            .manifests
-            .iter()
-            .filter(|(key, _)| cached(&key.prim))
-            .map(|(_, entry)| &entry.generated_from);
-        for set in sources.chain(manifests) {
+    /// anchored at or reads its manifest from, which composition holds, and
+    /// to `clips` every layer one reads as a clip or manifest, by the id
+    /// `graph` holds it under. A set on a prim no cached index holds keeps
+    /// nothing: the prim resolves its sets afresh when it next composes.
+    ///
+    /// TODO: a clip layer leaves the graph only at a reclaim once no set a
+    /// cached prim holds names it, and reclaims run at load-rules changes and
+    /// mutes, so a session that steps an expression variable through many
+    /// values holds one clip layer per value visited until then.
+    pub(crate) fn mark_live_layers(
+        &self,
+        graph: &LayerGraph,
+        kept: &mut HashSet<LayerId>,
+        clips: &mut HashSet<LayerId>,
+        cached: impl Fn(&Path) -> bool,
+    ) {
+        let mark = |kept: &mut HashSet<LayerId>, set: &ResolvedClipSet| {
             kept.insert(set.source.layer);
             kept.extend(set.manifest_layer);
+        };
+        let live = self.set_sources.iter().filter(|(prim, _)| cached(prim));
+        for sources in live.flat_map(|(_, sets)| sets.values()) {
+            clips.extend(
+                sources
+                    .identifiers
+                    .iter()
+                    .filter_map(|identifier| graph.id_of(identifier)),
+            );
+            mark(kept, &sources.from);
+        }
+        for (_, entry) in self.manifests.iter().filter(|(key, _)| cached(&key.prim)) {
+            mark(kept, &entry.generated_from);
         }
     }
 
@@ -1197,11 +1230,12 @@ impl ClipCache {
     /// block at each clip's activation time for the attributes that clip
     /// carries no samples for; `tag` names the anonymous layer produced.
     ///
-    /// Also reports whether every scheduled clip opened. A clip that fails to
-    /// resolve or parse contributes nothing rather than failing the whole
-    /// manifest — one damaged file in a sequence must not make the prim
-    /// unreadable at every time — so the result is provisional and the caller
-    /// decides whether it may be cached.
+    /// Also reports the clips that could not be read. `None` when a clip is
+    /// one the stage's query loop has yet to open, so there is no manifest to
+    /// build until it has. A clip that fails to resolve or parse contributes
+    /// nothing rather than failing the whole manifest — one damaged file in a
+    /// sequence must not make the prim unreadable at every time — so the
+    /// result is provisional and the caller decides whether it may be cached.
     ///
     /// Opening the clips is the cost here — the schedule is walked in order so
     /// a clip activated twice contributes twice, matching the sequence value
@@ -1213,19 +1247,24 @@ impl ClipCache {
         prim: &Path,
         tag: &str,
         write_blocks: bool,
-    ) -> Result<(sdf::Layer, Diagnostics), QueryError> {
+    ) -> Result<Option<(sdf::Layer, Diagnostics)>, QueryError> {
         let mut scheduled: Vec<(String, Option<f64>)> = Vec::with_capacity(resolved.set.active.len());
         let mut unread = Diagnostics::default();
+        let mut pending = false;
         for &(stage_time, index) in &resolved.set.active {
             let Some(asset) = resolved.set.asset_paths.get(index) else {
                 continue;
             };
             let reason = match self.ensure_clip_layer(graph, asset.asset_path(), resolved.source.layer) {
-                Ok(Some(id)) => {
+                Ok(ClipLayer::Held(id)) => {
                     scheduled.push((id, write_blocks.then_some(stage_time)));
                     continue;
                 }
-                Ok(None) => "asset path did not resolve".to_owned(),
+                Ok(ClipLayer::Pending) => {
+                    pending = true;
+                    continue;
+                }
+                Ok(ClipLayer::Missing) => "asset path did not resolve".to_owned(),
                 Err(error) => tf::error_chain(&error),
             };
             unread.report(CompositionDiagnostic::UnreadableClip {
@@ -1235,19 +1274,26 @@ impl ClipCache {
                 reason,
             });
         }
+        if pending {
+            return Ok(None);
+        }
         let clips: Vec<(&sdf::Layer, Option<f64>)> = scheduled
             .iter()
             .filter_map(|(id, active)| self.layer(graph, id).map(|layer| (layer, *active)))
             .collect();
         let clip_prim_path = resolved.set.clip_prim_path(prim);
-        Ok((clip_manifest::generate_manifest(&clips, &clip_prim_path, tag)?, unread))
+        Ok(Some((
+            clip_manifest::generate_manifest(&clips, &clip_prim_path, tag)?,
+            unread,
+        )))
     }
 
     /// The identifier of the manifest layer backing `resolved`, queried under
     /// `clip_prim_path`: the layer its `manifestAssetPath` names, or a
     /// synthesized one for a set that authors none (C++ `Usd_ClipSet`'s
-    /// generated manifest). `None` only when an authored manifest asset fails
-    /// to resolve, which leaves the set sourcing nothing.
+    /// generated manifest). `None` when an authored manifest asset fails to
+    /// resolve, which leaves the set sourcing nothing, and while the manifest
+    /// or a clip it is generated from is still to open.
     ///
     /// Synthesis is memoized per (prim, clip set) — the pair identifying the
     /// authored set, rather than the clip-internal prim path several prims may
@@ -1270,7 +1316,10 @@ impl ClipCache {
     ) -> Result<Option<String>, QueryError> {
         if let Some(asset) = resolved.set.manifest_asset.as_deref() {
             let anchor = resolved.manifest_layer.unwrap_or(resolved.source.layer);
-            return self.ensure_clip_layer(graph, asset, anchor);
+            return Ok(match self.ensure_clip_layer(graph, asset, anchor)? {
+                ClipLayer::Held(id) => Some(id),
+                ClipLayer::Pending | ClipLayer::Missing => None,
+            });
         }
 
         let key = resolved.key(prim);
@@ -1284,10 +1333,13 @@ impl ClipCache {
         // A synthesized manifest never carries value blocks: they exist to save
         // a reader from opening a clip, and generating them here would have
         // opened it already.
-        let (manifest, unread) =
-            self.generate_manifest(graph, resolved, prim, clip_manifest::GENERATED_MANIFEST_TAG, false)?;
+        let Some((manifest, unread)) =
+            self.generate_manifest(graph, resolved, prim, clip_manifest::GENERATED_MANIFEST_TAG, false)?
+        else {
+            return Ok(None);
+        };
         let layer = manifest.identifier().to_owned();
-        self.clip_layers.insert(layer.clone(), manifest);
+        self.generated.insert(layer.clone(), manifest);
         let entry = ManifestEntry {
             generated_from: resolved.clone(),
             layer: layer.clone(),
@@ -1295,7 +1347,7 @@ impl ClipCache {
         };
         diagnostics.extend(unread);
         if let Some(superseded) = self.manifests.insert(key, entry) {
-            self.clip_layers.remove(&superseded.layer);
+            self.generated.remove(&superseded.layer);
         }
         Ok(Some(layer))
     }
@@ -1362,9 +1414,7 @@ impl ClipCache {
     /// that read it, returned as the anchor prims whose composed values may have
     /// moved, having first dropped the synthesized manifests generated from its
     /// content. Every caller reports a layer the stage's graph has joined,
-    /// edited or lost, so the cache's own copy of it is dropped too: a clip
-    /// reads the graph's layer while the graph holds it, and opens its file
-    /// afresh once it leaves.
+    /// edited or lost.
     ///
     /// A synthesized manifest is derived from what its source clips declare, so
     /// an edit to one restales it; an authored manifest and the clips
@@ -1372,16 +1422,11 @@ impl ClipCache {
     /// snapshotted before anything is dropped, since dropping mutates the very
     /// map the answer is read from.
     pub(super) fn invalidate_layer(&mut self, identifier: &str) -> Vec<Path> {
-        self.clip_layers.remove(identifier);
         let Some(dependents) = self.dependents.get(identifier) else {
             return Vec::new();
         };
         let keys: Vec<ClipSetKey> = dependents.iter().cloned().collect();
-        // Two clip sets on one prim reading the same layer name one anchor: the
-        // restale walks that prim's subtree, so a repeat would walk it twice.
-        let mut anchors: Vec<Path> = keys.iter().map(|key| key.prim.clone()).collect();
-        anchors.sort();
-        anchors.dedup();
+        let anchors: Vec<Path> = keys.iter().map(|key| key.prim.clone()).collect();
         for key in &keys {
             self.drop_generated_manifest(key);
         }
@@ -1399,7 +1444,7 @@ impl ClipCache {
     /// declare. A set that authored its own manifest has none and is untouched.
     fn drop_generated_manifest(&mut self, key: &ClipSetKey) {
         if let Some(entry) = self.manifests.remove(key) {
-            self.clip_layers.remove(&entry.layer);
+            self.generated.remove(&entry.layer);
         }
     }
 
@@ -1497,60 +1542,45 @@ impl ClipCache {
         !resolved.set.interpolate_missing || !self.manifest_blocks(graph, resolved, manifest, clip_path, activation)
     }
 
-    /// Loads a value-clip or manifest layer referenced by `asset_path`,
-    /// anchored to the layer `anchor_layer` (the layer that authored the
-    /// clip metadata), and returns the identifier it is cached under. Layers are
-    /// loaded on demand through the graph's resolver; clip layers never enter
-    /// the composition [`LayerGraph`] (spec 12.3.4).
+    /// Where the value-clip or manifest layer `asset_path` names stands
+    /// ([`ClipLayer`]), anchored to the layer `anchor_layer` (the layer that
+    /// authored the clip metadata).
     ///
-    /// Returns `Ok(None)` when the asset path cannot be resolved.
+    /// A layer that resolved and could not be read fails with
+    /// [`QueryError::ClipLoad`] until an edit clears the graph's record of the
+    /// failure, and one that did not resolve is asked for again once the
+    /// resolver finds it.
     fn ensure_clip_layer(
         &mut self,
         graph: &LayerView<'_>,
         asset_path: &str,
         anchor_layer: LayerId,
-    ) -> Result<Option<String>, QueryError> {
+    ) -> Result<ClipLayer, QueryError> {
         let clip_id = clip_identifier(graph, asset_path, anchor_layer);
-        // A layer already reachable needs no open at all. The graph is checked
-        // first and by identifier alone: an in-memory or anonymous layer used as
-        // a clip has no asset the registry could open, so opening first would
-        // fail the whole clip where a live layer is sitting right there.
-        if graph.id_of(&clip_id).is_none() && !self.clip_layers.contains_key(&clip_id) {
-            let opened = graph
-                .layer_registry()
-                .open_layer(&clip_id)
-                .map_err(|error| ClipLoad::new(clip_id.clone(), error))?;
-            let Some(layer) = opened else {
-                return Ok(None);
-            };
-            self.clip_layers.insert(clip_id.clone(), layer);
+        // The graph is checked by identifier alone: an in-memory or anonymous
+        // layer used as a clip has no asset the registry could open.
+        if graph.id_of(&clip_id).is_some() || self.generated.contains_key(&clip_id) {
+            return Ok(ClipLayer::Held(clip_id));
         }
-        Ok(Some(clip_id))
+        match graph.blocking_failure(&clip_id) {
+            Some(LoadFailure::Unreadable(error)) => return Err(ClipLoad::new(clip_id, Arc::clone(error)).into()),
+            Some(LoadFailure::Unresolved) => return Ok(ClipLayer::Missing),
+            None => {}
+        }
+        // TODO(perf): a linear scan, quadratic over a long template sequence's
+        // first read; a set beside the list would make it constant.
+        if !self.pending.contains(&clip_id) {
+            self.pending.push(clip_id);
+        }
+        Ok(ClipLayer::Pending)
     }
 
     /// The clip or manifest layer `id` names: the graph's, when the identifier
-    /// is interned there, else the copy this cache opened.
-    ///
-    /// The graph is preferred on every lookup rather than once at load, so a
-    /// clip that a later sublayer or reference interns is read live from that
-    /// moment — the two would otherwise drift, since edits reach the graph's
-    /// layer and a re-open would read the file rather than the edited layer.
-    ///
-    /// TODO: `clip_layers` is only evicted when a synthesized manifest is
-    /// superseded, so a session that steps an expression variable through many
-    /// values retains one layer per value visited. Bounding it needs the cache
-    /// to drop layers no live set names.
-    //
-    // TODO: hold clip layers as registry handles (C++ opens a clip through
-    // `SdfLayer::FindOrOpenRelativeToLayer`). A clip layer the graph does not
-    // name is read privately, so the layer another stage on the registry holds,
-    // unsaved edits included, does not reach it, and no edit arrives for the
-    // copy. The read runs under the view's borrow of the registry's layers, so
-    // holding one needs the clip load moved outside that borrow.
+    /// is interned there, else a manifest this cache synthesized.
     fn layer<'a>(&'a self, graph: &'a LayerView<'a>, id: &str) -> Option<&'a sdf::Layer> {
         match graph.id_of(id) {
             Some(interned) => Some(graph.layer(interned)),
-            None => self.clip_layers.get(id),
+            None => self.generated.get(id),
         }
     }
 
@@ -1646,7 +1676,7 @@ impl ClipCache {
         anchor_layer: LayerId,
         clip_path: &Path,
     ) -> Result<Option<(String, sdf::TimeSampleMap)>, QueryError> {
-        let Some(id) = self.ensure_clip_layer(graph, asset, anchor_layer)? else {
+        let ClipLayer::Held(id) = self.ensure_clip_layer(graph, asset, anchor_layer)? else {
             return Ok(None);
         };
         let Some(layer) = self.layer(graph, &id) else {
@@ -1776,6 +1806,12 @@ impl ClipCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
         assets: AssetMode,
     ) -> Result<Option<Value>, QueryError> {
+        // A clip still to open, the active one or a neighbour, reads as no
+        // sample. The walk stops at the first one: the query loop opens it
+        // and reads again.
+        if !self.pending.is_empty() {
+            return Ok(None);
+        }
         let set = &resolved.set;
         // Position of the active clip among the `active` entries at `time`.
         let active_pos = set.active_position(time).unwrap_or(0);
@@ -1794,6 +1830,9 @@ impl ClipCache {
                     upper = Some((stage, sample));
                     break;
                 }
+                if !self.pending.is_empty() {
+                    return Ok(None);
+                }
             }
         }
 
@@ -1810,6 +1849,9 @@ impl ClipCache {
                 {
                     lower = Some((stage, sample));
                     break;
+                }
+                if !self.pending.is_empty() {
+                    return Ok(None);
                 }
             }
         }
@@ -1907,15 +1949,17 @@ pub(crate) fn asset_input<'a>(set: &'a HashMap<String, Value>, field: &str) -> O
 /// tried first so a relative path against a filesystem-backed layer never
 /// resolves to an unrelated layer that merely happens to be interned under the
 /// bare string. An in-memory layer has no location to anchor against, so the
-/// graph's own [`LayerGraph::find_relative`] settles the rest: keying such a
-/// clip by its anchored form would leave it unreadable, and would key its
+/// bare spelling, looked up among every layer the graph holds, settles the
+/// rest: keying such a clip by its anchored form would leave it unreadable, and would key its
 /// registrations under a name no edit to it is ever reported with.
 fn clip_identifier(graph: &LayerGraph, asset_path: &str, anchor_layer: LayerId) -> String {
     let anchored = graph.absolute_path(anchor_layer, asset_path);
     if graph.id_of(&anchored).is_some() {
         return anchored;
     }
-    match graph.find_relative(asset_path, anchor_layer) {
+    // A clip reads any layer the graph holds, not only those composition
+    // uses, so the bare in-memory spelling is looked up the same way.
+    match graph.id_of(&graph.layer_registry().in_memory_identifier(asset_path)) {
         Some(interned) => graph.identifier(interned).to_owned(),
         None => anchored,
     }
@@ -1932,17 +1976,32 @@ fn clip_attr_path(query: &ClipQuery<'_>, base: &Path) -> Result<Path, QueryError
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::mem;
+
     use super::*;
     use crate::sdf;
 
-    /// `ClipCache::clip_layer` loads a clip layer relative to the authoring
-    /// layer, caches it (clip layers never enter the composition stack), and
-    /// reports an unresolvable path as `None`. The cache resolves clips through
-    /// an independently-owned [`ClipCache`], so this exercises it without an
-    /// [`IndexCache`](super::super::index_cache::IndexCache).
+    /// Opens the clip and manifest layers `identifiers` into `graph`, marking
+    /// one that does not resolve, as the stage's query loop does.
+    pub(crate) fn intern_clips(graph: &mut LayerGraph, identifiers: Vec<String>) -> crate::Result<()> {
+        let registry = graph.layer_registry().clone();
+        for identifier in identifiers {
+            match registry.find_or_read(&identifier)? {
+                Some(layer) => {
+                    graph.join_clip(layer);
+                }
+                None => graph.mark_load_failed(&identifier, LoadFailure::Unresolved),
+            }
+        }
+        Ok(())
+    }
+
+    /// A clip the graph does not hold is asked for once, read from the graph
+    /// once it joins, and reported missing or unreadable once the graph has
+    /// recorded that failure.
     #[test]
-    fn loads_and_caches_clip_layer() -> crate::Result<()> {
+    fn clip_layer_pending() -> crate::Result<()> {
         let root = format!(
             "{}vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/clip_basic/usda/root.usda",
             env!("CARGO_WORKSPACE_DIR")
@@ -1950,31 +2009,37 @@ mod tests {
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
         let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
-        let graph = LayerGraph::from_layers(vec![layer], 0, registry);
+        let mut graph = LayerGraph::from_layers(vec![layer], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
         let mut clips = ClipCache::default();
-        let id = clips
-            .ensure_clip_layer(&graph.read_view(), "./clip.usda", root_id)?
-            .expect("clip resolves");
+        for _ in 0..2 {
+            let state = clips.ensure_clip_layer(&graph.read_view(), "./clip.usda", root_id)?;
+            assert!(matches!(state, ClipLayer::Pending));
+        }
+        assert_eq!(clips.pending.len(), 1, "a clip is asked for once");
+        intern_clips(&mut graph, mem::take(&mut clips.pending))?;
+        let ClipLayer::Held(id) = clips.ensure_clip_layer(&graph.read_view(), "./clip.usda", root_id)? else {
+            panic!("the clip joined the graph");
+        };
         {
             let view = graph.read_view();
-            let clip = clips.layer(&view, &id).expect("the clip is held");
-            assert!(clip.identifier().contains("clip.usda"));
+            let clip = clips.layer(&view, &id).expect("the graph holds the clip");
             assert!(clip.data().has_spec(&sdf::path("/Model.size")?));
         }
 
-        // Second lookup is a cache hit; a bogus path resolves to None.
-        assert!(
-            clips
-                .ensure_clip_layer(&graph.read_view(), "./clip.usda", root_id)?
-                .is_some()
+        let missing = clip_identifier(&graph.read_view(), "./does_not_exist.usda", root_id);
+        graph.mark_load_failed(&missing, LoadFailure::Unresolved);
+        let state = clips.ensure_clip_layer(&graph.read_view(), "./does_not_exist.usda", root_id)?;
+        assert!(matches!(state, ClipLayer::Missing));
+        graph.mark_load_failed(
+            &missing,
+            LoadFailure::Unreadable(Arc::new(sdf::layer_registry::LoadError::Unresolved {
+                asset_path: missing.clone(),
+            })),
         );
-        assert!(
-            clips
-                .ensure_clip_layer(&graph.read_view(), "./does_not_exist.usda", root_id)?
-                .is_none()
-        );
+        let state = clips.ensure_clip_layer(&graph.read_view(), "./does_not_exist.usda", root_id);
+        assert!(matches!(state, Err(QueryError::ClipLoad(_))));
         Ok(())
     }
 
@@ -2004,11 +2069,9 @@ mod tests {
         );
 
         let mut clips = ClipCache::default();
-        assert_eq!(
-            clips
-                .ensure_clip_layer(&graph.read_view(), "in_memory_clip.usda", root_id)?
-                .as_deref(),
-            Some(identifier.as_str()),
+        let state = clips.ensure_clip_layer(&graph.read_view(), "in_memory_clip.usda", root_id)?;
+        assert!(
+            matches!(&state, ClipLayer::Held(id) if *id == identifier),
             "resolving must find the interned layer rather than opening a file",
         );
         assert!(
@@ -2019,7 +2082,7 @@ mod tests {
     }
     /// A set that authors no manifest gets one synthesized, and repeat queries
     /// reuse it: the memo returns the same anonymous layer rather than minting
-    /// one — and growing `clip_layers` without bound — per query.
+    /// one — and growing `generated` without bound — per query.
     #[test]
     fn synthesized_manifest_is_memoized() -> crate::Result<()> {
         let root = format!(
@@ -2029,7 +2092,7 @@ mod tests {
         let registry = sdf::LayerRegistry::default();
         let id = registry.create_identifier(&root, None);
         let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
-        let graph = LayerGraph::from_layers(vec![layer], 0, registry);
+        let mut graph = LayerGraph::from_layers(vec![layer], 0, registry);
         let root_id = graph.root_id().expect("root layer");
 
         let model = sdf::path("/Model")?;
@@ -2053,17 +2116,20 @@ mod tests {
         };
 
         let mut clips = ClipCache::default();
+        // The first read asks for the clips; the next reads them.
+        clips.manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?;
+        intern_clips(&mut graph, mem::take(&mut clips.pending))?;
         let first = clips
             .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?
             .expect("synthesized");
-        let layers = clips.clip_layers.len();
+        let layers = clips.generated.len();
         assert_eq!(
             clips
                 .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &resolved, &model)?
                 .as_deref(),
             Some(&*first)
         );
-        assert_eq!(clips.clip_layers.len(), layers);
+        assert_eq!(clips.generated.len(), layers);
 
         // clip0 samples `size`, so the synthesized manifest declares it as
         // varying and the set owns the attribute.
@@ -2080,8 +2146,8 @@ mod tests {
             .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &retimed, &model)?
             .expect("synthesized");
         assert_ne!(second, first);
-        assert!(!clips.clip_layers.contains_key(&first));
-        assert_eq!(clips.clip_layers.len(), layers);
+        assert!(!clips.generated.contains_key(&first));
+        assert_eq!(clips.generated.len(), layers);
 
         let mut repathed = retimed.clone();
         repathed.set.prim_path = Some(sdf::path("/Other")?);
@@ -2089,8 +2155,8 @@ mod tests {
             .manifest_id(&graph.read_view(), &mut Diagnostics::default(), &repathed, &model)?
             .expect("synthesized");
         assert_ne!(third, second);
-        assert!(!clips.clip_layers.contains_key(&second));
-        assert_eq!(clips.clip_layers.len(), layers);
+        assert!(!clips.generated.contains_key(&second));
+        assert_eq!(clips.generated.len(), layers);
 
         // Two prims naming the same clip-internal prim path hold separate
         // manifests: the memo is keyed by the prim carrying the set, so their

@@ -33,6 +33,7 @@ use std::mem;
 use std::ops::Deref;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::ar::ResolvedPath;
 use crate::sdf::expr;
@@ -295,6 +296,15 @@ pub(crate) struct LayerGraph {
     /// Whether a stack sweep removed a stack since the layers were last
     /// reclaimed.
     reclaim_due: bool,
+    /// The layers the graph holds only for value clips, which take no part in
+    /// composition: no stack holds one, its `subLayers` are not resolved, and
+    /// its relocates are neither validated nor reported. A layer joins this
+    /// set when a clip opens it ([`join_clip`](Self::join_clip)) or when a
+    /// reclaim finds composition no longer uses it while a clip set reads it
+    /// ([`remove_layers`](Self::remove_layers)). It leaves when a composition
+    /// join reaches it ([`ensure_layer`](Self::ensure_layer)), which wires it
+    /// like a layer newly loaded, or when it leaves the graph.
+    clip_only: HashSet<LayerId>,
 }
 
 /// The diagnostic buckets a [`LayerGraph`] replaces on its own rebuilds.
@@ -481,6 +491,17 @@ impl SublayerState {
     }
 }
 
+/// What a reclaim found ([`LayerGraph::unused_layers`]).
+pub(crate) struct Reclaimable {
+    /// The layers nothing keeps, to leave the graph.
+    pub(crate) unused: HashSet<LayerId>,
+    /// The layers composition no longer uses that value clips read, to take
+    /// out of composition ([`LayerGraph::remove_layers`]).
+    pub(crate) demoted: HashSet<LayerId>,
+    /// Whether the next reclaim runs whether or not a sweep removes a stack.
+    pub(crate) retry: bool,
+}
+
 /// Which layers a reclaim ([`LayerGraph::unused_layers`]) may free.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Reclaim {
@@ -570,8 +591,9 @@ pub(crate) struct SublayerRecompute {
 pub(crate) enum LoadFailure {
     /// The asset path did not resolve to a physical location.
     Unresolved,
-    /// It resolved but could not be read or parsed.
-    Unreadable(String),
+    /// It resolved but could not be read or parsed, with what went wrong,
+    /// shared by every referrer the failure is reported to.
+    Unreadable(Arc<sdf::layer_registry::LoadError>),
 }
 
 impl LoadFailure {
@@ -584,10 +606,10 @@ impl LoadFailure {
                 asset_path: asset_path.to_string(),
                 introduced_by: introduced_by.to_string(),
             },
-            LoadFailure::Unreadable(reason) => CompositionDiagnostic::MalformedSublayer {
+            LoadFailure::Unreadable(error) => CompositionDiagnostic::MalformedSublayer {
                 asset_path: asset_path.to_string(),
                 introduced_by: introduced_by.to_string(),
-                reason: reason.clone(),
+                reason: tf::error_chain(&**error),
             },
         }
     }
@@ -718,6 +740,7 @@ impl LayerGraph {
             sublayers: SublayerState::default(),
             eager_stacks: Vec::new(),
             reclaim_due: false,
+            clip_only: HashSet::new(),
         }
     }
 
@@ -753,7 +776,10 @@ impl LayerGraph {
     /// survive) and reported as not fresh, so a re-added layer collapses onto
     /// its existing id. Callers key one-time per-layer setup (e.g. subscribing
     /// the stage's recorder) off `fresh` so a re-added identifier is not set
-    /// up twice.
+    /// up twice. A layer held only for value clips joins composition here
+    /// ([`clip_only`](Self::clip_only)) and is reported fresh, so the caller
+    /// wires it as a layer newly loaded; it is subscribed already
+    /// ([`is_subscribed`](Self::is_subscribed)).
     ///
     /// The node must exist before a `subLayers` edit naming its asset path is
     /// rebuilt, so that [`build_sublayer_edges`](Self::build_sublayer_edges)'s
@@ -769,7 +795,7 @@ impl LayerGraph {
             "a layer joins the graph under its canonical identifier"
         );
         if let Some(&id) = self.by_identifier.get(&requested) {
-            return (id, false);
+            return (id, self.clip_only.remove(&id));
         }
         // A second identifier for a file already interned names that layer (C++
         // `Sdf_LayerRegistry::_Layers::Insert` collides on real path): the new
@@ -788,7 +814,7 @@ impl LayerGraph {
             .or_else(|| self.id_of(real_path?));
         if let Some(id) = existing {
             self.by_identifier.insert(requested, id);
-            return (id, false);
+            return (id, self.clip_only.remove(&id));
         }
         let id = LayerId::from_raw(self.next_id);
         self.next_id += 1;
@@ -866,7 +892,9 @@ impl LayerGraph {
         let empty = HashMap::new();
         let mut plain_sink = EdgeSink::default();
         for &id in &self.order {
-            if resolved.as_ref().is_some_and(|resolved| !resolved.contains(&id)) {
+            // A layer held only for value clips composes nothing, its sublayers
+            // included.
+            if self.clip_only.contains(&id) || resolved.as_ref().is_some_and(|resolved| !resolved.contains(&id)) {
                 continue;
             }
             let edges = self.resolve_edges(id, &empty, &mut resolution, Some(&mut plain_sink));
@@ -1421,10 +1449,14 @@ impl LayerGraph {
     /// [`sweep_stacks`](Self::sweep_stacks) left, the root of every target
     /// stack, the parents of pending sublayer demands, the layers in `kept`
     /// and `pins`, a layer with unsaved edits or no file to read it from
-    /// again, and every unmuted sublayer beneath a stack member, a demand
-    /// parent, or a layer kept for a pin or a missing file. A
+    /// again, and every unmuted sublayer beneath one of those other than a
+    /// session layer or a target stack's root. A
     /// [`Reclaim::Muted`] returns only those among the muted layers and their
     /// sublayers.
+    ///
+    /// A layer in `clips`, which value clips read, is never unused: when
+    /// nothing above keeps it for composition, it is returned to be demoted
+    /// to clips only ([`remove_layers`](Self::remove_layers)), pinned or not.
     ///
     /// Also returns whether to retry at the next reclaim, for
     /// [`remove_layers`](Self::remove_layers): a layer was kept only for a pin
@@ -1433,9 +1465,10 @@ impl LayerGraph {
     pub(crate) fn unused_layers(
         &self,
         mut kept: HashSet<LayerId>,
+        clips: &HashSet<LayerId>,
         pins: &HashSet<LayerId>,
         reclaim: Reclaim,
-    ) -> (HashSet<LayerId>, bool) {
+    ) -> Reclaimable {
         kept.extend(self.stacks.member_layers());
         kept.extend(self.root);
         kept.extend(self.sublayers.pending_demands.iter().map(|demand| demand.parent));
@@ -1447,36 +1480,46 @@ impl LayerGraph {
         // the stack composes nothing from it.
         kept.extend(self.stacks.targets().into_iter().map(|(_, root, _)| root));
         self.keep_sublayers(&mut kept, seeds);
+        let mut demoted: HashSet<LayerId> = clips
+            .iter()
+            .copied()
+            .filter(|id| !kept.contains(id) && !self.clip_only.contains(id))
+            .collect();
         // Only a layer nothing else keeps is read for whether it could be
         // read back: one with unsaved edits, or with no file to read it from.
         let view = self.read_view();
-        let mut lapsing = false;
+        let mut retry = false;
         let pinned: Vec<LayerId> = self
             .order
             .iter()
             .copied()
-            .filter(|id| !kept.contains(id))
+            .filter(|id| !kept.contains(id) && !clips.contains(id))
             .filter(|id| {
                 let layer = view.layer(*id);
                 let lapses = pins.contains(id) || layer.is_dirty();
-                lapsing |= lapses;
+                retry |= lapses;
                 lapses || !layer.is_rereadable()
             })
             .collect();
         kept.extend(&pinned);
         self.keep_sublayers(&mut kept, pinned);
+        // A clip layer stays for its clip after the walk, which reaches past
+        // it to the sublayers of a pinned parent.
+        kept.extend(clips);
         let mut unused: HashSet<LayerId> = self.order.iter().copied().filter(|id| !kept.contains(id)).collect();
         if reclaim == Reclaim::Muted {
             // Every muted layer is a seed. The walk skips a muted child, which is
             // a seed of its own.
             let mut reach = self.muted.clone();
             self.keep_sublayers(&mut reach, self.muted.iter().copied().collect());
-            let all = unused.len();
+            let all = unused.len() + demoted.len();
             unused.retain(|id| reach.contains(id));
-            // A layer the mute did not prune leaves at a later reclaim.
-            lapsing |= unused.len() < all;
+            demoted.retain(|id| reach.contains(id));
+            // A layer the mute did not prune leaves, or leaves composition, at
+            // a later reclaim.
+            retry |= unused.len() + demoted.len() < all;
         }
-        (unused, lapsing)
+        Reclaimable { unused, demoted, retry }
     }
 
     /// Adds to `kept` every sublayer, transitively, of the layers in `walk`.
@@ -1493,12 +1536,21 @@ impl LayerGraph {
 
     /// Takes the layers in `dead` out of the graph, every spelling of their
     /// identifiers with them, and returns them as [`DepartedLayers`] with the
-    /// identifiers that named them. With `retry`, the next reclaim runs
-    /// whether or not a sweep removes a stack.
-    pub(crate) fn remove_layers(&mut self, dead: &HashSet<LayerId>, retry: bool) -> DepartedLayers {
+    /// identifiers that named them. Takes the layers in `demoted`, which
+    /// composition no longer uses but a clip set still reads, out of
+    /// composition ([`clip_only`](Self::clip_only)): each keeps its node and
+    /// drops its sublayer edges and relocates until a composition join
+    /// promotes it again. With `retry`, the next reclaim runs whether or not a
+    /// sweep removes a stack.
+    pub(crate) fn remove_layers(
+        &mut self,
+        dead: &HashSet<LayerId>,
+        demoted: &HashSet<LayerId>,
+        retry: bool,
+    ) -> DepartedLayers {
         self.reclaim_due = retry;
         let mut identifiers = Vec::new();
-        if dead.is_empty() {
+        if dead.is_empty() && demoted.is_empty() {
             return DepartedLayers {
                 identifiers,
                 _nodes: Vec::new(),
@@ -1526,6 +1578,7 @@ impl LayerGraph {
             keep
         });
         self.order.retain(|id| !dead.contains(id));
+        self.clip_only.retain(|id| !dead.contains(id));
         // A muted layer leaving the graph stays muted under its identifier and
         // answers to every other spelling that named it.
         for id in dead {
@@ -1540,18 +1593,31 @@ impl LayerGraph {
             }
             self.pending_mutes.insert(identifier);
         }
-        // The parents of a departing layer re-resolve their `subLayers` once it
-        // is gone: the entry reads as unresolved, which a mute leaves out of
-        // the stack and an unmute demands again.
+        // The parents of a departing or demoted layer re-resolve their
+        // `subLayers` once it is gone from composition: the entry reads as
+        // unresolved, which a mute leaves out of the stack and the next stack
+        // to use it demands again, joining it to composition.
         // TODO(perf): this scans every node's edges; an index of each layer's
         // parents would name them directly.
+        let leaving = |id: &LayerId| dead.contains(id) || demoted.contains(id);
         let parents: HashSet<LayerId> = self
             .nodes
             .iter()
-            .filter(|(id, node)| !dead.contains(id) && node.children.iter().any(|(child, _)| dead.contains(child)))
+            .filter(|(id, node)| !leaving(id) && node.children.iter().any(|(child, _)| leaving(child)))
             .map(|(&id, _)| id)
             .collect();
         let (mut relocates, mut expr) = (false, false);
+        for &id in demoted {
+            if !self.clip_only.insert(id) {
+                continue;
+            }
+            let node = self.nodes.get_mut(&id).expect("a demoted layer is in the graph");
+            node.children = SublayerEdges::default();
+            relocates |= !node.relocates.is_empty();
+            expr |= mem::take(&mut node.has_expr_sublayer);
+            self.sublayers.unresolved_plain.remove(&id);
+            self.sublayers.fallback_plain.remove(&id);
+        }
         let mut nodes = Vec::new();
         for id in dead {
             if let Some(node) = self.nodes.remove(id) {
@@ -1564,13 +1630,14 @@ impl LayerGraph {
             self.sublayers.any_expr = self.nodes.values().any(|node| node.has_expr_sublayer);
         }
         self.sublayers.forget(dead);
-        // A departed layer's relocate errors leave the diagnostics with it,
-        // those of a layer whose every relocate is invalid included.
+        // A departed or demoted layer's relocate errors leave the diagnostics
+        // with it, those of a layer whose every relocate is invalid included.
         if !parents.is_empty() {
-            // Re-resolving the edges recomputes the relocates too. Only a muted
-            // child leaves a parent that stays, as a kept parent keeps every
-            // other child. The rebuild changes no composed stack, and the mute
-            // filter drops the demand it files for the child.
+            // Re-resolving the edges recomputes the relocates too. A kept
+            // parent keeps every unmuted child unless it is muted itself (a
+            // session layer or a target stack's root stays muted), so the
+            // child that leaves contributes to no composed stack, and the
+            // rebuild changes none: the mute filter drops the demand it files.
             // TODO(perf): this re-resolves every layer's edges, rebuilds the
             // stacks reaching the parents and revalidates every relocate, where
             // only the parents' edges changed, and `apply_mute` has just
@@ -1690,6 +1757,11 @@ impl LayerGraph {
         self.nodes.get_mut(&id).expect("the layer is in the graph").subscription = Some(subscription);
     }
 
+    /// Whether the stage's recorder is subscribed to the layer `id`.
+    pub(crate) fn is_subscribed(&self, id: LayerId) -> bool {
+        self.nodes[&id].subscription.is_some()
+    }
+
     /// The store that holds every layer this graph's nodes name.
     pub(crate) fn store(&self) -> &Rc<sdf::LayerStore> {
         &self.store
@@ -1737,6 +1809,16 @@ impl LayerGraph {
     /// have outlived its layer.
     pub(crate) fn try_identifier(&self, id: LayerId) -> Option<&str> {
         self.nodes.get(&id).map(|node| node.handle.identifier())
+    }
+
+    /// Every identifier and real path that names one of the layers `ids`
+    /// ([`id_of`](Self::id_of) answers to each).
+    pub(crate) fn spellings<'a>(&'a self, ids: &'a HashSet<LayerId>) -> impl Iterator<Item = &'a str> {
+        self.by_identifier
+            .iter()
+            .chain(&self.by_real_path)
+            .filter(|(_, id)| ids.contains(id))
+            .map(|(spelling, _)| spelling.as_str())
     }
 
     /// The registry that opens reference/payload targets on demand.
@@ -2008,8 +2090,8 @@ impl LayerGraph {
         match only {
             None => {
                 let mut any = false;
-                for node in self.nodes.values_mut() {
-                    node.has_expr_sublayer = has_expr(node);
+                for (id, node) in &mut self.nodes {
+                    node.has_expr_sublayer = !self.clip_only.contains(id) && has_expr(node);
                     any |= node.has_expr_sublayer;
                 }
                 self.sublayers.any_expr = any;
@@ -2228,6 +2310,24 @@ impl LayerGraph {
     /// `None` if it never failed.
     pub(crate) fn load_failure(&self, asset_path: &str) -> Option<&LoadFailure> {
         self.failed_loads.get(asset_path)
+    }
+
+    /// The recorded failure that still keeps `asset_path` from being opened
+    /// again: an unreadable one until an edit clears it, and an unresolved one
+    /// while the asset neither resolves nor names a layer the registry holds
+    /// (an adopted or anonymous one is found without resolving).
+    ///
+    /// TODO(perf): an unresolved asset is resolved again on every ask, a
+    /// filesystem probe per clipped read for a clip that stays missing; the
+    /// load barrier's `forget_resolvable_failures` could clear the record
+    /// instead.
+    pub(crate) fn blocking_failure(&self, asset_path: &str) -> Option<&LoadFailure> {
+        self.failed_loads.get(asset_path).filter(|failure| match failure {
+            LoadFailure::Unreadable(_) => true,
+            LoadFailure::Unresolved => {
+                self.registry.resolve(asset_path).is_none() && !matches!(self.registry.find(asset_path), Ok(Some(_)))
+            }
+        })
     }
 
     /// Forgets every recorded load failure so a now-readable asset is demanded
@@ -2681,12 +2781,50 @@ impl LayerGraph {
     /// matched. The shared lookup behind [`find_relative`](Self::find_relative)
     /// and [`resolve_sublayer`](Self::resolve_sublayer).
     fn anchored_or_bare(&self, anchored: &str, asset_path: &str) -> Option<(LayerId, bool)> {
-        match self.id_of(anchored) {
+        match self.composing_id(anchored) {
             Some(id) => Some((id, true)),
             None => self
-                .id_of(&self.registry.in_memory_identifier(asset_path))
+                .composing_id(&self.registry.in_memory_identifier(asset_path))
                 .map(|id| (id, false)),
         }
+    }
+
+    /// The layer `identifier` names, as [`id_of`](Self::id_of), when it takes
+    /// part in composition. A layer the graph holds only for value clips
+    /// ([`clip_only`](Self::clip_only)) answers to `id_of` alone, so an arc or
+    /// sublayer entry naming it loads it as any unloaded layer, which joins it
+    /// to composition.
+    pub(crate) fn composing_id(&self, identifier: &str) -> Option<LayerId> {
+        self.id_of(identifier).filter(|id| !self.clip_only.contains(id))
+    }
+
+    /// Whether the graph holds `id` only for value clips, so it takes no part
+    /// in composition.
+    pub(crate) fn is_clip_only(&self, id: LayerId) -> bool {
+        self.clip_only.contains(&id)
+    }
+
+    /// Adds `layer`, opened for a value clip, to the graph as a layer that
+    /// takes no part in composition, returning its id and whether it newly
+    /// joined. A layer the graph already holds keeps what it takes part in.
+    pub(crate) fn join_clip(&mut self, layer: sdf::LoadedLayer) -> (LayerId, bool) {
+        if let Some(id) = self.id_of(&layer.identifier) {
+            return (id, false);
+        }
+        let (id, fresh) = self.ensure_layer(layer);
+        if fresh {
+            self.clip_only.insert(id);
+            // A mute recorded while the layer was not held takes hold now, so
+            // a later open leaves it out.
+            self.resolve_muted_ids();
+        }
+        (id, fresh)
+    }
+
+    /// Forgets the recorded failure to open `asset_path`, returning whether
+    /// there was one: the asset has since opened.
+    pub(crate) fn forget_load_failure(&mut self, asset_path: &str) -> bool {
+        self.failed_loads.remove(asset_path).is_some()
     }
 
     /// Resolves `asset_path` as authored in `anchor`, anchoring it through the
@@ -2985,6 +3123,9 @@ impl LayerGraph {
     pub(crate) fn presence(&self, identifier: &str) -> sdf::Presence {
         match self.id_of(identifier) {
             Some(id) if self.muted.contains(&id) => sdf::Presence::Excluded,
+            // A layer held only for value clips joins composition through the
+            // open.
+            Some(id) if self.clip_only.contains(&id) => sdf::Presence::Absent,
             Some(_) => sdf::Presence::Held,
             None if self.pending_mutes.contains(self.pending_key(identifier)) => sdf::Presence::Excluded,
             None => sdf::Presence::Absent,
@@ -4943,10 +5084,14 @@ mod tests {
         graph.finalize(0, Some(root));
         graph.mute_layer(graph.identifier(target).to_owned());
         assert!(graph.reclaim_due(Reclaim::Muted));
-        let (unused, _) = graph.unused_layers(HashSet::new(), &HashSet::new(), Reclaim::Muted);
+        let unused = graph
+            .unused_layers(HashSet::new(), &HashSet::new(), &HashSet::new(), Reclaim::Muted)
+            .unused;
         assert!(unused.is_empty(), "the stack's root stays: {unused:?}");
         graph.sweep_stacks(StackMarks::default());
-        let (unused, _) = graph.unused_layers(HashSet::new(), &HashSet::new(), Reclaim::Muted);
+        let unused = graph
+            .unused_layers(HashSet::new(), &HashSet::new(), &HashSet::new(), Reclaim::Muted)
+            .unused;
         assert_eq!(unused, HashSet::from([target]), "the swept stack's root leaves");
     }
 

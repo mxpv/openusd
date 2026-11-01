@@ -32,6 +32,7 @@ use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashSet, VecDeque};
 use std::mem;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
@@ -337,13 +338,16 @@ impl StageComposition {
         &self,
         query: impl FnOnce(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         demands: &mut Vec<pcp::Demand>,
+        clips: &mut Vec<String>,
     ) -> Result<T, pcp::QueryError> {
         self.assert_settled();
         let layers = self.layers.borrow();
         let view = layers.view()?;
         let mut cache = self.cache.borrow_mut();
+        let reported = cache.query_diagnostic_count();
         let result = query(&view, &mut cache);
         cache.swap_pending_loads(demands);
+        cache.swap_clip_loads(clips, reported);
         result
     }
 
@@ -722,8 +726,8 @@ impl StageComposition {
     /// [`departed`](CompositionHooks::departed), then leaves the graph, and
     /// the registry frees it unless something else holds it (C++ releases a
     /// payload's layer stacks, and with them its layers, as its prim indices
-    /// go). A clip set on one is dropped, and a clip that read one through the
-    /// graph reads its own copy again. Also kept is a layer with no file to
+    /// go). A clip set on one is dropped, and a clip layer stays while a clip
+    /// set a cached prim holds names it. Also kept is a layer with no file to
     /// read it from again, anonymous or built in memory.
     ///
     /// Kept besides are a layer with unsaved edits and the edit target's
@@ -761,17 +765,19 @@ impl StageComposition {
         // graph layer. `LayerStackRegistry::sweep` returning the layers whose
         // `using` entry emptied would make those the only candidates.
         let edit_targets = hooks.edit_target_identifiers();
-        let (unused, retry) = self.update_pair(|graph, cache| {
-            let mut kept = HashSet::new();
-            cache.mark_live_layers(&mut kept);
+        let pcp::Reclaimable { unused, demoted, retry } = self.update_pair(|graph, cache| {
+            let (mut kept, mut clips) = (HashSet::new(), HashSet::new());
+            cache.mark_live_layers(graph, &mut kept, &mut clips);
             let pins = edit_targets.iter().filter_map(|target| graph.id_of(target)).collect();
-            graph.unused_layers(kept, &pins, reclaim)
+            graph.unused_layers(kept, &clips, &pins, reclaim)
         });
         if !unused.is_empty() {
             hooks.departed(&unused);
         }
         let departed = self.update_pair(|graph, cache| {
-            let departed = graph.remove_layers(&unused, retry);
+            // A layer composition left that a clip still reads stays, for the
+            // clip alone.
+            let departed = graph.remove_layers(&unused, &demoted, retry);
             cache.forget_layers(&unused, &departed.identifiers);
             departed
         });
@@ -782,52 +788,173 @@ impl StageComposition {
     }
 
     /// Add `layer` to the stage's graph, returning its id and whether it newly
-    /// joined (a duplicate identifier collapses onto the existing node). The one
-    /// seam by which a layer joins the stage — both opening (`StageBuilder::assemble`) and
-    /// [`insert_layer`](super::Stage::insert_layer) go through it. A freshly-added layer
-    /// gets the stage's recorder, subscribed to its commits: it forwards each
-    /// staged edit to the stage's sinks and queues the commit into
-    /// [`StageComposition`]'s pending queue for
-    /// [`process_pending`](Self::process_pending) to recompose, so every layer
-    /// the stage holds reports its edits no matter who authors them. The
-    /// layer's node holds the subscription, which ends when the layer leaves
-    /// the graph.
+    /// joined (a duplicate identifier collapses onto the existing node). The
+    /// seam by which a layer joins the stage: opening (`StageBuilder::assemble`),
+    /// [`insert_layer`](super::Stage::insert_layer) and the load barrier go
+    /// through it, and a clip layer through [`join_layer`](Self::join_layer),
+    /// its first half. A freshly-added layer gets the stage's recorder,
+    /// subscribed to its commits: it forwards each staged edit to the stage's
+    /// sinks and queues the commit into [`StageComposition`]'s pending queue
+    /// for [`process_pending`](Self::process_pending) to recompose, so every
+    /// layer the stage holds reports its edits no matter who authors them.
+    /// The layer's node holds the subscription, which ends when the layer
+    /// leaves the graph.
     pub(super) fn intern_layer(&self, layer: sdf::LoadedLayer, hooks: &dyn CompositionHooks) -> (pcp::LayerId, bool) {
+        let (id, fresh, named) = self.join_layer(layer, false, hooks);
+        // The anchors it restaled go unreported: a join carries no payload to
+        // add them to, the same gap the demand-loading `TODO` beside
+        // `Payload::finish` records. Values are correct either way; an
+        // observer is simply not told, and learns on its next read.
+        let _restaled = self
+            .cache
+            .borrow_mut()
+            .invalidate_clip_sources(named.iter().map(String::as_str));
+        (id, fresh)
+    }
+
+    /// [`intern_layer`](Self::intern_layer) without invalidating the clip
+    /// sets that read the layer, returning the identifiers to invalidate them
+    /// by. A clip the query loop opens needs no invalidation. With `clip`, a
+    /// layer new to the graph joins it for value clips only
+    /// ([`LayerGraph::join_clip`](pcp::LayerGraph::join_clip)); without, a
+    /// layer held for clips only joins composition too and is reported fresh.
+    fn join_layer(
+        &self,
+        layer: sdf::LoadedLayer,
+        clip: bool,
+        hooks: &dyn CompositionHooks,
+    ) -> (pcp::LayerId, bool, Vec<String>) {
         // Joining is a value-source change for a clip that named this identifier
-        // while nothing was interned under it: the clip cache read whatever it
-        // could open on its own — or nothing at all — and now reads the graph's
-        // layer instead. No edit accompanies the join, so no change round would
-        // otherwise reach the prims sourcing from it. A stage with no clips never
-        // pays for the identifier, which every demand-loaded layer would
-        // otherwise allocate.
+        // while nothing was interned under it: the clip read nothing from it,
+        // and now reads the graph's layer. No edit accompanies the join, so no
+        // change round would otherwise reach the prims sourcing from it. A stage
+        // with no clips never pays for the identifier, which every demand-loaded
+        // layer would otherwise allocate.
         // A clip names the layer by the spelling it asked for, which also names
         // the layer when it joins as an alias of a held layer's other spelling.
-        let (id, fresh, named) = {
-            let mut layers = self.layers.borrow_mut();
-            let clips = self.cache.borrow().has_clip_sources();
-            let mut named = Vec::new();
-            if clips && layers.id_of(&layer.identifier).is_none() {
-                named.push(layer.identifier.clone());
-            }
-            let (id, fresh) = layers.ensure_layer(layer);
-            if fresh {
-                let subscription = hooks.subscribe_layer(id, layers.handle(id));
-                layers.subscribe(id, subscription);
-                let own = layers.identifier(id);
-                if clips && !named.iter().any(|requested| requested == own) {
-                    named.push(own.to_owned());
-                }
-            }
-            (id, fresh, named)
-        };
-        for identifier in named {
-            // The anchors it restaled go unreported: a join carries no payload to
-            // add them to, the same gap the demand-loading `TODO` beside
-            // `Payload::finish` records. Values are correct either way; an
-            // observer is simply not told, and learns on its next read.
-            let _restaled = self.cache.borrow_mut().invalidate_clip_source(&identifier);
+        let mut layers = self.layers.borrow_mut();
+        // A clip join names nothing to invalidate: its caller discards them.
+        let clips = !clip && self.cache.borrow().has_clip_sources();
+        let mut named = Vec::new();
+        if clips && layers.id_of(&layer.identifier).is_none() {
+            named.push(layer.identifier.clone());
         }
-        (id, fresh)
+        let (id, fresh) = if clip {
+            layers.join_clip(layer)
+        } else {
+            layers.ensure_layer(layer)
+        };
+        // A layer promoted from clips only is subscribed already, and the
+        // clip sets that read it read it as it is.
+        if fresh && !layers.is_subscribed(id) {
+            let subscription = hooks.subscribe_layer(id, layers.handle(id));
+            layers.subscribe(id, subscription);
+            let own = layers.identifier(id);
+            if clips && !named.iter().any(|requested| requested == own) {
+                named.push(own.to_owned());
+            }
+        }
+        (id, fresh, named)
+    }
+
+    /// Opens the clip and manifest layers value reads named, each alone (C++
+    /// `SdfLayer::FindOrOpenRelativeToLayer`), and holds it in the graph for
+    /// value clips only ([`LayerGraph::join_clip`](pcp::LayerGraph::join_clip)),
+    /// so the next pass reads it from the graph and the stage hears its edits
+    /// while it takes no part in composition. An arc or sublayer entry that
+    /// names it later loads it into composition like any unloaded layer. One
+    /// that does not resolve or cannot be read is marked failed, so the next
+    /// pass reads nothing from it rather than asking again.
+    ///
+    /// Returns whether a layer joined or a failure was newly marked.
+    fn load_clips(&self, clips: &[String], hooks: &dyn CompositionHooks) -> bool {
+        let registry = self.layers.borrow().layer_registry().clone();
+        let mut progress = false;
+        // The clips that failed to open on an earlier read and open now.
+        let mut recovered = Vec::new();
+        for identifier in clips {
+            let failure = match registry.find_or_read(identifier) {
+                Ok(Some(layer)) => {
+                    if self.layers.borrow_mut().forget_load_failure(identifier) {
+                        recovered.push(identifier.as_str());
+                    }
+                    self.join_layer(layer, true, hooks);
+                    progress = true;
+                    continue;
+                }
+                Ok(None) => self.unopened(identifier),
+                // A borrow conflict is not the clip's failure: the next read
+                // asks for it again.
+                Err(sdf::layer_registry::LoadError::Layer(sdf::LayerError::Busy)) => continue,
+                Err(error) => pcp::LoadFailure::Unreadable(Arc::new(error)),
+            };
+            progress |= self.record_load_failure(identifier, failure);
+        }
+        // The clip sets that name a clip opened for the first time need no
+        // invalidation: the only pass that read it as still to open is the
+        // one the query loop discards. One that read a recovered clip as
+        // missing answered other reads with it, which now change. The anchors
+        // go unreported, as `intern_layer`'s do.
+        if !recovered.is_empty() {
+            let _restaled = self.cache.borrow_mut().invalidate_clip_sources(recovered);
+        }
+        progress
+    }
+
+    /// The failure an open of `asset_path` that found no layer records. When
+    /// the raw asset still resolves, the layer-level resolution (a package's
+    /// default layer, say) is what failed, and the failure is unreadable: it
+    /// is terminal, where a resolvable asset whose failure was `Unresolved`
+    /// would be opened again every pass.
+    fn unopened(&self, asset_path: &str) -> pcp::LoadFailure {
+        match self.layers.borrow().layer_registry().resolve(asset_path) {
+            None => pcp::LoadFailure::Unresolved,
+            Some(_) => pcp::LoadFailure::Unreadable(Arc::new(sdf::layer_registry::LoadError::Unresolved {
+                asset_path: asset_path.to_owned(),
+            })),
+        }
+    }
+
+    /// Wires the layers in `joined`, which just joined composition (newly
+    /// loaded, or promoted from clips only), into the graph's sublayer edges
+    /// and relocates before any stack is composed against them.
+    fn wire_joined(&self, joined: &HashSet<pcp::LayerId>) {
+        let mut graph = self.layers.borrow_mut();
+        // A layer joined, and an asset may have appeared: one recorded as
+        // unresolved that the resolver now finds is forgotten, and the
+        // indices that reported a failed target recompose and demand it.
+        // The failure is looked up by the identifier it was recorded under,
+        // which an asset that did not exist then need not share with the
+        // one it has now.
+        if graph.forget_resolvable_failures() {
+            self.cache.borrow_mut().drop_load_failed_indices();
+        }
+        let relocated = graph.wire_joined(joined);
+        // A joined layer that introduces relocates restructures prims composed
+        // against its stack; drop their cached indices so they recompose with
+        // the relocates applied.
+        if !relocated.is_empty() {
+            self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
+        }
+    }
+
+    /// Records that opening `asset_path` failed with `failure`, returning
+    /// whether that is progress: a first failure, or one of another kind than
+    /// the asset failed with before (a target that was missing and is now
+    /// there but cannot be read). Re-marking an asset that failed the same way
+    /// on an earlier pass must not keep the query loop running forever, and a
+    /// read failure is never retried, so the kind changes at most once.
+    fn record_load_failure(&self, asset_path: &str, failure: pcp::LoadFailure) -> bool {
+        let mut graph = self.layers.borrow_mut();
+        let prior = graph.load_failure(asset_path).map(mem::discriminant);
+        let changed = prior != Some(mem::discriminant(&failure));
+        graph.mark_load_failed(asset_path, failure);
+        // The indices built since the earlier failure reported it; they
+        // recompose to report this one.
+        if changed && prior.is_some() {
+            self.cache.borrow_mut().drop_load_failed_indices();
+        }
+        changed
     }
 
     /// Opens the layers a composition pass demanded but that were not yet loaded.
@@ -849,6 +976,9 @@ impl StageComposition {
     /// newly marked failed — so the caller recomposes once more; a demanded path
     /// already loaded or already known unreadable is skipped.
     fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks) -> bool {
+        if pending.is_empty() {
+            return false;
+        }
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
@@ -876,20 +1006,10 @@ impl StageComposition {
             // find it — the asset has since appeared.
             let open = {
                 let graph = self.layers.borrow();
-                let retry_blocked = match graph.load_failure(asset_path) {
-                    Some(pcp::LoadFailure::Unreadable(_)) => true,
-                    Some(pcp::LoadFailure::Unresolved) => {
-                        let registry = graph.layer_registry();
-                        // A layer the registry has come to hold, an adopted or
-                        // anonymous one among them, is found without resolving.
-                        registry.resolve(asset_path).is_none() && !matches!(registry.find(asset_path), Ok(Some(_)))
-                    }
-                    None => false,
-                };
-                if retry_blocked {
+                if graph.blocking_failure(asset_path).is_some() {
                     None
                 } else {
-                    match graph.id_of(asset_path) {
+                    match graph.composing_id(asset_path) {
                         None => Some(false),
                         Some(target) if graph.needs_contextual_open(target, demand.context) => Some(true),
                         Some(_) => None,
@@ -924,71 +1044,20 @@ impl StageComposition {
                         resolved |= !reload;
                         None
                     }
-                    // No layer resolved. When the raw asset still resolves —
-                    // the layer-level resolution (a package's default layer,
-                    // say) is what failed — the failure is recorded as
-                    // unreadable: it is terminal, where the arc demand gate
-                    // retries a resolvable asset whose failure was
-                    // `Unresolved` and would re-run this open every pass.
-                    Ok(None) => {
-                        let graph = self.layers.borrow();
-                        Some(match graph.layer_registry().resolve(asset_path) {
-                            None => pcp::LoadFailure::Unresolved,
-                            Some(_) => {
-                                pcp::LoadFailure::Unreadable(format!("failed to resolve asset path: {asset_path}"))
-                            }
-                        })
-                    }
+                    Ok(None) => Some(self.unopened(asset_path)),
                     // A borrow conflict clears with the borrow: the demand stays for a later
                     // pass.
                     Err(sdf::layer_registry::LoadError::Layer(sdf::LayerError::Busy)) => None,
-                    Err(err) => Some(pcp::LoadFailure::Unreadable(tf::error_chain(&err))),
+                    Err(err) => Some(pcp::LoadFailure::Unreadable(Arc::new(err))),
                 };
                 if let Some(failure) = failure {
-                    let mut graph = self.layers.borrow_mut();
-                    // A first failure counts as progress, and so does one of
-                    // another kind than the asset failed with before: a
-                    // target that was missing and is now there but cannot
-                    // be read. Re-marking an asset that failed the same way
-                    // on an earlier pass must not keep the caller recomposing
-                    // forever, and a read failure is never retried, so the
-                    // kind changes at most once.
-                    let prior = graph.load_failure(asset_path).map(mem::discriminant);
-                    let changed = prior != Some(mem::discriminant(&failure));
-                    graph.mark_load_failed(asset_path, failure);
-                    // The indices built since the earlier failure reported
-                    // it; they recompose to report this one.
-                    if changed && prior.is_some() {
-                        self.cache.borrow_mut().drop_load_failed_indices();
-                    }
-                    newly_failed |= changed;
+                    newly_failed |= self.record_load_failure(asset_path, failure);
                 }
             }
         }
         let grew = !joined.is_empty();
-        // A layer joined, and an asset may have appeared: one recorded as
-        // unresolved that the resolver now finds is forgotten, and the
-        // indices that reported a failed target recompose and demand it.
-        // The failure is looked up by the identifier it was recorded under,
-        // which an asset that did not exist then need not share with the
-        // one it has now.
         if grew {
-            let mut graph = self.layers.borrow_mut();
-            if graph.forget_resolvable_failures() {
-                self.cache.borrow_mut().drop_load_failed_indices();
-            }
-        }
-        // Newly joined layers need their plain sublayer edges (and relocates) wired
-        // before any stack is composed against them.
-        if grew {
-            let mut graph = self.layers.borrow_mut();
-            let relocated = graph.wire_joined(&joined);
-            // A demanded layer that introduces relocates restructures prims
-            // composed against its stack; drop their cached indices so they
-            // recompose with the relocates applied.
-            if !relocated.is_empty() {
-                self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
-            }
+            self.wire_joined(&joined);
         }
         // Mint each demand's layer stack now that the edges are wired. The layer
         // graph applies the stack-selection policy idempotently, so a stack the
@@ -1007,7 +1076,7 @@ impl StageComposition {
             let mut graph = self.layers.borrow_mut();
             for (demand, &was_opened) in pending.iter().zip(&opened_this_pass) {
                 let asset_path = demand.asset_path.as_str();
-                if let Some(root) = graph.id_of(asset_path) {
+                if let Some(root) = graph.composing_id(asset_path) {
                     if !was_opened
                         && !graph.load_failed(asset_path)
                         && graph.needs_contextual_open(root, demand.context)
@@ -1131,7 +1200,7 @@ impl StageComposition {
                     // A borrow conflict clears with the borrow: the demand stays for a later
                     // pass.
                     Err(sdf::layer_registry::LoadError::Layer(sdf::LayerError::Busy)) => None,
-                    Err(err) => Some(pcp::LoadFailure::Unreadable(tf::error_chain(&err))),
+                    Err(err) => Some(pcp::LoadFailure::Unreadable(Arc::new(err))),
                 };
                 if let Some(load_failure) = failure {
                     let mut graph = self.layers.borrow_mut();
@@ -1174,9 +1243,12 @@ impl StageComposition {
     /// reference or payload arc to a not-yet-loaded layer records a demand
     /// instead of composing (the index is left uncached); after the pass the
     /// borrows are released, the demanded layers are opened, and the query
-    /// re-runs. The loop ends when a pass demands nothing, or when a demanded
-    /// target cannot be opened, so loading makes no progress. Composition thus
-    /// drives layer loading: an un-visited subtree never loads.
+    /// re-runs. A value read naming a clip or manifest layer the graph does
+    /// not hold reads nothing from it that pass, and the layer is opened
+    /// before the next. The loop ends when a pass demands nothing, or when a
+    /// demanded layer cannot be opened, so loading makes no progress.
+    /// Composition thus drives layer loading: an un-visited subtree never
+    /// loads.
     pub(super) fn query<T>(
         &self,
         mut query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
@@ -1185,33 +1257,38 @@ impl StageComposition {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
         let mut pending: Vec<pcp::Demand> = Vec::new();
+        let mut clips: Vec<String> = Vec::new();
         // A cache scope from the first pass that demands a layer to the end
         // of the query. The loads and the passes that follow them share one
         // open of each package. A query that demands nothing, the usual one,
         // begins no scope.
         let mut scope = None;
         loop {
-            let result = self.query_pass(&mut query, &mut pending);
-            // The pass left a reference/payload arc uncomposed pending these
-            // layers; open them and recompose. `load_demanded` reports false once a
-            // pass neither loads a layer nor newly marks one failed, so the loop
-            // ends after an unopenable target is marked failed and the following
-            // pass recomposes its prim — recording the arc unresolved — without it.
-            if pending.is_empty() {
+            let result = self.query_pass(&mut query, &mut pending, &mut clips);
+            // The pass left a reference/payload arc uncomposed, or a clip unread,
+            // pending these layers; open them and recompose. Each loader reports
+            // false once a pass neither loads a layer nor newly marks one failed,
+            // so the loop ends after an unopenable layer is marked failed and the
+            // following pass recomposes without it.
+            if pending.is_empty() && clips.is_empty() {
                 return result;
             }
             // Opening a layer adds it to the store, which a read or an edit of
             // any layer of the stage's registry holds. The demands go back to the
-            // cache, for the next query to load.
+            // cache, for the next query to load; a clip read names its layer
+            // again.
             if let Err(busy) = self.store.ensure_writable() {
                 self.cache.borrow_mut().swap_pending_loads(&mut pending);
                 return Err(busy.into());
             }
             scope.get_or_insert_with(ar::CacheScope::begin);
-            if !self.load_demanded(&pending, hooks) {
+            let loaded = self.load_demanded(&pending, hooks);
+            let clipped = self.load_clips(&clips, hooks);
+            if !(loaded || clipped) {
                 return result;
             }
             pending.clear();
+            clips.clear();
         }
     }
 
@@ -1338,7 +1415,7 @@ impl StageComposition {
         layers: Vec<sdf::LoadedLayer>,
         session_layer_count: usize,
         muted: HashSet<String>,
-        failures: Vec<(String, String, pcp::LoadFailure)>,
+        failures: Vec<pcp::LoadFailureSeed>,
         hooks: &dyn CompositionHooks,
     ) {
         // One cache scope spans the pass. Every probe and load of a package
@@ -1664,7 +1741,11 @@ mod tests {
         let composition = composition();
         let mut demands = Vec::new();
         let count = composition
-            .query_pass(|layers, cache| Ok(layers.len() + cache.indexed_count()), &mut demands)
+            .query_pass(
+                |layers, cache| Ok(layers.len() + cache.indexed_count()),
+                &mut demands,
+                &mut Vec::new(),
+            )
             .expect("query runs");
         assert_eq!(count, 0);
         assert!(demands.is_empty(), "an empty stage demands nothing");

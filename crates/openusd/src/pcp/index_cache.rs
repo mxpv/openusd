@@ -1282,6 +1282,27 @@ impl IndexCache {
         mem::swap(&mut self.pending_loads, buf);
     }
 
+    /// Hands the clip and manifest layers value reads named that the graph
+    /// does not hold to `buf`, taking `buf`'s storage in exchange, as
+    /// [`swap_pending_loads`](Self::swap_pending_loads) does for its demands:
+    /// the stage's query loop opens them before it runs the query again.
+    ///
+    /// A pass that left a clip to open is run again, so the query
+    /// diagnostics it reported past the first `reported` are dropped: a value
+    /// it fell back to for want of the clip is not one any read returns.
+    pub(crate) fn swap_clip_loads(&mut self, buf: &mut Vec<String>, reported: usize) {
+        mem::swap(&mut self.clip_cache.pending, buf);
+        if !buf.is_empty() {
+            self.query_diagnostics.truncate(reported);
+        }
+    }
+
+    /// How many transient query diagnostics are held, for a pass to drop
+    /// those it reports ([`swap_clip_loads`](Self::swap_clip_loads)).
+    pub(crate) fn query_diagnostic_count(&self) -> usize {
+        self.query_diagnostics.len()
+    }
+
     /// Whether work done since the demand queue held `pending_before`
     /// entries is waiting on a layer: it demanded one that is not loaded. A
     /// demand that only asks the barrier to look again for a target already
@@ -1292,29 +1313,33 @@ impl IndexCache {
             .any(|demand| !demand.recheck)
     }
 
-    /// Adds to `kept` every layer the cache depends on outside a layer stack,
-    /// for the stage's layer reclamation
+    /// Adds to `kept` every layer the cache's composition depends on outside
+    /// a layer stack, and to `clips` every layer its value clips read, for the
+    /// stage's layer reclamation
     /// ([`LayerGraph::unused_layers`](super::LayerGraph::unused_layers)).
-    pub(crate) fn mark_live_layers(&self, kept: &mut HashSet<LayerId>) {
+    pub(crate) fn mark_live_layers(
+        &self,
+        graph: &LayerGraph,
+        kept: &mut HashSet<LayerId>,
+        clips: &mut HashSet<LayerId>,
+    ) {
         self.store.dependencies().mark_live_layers(kept);
         self.clip_cache
-            .mark_live_layers(kept, |prim| self.store.is_indexed(prim));
+            .mark_live_layers(graph, kept, clips, |prim| self.store.is_indexed(prim));
     }
 
     /// Drops what the cache holds of the layers in `dead`, which are leaving
     /// the stage's graph: the sublayer diagnostics one introduced, the clip
     /// sets anchored at one or reading its manifest, and the values a clip
-    /// read through the graph, which a clip reads from its own copy again.
+    /// read from one, which the next read asks the stage to open again.
     pub(crate) fn forget_layers(&mut self, dead: &HashSet<LayerId>, identifiers: &[String]) {
         self.clip_cache.forget_layers(dead);
         let departed: HashSet<&str> = identifiers.iter().map(String::as_str).collect();
         self.collection_diagnostics.retain(|diagnostic| {
             sublayer_introducer(diagnostic).is_none_or(|introduced_by| !departed.contains(introduced_by.as_str()))
         });
-        for identifier in identifiers {
-            // The anchors it restaled go unreported, as a join's do.
-            let _ = self.invalidate_clip_source(identifier);
-        }
+        // The anchors it restaled go unreported, as a join's do.
+        let _ = self.invalidate_clip_sources(identifiers.iter().map(String::as_str));
     }
 
     /// Marks every layer stack the cache holds live for a registry sweep
@@ -1392,24 +1417,31 @@ impl IndexCache {
         }
     }
 
-    /// Invalidates what a change to the clip or manifest layer `identifier`
-    /// reaches: the synthesized manifests generated from its content, and the
-    /// composed values of every prim under an anchor whose clip sets read it.
-    /// Returns those anchor prims.
+    /// Invalidates what a change to the clip or manifest layers `identifiers`
+    /// reaches: the synthesized manifests generated from their content, and
+    /// the composed values of every prim under an anchor whose clip sets read
+    /// one. Returns those anchor prims, each once.
     ///
     /// A layer that feeds no clip set invalidates nothing here, so an ordinary
     /// layer edit — or an unrelated layer joining the graph — costs one lookup
-    /// and clears no diagnostic. The clip diagnostics are retired when it does
-    /// match, since a clip that could not be read may now be readable.
+    /// and clears no diagnostic. The clip diagnostics are retired when one
+    /// does match, since a clip that could not be read may now be readable.
     ///
     /// The anchors are returned for a caller to report: each stands for its
     /// whole subtree, the same reach the restale took, since a clip set sources
     /// values anywhere below its anchor.
-    pub(crate) fn invalidate_clip_source(&mut self, identifier: &str) -> Vec<Path> {
-        let anchors = self.clip_cache.invalidate_layer(identifier);
+    pub(crate) fn invalidate_clip_sources<'a>(&mut self, identifiers: impl IntoIterator<Item = &'a str>) -> Vec<Path> {
+        let mut anchors: Vec<Path> = identifiers
+            .into_iter()
+            .flat_map(|identifier| self.clip_cache.invalidate_layer(identifier))
+            .collect();
         if anchors.is_empty() {
             return anchors;
         }
+        // Clip sets on one prim name one anchor, and the restale walks its
+        // subtree, so a repeat would walk it twice.
+        anchors.sort();
+        anchors.dedup();
         for anchor in &anchors {
             self.store.restale_subtree(anchor, &BTreeSet::new());
         }
@@ -2000,10 +2032,11 @@ impl IndexCache {
     /// a value block at each clip's activation time for the attributes that clip
     /// has no samples for.
     ///
-    /// `None` for the pseudo-root or when no set of that name resolves on
-    /// `prim`. The manifest is a fresh anonymous layer: it is not installed on
-    /// the set, so authoring `manifestAssetPath` after exporting it is the
-    /// caller's to do.
+    /// `None` for the pseudo-root, when no set of that name resolves on
+    /// `prim`, and while a clip it names is still to open, which the stage's
+    /// query loop opens before asking again. The manifest is a fresh
+    /// anonymous layer: it is not installed on the set, so authoring
+    /// `manifestAssetPath` after exporting it is the caller's to do.
     ///
     /// Errors when a clip the schedule names cannot be read. An authored
     /// manifest that silently omits a clip's attributes would stop value
@@ -2028,13 +2061,18 @@ impl IndexCache {
         let Some(resolved) = sets.into_iter().find(|resolved| resolved.set.name == clip_set) else {
             return Ok(None);
         };
-        let (manifest, unread) = self.clip_cache.generate_manifest(
+        // With a clip still to open there is no manifest yet: the stage's
+        // query loop opens it and asks again.
+        let Some((manifest, unread)) = self.clip_cache.generate_manifest(
             graph,
             &resolved,
             prim,
             clip_manifest::CLIP_MANIFEST_TAG,
             write_blocks,
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         if let Some(error) = unread.iter().next() {
             return Err(IncompleteClipManifest::new(clip_set, prim.clone(), error.clone()).into());
         }
@@ -5770,6 +5808,22 @@ def "Anchor" (inherits = </Rig>) {}
         Ok(())
     }
 
+    /// Opens into `graph` the clip and manifest layers the clip sets sourcing
+    /// `attr` read, as the stage's query loop does between passes.
+    fn open_clips(graph: &mut LayerGraph, cache: &mut IndexCache, attr: &str) -> Result<()> {
+        let attr = sdf::path(attr)?;
+        loop {
+            let reported = cache.query_diagnostic_count();
+            cache.time_sample_times(&graph.read_view(), &attr)?;
+            let mut clips = Vec::new();
+            cache.swap_clip_loads(&mut clips, reported);
+            if clips.is_empty() {
+                return Ok(());
+            }
+            crate::pcp::clip::tests::intern_clips(graph, clips)?;
+        }
+    }
+
     /// A template clip set (`templateAssetPath` + start/end/stride) is
     /// expanded to explicit clips and resolves end to end through
     /// `value_at` (spec 12.3.4.1.3): `clip.1.usda` drives t=1, `clip.2.usda`
@@ -5777,7 +5831,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn resolves_template_clip_values() -> Result<()> {
         let root = format!("{}/fixtures/clip_template/root.usda", manifest_dir());
-        let (graph, mut cache) = single_layer_stack(&root);
+        let (mut graph, mut cache) = single_layer_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         // Exact-match sampler: each clip authors a single sample at its frame.
         let interp =
             |samples: &sdf::TimeSampleMap, t: f64| samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone());
@@ -5802,7 +5857,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn template_clip_schedule_retimed_by_offset() -> Result<()> {
         let root = format!("{}/fixtures/clip_template_offset/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
+        let (mut graph, mut cache) = collected_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         let size = |cache: &mut IndexCache, t: f64| {
             cache.value_at(
                 &graph.read_view(),
@@ -5824,7 +5880,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn explicit_asset_paths_anchor_over_template() -> Result<()> {
         let root = format!("{}/fixtures/clip_asset_anchor/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
+        let (mut graph, mut cache) = collected_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         let size = |cache: &mut IndexCache, t: f64| {
             cache.value_at(
                 &graph.read_view(),
@@ -5871,7 +5928,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn missing_clip_value_uses_manifest_default() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_default/root.usda", manifest_dir());
-        let (graph, mut cache) = single_layer_stack(&root);
+        let (mut graph, mut cache) = single_layer_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         let size = |cache: &mut IndexCache, t: f64| {
             cache.value_at(
                 &graph.read_view(),
@@ -5893,7 +5951,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn missing_clip_value_without_default_blocks() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
+        let (mut graph, mut cache) = collected_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         let size = |cache: &mut IndexCache, t: f64| {
             cache.value_at(
                 &graph.read_view(),
@@ -5916,7 +5975,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn value_source_skips_undeclared_clip_attr() -> Result<()> {
         let root = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
+        let (mut graph, mut cache) = collected_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
 
         assert!(matches!(
             cache
@@ -5946,7 +6006,8 @@ def "Anchor" (inherits = </Rig>) {}
     #[test]
     fn value_source_clips_held_manifestless() -> Result<()> {
         let root = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
+        let (mut graph, mut cache) = collected_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
 
         assert_eq!(
             cache.value_at(
@@ -5994,7 +6055,8 @@ def "Model" (
                 format!("#usda 1.0\ndef \"Model\" {{\n    float size.timeSamples = {{0: {first}, 20: {last}}}\n}}\n"),
             )?;
         }
-        let (graph, mut cache) = collected_stack(directory.path().join("root.usda").to_str().unwrap());
+        let (mut graph, mut cache) = collected_stack(directory.path().join("root.usda").to_str().unwrap());
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         for (time, expected) in [
             (0.0, 1.0),
             (5.0, 3.5),
@@ -6025,14 +6087,16 @@ def "Model" (
     #[test]
     fn clip_sample_times_boundaries() -> Result<()> {
         let held = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&held);
+        let (mut graph, mut cache) = collected_stack(&held);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         assert_eq!(
             cache.time_sample_times(&graph.read_view(), &sdf::path("/Model.size")?)?,
             Some(vec![0.0, 10.0])
         );
 
         let arc = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&arc);
+        let (mut graph, mut cache) = collected_stack(&arc);
+        open_clips(&mut graph, &mut cache, "/Model.extra")?;
         let extra = cache.time_sample_times(&graph.read_view(), &sdf::path("/Model.extra")?)?;
         assert_eq!(extra, Some(vec![3.0]));
         Ok(())
@@ -6045,7 +6109,8 @@ def "Model" (
     #[test]
     fn interpolate_missing_clip_values_across_clips() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_interp/root.usda", manifest_dir());
-        let (graph, mut cache) = single_layer_stack(&root);
+        let (mut graph, mut cache) = single_layer_stack(&root);
+        open_clips(&mut graph, &mut cache, "/Model.size")?;
         let size = |cache: &mut IndexCache, t: f64| {
             cache.value_at(
                 &graph.read_view(),

@@ -92,6 +92,20 @@ impl Diagnostics {
         self.entries.is_empty()
     }
 
+    /// How many distinct diagnostics are held.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Keeps the first `len` diagnostics, dropping those reported since the
+    /// collection held that many.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        if len < self.entries.len() {
+            self.entries.truncate(len);
+            self.seen = None;
+        }
+    }
+
     /// Borrows the diagnostics in first-seen order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &CompositionDiagnostic> {
         self.entries.iter()
@@ -100,14 +114,6 @@ impl Diagnostics {
     /// Takes the diagnostics as a plain vector, for a caller handing them out.
     pub(crate) fn into_vec(self) -> Vec<CompositionDiagnostic> {
         self.entries
-    }
-}
-
-#[cfg(test)]
-impl Diagnostics {
-    /// How many distinct diagnostics are held.
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 

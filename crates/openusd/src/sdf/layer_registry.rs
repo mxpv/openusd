@@ -22,10 +22,10 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::sdf::{self, expr};
-use crate::tf;
 use crate::usda::UsdaFileFormat;
 use crate::usdc::UsdcFileFormat;
 use crate::usdz::UsdzFileFormat;
@@ -61,14 +61,16 @@ pub(crate) enum Error {
     /// parsed. Only the bad sublayer is dropped; the layer that declared it (and
     /// the rest of the stack) still loads, matching C++ `SdfLayer`, which opens
     /// the parent and reports the unreadable sublayer.
-    #[error("failed to read sublayer asset: {asset_path} (referenced by {referencing_layer}): {reason}")]
+    #[error("failed to read sublayer asset: {asset_path} (referenced by {referencing_layer})")]
     UnreadableAsset {
         /// The sublayer asset path that resolved but could not be read.
         asset_path: String,
         /// The layer that declared the sublayer.
         referencing_layer: String,
-        /// The underlying read or parse error.
-        reason: String,
+        /// The underlying read or parse error, shared with the stage's record
+        /// of the failure.
+        #[source]
+        source: Arc<LoadError>,
     },
 
     /// An expression-valued (`${VAR}`) sublayer path failed to evaluate, so the
@@ -560,7 +562,7 @@ impl LayerRegistry {
     /// Fails with [`LayerError::Busy`](sdf::LayerError::Busy), before reading
     /// anything, when it would have to hold a layer from inside a read or an
     /// edit on this registry.
-    fn find_or_read(&self, identifier: &str) -> Result<Option<LoadedLayer>, LoadError> {
+    pub(crate) fn find_or_read(&self, identifier: &str) -> Result<Option<LoadedLayer>, LoadError> {
         let _scope = ar::CacheScope::begin();
         let handle = match self.locate(identifier.to_owned())? {
             Located::Open(handle) => handle,
@@ -580,8 +582,6 @@ impl LayerRegistry {
     /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
     /// location it resolved to, which for a package is its default packaged
     /// layer, or `None` when it does not resolve. The registry does not hold it.
-    /// Value-clip and manifest layers, which compose outside the layer graph
-    /// (spec 12.3.4), open through it.
     pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
         let _scope = ar::CacheScope::begin();
         let Some(resolved) = self.resolve_layer(identifier) else {
@@ -907,7 +907,7 @@ impl LayerRegistry {
                     on_error(Error::UnreadableAsset {
                         asset_path: sub_asset,
                         referencing_layer: identifier.clone(),
-                        reason: tf::error_chain(&reason),
+                        source: Arc::new(reason),
                     })?;
                     failed.insert(sub_id);
                     continue;

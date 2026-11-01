@@ -187,8 +187,8 @@ pub(crate) fn validate_layer_relocates(graph: &LayerView<'_>) -> (LayerRelocates
     let mut all: Vec<AuthoredRelocate> = Vec::new();
     for &id in graph.all_ids() {
         // A muted layer contributes nothing, including its authored relocates and
-        // their diagnostics.
-        if graph.is_muted(id) {
+        // their diagnostics, and neither does a layer held only for value clips.
+        if graph.is_muted(id) || graph.is_clip_only(id) {
             continue;
         }
         let layer = graph.layer(id);

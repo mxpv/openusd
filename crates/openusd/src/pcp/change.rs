@@ -997,14 +997,13 @@ impl Changes {
         // lookup and a hash probe per edited layer, as the interning seam skips
         // deriving an identifier for the same reason.
         if cache.has_clip_sources() {
-            for &layer in &self.edited_layers {
-                let Some(identifier) = graph.try_identifier(layer) else {
-                    continue;
-                };
-                // Each anchor stands for its whole subtree, the same reach the
-                // restale took: a clip set sources values anywhere below it.
-                resynced.extend(cache.invalidate_clip_source(identifier));
-            }
+            // A clip set names a layer by the spelling it asked for, any of
+            // those the graph answers to. Each anchor stands for its whole
+            // subtree, the same reach the restale took: a clip set sources
+            // values anywhere below it.
+            // TODO(perf): this walks every spelling the graph holds; a per-layer
+            // list of spellings would name the edited ones directly.
+            resynced.extend(cache.invalidate_clip_sources(graph.spellings(&self.edited_layers)));
         }
 
         ApplyOutcome {

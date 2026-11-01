@@ -96,7 +96,7 @@ use std::mem;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path};
-use crate::tf::Token;
+use crate::tf::{self, Token};
 use crate::vt::Value;
 
 use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in, evaluate_expression};
@@ -2834,7 +2834,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let target_stack = if is_internal {
             context
         } else {
-            let Some(layer_index) = self.inputs.stack.id_of(asset_path) else {
+            let Some(layer_index) = self.inputs.stack.composing_id(asset_path) else {
                 // The target is not loaded.
                 // A muted target contributes nothing and is never opened: drop
                 // the arc (it then composes as if absent) and record both the
@@ -2880,7 +2880,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                             arc,
                             introduced_by: self.introducing_layer(parent),
                             site_path: parent_path,
-                            reason: reason.clone(),
+                            reason: tf::error_chain(&**reason),
                         });
                         return Ok(());
                     }

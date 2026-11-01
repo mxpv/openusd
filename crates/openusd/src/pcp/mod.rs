@@ -57,8 +57,8 @@
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `overlay` | — | Prim opinions an authoring batch has queued, composed into a prim's existence, specifier and type before they are written. |
 //! | `value_resolve` | `UsdStage::_GetResolvedValueAtTimeImpl` | The shared attribute-value walk: `ResolveMode`, the `OpinionResolver` seam every value query runs through, and the `Resolution` they answer with. |
-//! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` provenance: the `AssetSite` every value source supplies, projected onto the anchor and variable scope the `sdf` resolution tail takes. Shared by the composed-opinion path and the clip cache, whose layers stand outside the graph. |
-//! | `clip` | `Usd_Clips` / `Usd_ClipSet` | Value clips (spec 12.3.4): the `ClipSet` metadata model with its stage-to-clip timing, and the `ClipCache` holding the clip and manifest layers that stay outside the composition graph. |
+//! | `asset_resolve` | `Usd_AssetPathContext` | Value-time `asset` provenance: the `AssetSite` every value source supplies, projected onto the anchor and variable scope the `sdf` resolution tail takes. Shared by the composed-opinion path and the clip cache, whose layers no stack holds. |
+//! | `clip` | `Usd_Clips` / `Usd_ClipSet` | Value clips (spec 12.3.4): the `ClipSet` metadata model with its stage-to-clip timing, and the `ClipCache` reading the clip and manifest layers the graph holds for clips alone. |
 //! | `clip_manifest` | `Usd_GenerateClipManifest` | Builds the manifest layer indexing which attributes a clip set's clips carry time samples for — generated on request through [`ClipsAPI`](crate::usd::ClipsAPI), and synthesized by `ClipCache` for a set that authors none. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
@@ -336,7 +336,8 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::{error, mem};
+use std::mem;
+use std::sync::Arc;
 
 pub(crate) mod asset_resolve;
 pub(crate) mod change;
@@ -363,6 +364,7 @@ pub(crate) mod value_resolve;
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, Path};
+use crate::tf;
 use crate::vt::{self, Value};
 
 pub(crate) use asset_resolve::AssetMode;
@@ -374,7 +376,7 @@ pub use index_cache::{GraphStats, SpecSiteRecord};
 pub(crate) use index_store::PrimRevision;
 pub(crate) use instancing::is_prototype_namespace;
 pub use layer_graph::StackIdentity;
-pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, Reclaim, SublayerDemand};
+pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, Reclaim, Reclaimable, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub use load_rules::{LoadRules, Rule};
@@ -615,17 +617,18 @@ impl From<IncompleteClipManifest> for QueryError {
 pub struct ClipLoad {
     /// The clip layer's canonical identifier.
     identifier: String,
-    /// The underlying load failure.
+    /// The underlying load failure, shared with the record of it that keeps
+    /// the clip from being opened again.
     #[source]
-    source: Box<dyn error::Error + Send + Sync>,
+    source: Arc<sdf::layer_registry::LoadError>,
 }
 
 impl ClipLoad {
     /// Wraps a clip layer's load failure with its identifier.
-    pub(crate) fn new(identifier: impl Into<String>, source: impl error::Error + Send + Sync + 'static) -> Self {
+    pub(crate) fn new(identifier: impl Into<String>, source: Arc<sdf::layer_registry::LoadError>) -> Self {
         Self {
             identifier: identifier.into(),
-            source: Box::new(source),
+            source,
         }
     }
 }
@@ -992,6 +995,32 @@ pub enum CompositionDiagnostic {
     },
 }
 
+/// A sublayer load failure an open reported: the authored asset path, the
+/// layer that authored it, and the failure.
+pub(crate) type LoadFailureSeed = (String, String, LoadFailure);
+
+/// The failure a layer-registry load error records for its sublayer, so the
+/// stage reports it without opening the sublayer again, or `None` for an
+/// expression that selects no layer.
+pub(crate) fn load_failure_seed(error: &sdf::layer_registry::Error) -> Option<LoadFailureSeed> {
+    match error {
+        sdf::layer_registry::Error::UnresolvedAsset {
+            asset_path,
+            referencing_layer,
+        } => Some((asset_path.clone(), referencing_layer.clone(), LoadFailure::Unresolved)),
+        sdf::layer_registry::Error::UnreadableAsset {
+            asset_path,
+            referencing_layer,
+            source,
+        } => Some((
+            asset_path.clone(),
+            referencing_layer.clone(),
+            LoadFailure::Unreadable(Arc::clone(source)),
+        )),
+        sdf::layer_registry::Error::InvalidExpression { .. } => None,
+    }
+}
+
 impl From<sdf::layer_registry::Error> for CompositionDiagnostic {
     /// Lifts a layer-registry load error into a composition error: a sublayer
     /// that failed to resolve while opening a layer stack (the root stack or a
@@ -1015,11 +1044,11 @@ impl From<sdf::layer_registry::Error> for CompositionDiagnostic {
             sdf::layer_registry::Error::UnreadableAsset {
                 asset_path,
                 referencing_layer,
-                reason,
+                source,
             } => CompositionDiagnostic::MalformedSublayer {
                 asset_path,
                 introduced_by: referencing_layer,
-                reason,
+                reason: tf::error_chain(&*source),
             },
             sdf::layer_registry::Error::InvalidExpression {
                 expression,

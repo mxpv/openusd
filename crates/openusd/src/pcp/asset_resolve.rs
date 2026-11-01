@@ -66,10 +66,9 @@ impl AssetSite {
         }
     }
 
-    /// The site of a value read out of the clip or manifest `layer`, which the
-    /// clip cache owns.
+    /// The site of a value read out of the clip or manifest `layer`.
     ///
-    /// Such a layer stands outside the composition graph, so it anchors on its
+    /// A clip reads such a layer outside any layer stack, so it anchors on its
     /// own resolved location and names itself. `stack` is the layer stack of the
     /// node that *introduced the clips*, not anything about the clip itself:
     /// that is where a clip-sourced expression's variables come from (C++

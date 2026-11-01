@@ -2592,10 +2592,11 @@ impl Stage {
     /// Returns the number of layers the stage holds (including session layers).
     ///
     /// Layers behind references and payloads load on demand as composition
-    /// reaches their arcs, so this is the count loaded by the queries performed
-    /// so far, less the layers an [`unload`](Self::unload) or other load-rules
-    /// change freed, mirroring C++ `UsdStage::GetUsedLayers`. The root layer
-    /// stack is always fully loaded.
+    /// reaches their arcs, and value-clip layers as a value read reaches them,
+    /// so this is the count loaded by the queries performed so far, less the
+    /// layers an [`unload`](Self::unload) or other load-rules change freed,
+    /// mirroring C++ `UsdStage::GetUsedLayers` (which counts clip layers by
+    /// default). The root layer stack is always fully loaded.
     pub fn layer_count(&self) -> usize {
         self.layers().len()
     }
@@ -2622,11 +2623,10 @@ impl Stage {
     /// (session and root layer stack first, then arc-target layers in the order
     /// composition opened them).
     ///
-    /// Reference and payload target layers load on demand, so this lists the
-    /// layers reached by the queries performed so far, less those a load-rules
-    /// change freed, rather than the full transitive closure (C++
-    /// `UsdStage::GetUsedLayers`). Traverse the stage
-    /// to force every reachable layer to load.
+    /// Reference, payload and value-clip layers load on demand, so this lists
+    /// the layers reached by the queries performed so far, less those a
+    /// load-rules change freed (C++ `UsdStage::GetUsedLayers`). Traverse the
+    /// stage to force every reachable layer to load.
     pub fn layer_identifiers(&self) -> Vec<String> {
         self.layers().identifiers()
     }
@@ -2711,7 +2711,11 @@ impl Stage {
     /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry, while
     /// an earlier edit of them is still queued, a fallible stage read fails
     /// with [`sdf::LayerError::Busy`], and one that cannot fail (such as
-    /// [`sub_layers`](Self::sub_layers)) panics.
+    /// [`sub_layers`](Self::sub_layers)) panics. A read can also demand a
+    /// load: one that first reaches a reference or payload target, a `${VAR}`
+    /// sublayer, or a value clip the stage has not loaded fails there with
+    /// `Busy` too, since loading adds the layer to the registry, while a read
+    /// of loaded layers succeeds.
     pub fn layer_handle(&self, identifier: &str) -> Option<sdf::LayerHandle> {
         let layers = self.layers();
         Some(layers.handle(layers.id_of(identifier)?).clone())
@@ -2788,6 +2792,7 @@ impl Stage {
     /// edit target's layer, one with no file to read it from again, the
     /// session layers the stage opened with (a sublayer added to one later
     /// leaves), and the root of a reference or payload target still composed.
+    /// A layer a value clip reads stays for the clip alone, composing nothing.
     /// A sublayer muted at open ([`StageBuilder::mute`]) is not read.
     /// [`unmute_layer`](Self::unmute_layer) reads a freed layer from its file
     /// again.
@@ -2873,8 +2878,9 @@ impl Stage {
     /// something else holds it, a [`sdf::LayerHandle`] or another stage. A
     /// layer with unsaved edits stays, as does the edit target's, unlike C++,
     /// which frees a dirty layer nothing holds and holds the edit target's
-    /// weakly; so does a layer with no file to read it from again. Loading the
-    /// payload again reads a freed layer from its file. A
+    /// weakly; so does a layer with no file to read it from again, and a layer
+    /// a value clip reads stays for the clip alone, composing nothing. Loading
+    /// the payload again reads a freed layer from its file. A
     /// [`sdf::LayerSink`] does not hold its layer, and goes with it.
     pub fn unload(&self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
         self.unload_path(&sdf::try_into_path(path)?);
@@ -4350,10 +4356,14 @@ pub struct StageBuilder {
     schema_registry: Option<Arc<SchemaRegistry>>,
 }
 
+/// What a stack open collected: its layers, the diagnostics of the
+/// sublayers it could not load, and those failures as the graph records
+/// them, so the stage reports each without opening it again.
 #[derive(Default)]
 struct CollectedLayers {
     layers: Vec<sdf::LoadedLayer>,
     diagnostics: pcp::Diagnostics,
+    failures: Vec<pcp::LoadFailureSeed>,
 }
 
 impl StageBuilder {
@@ -4558,7 +4568,8 @@ impl StageBuilder {
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
         let diagnostics = session.diagnostics.into_iter().chain(root.diagnostics).collect();
-        Ok(self.assemble(layers, session_layer_count, diagnostics))
+        let failures = session.failures.into_iter().chain(root.failures).collect();
+        Ok(self.assemble(layers, session_layer_count, diagnostics, failures))
     }
 
     /// Create an in-memory stage backed by a single writable anonymous root
@@ -4610,6 +4621,7 @@ impl StageBuilder {
         muted: &HashSet<String>,
     ) -> Result<CollectedLayers> {
         let diagnostics = RefCell::new(pcp::Diagnostics::default());
+        let failures = RefCell::new(Vec::new());
         // `ancestor_expr_vars` are the expression variables the enclosing context
         // contributes: the session layers' composed set for the root stack, empty
         // for the session stack itself (nothing sublayers it).
@@ -4618,6 +4630,7 @@ impl StageBuilder {
             ancestor_expr_vars,
             false,
             &|error| {
+                failures.borrow_mut().extend(pcp::load_failure_seed(&error));
                 diagnostics.borrow_mut().report(error.into());
                 Ok(())
             },
@@ -4632,6 +4645,7 @@ impl StageBuilder {
         Ok(CollectedLayers {
             layers,
             diagnostics: diagnostics.into_inner(),
+            failures: failures.into_inner(),
         })
     }
 
@@ -4681,6 +4695,7 @@ impl StageBuilder {
         layers: Vec<sdf::LoadedLayer>,
         session_layer_count: usize,
         collection_diagnostics: pcp::Diagnostics,
+        failures: Vec<pcp::LoadFailureSeed>,
     ) -> Stage {
         let load_rules = match self.initial_load_set {
             InitialLoadSet::LoadAll => pcp::LoadRules::all(),
@@ -4704,29 +4719,6 @@ impl StageBuilder {
             layer_stack: Some(layer_stack_id.clone()),
             ..EditTarget::for_layer(layer_stack_id.root_layer.clone())
         };
-        // Every sublayer load failure the collect pass reported, keyed for the
-        // graph's failure memo below: the finalize drain then regenerates each
-        // broken entry's per-stack diagnostic without re-attempting an open the
-        // loader already ran.
-        let failure_seeds: Vec<(String, String, pcp::LoadFailure)> = collection_diagnostics
-            .iter()
-            .filter_map(|error| match error {
-                pcp::CompositionDiagnostic::UnresolvedSublayer {
-                    asset_path,
-                    introduced_by,
-                } => Some((asset_path.clone(), introduced_by.clone(), pcp::LoadFailure::Unresolved)),
-                pcp::CompositionDiagnostic::MalformedSublayer {
-                    asset_path,
-                    introduced_by,
-                    reason,
-                } => Some((
-                    asset_path.clone(),
-                    introduced_by.clone(),
-                    pcp::LoadFailure::Unreadable(reason.clone()),
-                )),
-                _ => None,
-            })
-            .collect();
         // The graph keeps its own regenerable diagnostics (sublayer cycles,
         // invalid relocates); the cache holds only the one-shot collection errors.
         // `Stage::composition_errors` concatenates the two.
@@ -4755,13 +4747,14 @@ impl StageBuilder {
         }));
         stage
             .composition
-            .initialize(layers, session_layer_count, self.muted, failure_seeds, &stage);
+            .initialize(layers, session_layer_count, self.muted, failures, &stage);
         stage
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::error;
     use std::fs;
     use std::panic::{self, AssertUnwindSafe};
     use std::path::Path as FsPath;
@@ -4796,7 +4789,7 @@ pub(crate) mod tests {
                 .into_iter()
                 .map(|layer| sdf::layer_registry::tests::hold(&store, layer))
                 .collect();
-            self.assemble(layers, session_layer_count, collection_diagnostics)
+            self.assemble(layers, session_layer_count, collection_diagnostics, Vec::new())
         }
     }
 
@@ -7138,11 +7131,11 @@ def "M" (
         Ok(())
     }
 
-    /// A layer read first as a value clip, then loaded as a payload layer,
-    /// edited and saved, gives its clip readers the saved values once it
-    /// leaves the stage.
+    /// A layer read first as a value clip, then loaded as a payload layer and
+    /// edited, gives its clip readers the edit, and stays once the payload
+    /// unloads while a clip set names it.
     #[test]
-    fn departed_clip_rereads() -> Result<()> {
+    fn clip_payload_unload() -> Result<()> {
         let dir = tempfile::tempdir()?;
         fs::write(
             dir.path().join("root.usda"),
@@ -7169,24 +7162,334 @@ def "P" (payload = @./clip.usda@</M>) {}
         let stage = Stage::builder()
             .load(InitialLoadSet::LoadNone)
             .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
-        let x = |stage: &Stage| stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(0.0));
-        assert_eq!(x(&stage)?, Some(5.0), "read through the clip's own copy");
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        assert_eq!(stage.layer_count(), 2, "the clip layer joined the stage");
         stage.load("/P", LoadPolicy::WithDescendants)?;
         assert!(stage.prim("/P")?.is_valid()?);
-        let clip = layer_named(&stage, "clip.usda");
-        stage.edit_layer(&clip, |e| {
+        set_clip_x(&stage, 7.0)?;
+        assert_eq!(clip_x(&stage)?, Some(7.0), "the clip reads the edit");
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 2, "the clip set keeps the layer");
+        assert_eq!(clip_x(&stage)?, Some(7.0));
+        Ok(())
+    }
+
+    /// A root layer whose `/A` reads `x` from the value clip at `clip`, and
+    /// `clip.usda`, which samples 5 at time 0, both written to `dir`; returns
+    /// the root's path.
+    fn clip_fixture(dir: &FsPath, clip: &str) -> Result<String> {
+        fs::write(
+            dir.join("root.usda"),
+            format!(
+                "#usda 1.0\ndef \"A\" (\n    clips = {{\n        dictionary default = {{\n            \
+                 asset[] assetPaths = [@./{clip}@]\n            string primPath = \"/M\"\n            \
+                 double2[] active = [(0, 0)]\n        }}\n    }}\n)\n{{\n    double x\n}}\n"
+            ),
+        )?;
+        fs::write(
+            dir.join("clip.usda"),
+            "#usda 1.0\ndef \"M\" {\n    double x.timeSamples = {\n        0: 5,\n    }\n}\n",
+        )?;
+        Ok(dir.join("root.usda").to_str().expect("utf-8 path").to_owned())
+    }
+
+    /// The value of `/A.x` at time 0.
+    fn clip_x(stage: &Stage) -> Result<Option<f64>> {
+        stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(0.0))
+    }
+
+    /// Sets the clip layer `clip.usda` of `stage` to sample `value` for `/M.x`
+    /// at time 0.
+    fn set_clip_x(stage: &Stage, value: f64) -> Result<()> {
+        stage.edit_layer(&layer_named(stage, "clip.usda"), |e| {
             e.data_mut().set_field(
                 &sdf::path("/M.x")?,
                 sdf::FieldKey::TimeSamples.as_str(),
-                vt::Value::TimeSamples(vec![(0.0, vt::Value::Double(7.0))]),
+                vt::Value::TimeSamples(vec![(0.0, vt::Value::Double(value))]),
             );
             Ok(())
         })?;
-        stage.layer_handle(&clip).expect("held").save()?;
-        assert_eq!(x(&stage)?, Some(7.0), "read through the graph's layer");
+        Ok(())
+    }
+
+    /// An edit to a clip layer reaches the value it sources.
+    #[test]
+    fn clip_edit_reaches_value() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = Stage::open(&clip_fixture(dir.path(), "clip.usda")?)?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        set_clip_x(&stage, 7.0)?;
+        assert_eq!(clip_x(&stage)?, Some(7.0));
+        Ok(())
+    }
+
+    /// Stages on one registry read a clip layer once, and an edit to it
+    /// through one reaches the other's clip value.
+    #[test]
+    fn shared_clip_one_read() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "clip.usda")?;
+        let (registry, opens) = sdf::layer_registry::tests::counting_registry();
+        let a = Stage::builder().registry(registry.clone()).open(&root)?;
+        let b = Stage::builder().registry(registry).open(&root)?;
+        assert_eq!(clip_x(&a)?, Some(5.0));
+        assert_eq!(clip_x(&b)?, Some(5.0));
+        assert_eq!(opens.get(), 2, "the root and the clip, each read once");
+        set_clip_x(&b, 7.0)?;
+        assert_eq!(clip_x(&a)?, Some(7.0), "the edit through the other stage");
+        Ok(())
+    }
+
+    /// A layer read first as a clip and then referenced composes its
+    /// sublayers into the reference.
+    #[test]
+    fn clip_then_reference() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "clip.usda")?;
+        let mut text = fs::read_to_string(&root)?;
+        text.push_str("def \"R\" (references = @./clip.usda@</M>) {}\n");
+        fs::write(&root, text)?;
+        fs::write(
+            dir.path().join("clip.usda"),
+            "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"M\" {\n    double x.timeSamples = {\n        \
+             0: 5,\n    }\n}\n",
+        )?;
+        fs::write(
+            dir.path().join("sub.usda"),
+            "#usda 1.0\nover \"M\" {\n    def \"Child\" {}\n}\n",
+        )?;
+        let stage = Stage::open(&root)?;
+        assert_eq!(clip_x(&stage)?, Some(5.0), "read as a clip first");
+        assert!(
+            stage.prim("/R/Child")?.is_valid()?,
+            "the reference reaches its sublayer"
+        );
+        Ok(())
+    }
+
+    /// A clip layer leaves the stage with the payload holding its clip set,
+    /// and the next read once the payload loads opens it again.
+    #[test]
+    fn clip_reopens_after_unload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        clip_fixture(dir.path(), "clip.usda")?;
+        fs::rename(dir.path().join("root.usda"), dir.path().join("payload.usda"))?;
+        let root = dir.path().join("root.usda");
+        fs::write(&root, "#usda 1.0\ndef \"P\" (payload = @./payload.usda@</A>) {}\n")?;
+        let stage = Stage::builder()
+            .load(InitialLoadSet::LoadNone)
+            .open(root.to_str().expect("utf-8 path"))?;
+        let x = |stage: &Stage| stage.attribute("/P.x")?.get_at::<f64>(usd::TimeCode::new(0.0));
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert_eq!(x(&stage)?, Some(5.0));
+        assert_eq!(stage.layer_count(), 3, "the root, the payload and the clip");
         stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1, "the clip left with the payload");
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert_eq!(x(&stage)?, Some(5.0), "the clip is read again");
+        assert_eq!(stage.layer_count(), 3);
+        Ok(())
+    }
+
+    /// Opening a clip leaves the diagnostics of earlier reads standing.
+    #[test]
+    fn clip_read_keeps_errors() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "clip.usda")?;
+        let mut text = fs::read_to_string(&root)?;
+        text.push_str("def \"B\" {\n    asset t = @`if(`@\n}\n");
+        fs::write(&root, text)?;
+        let stage = Stage::open(&root)?;
+        let _ = stage.attribute("/B.t")?.get::<sdf::AssetPath>();
+        let before = stage.composition_errors().len();
+        assert!(before > 0, "the malformed expression is reported");
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        assert_eq!(stage.composition_errors().len(), before);
+        Ok(())
+    }
+
+    /// A clip layer's relocates are reported only while composition uses the
+    /// layer: not while it serves a clip alone, then once a payload composes
+    /// it, and no longer once the payload unloads and leaves it to the clip.
+    #[test]
+    fn clip_relocates_follow_composition() -> Result<()> {
+        let invalid = |stage: &Stage| {
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| matches!(error, pcp::CompositionDiagnostic::InvalidRelocate { .. }))
+        };
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "clip.usda")?;
+        let mut text = fs::read_to_string(&root)?;
+        text.push_str("def \"P\" (payload = @./clip.usda@</M>) {}\n");
+        fs::write(&root, text)?;
+        fs::write(
+            dir.path().join("clip.usda"),
+            "#usda 1.0\n(\n    relocates = { </M/C/D>: </M> }\n)\ndef \"M\" {\n    double x.timeSamples = {\n        \
+             0: 5,\n    }\n}\n",
+        )?;
+        let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&root)?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        assert!(!invalid(&stage), "the clip alone reports nothing");
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P")?.is_valid()?);
+        assert!(invalid(&stage), "composed, the layer's relocates are validated");
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 2, "the clip keeps the layer");
+        assert!(!invalid(&stage), "the clip alone reports nothing again");
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        Ok(())
+    }
+
+    /// A sublayer composition leaves while a clip reads it, under a parent
+    /// that stays, composes its own sublayers again once composition reaches
+    /// it: the parent's entry no longer names it until it rejoins.
+    #[test]
+    fn demoted_sublayer_rejoins() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "x.usda")?;
+        let mut text = fs::read_to_string(&root)?;
+        // `/Q` holds y.usda in composition, so only x.usda changes.
+        text.push_str("def \"P\" (payload = @./r.usda@</M>) {}\ndef \"Q\" (references = @./y.usda@</M>) {}\n");
+        fs::write(&root, text)?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "r.usda",
+            "#usda 1.0\n(\n    subLayers = [@./x.usda@]\n)\ndef \"M\" {}\n",
+        )?;
+        write(
+            "x.usda",
+            "#usda 1.0\n(\n    subLayers = [@./y.usda@]\n)\ndef \"M\" {\n    double x.timeSamples = {\n        \
+             0: 5,\n    }\n}\n",
+        )?;
+        write("y.usda", "#usda 1.0\nover \"M\" {\n    def \"Child\" {}\n}\n")?;
+        let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&root)?;
+        assert_eq!(clip_x(&stage)?, Some(5.0), "x.usda serves the clip alone");
+        assert!(stage.prim("/Q/Child")?.is_valid()?);
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P/Child")?.is_valid()?, "x.usda composes its sublayer");
+        // Unsaved edits keep r.usda once its payload unloads.
+        stage.edit_layer(&layer_named(&stage, "r.usda"), |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/Edited", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.unload("/P")?;
+        assert_eq!(
+            stage.layer_count(),
+            4,
+            "the root, r.usda, x.usda for the clip and y.usda"
+        );
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P/Edited")?.is_valid()?);
+        assert!(
+            stage.prim("/P/Child")?.is_valid()?,
+            "x.usda composes its sublayer again"
+        );
+        Ok(())
+    }
+
+    /// A value read that must load a clip fails with
+    /// [`sdf::LayerError::Busy`] from inside a read of the registry's layers,
+    /// as an arc load does, and reads a clip already loaded there.
+    #[test]
+    fn clip_load_busy() -> Result<()> {
+        let busy = |result: &Result<Option<f64>>| match result {
+            Err(crate::Error::Query(pcp::QueryError::Layer(error))) => matches!(**error, sdf::LayerError::Busy),
+            _ => false,
+        };
+        let dir = tempfile::tempdir()?;
+        let stage = Stage::open(&clip_fixture(dir.path(), "clip.usda")?)?;
+        let root = stage
+            .layer_handle(stage.root_layer().identifier())
+            .expect("the stage holds its root");
+        let unloaded = root.read(|_| clip_x(&stage))?;
+        assert!(busy(&unloaded), "{unloaded:?}");
+        assert_eq!(clip_x(&stage)?, Some(5.0), "outside the read, the clip loads");
+        assert_eq!(root.read(|_| clip_x(&stage))??, Some(5.0), "a loaded clip reads");
+        Ok(())
+    }
+
+    /// A clip that cannot be read fails the value read of a set with an
+    /// authored manifest, with the load error as its source.
+    #[test]
+    fn clip_load_keeps_source() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "clip.usda")?;
+        let text = fs::read_to_string(&root)?.replace(
+            "string primPath",
+            "asset manifestAssetPath = @./manifest.usda@\n            string primPath",
+        );
+        fs::write(&root, text)?;
+        fs::write(
+            dir.path().join("manifest.usda"),
+            "#usda 1.0\nover \"M\" {\n    double x\n}\n",
+        )?;
+        fs::write(dir.path().join("clip.usda"), "#usda 1.0\ndef \"M\" {\n")?;
+        let stage = Stage::open(&root)?;
+        let Err(crate::Error::Query(pcp::QueryError::ClipLoad(load))) = clip_x(&stage) else {
+            panic!("an unreadable clip fails the read");
+        };
+        assert!(error::Error::source(&*load).is_some(), "the parse error is kept");
+        assert!(clip_x(&stage).is_err(), "the failure is remembered");
+        Ok(())
+    }
+
+    /// A gap filled by interpolating across clips opens the clips it reads,
+    /// the nearest later one with a sample, and none beyond it.
+    #[test]
+    fn interpolate_opens_neighbour() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let write = |name: &str, text: &str| fs::write(dir.path().join(name), text);
+        write(
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    clips = {\n        dictionary default = {\n            \
+             asset[] assetPaths = [@./a.usda@, @./b.usda@, @./c.usda@]\n            \
+             asset manifestAssetPath = @./manifest.usda@\n            string primPath = \"/M\"\n            \
+             double2[] active = [(0, 0), (10, 1), (20, 2)]\n            \
+             bool interpolateMissingClipValues = 1\n        }\n    }\n)\n{\n    double x\n}\n",
+        )?;
+        write("manifest.usda", "#usda 1.0\nover \"M\" {\n    double x\n}\n")?;
+        write("a.usda", "#usda 1.0\ndef \"M\" {}\n")?;
+        for (name, value) in [("b.usda", 7), ("c.usda", 9)] {
+            write(
+                name,
+                &format!("#usda 1.0\ndef \"M\" {{\n    double x.timeSamples = {{\n        0: {value},\n    }}\n}}\n"),
+            )?;
+        }
+        let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        assert_eq!(clip_x(&stage)?, Some(7.0), "the gap holds b.usda's sample");
+        let opened = stage.layer_identifiers();
+        assert!(
+            !opened.iter().any(|identifier| identifier.ends_with("c.usda")),
+            "{opened:?}"
+        );
+        Ok(())
+    }
+
+    /// A clip whose file appears after a read found it missing is read on
+    /// the next read.
+    #[test]
+    fn clip_appears_later() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "late.usda")?;
+        let stage = Stage::open(&root)?;
+        assert_eq!(clip_x(&stage)?, None);
+        fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
+        assert_eq!(clip_x(&stage)?, Some(5.0), "the clip is read once it resolves");
+        Ok(())
+    }
+
+    /// A clip whose asset does not resolve sources nothing, and the read
+    /// finds no value.
+    #[test]
+    fn missing_clip_no_value() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = Stage::open(&clip_fixture(dir.path(), "absent.usda")?)?;
+        assert_eq!(clip_x(&stage)?, None);
+        assert_eq!(clip_x(&stage)?, None, "the failure is remembered");
         assert_eq!(stage.layer_count(), 1);
-        assert_eq!(x(&stage)?, Some(7.0), "read from the saved file");
         Ok(())
     }
 
