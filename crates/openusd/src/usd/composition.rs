@@ -717,7 +717,8 @@ impl StageComposition {
 
     /// Drops the layers no live layer stack uses and nothing else keeps
     /// (`LayerGraph::unused_layers`) once a load-rules change has unloaded
-    /// what used them: each first reaches the stage's observers as
+    /// what used them, or, with [`pcp::Reclaim::Muted`], once a mute has
+    /// pruned them: each first reaches the stage's observers as
     /// [`departed`](CompositionHooks::departed), then leaves the graph, and
     /// the registry frees it unless something else holds it (C++ releases a
     /// payload's layer stacks, and with them its layers, as its prim indices
@@ -733,18 +734,27 @@ impl StageComposition {
     /// is read from its file again on their next read, and the pins keep that
     /// from losing edits.
     //
-    // TODO: keep a drain-evicted prim's stacks owned until it recomposes or
-    // leaves the namespace (C++ `PcpLifeboat`, which C++ needs only within one
-    // change round as `UsdStage` recomposes at once). Then a layer reclaims at
-    // every edit seam, a clean layer a prim waiting to recompose uses stays
-    // (`/P`'s payload layer after an edit resyncs `/P` and `/Q` unloads), and
-    // the pins are a policy. Releasing a prim never read again needs its own
-    // rule.
-    fn reclaim_unused_layers(&self, hooks: &dyn CompositionHooks) {
+    // TODO: keep what a drain-evicted prim used until it recomposes (C++
+    // `PcpLifeboat`), so a clean layer a prim waiting to recompose uses stays
+    // (`/P`'s payload layer after an edit resyncs `/P` and `/Q` unloads);
+    // today it is read from its file again and undo history on it is dropped.
+    // C++ holds for one change round, as `UsdStage` recomposes at once; here a
+    // prim recomposes on its next read, so a hold kept until then has no end
+    // for a prim never read again (a deleted subtree, a deactivated or masked
+    // parent). Holding the stacks as cache owners keeps their sublayer
+    // diagnostics in `composition_errors`; holding their layers needs that
+    // release, and probing child names here composes under `update_pair`.
+    // Two designs fit: hold the stacks as owners, released where change
+    // processing tells a removed prim from a changed one, with held stacks'
+    // diagnostics filtered; or recompose resynced prims at the end of the
+    // drain and hold for one round. Either lets a layer reclaim at every edit
+    // seam (after the drain, never while delivering, not on the read path)
+    // and makes the pins a policy.
+    fn reclaim_unused_layers(&self, hooks: &dyn CompositionHooks, reclaim: pcp::Reclaim) {
         // A layer leaves only once its last stack has. One a pin kept (a save
         // not yet made, an edit target), or one the registry's read or edit
         // held from a reclaim, leaves at the next load-rules change after.
-        if !self.layers.borrow().reclaim_due() || self.store.ensure_writable().is_err() {
+        if !self.layers.borrow().reclaim_due(reclaim) || self.store.ensure_writable().is_err() {
             return;
         }
         // TODO(perf): every reclaim walks every stack's members and every
@@ -755,7 +765,7 @@ impl StageComposition {
             let mut kept = HashSet::new();
             cache.mark_live_layers(&mut kept);
             let pins = edit_targets.iter().filter_map(|target| graph.id_of(target)).collect();
-            graph.unused_layers(kept, &pins)
+            graph.unused_layers(kept, &pins, reclaim)
         });
         if !unused.is_empty() {
             hooks.departed(&unused);
@@ -900,7 +910,7 @@ impl StageComposition {
                         graph.stack_variables(demand.context),
                         reload,
                         &|_| Ok(()),
-                        &|id| graph.id_of(id).is_some(),
+                        &|id| graph.presence(id),
                     )
                 };
                 let failure = match opened {
@@ -1044,12 +1054,18 @@ impl StageComposition {
     /// nested inside an opened subtree surfaces next round, when the rewired
     /// stack re-derives the failing entry as its own demand.
     ///
-    /// Returns whether any layer joined the graph.
-    fn resolve_sublayer_demands(&self, mut demands: Vec<pcp::SublayerDemand>, hooks: &dyn CompositionHooks) -> bool {
+    /// Returns whether any layer joined the graph, and the cached prims the
+    /// joins dropped.
+    fn resolve_sublayer_demands(
+        &self,
+        mut demands: Vec<pcp::SublayerDemand>,
+        hooks: &dyn CompositionHooks,
+    ) -> (bool, Vec<sdf::Path>) {
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
         let mut attempted: HashSet<(String, pcp::LayerStackId)> = HashSet::new();
+        let mut dropped = Vec::new();
         let mut recomposed: HashSet<(pcp::LayerId, String)> = HashSet::new();
         let mut reported: HashSet<(String, pcp::LayerStackId, pcp::LayerId)> = HashSet::new();
         let mut loaded_any = false;
@@ -1100,7 +1116,7 @@ impl StageComposition {
                     graph
                         .layer_registry()
                         .open_sublayer_tree(&identifier, graph.stack_variables(demand.stack), &|id| {
-                            graph.id_of(id).is_some()
+                            graph.presence(id)
                         })
                 };
                 let failure = match opened {
@@ -1137,11 +1153,11 @@ impl StageComposition {
             let mut graph = self.layers.borrow_mut();
             let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
             if !affected.is_empty() {
-                self.cache.borrow_mut().invalidate_layers(&graph, &affected);
+                dropped.extend(self.cache.borrow_mut().invalidate_layers(&graph, &affected));
             }
             demands = graph.take_sublayer_demands();
         }
-        loaded_any
+        (loaded_any, dropped)
     }
 
     /// A layer's identifier read without draining, for the reconciliation
@@ -1219,7 +1235,7 @@ impl StageComposition {
             "a layer of the stage is muted from inside a read or an edit of its registry's layers"
         );
         self.process_pending(hooks);
-        let (changed, resynced, demands) = self.update_pair(|graph, cache| {
+        let (changed, mut resynced, demands) = self.update_pair(|graph, cache| {
             let change = mutate(graph)?;
             // The mutation already rebuilt the graph's sublayer stacks, relocates, and
             // cycle diagnostics; only the cache needs work. Removing a session variable
@@ -1231,19 +1247,17 @@ impl StageComposition {
             let resynced = cache.invalidate_muting(&change);
             Some((change.changed, resynced, graph.take_sublayer_demands()))
         })?;
-        // The set gathered above is the whole answer, though resolving the demands
-        // invalidates again: `mute_fanout` answers a session mute — the only kind
-        // that can move a stack's composed variables — with the root layer and so
-        // with every index, and a sublayer an unmute newly exposes joins only
-        // stacks that already held the unmuted layer. Either way the second pass
-        // reaches what the first already named.
-        self.resolve_sublayer_demands(demands, hooks);
+        // An unmuted sublayer that left the graph while muted has no fanout to
+        // name the prims it reaches: it joins again here, and the prims its
+        // join dropped are the resyncs it adds.
+        resynced.extend(self.resolve_sublayer_demands(demands, hooks).1);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
         // discards variable deltas, so the sweep is what reclaims it. Discarding
         // them costs no notice; `LayerGraph::recompose_for_mute` carries the
         // argument.
         self.reclaim_stale_stacks();
+        self.reclaim_unused_layers(hooks, pcp::Reclaim::Muted);
         Some((changed, resynced))
     }
 
@@ -1306,7 +1320,7 @@ impl StageComposition {
     /// the `${VAR}` selections it newly exposed.
     fn resolve_recorded_demands(&self, hooks: &dyn CompositionHooks) -> bool {
         let demands = self.layers.borrow_mut().take_sublayer_demands();
-        self.resolve_sublayer_demands(demands, hooks)
+        self.resolve_sublayer_demands(demands, hooks).0
     }
 
     /// Brings a freshly built stage's composition up: interns every collected
@@ -1392,6 +1406,10 @@ impl StageComposition {
         if !superseded.is_empty() {
             self.cache.borrow_mut().discard_collection_errors(&superseded);
         }
+        // The open leaves out a layer muted by the identifier it opens under;
+        // one muted by another spelling, its real path, was read, and leaves
+        // the stage like one muted later.
+        self.reclaim_unused_layers(hooks, pcp::Reclaim::Muted);
     }
 
     /// Reads the load rules, applies `edit`, installs the result, and reclaims
@@ -1414,7 +1432,7 @@ impl StageComposition {
         edit(&mut rules);
         let victims = self.swap_load_rules(rules, hooks);
         self.reclaim_stale_stacks();
-        self.reclaim_unused_layers(hooks);
+        self.reclaim_unused_layers(hooks, pcp::Reclaim::Unused);
         victims
     }
 

@@ -217,6 +217,21 @@ pub(crate) struct LoadedLayer {
     pub(crate) handle: sdf::LayerHandle,
 }
 
+/// What the caller of a stack open has of a layer the open reaches, by
+/// canonical identifier.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Presence {
+    /// The caller does not hold it: the open reads and emits it.
+    Absent,
+    /// The caller holds it: the open does not emit it, and walks it again only
+    /// in a reload.
+    Held,
+    /// The caller leaves it out: the open does not read a sublayer it
+    /// excludes, and reads and emits an excluded root without walking below
+    /// it.
+    Excluded,
+}
+
 impl From<sdf::LayerHandle> for LoadedLayer {
     /// The layer `handle` names, asked for under its own identifier.
     fn from(handle: sdf::LayerHandle) -> Self {
@@ -618,9 +633,10 @@ impl LayerRegistry {
     /// layers on demand when it reaches the arc, so an un-visited subtree never
     /// loads them. Only `subLayers` edges are walked, since a layer's sublayer
     /// stack contributes opinions to its own namespace and so must be present
-    /// whenever the layer is (spec 10.3.1.1). `already_present` reports whether a
-    /// layer (by canonical identifier) is already loaded, so a sublayer shared
-    /// with the graph is neither re-read nor re-emitted.
+    /// whenever the layer is (spec 10.3.1.1). `presence` reports what the
+    /// caller has of a layer (by canonical identifier), so a sublayer shared
+    /// with the graph is neither re-read nor re-emitted, and one the caller
+    /// excludes is not read.
     ///
     /// A root that does not resolve returns `Ok(None)`; one that resolves but
     /// cannot be read propagates as `Err` — the caller decides how to frame
@@ -637,36 +653,33 @@ impl LayerRegistry {
     /// against (C++ `PcpExpressionVariables`). Sublayers of the root contribute no
     /// variables, so the context is fixed for the whole walk.
     ///
-    /// With `reload`, an already-interned root and its already-present
-    /// sublayers are walked again, as the registry holds them, but not
-    /// re-emitted. A re-open
+    /// With `reload`, an already-interned root and its held sublayers are
+    /// walked again, as the registry holds them, but not re-emitted. A re-open
     /// under a new expression-variable context then loads the `${VAR}`
     /// sublayers that context resolves, including ones nested below a literal
     /// sublayer, which a first, variable-free open left unresolved. The caller
     /// only reloads for that case.
     ///
-    /// This is a pure loader: it reports every load failure raw (a missing or
-    /// unreadable sublayer, at whatever site reaches it) and knows nothing of
-    /// muting. Whether such a failure is a stage diagnostic depends on composition
-    /// reachability — a failure under a muted branch contributes nothing — which the
-    /// composition layer decides once the muted-aware graph exists (see
-    /// [`Stage`](crate::usd::Stage)'s construction). Keeping the muted policy out
-    /// of the load walk avoids attributing a diagnostic to whichever branch happened
-    /// to reach a shared layer first.
+    /// The loader reports every load failure raw (a missing or unreadable
+    /// sublayer, at whatever site reaches it). Whether such a failure is a
+    /// stage diagnostic depends on composition reachability (a failure under a
+    /// muted branch contributes nothing), which the composition layer decides
+    /// once the muted-aware graph exists (see
+    /// [`Stage`](crate::usd::Stage)'s construction).
     pub(crate) fn open_stack(
         &self,
         identifier: &str,
         ancestor_expr_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
-        already_present: &dyn Fn(&str) -> bool,
+        presence: &dyn Fn(&str) -> Presence,
     ) -> Result<Option<Vec<LoadedLayer>>, LoadError> {
         self.ensure_writable()?;
         if identifier.is_empty() {
             return Ok(None);
         }
         self.find_or_read(identifier)?
-            .map(|root| self.open_prepared_stack(root, ancestor_expr_vars, reload, on_error, already_present))
+            .map(|root| self.open_prepared_stack(root, ancestor_expr_vars, reload, on_error, presence))
             .transpose()
     }
 
@@ -678,7 +691,7 @@ impl LayerRegistry {
         ancestor_expr_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
-        already_present: &dyn Fn(&str) -> bool,
+        presence: &dyn Fn(&str) -> Presence,
     ) -> Result<Vec<LoadedLayer>, LoadError> {
         let mut layers = Vec::new();
         let mut visited = HashSet::from([root.identifier.clone()]);
@@ -691,15 +704,7 @@ impl LayerRegistry {
             .handle
             .read(|layer| expr::stack_variables(layer.data(), ancestor_expr_vars))??;
 
-        self.open_sublayers(
-            root,
-            &stack_vars,
-            reload,
-            on_error,
-            already_present,
-            &mut visited,
-            &mut layers,
-        )?;
+        self.open_sublayers(root, &stack_vars, reload, on_error, presence, &mut visited, &mut layers)?;
         Ok(layers)
     }
 
@@ -726,7 +731,7 @@ impl LayerRegistry {
         &self,
         identifier: &str,
         stack_vars: &HashMap<String, vt::Value>,
-        already_present: &dyn Fn(&str) -> bool,
+        presence: &dyn Fn(&str) -> Presence,
     ) -> Result<Option<Vec<LoadedLayer>>, LoadError> {
         self.ensure_writable()?;
         let Some(layer) = self.find_or_read(identifier)? else {
@@ -739,7 +744,7 @@ impl LayerRegistry {
             stack_vars,
             false,
             &|_| Ok(()),
-            already_present,
+            presence,
             &mut visited,
             &mut layers,
         )?;
@@ -794,20 +799,27 @@ impl LayerRegistry {
         stack_vars: &HashMap<String, vt::Value>,
         reload: bool,
         on_error: &dyn Fn(Error) -> Result<(), Error>,
-        already_present: &dyn Fn(&str) -> bool,
+        presence: &dyn Fn(&str) -> Presence,
         visited: &mut HashSet<String>,
         layers: &mut Vec<LoadedLayer>,
     ) -> Result<(), LoadError> {
         let anchor = layer.handle.anchor_location().cloned();
-        let sub_paths = layer.handle.read(|layer| Self::sublayer_paths(layer.data()))?;
         let identifier = layer.identifier.clone();
+        let held = presence(&identifier);
+        // An excluded layer reaches here only as the root of the open, which the
+        // caller asked for: it is emitted, and nothing beneath it is walked.
+        if held == Presence::Excluded {
+            layers.push(layer);
+            return Ok(());
+        }
+        let sub_paths = layer.handle.read(|layer| Self::sublayer_paths(layer.data()))?;
 
         // Emit this layer ahead of its sublayers so the collected stack is
         // strongest-first: a layer overrides the layers it sublayers, and earlier
         // entries in a `subLayers` list override later ones (spec 10.3.1.1). In a
         // reload pass an already-interned layer is re-walked (to reach a `${VAR}`
         // sublayer the new context now resolves) but not re-emitted.
-        if !already_present(&identifier) {
+        if held == Presence::Absent {
             layers.push(layer);
         }
 
@@ -855,13 +867,19 @@ impl LayerRegistry {
             };
 
             let sub_id = self.create_identifier(&sub_asset, anchor.as_ref());
-            // A sublayer already opened this pass is skipped. One already in the
-            // graph is skipped too — except in a reload pass, where it is re-walked
-            // to reach the `${VAR}` sublayers the new context now resolves below it
-            // (it is not re-emitted; see the push above). A failure this layer
-            // already reported is skipped too. An empty/degenerate identifier falls
-            // through to the resolve below as `UnresolvedAsset`.
-            if visited.contains(&sub_id) || failed.contains(&sub_id) || (already_present(&sub_id) && !reload) {
+            // A sublayer already opened this pass is skipped, and so is one the
+            // caller excludes. One the caller holds is skipped too, except in a
+            // reload pass, where it is re-walked to reach the `${VAR}` sublayers
+            // the new context now resolves below it (it is not re-emitted; see
+            // the push above). A failure this layer already reported is skipped
+            // too. An empty/degenerate identifier falls through to the resolve
+            // below as `UnresolvedAsset`.
+            let skipped = match presence(&sub_id) {
+                Presence::Absent => false,
+                Presence::Held => !reload,
+                Presence::Excluded => true,
+            };
+            if skipped || visited.contains(&sub_id) || failed.contains(&sub_id) {
                 continue;
             }
             // Find or read the sublayer. A missing one is a raw load failure reported at
@@ -899,7 +917,7 @@ impl LayerRegistry {
             // `visited` before recursing so a diamond or cycle does not re-emit it.
             visited.insert(sub_id);
 
-            self.open_sublayers(sublayer, stack_vars, reload, on_error, already_present, visited, layers)?;
+            self.open_sublayers(sublayer, stack_vars, reload, on_error, presence, visited, layers)?;
         }
 
         Ok(())
@@ -1141,7 +1159,7 @@ pub(crate) mod tests {
         let registry = registry();
         let identifier = registry.create_identifier(path, None);
         Ok(registry
-            .open_stack(&identifier, &HashMap::new(), false, &Err, &|_| false)?
+            .open_stack(&identifier, &HashMap::new(), false, &Err, &|_| Presence::Absent)?
             .expect("root did not resolve"))
     }
 
@@ -1265,7 +1283,7 @@ pub(crate) mod tests {
                     errors.borrow_mut().push(e);
                     Ok(())
                 },
-                &|_| false,
+                &|_| Presence::Absent,
             )?
             .expect("root resolves");
 

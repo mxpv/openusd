@@ -26,7 +26,7 @@ use super::clip_manifest;
 use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::{Answer, PrimRecord, PrototypeRegistry};
-use super::layer_graph::{LayerGraph, LayerStackIdentifier, LayerView, MuteChange};
+use super::layer_graph::{LayerGraph, LayerStackIdentifier, LayerView, MuteChange, sublayer_introducer};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
@@ -1302,11 +1302,15 @@ impl IndexCache {
     }
 
     /// Drops what the cache holds of the layers in `dead`, which are leaving
-    /// the stage's graph: the clip sets anchored at one or reading its
-    /// manifest, and the values a clip read through the graph, which a clip
-    /// reads from its own copy again.
+    /// the stage's graph: the sublayer diagnostics one introduced, the clip
+    /// sets anchored at one or reading its manifest, and the values a clip
+    /// read through the graph, which a clip reads from its own copy again.
     pub(crate) fn forget_layers(&mut self, dead: &HashSet<LayerId>, identifiers: &[String]) {
         self.clip_cache.forget_layers(dead);
+        let departed: HashSet<&str> = identifiers.iter().map(String::as_str).collect();
+        self.collection_diagnostics.retain(|diagnostic| {
+            sublayer_introducer(diagnostic).is_none_or(|introduced_by| !departed.contains(introduced_by.as_str()))
+        });
         for identifier in identifiers {
             // The anchors it restaled go unreported, as a join's do.
             let _ = self.invalidate_clip_source(identifier);
@@ -2257,13 +2261,15 @@ impl IndexCache {
     /// remains. Drops exactly the cached indices whose composition reads an
     /// `affected` layer, leaving the rest warm.
     ///
-    /// Reports nothing, unlike its siblings: no caller of this path publishes a
-    /// notice today. Widening it is the first half of the deferred demand-notice
-    /// work — see the `TODO` beside `Payload::finish` in `usd::composition`.
-    pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
+    /// Returns the paths whose indices it dropped. An unmute reports those of
+    /// the sublayers that join again with its resyncs; no other caller
+    /// publishes a notice for this path, which is the first half of the
+    /// deferred demand-notice work (see the `TODO` beside `Payload::finish` in
+    /// `usd::composition`).
+    pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
         self.retire_query_errors();
         self.invalidate_population();
-        self.drop_indices_touching_layers(graph, affected);
+        self.drop_indices_touching_layers(graph, affected)
     }
 
     /// Invalidates the cache after the layer-muting toggle `change`: retires
@@ -2295,12 +2301,12 @@ impl IndexCache {
     /// leaving indices that read none of them cached. Editing a layer can only
     /// restructure prims that compose against a layer stack containing it (C++
     /// `PcpChanges` layer-stack fanout), so the rest of the cache stays warm.
-    fn drop_indices_touching_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
+    fn drop_indices_touching_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
         if affected.is_empty() {
-            return;
+            return Vec::new();
         }
         let victims = self.store.dependencies().indices_for_layers(graph, affected);
-        self.drop_index_victims(victims);
+        self.drop_index_victims(victims)
     }
 
     /// Drops each victim prim index and the prototypes its drop touches — the tail

@@ -224,8 +224,9 @@ pub(crate) struct LayerGraph {
     root: Option<LayerId>,
     /// The muted layers that are loaded, by id — the muted set proper, excluded
     /// when materializing the stacks (C++ `PcpLayerStack::_BuildLayerStack`). A
-    /// muted layer and its whole sublayer subtree are pruned from every stack
-    /// while staying interned, so unmute is a rebuild. Keyed by identity, so
+    /// muted layer and its whole sublayer subtree are pruned from every stack,
+    /// and a layer reclamation frees them; one freed stays muted through
+    /// [`pending_mutes`](Self::pending_mutes). Keyed by identity, so
     /// every spelling of one layer — its identifier, or the real path of one
     /// found through a search directory — mutes, unmutes and reads as the same
     /// entry. Never holds the root layer, which cannot be muted ("would lead to
@@ -241,6 +242,11 @@ pub(crate) struct LayerGraph {
     /// `muted` the moment such a layer is interned
     /// ([`resolve_muted_ids`](Self::resolve_muted_ids)).
     pending_mutes: HashSet<String>,
+    /// Every other spelling of each muted layer that left the graph, its
+    /// other registered identifiers and its real path, to the identifier its
+    /// mute is kept under in [`pending_mutes`](Self::pending_mutes), so each
+    /// still reads as the same mute.
+    freed_aliases: HashMap<String, String>,
     /// Whether any node keeps structurally valid authored relocates. The indexer
     /// reads this to gate its relocate passes without rescanning.
     has_relocates: bool,
@@ -475,6 +481,16 @@ impl SublayerState {
     }
 }
 
+/// Which layers a reclaim ([`LayerGraph::unused_layers`]) may free.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reclaim {
+    /// Every layer nothing keeps.
+    Unused,
+    /// Only the muted layers still in the graph, and the sublayers only they
+    /// brought in.
+    Muted,
+}
+
 /// What a [`mute_layer`](LayerGraph::mute_layer) or
 /// [`unmute_layer`](LayerGraph::unmute_layer) actually changed, returned only
 /// when the muted set changed.
@@ -691,6 +707,7 @@ impl LayerGraph {
             session_layer_count: 0,
             root: None,
             pending_mutes: HashSet::new(),
+            freed_aliases: HashMap::new(),
             muted: HashSet::new(),
             has_relocates: false,
             diagnostics: GraphDiagnostics::default(),
@@ -1244,12 +1261,9 @@ impl LayerGraph {
     /// gate's retry.
     fn file_stack_discoveries(&mut self, stack: LayerStackId, sink: EdgeSink) {
         // A stack with an entry naming no layer under its anchored identifier
-        // stays open to a join ([`SublayerState::unsettled`]).
-        if sink.demands.is_empty() && sink.fallbacks.is_empty() {
-            self.sublayers.unsettled.remove(&stack);
-        } else {
-            self.sublayers.unsettled.insert(stack);
-        }
+        // stays open to a join ([`SublayerState::unsettled`]), unless the entry
+        // names a muted layer, which joins no stack.
+        let mut unsettled = !sink.fallbacks.is_empty();
         let members = self.stacks.member_set(stack).expect("a filed stack is minted");
         let (demands, mut errors, used_vars) = sink.drain(stack, members);
         // The names this composition's `${VAR}` entries read replace the stack's
@@ -1269,6 +1283,7 @@ impl LayerGraph {
             {
                 continue;
             }
+            unsettled = true;
             if !self.failed_loads.is_empty() {
                 // An unresolved entry's identifier is derived afresh each
                 // rebuild (nothing memoizes it): under the resolver's
@@ -1293,6 +1308,11 @@ impl LayerGraph {
                 }
             }
             pending.push(demand);
+        }
+        if unsettled {
+            self.sublayers.unsettled.insert(stack);
+        } else {
+            self.sublayers.unsettled.remove(&stack);
         }
         self.sublayers.replace_stack(stack, pending, errors);
     }
@@ -1358,7 +1378,7 @@ impl LayerGraph {
 
     /// Removes every layer-stack instance `marks` did not reach — extended
     /// here with the stacks pending sublayer demands reference and the
-    /// eagerly minted sublayer-DAG roots, and closed over variable-source
+    /// eagerly minted sublayer-DAG roots whose root is not muted, and closed over variable-source
     /// ancestry by the registry ([`LayerStackRegistry::sweep`]) — and retires
     /// the removed stacks' sublayer diagnostics with them, so
     /// [`errors`](Self::errors) and
@@ -1368,6 +1388,12 @@ impl LayerGraph {
     /// its diagnostics if the problem still exists.
     pub(crate) fn sweep_stacks(&mut self, mut marks: StackMarks) {
         self.sublayers.mark_demanded(&mut marks);
+        // An eager stack whose root is muted composes nothing. It is left
+        // unmarked, and the next arc to it mints it again through the demand
+        // path.
+        let (stacks, muted) = (&self.stacks, &self.muted);
+        self.eager_stacks
+            .retain(|&id| stacks.target_key(id).is_none_or(|(root, _)| !muted.contains(&root)));
         for &id in &self.eager_stacks {
             marks.mark(id);
         }
@@ -1376,37 +1402,50 @@ impl LayerGraph {
         self.reclaim_due |= !removed.is_empty();
     }
 
-    /// Whether a stack sweep removed a stack since the layers were last
-    /// reclaimed ([`remove_layers`](Self::remove_layers)), so a layer may have
-    /// lost its last stack, or the last reclaim kept a layer only for a pin
-    /// that can lapse.
-    pub(crate) fn reclaim_due(&self) -> bool {
-        self.reclaim_due
+    /// Whether a `reclaim` may find a layer to free: a stack sweep removed a
+    /// stack since the layers were last reclaimed
+    /// ([`remove_layers`](Self::remove_layers)), or the last reclaim kept a
+    /// layer it may free later; or, for [`Reclaim::Muted`], a loaded layer is
+    /// muted.
+    pub(crate) fn reclaim_due(&self, reclaim: Reclaim) -> bool {
+        match reclaim {
+            Reclaim::Unused => self.reclaim_due,
+            Reclaim::Muted => !self.muted.is_empty(),
+        }
     }
 
     /// The layers no live layer stack holds and nothing else keeps, for the
     /// caller to drop with [`remove_layers`](Self::remove_layers)
     /// once the stage's observers have heard of them. Kept are the root and
     /// session layers, the members of every stack the last
-    /// [`sweep_stacks`](Self::sweep_stacks) left, the muted layers, the parents
-    /// of pending sublayer demands, the layers in `kept` and `pins`, a layer
-    /// with unsaved edits or no file to read it from again, and every sublayer
-    /// of a kept layer.
+    /// [`sweep_stacks`](Self::sweep_stacks) left, the root of every target
+    /// stack, the parents of pending sublayer demands, the layers in `kept`
+    /// and `pins`, a layer with unsaved edits or no file to read it from
+    /// again, and every unmuted sublayer beneath a stack member, a demand
+    /// parent, or a layer kept for a pin or a missing file. A
+    /// [`Reclaim::Muted`] returns only those among the muted layers and their
+    /// sublayers.
     ///
-    /// Also returns whether a layer was kept only for a pin that can lapse,
-    /// one in `pins` or one with unsaved edits, for
-    /// [`remove_layers`](Self::remove_layers) to retry at the next reclaim.
+    /// Also returns whether to retry at the next reclaim, for
+    /// [`remove_layers`](Self::remove_layers): a layer was kept only for a pin
+    /// that can lapse, one in `pins` or one with unsaved edits, or a
+    /// [`Reclaim::Muted`] left out an unused layer.
     pub(crate) fn unused_layers(
         &self,
         mut kept: HashSet<LayerId>,
         pins: &HashSet<LayerId>,
+        reclaim: Reclaim,
     ) -> (HashSet<LayerId>, bool) {
         kept.extend(self.stacks.member_layers());
         kept.extend(self.root);
-        kept.extend(self.session_layers());
-        kept.extend(&self.muted);
         kept.extend(self.sublayers.pending_demands.iter().map(|demand| demand.parent));
         let seeds = kept.iter().copied().collect();
+        // The stage owns its session layers, muted or not. A contributing
+        // session layer's sublayers are root-stack members already.
+        kept.extend(self.session_layers());
+        // A live target stack is keyed by its root, which stays though muted:
+        // the stack composes nothing from it.
+        kept.extend(self.stacks.targets().into_iter().map(|(_, root, _)| root));
         self.keep_sublayers(&mut kept, seeds);
         // Only a layer nothing else keeps is read for whether it could be
         // read back: one with unsaved edits, or with no file to read it from.
@@ -1426,7 +1465,17 @@ impl LayerGraph {
             .collect();
         kept.extend(&pinned);
         self.keep_sublayers(&mut kept, pinned);
-        let unused = self.order.iter().copied().filter(|id| !kept.contains(id)).collect();
+        let mut unused: HashSet<LayerId> = self.order.iter().copied().filter(|id| !kept.contains(id)).collect();
+        if reclaim == Reclaim::Muted {
+            // Every muted layer is a seed. The walk skips a muted child, which is
+            // a seed of its own.
+            let mut reach = self.muted.clone();
+            self.keep_sublayers(&mut reach, self.muted.iter().copied().collect());
+            let all = unused.len();
+            unused.retain(|id| reach.contains(id));
+            // A layer the mute did not prune leaves at a later reclaim.
+            lapsing |= unused.len() < all;
+        }
         (unused, lapsing)
     }
 
@@ -1434,7 +1483,8 @@ impl LayerGraph {
     fn keep_sublayers(&self, kept: &mut HashSet<LayerId>, mut walk: Vec<LayerId>) {
         while let Some(id) = walk.pop() {
             for &(child, _) in self.nodes.get(&id).map_or(&[][..], |node| &node.children) {
-                if kept.insert(child) {
+                // A muted sublayer contributes nothing to its parent's stack.
+                if !self.muted.contains(&child) && kept.insert(child) {
                     walk.push(child);
                 }
             }
@@ -1446,16 +1496,61 @@ impl LayerGraph {
     /// identifiers that named them. With `retry`, the next reclaim runs
     /// whether or not a sweep removes a stack.
     pub(crate) fn remove_layers(&mut self, dead: &HashSet<LayerId>, retry: bool) -> DepartedLayers {
+        self.reclaim_due = retry;
         let mut identifiers = Vec::new();
+        if dead.is_empty() {
+            return DepartedLayers {
+                identifiers,
+                _nodes: Vec::new(),
+            };
+        }
+        // Every spelling that named each departing muted layer, its identifiers
+        // and its real path.
+        let mut spellings: HashMap<LayerId, Vec<String>> = HashMap::new();
+        let muted = &self.muted;
         self.by_identifier.retain(|identifier, id| {
             let keep = !dead.contains(id);
             if !keep {
                 identifiers.push(identifier.clone());
+                if muted.contains(id) {
+                    spellings.entry(*id).or_default().push(identifier.clone());
+                }
             }
             keep
         });
-        self.by_real_path.retain(|_, id| !dead.contains(id));
+        self.by_real_path.retain(|real_path, id| {
+            let keep = !dead.contains(id);
+            if !keep && muted.contains(id) {
+                spellings.entry(*id).or_default().push(real_path.clone());
+            }
+            keep
+        });
         self.order.retain(|id| !dead.contains(id));
+        // A muted layer leaving the graph stays muted under its identifier and
+        // answers to every other spelling that named it.
+        for id in dead {
+            if !self.muted.remove(id) {
+                continue;
+            }
+            let identifier = self.identity(*id);
+            for spelling in spellings.remove(id).into_iter().flatten() {
+                if spelling != identifier {
+                    self.freed_aliases.insert(spelling, identifier.clone());
+                }
+            }
+            self.pending_mutes.insert(identifier);
+        }
+        // The parents of a departing layer re-resolve their `subLayers` once it
+        // is gone: the entry reads as unresolved, which a mute leaves out of
+        // the stack and an unmute demands again.
+        // TODO(perf): this scans every node's edges; an index of each layer's
+        // parents would name them directly.
+        let parents: HashSet<LayerId> = self
+            .nodes
+            .iter()
+            .filter(|(id, node)| !dead.contains(id) && node.children.iter().any(|(child, _)| dead.contains(child)))
+            .map(|(&id, _)| id)
+            .collect();
         let (mut relocates, mut expr) = (false, false);
         let mut nodes = Vec::new();
         for id in dead {
@@ -1471,12 +1566,21 @@ impl LayerGraph {
         self.sublayers.forget(dead);
         // A departed layer's relocate errors leave the diagnostics with it,
         // those of a layer whose every relocate is invalid included.
-        // TODO(perf): this revalidates every layer's relocates; a departed
-        // layer retracts only its own diagnostics and pairs.
-        if relocates || !self.diagnostics.relocates.is_empty() {
+        if !parents.is_empty() {
+            // Re-resolving the edges recomputes the relocates too. Only a muted
+            // child leaves a parent that stays, as a kept parent keeps every
+            // other child. The rebuild changes no composed stack, and the mute
+            // filter drops the demand it files for the child.
+            // TODO(perf): this re-resolves every layer's edges, rebuilds the
+            // stacks reaching the parents and revalidates every relocate, where
+            // only the parents' edges changed, and `apply_mute` has just
+            // rebuilt every stack.
+            self.recompute_sublayers(Some(&parents));
+        } else if relocates || !self.diagnostics.relocates.is_empty() {
+            // TODO(perf): this revalidates every layer's relocates; a departed
+            // layer retracts only its own diagnostics and pairs.
             self.recompute_relocates();
         }
-        self.reclaim_due = retry;
         DepartedLayers {
             identifiers,
             _nodes: nodes,
@@ -2642,9 +2746,13 @@ impl LayerGraph {
         if self.is_root_identifier(&canonical) {
             return None;
         }
-        let changed = match self.id_of(&canonical) {
-            Some(id) => self.muted.insert(id).then(|| self.identity(id))?,
-            None => self.pending_mutes.insert(canonical.clone()).then_some(canonical)?,
+        let changed = if let Some(id) = self.id_of(&canonical) {
+            // The muted layer leaves every stack, and the graph at the mute's
+            // reclaim.
+            self.muted.insert(id).then(|| self.identity(id))?
+        } else {
+            let key = self.pending_key(&canonical).to_owned();
+            self.pending_mutes.insert(key.clone()).then_some(key)?
         };
         Some(self.recompose_for_mute_with_fanout(changed))
     }
@@ -2658,9 +2766,26 @@ impl LayerGraph {
         let canonical = self.canonical_muted_id(identifier, self.anchor_location(self.root));
         let changed = match self.id_of(&canonical) {
             Some(id) if self.muted.remove(&id) => self.identity(id),
-            _ => self.pending_mutes.take(&canonical)?,
+            _ => {
+                let key = self.pending_key(&canonical).to_owned();
+                let changed = self.pending_mutes.take(&key)?;
+                self.forget_aliases(&changed);
+                changed
+            }
         };
         Some(self.recompose_for_mute_with_fanout(changed))
+    }
+
+    /// The key a pending mute of `canonical` is kept under: the identifier a
+    /// freed muted layer's other spelling stands for, or `canonical` itself.
+    fn pending_key<'a>(&'a self, canonical: &'a str) -> &'a str {
+        self.freed_aliases.get(canonical).map_or(canonical, String::as_str)
+    }
+
+    /// Drops the other spellings of the freed muted layer `identifier`, whose
+    /// pending mute just ended.
+    fn forget_aliases(&mut self, identifier: &str) {
+        self.freed_aliases.retain(|_, muted| muted != identifier);
     }
 
     /// The identity a loaded layer is muted under: its interned identifier.
@@ -2842,15 +2967,28 @@ impl LayerGraph {
     /// spellings of a loaded layer (see [`id_of`](Self::id_of)) read alike.
     fn muted_entry(&self, canonical: &str) -> Option<String> {
         let loaded = self.id_of(canonical).filter(|id| self.muted.contains(id));
+        let pending = self.pending_key(canonical);
         loaded
             .map(|id| self.identity(id))
-            .or_else(|| self.pending_mutes.contains(canonical).then(|| canonical.to_string()))
+            .or_else(|| self.pending_mutes.contains(pending).then(|| pending.to_string()))
     }
 
     /// Whether any layer is muted at all. A cheap gate so the per-arc mute check
     /// skips its anchoring work on the common unmuted stage.
     pub(crate) fn has_muted_layers(&self) -> bool {
         !self.muted.is_empty() || !self.pending_mutes.is_empty()
+    }
+
+    /// What the graph has of the layer `identifier`, the canonical identifier
+    /// a stack open derived, for the loaders. A muted layer contributes
+    /// nothing, and the open leaves it out.
+    pub(crate) fn presence(&self, identifier: &str) -> sdf::Presence {
+        match self.id_of(identifier) {
+            Some(id) if self.muted.contains(&id) => sdf::Presence::Excluded,
+            Some(_) => sdf::Presence::Held,
+            None if self.pending_mutes.contains(self.pending_key(identifier)) => sdf::Presence::Excluded,
+            None => sdf::Presence::Absent,
+        }
     }
 
     /// The muted-set identifier matched by the reference/payload target
@@ -2985,18 +3123,21 @@ impl LayerGraph {
     /// it. The root is never present: its identifier is rejected before any
     /// entry is recorded (see [`is_root_identifier`](Self::is_root_identifier)).
     fn resolve_muted_ids(&mut self) {
-        // TODO: reclaim a muted layer's memory. C++ drops its references; here
-        // the node stays interned so unmute is a rebuild and nothing is freed.
         if self.pending_mutes.is_empty() {
             return;
         }
+        // A freed muted layer may join again under any spelling that named it.
+        let aliases = self.freed_aliases.iter();
         let promoted: Vec<(String, LayerId)> = self
             .pending_mutes
             .iter()
-            .filter_map(|canonical| self.id_of(canonical).map(|id| (canonical.clone(), id)))
+            .map(|canonical| (canonical, canonical))
+            .chain(aliases)
+            .filter_map(|(spelling, key)| self.id_of(spelling).map(|id| (key.clone(), id)))
             .collect();
         for (canonical, id) in promoted {
             self.pending_mutes.remove(&canonical);
+            self.forget_aliases(&canonical);
             self.muted.insert(id);
         }
     }
@@ -3286,8 +3427,23 @@ fn sublayer_source(diagnostic: &CompositionDiagnostic) -> Option<(&String, &Stri
     }
 }
 
+/// The identifier of the layer that introduced a sublayer diagnostic (an
+/// unresolvable or malformed sublayer, or a sublayer expression that does not
+/// evaluate), or `None` for any other diagnostic.
+pub(super) fn sublayer_introducer(diagnostic: &CompositionDiagnostic) -> Option<&String> {
+    match diagnostic {
+        CompositionDiagnostic::InvalidExpression {
+            context: ExpressionContext::Sublayer,
+            source_layer,
+            ..
+        } => Some(source_layer),
+        _ => sublayer_source(diagnostic).map(|(_, introduced_by)| introduced_by),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io;
     use std::path::Path as FsPath;
 
@@ -4763,6 +4919,35 @@ mod tests {
         );
         graph.wire_joined(&HashSet::from([anchored]));
         assert_eq!(root_members(&graph), vec![root_id, anchored]);
+    }
+
+    /// A muted layer rooting a target stack stays while the stack lives, and
+    /// leaves once a sweep retires the stack.
+    #[test]
+    fn muted_stack_root_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = sdf::LayerRegistry::default();
+        let mut graph = LayerGraph::new(registry.clone());
+        let mut open = |name: &str| {
+            let path = tmp.path().join(name);
+            fs::write(&path, b"#usda 1.0\n").unwrap();
+            let handle = registry
+                .find_or_open(path.to_str().unwrap())
+                .unwrap()
+                .expect("the file resolves");
+            graph.ensure_layer(handle.into()).0
+        };
+        let root = open("root.usda");
+        // Sublayered by nothing, it roots an eager target stack.
+        let target = open("target.usda");
+        graph.finalize(0, Some(root));
+        graph.mute_layer(graph.identifier(target).to_owned());
+        assert!(graph.reclaim_due(Reclaim::Muted));
+        let (unused, _) = graph.unused_layers(HashSet::new(), &HashSet::new(), Reclaim::Muted);
+        assert!(unused.is_empty(), "the stack's root stays: {unused:?}");
+        graph.sweep_stacks(StackMarks::default());
+        let (unused, _) = graph.unused_layers(HashSet::new(), &HashSet::new(), Reclaim::Muted);
+        assert_eq!(unused, HashSet::from([target]), "the swept stack's root leaves");
     }
 
     /// A joined layer authoring no relocates brings the loaded layers it

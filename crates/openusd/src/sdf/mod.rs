@@ -57,7 +57,7 @@ pub use layer::{
 };
 pub(crate) use layer::{absolute_path_at, dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
-pub(crate) use layer_registry::{LoadedLayer, PreparedLayer};
+pub(crate) use layer_registry::{LoadedLayer, PreparedLayer, Presence};
 pub use layer_store::{AdoptError, LayerError, LayerHandle};
 pub(crate) use layer_store::{LayerStore, StoreRead, Subscription};
 pub use ordering::{apply_ordering, element_cmp};

@@ -2777,10 +2777,20 @@ impl Stage {
     }
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
-    /// composition — as if absent from every layer stack it participates in —
-    /// while staying registered so [`unmute_layer`](Self::unmute_layer) restores
-    /// it (C++ `UsdStage::MuteLayer` → `PcpCache::RequestLayerMuting`). Muting
+    /// composition — as if absent from every layer stack it participates in
+    /// (C++ `UsdStage::MuteLayer` → `PcpCache::RequestLayerMuting`). Muting
     /// prunes the layer's whole sublayer subtree, not just the one layer.
+    ///
+    /// The muted layer, and the layers only it brought in, leave the stage,
+    /// and the registry frees each unless something else holds it, as
+    /// [`unload`](Self::unload) frees a payload's. Undo steps touching a layer
+    /// that leaves are dropped. Staying are a layer with unsaved edits, the
+    /// edit target's layer, one with no file to read it from again, the
+    /// session layers the stage opened with (a sublayer added to one later
+    /// leaves), and the root of a reference or payload target still composed.
+    /// A sublayer muted at open ([`StageBuilder::mute`]) is not read.
+    /// [`unmute_layer`](Self::unmute_layer) reads a freed layer from its file
+    /// again.
     ///
     /// The layer need not be loaded: muting an identifier the stage does not
     /// (yet) contain records it and takes effect if such a layer is later
@@ -4530,11 +4540,21 @@ impl StageBuilder {
         // layer this collection opened.
         let session = self.prepare_session()?;
         let root_stack_vars = self.root_stack_expression_variables(&root, session.as_ref())?;
+        // The requested mutes as the identifiers the open meets, the root's
+        // left out: muting the root is ignored.
+        let anchor = root.handle.anchor_location();
+        let mut muted: HashSet<String> = self
+            .muted
+            .iter()
+            .map(|m| self.registry.create_identifier(m, anchor))
+            .collect();
+        muted.remove(&root.identifier);
+        muted.remove(root.handle.identifier());
         let session = session
-            .map(|session| self.collect_layers(session, &root_stack_vars))
+            .map(|session| self.collect_layers(session, &root_stack_vars, &muted))
             .transpose()?
             .unwrap_or_default();
-        let root = self.collect_layers(root, &root_stack_vars)?;
+        let root = self.collect_layers(root, &root_stack_vars, &muted)?;
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
         let diagnostics = session.diagnostics.into_iter().chain(root.diagnostics).collect();
@@ -4581,11 +4601,13 @@ impl StageBuilder {
     /// [`UnresolvedSublayer`](pcp::CompositionDiagnostic::UnresolvedSublayer) collection error
     /// rather than aborting the open; one under a muted branch is filtered out
     /// later, once the muted-aware graph exists (see
-    /// [`StageBuilder::assemble`](Self::assemble)).
+    /// [`StageBuilder::assemble`](Self::assemble)). A sublayer the builder
+    /// mutes, one of the identifiers in `muted`, is not read.
     fn collect_layers(
         &self,
         root: sdf::LoadedLayer,
         ancestor_expr_vars: &HashMap<String, vt::Value>,
+        muted: &HashSet<String>,
     ) -> Result<CollectedLayers> {
         let diagnostics = RefCell::new(pcp::Diagnostics::default());
         // `ancestor_expr_vars` are the expression variables the enclosing context
@@ -4599,7 +4621,13 @@ impl StageBuilder {
                 diagnostics.borrow_mut().report(error.into());
                 Ok(())
             },
-            &|_| false,
+            &|identifier| {
+                if muted.contains(identifier) {
+                    sdf::Presence::Excluded
+                } else {
+                    sdf::Presence::Absent
+                }
+            },
         )?;
         Ok(CollectedLayers {
             layers,
@@ -6775,6 +6803,17 @@ def \"Sub\" {}
         Ok(())
     }
 
+    /// The identifier of the stage's layer whose identifier ends with `name`.
+    fn layer_named(stage: &Stage, name: &str) -> String {
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with(name))
+            .expect("the layer is loaded")
+    }
+
     /// A root layer whose `/P` has a payload on `payload.usda`, which holds
     /// `/M` with `double x = 0` and a child `/M/C`, both written to `dir`, and
     /// the root's and the payload's paths.
@@ -6836,13 +6875,7 @@ def \"Sub\" {}
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::open(&root)?;
         assert!(stage.prim("/P/C")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let identifier = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("payload.usda"))
-            .expect("the payload is loaded");
+        let identifier = layer_named(&stage, "payload.usda");
         stage.edit_layer(&identifier, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/M/Unsaved", sdf::Specifier::Def, "")?;
             Ok(())
@@ -6862,13 +6895,7 @@ def \"Sub\" {}
         let (root, _) = payload_fixture(dir.path())?;
         let stage = usd::UndoStage::from(Stage::open(&root)?);
         assert!(stage.prim("/P/C")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let identifier = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("payload.usda"))
-            .expect("the payload is loaded");
+        let identifier = layer_named(&stage, "payload.usda");
         stage.edit_layer(&identifier, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/M/Saved", sdf::Specifier::Def, "")?;
             Ok(())
@@ -7044,13 +7071,7 @@ def "M" (
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::open(&root)?;
         assert!(stage.prim("/P/C")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let payload = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("payload.usda"))
-            .expect("the payload is loaded");
+        let payload = layer_named(&stage, "payload.usda");
         let root_layer = stage.root_layer().identifier().to_string();
         stage.set_edit_target(EditTarget::for_layer(payload.clone()))?;
         {
@@ -7073,13 +7094,7 @@ def "M" (
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::open(&root)?;
         assert!(stage.prim("/P/C")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let payload = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("payload.usda"))
-            .expect("the payload is loaded");
+        let payload = layer_named(&stage, "payload.usda");
         stage.edit_layer(&payload, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/M/Unsaved", sdf::Specifier::Def, "")?;
             Ok(())
@@ -7107,13 +7122,7 @@ def "M" (
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::open(&root)?;
         assert!(stage.prim("/P/C")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let payload = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("payload.usda"))
-            .expect("the payload is loaded");
+        let payload = layer_named(&stage, "payload.usda");
         let root_layer = stage.root_layer().identifier().to_string();
         stage.set_edit_target(EditTarget::for_layer(payload.clone()))?;
         let sink = stage.add_sink(Unloads);
@@ -7164,13 +7173,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(x(&stage)?, Some(5.0), "read through the clip's own copy");
         stage.load("/P", LoadPolicy::WithDescendants)?;
         assert!(stage.prim("/P")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let clip = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("clip.usda"))
-            .expect("the payload is loaded");
+        let clip = layer_named(&stage, "clip.usda");
         stage.edit_layer(&clip, |e| {
             e.data_mut().set_field(
                 &sdf::path("/M.x")?,
@@ -7216,13 +7219,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         )?;
         let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
         assert!(stage.prim("/P")?.is_valid()?);
-        // The identifier canonicalizes the path, which may spell it another way
-        // (a `\\?\` prefix on Windows).
-        let payload = stage
-            .layer_identifiers()
-            .into_iter()
-            .find(|identifier| identifier.ends_with("payload.usda"))
-            .expect("the payload is loaded");
+        let payload = layer_named(&stage, "payload.usda");
         let dropped = Rc::new(Cell::new(false));
         stage.layer_handle(&payload).expect("held").add_sink(Probe {
             stage: stage.downgrade(),
@@ -7231,6 +7228,259 @@ def "P" (payload = @./clip.usda@</M>) {}
         stage.unload("/P")?;
         assert!(dropped.get(), "the sink went with its layer");
         assert_eq!(stage.layer_count(), 1);
+        Ok(())
+    }
+
+    /// Muting a layer frees it, and unmuting reads it again.
+    #[test]
+    fn mute_frees_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder().registry(registry.clone()).open(&root)?;
+        assert!(stage.prim("/Sub")?.is_valid()?);
+        let weak = layer_named(&stage, "sub.usda");
+        stage.mute_layer(weak.as_str());
+        assert_eq!(stage.layer_count(), 1, "the muted layer left the stage");
+        assert!(registry.find(&weak)?.is_none(), "and the registry");
+        assert!(stage.is_layer_muted(&weak), "it stays muted");
+        assert!(!stage.prim("/Sub")?.is_valid()?);
+        stage.unmute_layer(&weak);
+        assert!(stage.prim("/Sub")?.is_valid()?, "unmuted, it is read again");
+        assert_eq!(stage.layer_count(), 2);
+        Ok(())
+    }
+
+    /// A muted layer with unsaved edits stays, so unmuting it finds them.
+    #[test]
+    fn mute_keeps_dirty() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        let weak = layer_named(&stage, "sub.usda");
+        stage.edit_layer(&weak, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Unsaved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.mute_layer(weak.as_str());
+        assert_eq!(stage.layer_count(), 2, "the dirty layer stays");
+        stage.unmute_layer(&weak);
+        assert!(stage.prim("/Unsaved")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A muted layer leaving the stage drops the undo history touching it.
+    #[test]
+    fn mute_departs_undo() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let stage = usd::UndoStage::from(Stage::open(&root)?);
+        let weak = layer_named(&stage, "sub.usda");
+        stage.edit_layer(&weak, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Saved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.layer_handle(&weak).expect("loaded").save()?;
+        assert!(stage.can_undo());
+        stage.mute_layer(weak.as_str());
+        assert_eq!(stage.layer_count(), 1);
+        assert!(!stage.can_undo(), "the step on the muted layer went with it");
+        stage.unmute_layer(&weak);
+        assert!(stage.prim("/Saved")?.is_valid()?, "the saved edit reads back");
+        Ok(())
+    }
+
+    /// Unmuting a sublayer its mute freed resyncs the prims it composes into.
+    #[test]
+    fn unmute_freed_resyncs() -> Result<()> {
+        /// Each muting notice: whether it muted, and what it resynced.
+        type Notices = Rc<RefCell<Vec<(bool, Vec<sdf::Path>)>>>;
+        struct Log(Notices);
+        impl StageSink for Log {
+            fn layer_muting_changed(&self, _: &Stage, _: &str, muted: bool, resynced: &[sdf::Path]) {
+                self.0.borrow_mut().push((muted, resynced.to_vec()));
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        let weak = layer_named(&stage, "sub.usda");
+        let log = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Log(Rc::clone(&log)));
+        stage.mute_layer(weak.as_str());
+        assert!(!stage.prim("/Sub")?.is_valid()?, "composed while muted");
+        assert_eq!(stage.layer_count(), 1);
+        stage.unmute_layer(&weak);
+        assert!(stage.prim("/Sub")?.is_valid()?);
+        let log = log.borrow();
+        let (muted, resynced) = log.last().expect("the unmute notified");
+        assert!(!muted);
+        assert!(!resynced.is_empty(), "the unmute resyncs what the layer reaches");
+        Ok(())
+    }
+
+    /// A muted layer two spellings name keeps answering to both once freed,
+    /// and unmuting by either reads it again.
+    #[test]
+    fn freed_mute_both_spellings() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        let absolute = dir.path().join("sub.usda").canonicalize()?;
+        let absolute = absolute.to_str().expect("utf-8 path").to_owned();
+        for unmute_by in ["sub.usda", absolute.as_str()] {
+            let stage = Stage::builder()
+                .resolver(ar::DefaultResolver::with_search_paths([dir.path()]))
+                .in_memory("root.usda")?;
+            let root_id = stage.root_layer().identifier().to_string();
+            stage.edit_layer(&root_id, |e| {
+                e.pseudo_root_mut()?.set_sublayers(["sub.usda"]);
+                Ok(())
+            })?;
+            let mut other = sdf::Layer::new_in_memory("other.usda");
+            edit_layer(&mut other, |e| {
+                e.pseudo_root_mut().unwrap().set_sublayers([absolute.as_str()]);
+            });
+            stage.insert_layer(&root_id, 1, other, sdf::LayerOffset::IDENTITY)?;
+            assert!(stage.prim("/Sub")?.is_defined()?);
+            stage.mute_layer("sub.usda");
+            assert_eq!(stage.layer_count(), 2, "sub.usda left the stage");
+            assert!(stage.is_layer_muted("sub.usda"));
+            assert!(stage.is_layer_muted(&absolute), "the other spelling reads muted");
+            assert!(!stage.prim("/Sub")?.is_defined()?);
+            stage.unmute_layer(unmute_by);
+            assert!(stage.muted_layers().is_empty(), "unmuted by {unmute_by}");
+            assert!(stage.prim("/Sub")?.is_defined()?, "read again");
+        }
+        Ok(())
+    }
+
+    /// Muting a session layer frees a sublayer added to it after the stage
+    /// opened, though the session layer stays, and unmuting reads it again.
+    #[test]
+    fn session_mute_frees_child() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("root.usda"), "#usda 1.0\n")?;
+        fs::write(dir.path().join("session.usda"), "#usda 1.0\n")?;
+        fs::write(dir.path().join("extra.usda"), "#usda 1.0\ndef \"E\" {}\n")?;
+        let stage = Stage::builder()
+            .session_layer(dir.path().join("session.usda").to_string_lossy().into_owned())
+            .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        let session = layer_named(&stage, "session.usda");
+        stage.edit_layer(&session, |e| {
+            e.pseudo_root_mut()?.set_sublayers(["./extra.usda"]);
+            Ok(())
+        })?;
+        assert!(stage.prim("/E")?.is_valid()?);
+        assert_eq!(stage.layer_count(), 3);
+        stage.mute_layer(session.as_str());
+        assert_eq!(stage.layer_count(), 2, "the session layer stays, its sublayer leaves");
+        assert!(!stage.prim("/E")?.is_valid()?);
+        stage.unmute_layer(&session);
+        assert!(stage.prim("/E")?.is_valid()?, "unmuted, the sublayer is read again");
+        assert_eq!(stage.layer_count(), 3);
+        Ok(())
+    }
+
+    /// Muting a sublayer frees only it: a payload layer whose prims the mute
+    /// recomposes stays.
+    #[test]
+    fn mute_keeps_payload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        let stage = Stage::open(&root)?;
+        let root_id = stage.root_layer().identifier().to_string();
+        stage.edit_layer(&root_id, |e| {
+            e.pseudo_root_mut()?.set_sublayers(["./sub.usda"]);
+            Ok(())
+        })?;
+        assert!(stage.prim("/Sub")?.is_valid()?);
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        assert_eq!(stage.layer_count(), 3);
+        stage.mute_layer(layer_named(&stage, "sub.usda"));
+        assert_eq!(stage.layer_count(), 2, "the payload layer stays");
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A layer muted at open leaves the stage, and unmuting reads it.
+    #[test]
+    fn open_mute_unread() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let sub = dir.path().join("sub.usda").to_str().expect("utf-8 path").to_owned();
+        let stage = Stage::builder().mute([sub.as_str()]).open(&root)?;
+        assert!(stage.is_layer_muted(&sub));
+        assert_eq!(stage.layer_count(), 1, "the muted layer is not on the stage");
+        stage.unmute_layer(&sub);
+        assert!(stage.prim("/Sub")?.is_valid()?, "unmuted, it is read");
+        assert_eq!(stage.layer_count(), 2);
+        Ok(())
+    }
+
+    /// A builder mute of the root layer is ignored.
+    #[test]
+    fn open_mute_root_ignored() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let stage = Stage::builder().mute([root.as_str()]).open(&root)?;
+        assert!(stage.muted_layers().is_empty());
+        assert!(stage.prim("/A")?.is_valid()?);
+        assert!(stage.prim("/Sub")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A session layer muted at open stays, its sublayers unread, and
+    /// unmuting composes them.
+    #[test]
+    fn open_mute_session() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        fs::write(
+            dir.path().join("session.usda"),
+            "#usda 1.0\n(\n    subLayers = [@./extra.usda@]\n)\n",
+        )?;
+        fs::write(dir.path().join("extra.usda"), "#usda 1.0\ndef \"E\" {}\n")?;
+        let session = dir.path().join("session.usda").to_str().expect("utf-8 path").to_owned();
+        let stage = Stage::builder()
+            .session_layer(session.clone())
+            .mute([session.as_str()])
+            .open(&root)?;
+        assert!(stage.is_layer_muted(&session));
+        assert!(!stage.prim("/E")?.is_valid()?);
+        assert_eq!(stage.layer_count(), 3, "the session layer, the root and its sublayer");
+        stage.unmute_layer(&session);
+        assert!(stage.prim("/E")?.is_valid()?, "unmuted, its sublayer is read");
+        Ok(())
+    }
+
+    /// A freed muted layer joining again under another of its spellings is
+    /// muted.
+    #[test]
+    fn freed_mute_rejoin() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        let absolute = dir.path().join("sub.usda").canonicalize()?;
+        let absolute = absolute.to_str().expect("utf-8 path").to_owned();
+        let stage = Stage::builder()
+            .resolver(ar::DefaultResolver::with_search_paths([dir.path()]))
+            .in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        stage.edit_layer(&root_id, |e| {
+            e.pseudo_root_mut()?.set_sublayers(["sub.usda"]);
+            Ok(())
+        })?;
+        assert!(stage.prim("/Sub")?.is_defined()?);
+        stage.mute_layer("sub.usda");
+        assert_eq!(stage.layer_count(), 1, "sub.usda left the stage");
+        let mut again = sdf::Layer::new_in_memory(absolute.as_str());
+        edit_layer(&mut again, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Sub", sdf::Specifier::Def, "").unwrap();
+        });
+        stage.insert_layer(&root_id, 1, again, sdf::LayerOffset::IDENTITY)?;
+        assert!(stage.is_layer_muted(&absolute));
+        assert!(!stage.prim("/Sub")?.is_defined()?, "it joined muted");
         Ok(())
     }
 
