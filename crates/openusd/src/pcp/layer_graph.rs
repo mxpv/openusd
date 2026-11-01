@@ -161,6 +161,18 @@ pub(crate) struct LayerNode {
     pub relocates: RelocateList,
 }
 
+/// The layers [`LayerGraph::remove_layers`] took out of the graph, held until
+/// the caller drops this with every composition borrow released: each node's
+/// subscription ends, then its handle drops, and the registry frees the layer
+/// at its next sweep unless something else holds it. A freed layer's sinks
+/// drop with it, and a sink's drop may reach the stage.
+pub(crate) struct DepartedLayers {
+    /// The identifiers that named the layers, every spelling included.
+    pub(crate) identifiers: Vec<String>,
+    /// The nodes, held so no read of the store frees a layer early.
+    _nodes: Vec<LayerNode>,
+}
+
 impl LayerNode {
     /// A node holding `handle`, with no edges and no relocates. The sublayer
     /// edges, expression-sublayer flag, and relocates are filled in by
@@ -274,6 +286,9 @@ pub(crate) struct LayerGraph {
     /// permanently marked in every sweep: their layers stay open for the
     /// graph's life and nothing else re-mints them.
     eager_stacks: Vec<LayerStackId>,
+    /// Whether a stack sweep removed a stack since the layers were last
+    /// reclaimed.
+    reclaim_due: bool,
 }
 
 /// The diagnostic buckets a [`LayerGraph`] replaces on its own rebuilds.
@@ -327,11 +342,12 @@ struct SublayerState {
     /// filesystem canonicalize — and re-runs the whole walk on every
     /// `LayerGraph::build_sublayer_edges`, i.e. every `subLayers` edit. Only a
     /// stable identifier is memoized — an absolute one naming an interned
-    /// layer, which nothing removes — so it is computed once and reused, and
-    /// looked up live with [`LayerGraph::id_of`]. A search-path or unresolved
-    /// entry is never memoized: its identifier follows the filesystem beside
-    /// its parent, so `LayerGraph::resolve_sublayer` derives it afresh on every
-    /// rebuild, as C++ `_BuildLayerStack` derives every entry.
+    /// layer — so it is computed once and reused, and looked up live with
+    /// [`LayerGraph::id_of`], which misses once the layer leaves the graph. A
+    /// search-path or unresolved entry is never memoized: its identifier
+    /// follows the filesystem beside its parent, so
+    /// `LayerGraph::resolve_sublayer` derives it afresh on every rebuild, as
+    /// C++ `_BuildLayerStack` derives every entry.
     resolution: HashMap<LayerId, HashMap<String, String>>,
     /// Sublayer entries that resolved to no loaded layer under the empty
     /// context, keyed by the authoring parent — the table a stack on the
@@ -417,6 +433,15 @@ impl SublayerState {
             self.errors.remove(id);
             self.unsettled.remove(id);
         }
+    }
+
+    /// Drops what the sublayer resolution recorded for the parents in `dead`,
+    /// layers leaving the graph. A memoized identifier naming a departed layer
+    /// is looked up live, so it reads as unresolved.
+    fn forget(&mut self, dead: &HashSet<LayerId>) {
+        self.resolution.retain(|parent, _| !dead.contains(parent));
+        self.unresolved_plain.retain(|parent, _| !dead.contains(parent));
+        self.fallback_plain.retain(|parent| !dead.contains(parent));
     }
 
     /// Drains the pending demands for the stage's load barrier.
@@ -675,6 +700,7 @@ impl LayerGraph {
             stacks: LayerStackRegistry::default(),
             sublayers: SublayerState::default(),
             eager_stacks: Vec::new(),
+            reclaim_due: false,
         }
     }
 
@@ -996,7 +1022,7 @@ impl LayerGraph {
     /// An identifier is memoized in `cache` once it is stable — made from an
     /// entry the resolver does not call
     /// [context dependent](crate::ar::Resolver::is_context_dependent_path), and
-    /// naming an interned layer, which nothing removes — so the resolver's
+    /// naming an interned layer, looked up live — so the resolver's
     /// filesystem canonicalize runs once per such `(parent, sub_path)`. A
     /// search-path or unresolved entry is anchored afresh on every rebuild, as
     /// C++ `_BuildLayerStack` derives every entry: its identifier follows the
@@ -1347,6 +1373,114 @@ impl LayerGraph {
         }
         let removed = self.stacks.sweep(marks);
         self.sublayers.retire_stacks(&removed);
+        self.reclaim_due |= !removed.is_empty();
+    }
+
+    /// Whether a stack sweep removed a stack since the layers were last
+    /// reclaimed ([`remove_layers`](Self::remove_layers)), so a layer may have
+    /// lost its last stack, or the last reclaim kept a layer only for a pin
+    /// that can lapse.
+    pub(crate) fn reclaim_due(&self) -> bool {
+        self.reclaim_due
+    }
+
+    /// The layers no live layer stack holds and nothing else keeps, for the
+    /// caller to drop with [`remove_layers`](Self::remove_layers)
+    /// once the stage's observers have heard of them. Kept are the root and
+    /// session layers, the members of every stack the last
+    /// [`sweep_stacks`](Self::sweep_stacks) left, the muted layers, the parents
+    /// of pending sublayer demands, the layers in `kept` and `pins`, a layer
+    /// with unsaved edits or no file to read it from again, and every sublayer
+    /// of a kept layer.
+    ///
+    /// Also returns whether a layer was kept only for a pin that can lapse,
+    /// one in `pins` or one with unsaved edits, for
+    /// [`remove_layers`](Self::remove_layers) to retry at the next reclaim.
+    pub(crate) fn unused_layers(
+        &self,
+        mut kept: HashSet<LayerId>,
+        pins: &HashSet<LayerId>,
+    ) -> (HashSet<LayerId>, bool) {
+        kept.extend(self.stacks.member_layers());
+        kept.extend(self.root);
+        kept.extend(self.session_layers());
+        kept.extend(&self.muted);
+        kept.extend(self.sublayers.pending_demands.iter().map(|demand| demand.parent));
+        let seeds = kept.iter().copied().collect();
+        self.keep_sublayers(&mut kept, seeds);
+        // Only a layer nothing else keeps is read for whether it could be
+        // read back: one with unsaved edits, or with no file to read it from.
+        let view = self.read_view();
+        let mut lapsing = false;
+        let pinned: Vec<LayerId> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|id| !kept.contains(id))
+            .filter(|id| {
+                let layer = view.layer(*id);
+                let lapses = pins.contains(id) || layer.is_dirty();
+                lapsing |= lapses;
+                lapses || !layer.is_rereadable()
+            })
+            .collect();
+        kept.extend(&pinned);
+        self.keep_sublayers(&mut kept, pinned);
+        let unused = self.order.iter().copied().filter(|id| !kept.contains(id)).collect();
+        (unused, lapsing)
+    }
+
+    /// Adds to `kept` every sublayer, transitively, of the layers in `walk`.
+    fn keep_sublayers(&self, kept: &mut HashSet<LayerId>, mut walk: Vec<LayerId>) {
+        while let Some(id) = walk.pop() {
+            for &(child, _) in self.nodes.get(&id).map_or(&[][..], |node| &node.children) {
+                if kept.insert(child) {
+                    walk.push(child);
+                }
+            }
+        }
+    }
+
+    /// Takes the layers in `dead` out of the graph, every spelling of their
+    /// identifiers with them, and returns them as [`DepartedLayers`] with the
+    /// identifiers that named them. With `retry`, the next reclaim runs
+    /// whether or not a sweep removes a stack.
+    pub(crate) fn remove_layers(&mut self, dead: &HashSet<LayerId>, retry: bool) -> DepartedLayers {
+        let mut identifiers = Vec::new();
+        self.by_identifier.retain(|identifier, id| {
+            let keep = !dead.contains(id);
+            if !keep {
+                identifiers.push(identifier.clone());
+            }
+            keep
+        });
+        self.by_real_path.retain(|_, id| !dead.contains(id));
+        self.order.retain(|id| !dead.contains(id));
+        let (mut relocates, mut expr) = (false, false);
+        let mut nodes = Vec::new();
+        for id in dead {
+            if let Some(node) = self.nodes.remove(id) {
+                relocates |= !node.relocates.is_empty();
+                expr |= node.has_expr_sublayer;
+                nodes.push(node);
+            }
+        }
+        if expr {
+            self.sublayers.any_expr = self.nodes.values().any(|node| node.has_expr_sublayer);
+        }
+        self.sublayers.forget(dead);
+        // A departed layer's relocate errors leave the diagnostics with it,
+        // those of a layer whose every relocate is invalid included.
+        // TODO(perf): this revalidates every layer's relocates; a departed
+        // layer retracts only its own diagnostics and pairs.
+        if relocates || !self.diagnostics.relocates.is_empty() {
+            self.recompute_relocates();
+        }
+        self.reclaim_due = retry;
+        DepartedLayers {
+            identifiers,
+            _nodes: nodes,
+        }
     }
 
     /// Mints a root-sourced stack instance for every sublayer-DAG root that lacks

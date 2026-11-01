@@ -1292,6 +1292,27 @@ impl IndexCache {
             .any(|demand| !demand.recheck)
     }
 
+    /// Adds to `kept` every layer the cache depends on outside a layer stack,
+    /// for the stage's layer reclamation
+    /// ([`LayerGraph::unused_layers`](super::LayerGraph::unused_layers)).
+    pub(crate) fn mark_live_layers(&self, kept: &mut HashSet<LayerId>) {
+        self.store.dependencies().mark_live_layers(kept);
+        self.clip_cache
+            .mark_live_layers(kept, |prim| self.store.is_indexed(prim));
+    }
+
+    /// Drops what the cache holds of the layers in `dead`, which are leaving
+    /// the stage's graph: the clip sets anchored at one or reading its
+    /// manifest, and the values a clip read through the graph, which a clip
+    /// reads from its own copy again.
+    pub(crate) fn forget_layers(&mut self, dead: &HashSet<LayerId>, identifiers: &[String]) {
+        self.clip_cache.forget_layers(dead);
+        for identifier in identifiers {
+            // The anchors it restaled go unreported, as a join's do.
+            let _ = self.invalidate_clip_source(identifier);
+        }
+    }
+
     /// Marks every layer stack the cache holds live for a registry sweep
     /// (`LayerGraph::sweep_stacks`): each cached prim index's nodes and the
     /// contexts of pending arc-load demands, whose stacks the load barrier is

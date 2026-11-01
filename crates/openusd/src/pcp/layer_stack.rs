@@ -515,10 +515,7 @@ impl LayerStackRegistry {
     /// muted layer. A reclaimed stack contributes nothing: its members retire in
     /// a sweep together with the diagnostics they anchored.
     pub(crate) fn member_layers(&self) -> HashSet<LayerId> {
-        self.instances
-            .values()
-            .flat_map(|instance| instance.member_set.iter().copied())
-            .collect()
+        self.using.keys().copied().collect()
     }
 
     /// The `(root, source)` key of a non-root target stack, or `None` for the

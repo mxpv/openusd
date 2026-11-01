@@ -17,7 +17,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::mem;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -367,11 +367,23 @@ impl Journal {
         // TODO(perf): every foreign commit scans every recorded transaction; a
         // per-layer index of the steps touching each layer would skip the
         // layers no step touched.
-        let stale = |transaction: &Transaction| transaction.overlaps(footprints);
+        self.drop_stale(|transaction| transaction.overlaps(footprints));
+    }
+
+    /// Drop what the departure of the layers in `layers` from the stage made
+    /// stale, by [`invalidate`](Self::invalidate)'s rule: an edit to one no
+    /// longer reaches the journal, so history touching it cannot be kept
+    /// valid.
+    fn depart(&mut self, layers: &HashSet<pcp::LayerId>) {
+        self.drop_stale(|transaction| transaction.layers.iter().any(|inverse| layers.contains(&inverse.layer)));
+    }
+
+    /// Drop the newest transaction `stale` holds with every older one.
+    fn drop_stale(&mut self, stale: impl Fn(&Transaction) -> bool) {
         let held = self.groups.iter_mut().chain(&mut self.reverting);
         let newest = held
             .enumerate()
-            .filter_map(|(level, transactions)| Some((level, transactions.iter().rposition(stale)?)))
+            .filter_map(|(level, transactions)| Some((level, transactions.iter().rposition(&stale)?)))
             .last();
         if let Some((level, at)) = newest {
             for (index, transactions) in self.groups.iter_mut().chain(&mut self.reverting).enumerate() {
@@ -386,7 +398,7 @@ impl Journal {
             self.stack.clear();
             return;
         }
-        let stale = self.stack.iter().rposition(|step| step.iter().any(stale));
+        let stale = self.stack.iter().rposition(|step| step.iter().any(&stale));
         if let Some(newest) = stale {
             self.stack.drain(..=newest);
         }
@@ -483,6 +495,10 @@ impl TxnObserver for UndoRecorder {
             .borrow_mut()
             .in_flight
             .retain(|bucket| bucket.generation != generation);
+    }
+
+    fn departed(&self, layers: &HashSet<pcp::LayerId>) {
+        self.journal.borrow_mut().depart(layers);
     }
 
     fn committed(

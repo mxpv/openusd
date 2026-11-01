@@ -14,6 +14,7 @@
 //! plain `Fn(&Stage, &CommittedChange)` closure is itself a `StageSink`, so
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
+use std::collections::HashSet;
 use std::mem;
 use std::rc::Rc;
 
@@ -355,6 +356,13 @@ pub(crate) trait TxnObserver {
     /// The transaction `generation` began committing and did not land.
     fn aborted(&self, generation: u64) {
         let _ = generation;
+    }
+
+    /// The layers in `layers` are about to leave the stage's graph: an edit to
+    /// one no longer reaches the stage. Runs between two borrows of the
+    /// stage's composition and touches only the observer's own state.
+    fn departed(&self, layers: &HashSet<pcp::LayerId>) {
+        let _ = layers;
     }
 }
 

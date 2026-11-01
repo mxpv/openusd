@@ -569,6 +569,12 @@ impl Drop for EditContext<'_> {
         // needs no validation. `replace_edit_target` notifies the change so a
         // listener tracking the edit target stays current (C++ `UsdEditContext`
         // notifies on both enter and restore).
+        {
+            let mut saved = self.stage.saved_edit_targets.borrow_mut();
+            if let Some(at) = saved.iter().rposition(|layer| layer == self.saved.layer_identifier()) {
+                saved.remove(at);
+            }
+        }
         self.stage.replace_edit_target(self.saved.clone());
     }
 }
@@ -951,6 +957,9 @@ pub struct StageInner {
     interpolation: Cell<InterpolationType>,
     /// Where authored opinions land. Defaults to the root layer.
     edit_target: RefCell<EditTarget>,
+    /// The layer identifiers of the targets the open [`EditContext`]s will
+    /// restore, outermost first, which a layer reclamation keeps.
+    saved_edit_targets: RefCell<Vec<String>>,
     /// This stage's root layer stack identity (root + session + resolver
     /// identity). Computed once at open and stable for the stage's life — the
     /// root and session layers and the resolver never change after
@@ -1141,6 +1150,18 @@ impl composition::CompositionHooks for Stage {
         for observer in self.observers.borrow().snapshot() {
             observer.aborted(generation);
         }
+    }
+
+    fn departed(&self, layers: &HashSet<pcp::LayerId>) {
+        for observer in self.observers.borrow().snapshot() {
+            observer.departed(layers);
+        }
+    }
+
+    fn edit_target_identifiers(&self) -> Vec<String> {
+        let mut identifiers = self.saved_edit_targets.borrow().clone();
+        identifiers.push(self.edit_target.borrow().layer_identifier().to_owned());
+        identifiers
     }
 }
 
@@ -1743,8 +1764,15 @@ impl Stage {
     /// fails the same validation as [`set_edit_target`](Self::set_edit_target).
     pub fn edit_context(&self, target: EditTarget) -> Result<EditContext<'_>, StageAuthoringError> {
         let saved = self.edit_target.borrow().clone();
+        // The saved target is kept from a reclaim before the switch notifies a
+        // sink, which may unload. The guard is made first, so a failed switch
+        // drops it: it unpins and restores the target the switch left alone.
+        self.saved_edit_targets
+            .borrow_mut()
+            .push(saved.layer_identifier().to_owned());
+        let context = EditContext { stage: self, saved };
         self.set_edit_target(target)?;
-        Ok(EditContext { stage: self, saved })
+        Ok(context)
     }
 
     /// Author a `def` prim spec at `path` on the edit target's layer and
@@ -2561,12 +2589,13 @@ impl Stage {
         }
     }
 
-    /// Returns the number of layers loaded so far (including session layers).
+    /// Returns the number of layers the stage holds (including session layers).
     ///
     /// Layers behind references and payloads load on demand as composition
     /// reaches their arcs, so this is the count loaded by the queries performed
-    /// so far — it grows as more of the stage is visited, mirroring C++
-    /// `UsdStage::GetUsedLayers`. The root layer stack is always fully loaded.
+    /// so far, less the layers an [`unload`](Self::unload) or other load-rules
+    /// change freed, mirroring C++ `UsdStage::GetUsedLayers`. The root layer
+    /// stack is always fully loaded.
     pub fn layer_count(&self) -> usize {
         self.layers().len()
     }
@@ -2594,8 +2623,9 @@ impl Stage {
     /// composition opened them).
     ///
     /// Reference and payload target layers load on demand, so this lists the
-    /// layers reached by the queries performed so far rather than the full
-    /// transitive closure (C++ `UsdStage::GetUsedLayers`). Traverse the stage
+    /// layers reached by the queries performed so far, less those a load-rules
+    /// change freed, rather than the full transitive closure (C++
+    /// `UsdStage::GetUsedLayers`). Traverse the stage
     /// to force every reachable layer to load.
     pub fn layer_identifiers(&self) -> Vec<String> {
         self.layers().identifiers()
@@ -2827,6 +2857,15 @@ impl Stage {
     /// Unloads `path`'s payload and everything beneath it (C++
     /// `UsdStage::Unload`). Same leniency as [`load`](Self::load) for a
     /// prototype-namespace path.
+    ///
+    /// The layers the unloaded payloads brought in, and that nothing loaded
+    /// still uses, leave the stage, and the registry frees each unless
+    /// something else holds it, a [`sdf::LayerHandle`] or another stage. A
+    /// layer with unsaved edits stays, as does the edit target's, unlike C++,
+    /// which frees a dirty layer nothing holds and holds the edit target's
+    /// weakly; so does a layer with no file to read it from again. Loading the
+    /// payload again reads a freed layer from its file. A
+    /// [`sdf::LayerSink`] does not hold its layer, and goes with it.
     pub fn unload(&self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
         self.unload_path(&sdf::try_into_path(path)?);
         Ok(())
@@ -2921,11 +2960,11 @@ impl Stage {
     /// (matching whatever `set_load_rules` would do for that same transition),
     /// which a cached value view stamped on one of them will notice.
     ///
-    /// This also has a real, permanent side effect worth calling out: every
-    /// payload-target layer under `root` is left loaded in the layer
-    /// registry afterward, even though the load *rules* are restored — this
-    /// codebase has no layer-eviction mechanism yet, so there is no way to
-    /// discover a payload's content without leaving its layer resident.
+    /// It also leaves every payload-target layer under `root` loaded, though
+    /// the load *rules* are restored: the swaps free no layer, so one stays
+    /// until the next load-rules change ([`load`](Self::load),
+    /// [`unload`](Self::unload) and the rest) drops the layers no loaded prim
+    /// uses.
     /// C++'s own `FindLoadable` equally must traverse (and thus compose)
     /// every candidate subtree.
     // TODO(perf): when the stage's current rules are not already
@@ -4677,6 +4716,7 @@ impl StageBuilder {
             prototypes_discovered: Cell::new(None),
             interpolation: Cell::new(self.interpolation),
             edit_target: RefCell::new(edit_target),
+            saved_edit_targets: RefCell::default(),
             layer_stack_id,
             sinks: RefCell::default(),
             observers: RefCell::default(),
@@ -6732,6 +6772,465 @@ def \"Sub\" {}
                 "{second} reaches the sub.usda {first} loaded"
             );
         }
+        Ok(())
+    }
+
+    /// A root layer whose `/P` has a payload on `payload.usda`, which holds
+    /// `/M` with `double x = 0` and a child `/M/C`, both written to `dir`, and
+    /// the root's and the payload's paths.
+    fn payload_fixture(dir: &FsPath) -> Result<(String, String)> {
+        fs::write(
+            dir.join("root.usda"),
+            "#usda 1.0\ndef \"P\" (payload = @./payload.usda@</M>) {}\n",
+        )?;
+        fs::write(
+            dir.join("payload.usda"),
+            "#usda 1.0\ndef \"M\" {\n    double x = 0\n    def \"C\" {}\n}\n",
+        )?;
+        let path = |name: &str| dir.join(name).to_str().expect("utf-8 path").to_owned();
+        Ok((path("root.usda"), path("payload.usda")))
+    }
+
+    /// Unloading a payload drops its layer from the stage, and the registry
+    /// frees it when nothing else holds it.
+    #[test]
+    fn unload_frees_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, payload) = payload_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder().registry(registry.clone()).open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        assert_eq!(stage.layer_count(), 2);
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1, "the payload layer left the stage");
+        assert!(registry.find(&payload)?.is_none(), "and the registry");
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P/C")?.is_valid()?, "loading it again reads it again");
+        Ok(())
+    }
+
+    /// A handle to an unloaded payload's layer keeps it in the registry, edits
+    /// included, though the stage drops it.
+    #[test]
+    fn unload_kept_by_handle() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, payload) = payload_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder().registry(registry.clone()).open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        let held = registry.find(&payload)?.expect("the stage holds the payload");
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1);
+        assert!(registry.find(&payload)?.is_some(), "the handle keeps it");
+        drop(held);
+        registry.sweep();
+        assert!(registry.find(&payload)?.is_none());
+        Ok(())
+    }
+
+    /// A payload layer with unsaved edits stays through an unload, so loading
+    /// it again finds the edits.
+    #[test]
+    fn unload_keeps_dirty() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let identifier = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("payload.usda"))
+            .expect("the payload is loaded");
+        stage.edit_layer(&identifier, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/Unsaved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 2, "the dirty layer stays");
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P/Unsaved")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A payload layer leaving the stage drops the undo history touching it,
+    /// and history touching only other layers stays.
+    #[test]
+    fn unload_departs_undo() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = usd::UndoStage::from(Stage::open(&root)?);
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let identifier = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("payload.usda"))
+            .expect("the payload is loaded");
+        stage.edit_layer(&identifier, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/Saved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.layer_handle(&identifier).expect("loaded").save()?;
+        stage.define_prim("/Newer")?;
+        assert_eq!(stage.undo_depth(), 2);
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1);
+        assert_eq!(
+            stage.undo_depth(),
+            1,
+            "the step on the departed layer went with the older ones"
+        );
+        assert!(stage.undo()?);
+        assert!(!stage.prim("/Newer")?.is_valid()?);
+        Ok(())
+    }
+
+    /// An anonymous payload layer has no file to read back, so an unload keeps
+    /// it and loading the payload again finds its content.
+    #[test]
+    fn unload_keeps_anonymous() -> Result<()> {
+        let registry = sdf::LayerRegistry::default();
+        let mut payload = sdf::Layer::new_anonymous("payload.usda");
+        edit_layer(&mut payload, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M", sdf::Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/M/C", sdf::Specifier::Def, "").unwrap();
+        });
+        let identifier = payload.identifier().to_owned();
+        let held = registry.adopt(payload).map_err(|refused| refused.error)?;
+        let stage = Stage::builder().registry(registry).in_memory("root.usda")?;
+        let root = stage.root_layer().identifier().to_string();
+        stage.edit_layer(&root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/P", sdf::Specifier::Def, "")?;
+            e.data_mut().set_field(
+                &sdf::path("/P")?,
+                sdf::FieldKey::Payload.as_str(),
+                vt::Value::PayloadListOp(sdf::PayloadListOp::prepended([sdf::Payload {
+                    asset_path: identifier.clone(),
+                    prim_path: sdf::path("/M")?,
+                    ..Default::default()
+                }])),
+            );
+            Ok(())
+        })?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        drop(held);
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 2, "the anonymous layer stays");
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A payload layer whose stack an edit's sweep already removed leaves at
+    /// the next load-rules change.
+    #[test]
+    fn unload_frees_orphan() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&root)?;
+        assert_eq!(stage.find_loadable("/")?, [sdf::path("/P")?]);
+        assert_eq!(stage.layer_count(), 2, "finding the payload read its layer");
+        stage.define_prim("/Other")?;
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1);
+        Ok(())
+    }
+
+    /// A payload whose prims read value clips leaves with its clip sets.
+    #[test]
+    fn unload_frees_clipped() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"P\" (payload = @./payload.usda@</M>) {}\n",
+        )?;
+        fs::write(
+            dir.path().join("payload.usda"),
+            r#"#usda 1.0
+def "M" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/M"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    double x
+}
+"#,
+        )?;
+        fs::write(
+            dir.path().join("clip.usda"),
+            "#usda 1.0\ndef \"M\" {\n    double x.timeSamples = {\n        0: 5,\n    }\n}\n",
+        )?;
+        let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        assert_eq!(
+            stage.attribute("/P.x")?.get_at::<f64>(usd::TimeCode::new(0.0))?,
+            Some(5.0)
+        );
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1, "the clipped payload leaves");
+        assert!(
+            !stage.composition.settled_cache().has_clip_sources(),
+            "and retracts the clip sources it registered"
+        );
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert_eq!(
+            stage.attribute("/P.x")?.get_at::<f64>(usd::TimeCode::new(0.0))?,
+            Some(5.0)
+        );
+        Ok(())
+    }
+
+    /// An unload made while a handle edit holds the registry's layers frees
+    /// nothing then, and the next load-rules change frees the layer.
+    #[test]
+    fn unload_inside_edit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        let identifier = stage.root_layer().identifier().to_string();
+        let handle = stage.layer_handle(&identifier).expect("the root layer");
+        handle.edit(|_| {
+            stage.unload("/P").expect("a valid path");
+            Ok(())
+        })?;
+        assert_eq!(stage.layer_count(), 2, "the busy registry freed nothing");
+        stage.load("/Nothing", LoadPolicy::WithDescendants)?;
+        assert_eq!(stage.layer_count(), 1);
+        Ok(())
+    }
+
+    /// A payload layer whose every relocate is invalid takes its relocate
+    /// error with it when it leaves.
+    #[test]
+    fn unload_drops_relocate_error() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"P\" (payload = @./payload.usda@</M>) {}\n",
+        )?;
+        fs::write(
+            dir.path().join("payload.usda"),
+            "#usda 1.0\n(\n    relocates = { </M/C/D>: </M> }\n)\ndef \"M\" {\n    def \"C\" {}\n}\n",
+        )?;
+        let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        let relocate_errors = |stage: &Stage| {
+            stage
+                .composition_errors()
+                .iter()
+                .filter(|error| matches!(error, pcp::CompositionDiagnostic::InvalidRelocate { .. }))
+                .count()
+        };
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        assert_eq!(relocate_errors(&stage), 1, "the loaded payload reports its relocate");
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1);
+        assert_eq!(relocate_errors(&stage), 0, "the error left with its layer");
+        Ok(())
+    }
+
+    /// The layer an open edit context will restore as the edit target stays
+    /// through an unload, so authoring after the context ends still reaches it.
+    #[test]
+    fn unload_keeps_saved_target() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let payload = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("payload.usda"))
+            .expect("the payload is loaded");
+        let root_layer = stage.root_layer().identifier().to_string();
+        stage.set_edit_target(EditTarget::for_layer(payload.clone()))?;
+        {
+            let _context = stage.edit_context(EditTarget::for_layer(root_layer))?;
+            stage.unload("/P")?;
+            assert_eq!(stage.layer_count(), 2, "the target the context restores stays");
+        }
+        stage.edit_layer(&payload, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/After", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A payload layer an unload kept for its unsaved edits leaves at the next
+    /// load-rules change once it is saved.
+    #[test]
+    fn saved_layer_leaves_later() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let payload = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("payload.usda"))
+            .expect("the payload is loaded");
+        stage.edit_layer(&payload, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/Unsaved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 2, "the dirty layer stays");
+        stage.layer_handle(&payload).expect("held").save()?;
+        stage.load("/Nothing", LoadPolicy::WithDescendants)?;
+        assert_eq!(stage.layer_count(), 1, "saved, it leaves");
+        Ok(())
+    }
+
+    /// A sink that unloads as an edit context switches the target cannot free
+    /// the layer the context will restore.
+    #[test]
+    fn context_switch_unload() -> Result<()> {
+        struct Unloads;
+        impl StageSink for Unloads {
+            fn edit_target_changed(&self, stage: &Stage) {
+                stage.unload("/P").expect("a valid path");
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let payload = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("payload.usda"))
+            .expect("the payload is loaded");
+        let root_layer = stage.root_layer().identifier().to_string();
+        stage.set_edit_target(EditTarget::for_layer(payload.clone()))?;
+        let sink = stage.add_sink(Unloads);
+        {
+            let _context = stage.edit_context(EditTarget::for_layer(root_layer))?;
+            assert_eq!(stage.layer_count(), 2, "the target the context restores stays");
+        }
+        stage.remove_sink(sink);
+        stage.edit_layer(&payload, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/After", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A layer read first as a value clip, then loaded as a payload layer,
+    /// edited and saved, gives its clip readers the saved values once it
+    /// leaves the stage.
+    #[test]
+    fn departed_clip_rereads() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            r#"#usda 1.0
+def "A" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/M"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    double x
+}
+def "P" (payload = @./clip.usda@</M>) {}
+"#,
+        )?;
+        fs::write(
+            dir.path().join("clip.usda"),
+            "#usda 1.0\ndef \"M\" {\n    double x.timeSamples = {\n        0: 5,\n    }\n}\n",
+        )?;
+        let stage = Stage::builder()
+            .load(InitialLoadSet::LoadNone)
+            .open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        let x = |stage: &Stage| stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(0.0));
+        assert_eq!(x(&stage)?, Some(5.0), "read through the clip's own copy");
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let clip = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("clip.usda"))
+            .expect("the payload is loaded");
+        stage.edit_layer(&clip, |e| {
+            e.data_mut().set_field(
+                &sdf::path("/M.x")?,
+                sdf::FieldKey::TimeSamples.as_str(),
+                vt::Value::TimeSamples(vec![(0.0, vt::Value::Double(7.0))]),
+            );
+            Ok(())
+        })?;
+        stage.layer_handle(&clip).expect("held").save()?;
+        assert_eq!(x(&stage)?, Some(7.0), "read through the graph's layer");
+        stage.unload("/P")?;
+        assert_eq!(stage.layer_count(), 1);
+        assert_eq!(x(&stage)?, Some(7.0), "read from the saved file");
+        Ok(())
+    }
+
+    /// A departed layer's sinks drop once the stage's composition is free, so
+    /// a sink whose drop queries the stage does not meet a borrowed stage.
+    #[test]
+    fn departed_sink_drops_free() -> Result<()> {
+        struct Probe {
+            stage: WeakStage,
+            dropped: Rc<Cell<bool>>,
+        }
+        impl sdf::LayerSink for Probe {}
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                if let Some(stage) = self.stage.upgrade() {
+                    let _ = stage.layer_count();
+                }
+                self.dropped.set(true);
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"P\" (payload = @./payload.usda@</M>) {}\n",
+        )?;
+        fs::write(
+            dir.path().join("payload.usda"),
+            "#usda 1.0\n(\n    relocates = { </M/C>: </M/D> }\n)\ndef \"M\" {\n    def \"C\" {}\n}\n",
+        )?;
+        let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
+        assert!(stage.prim("/P")?.is_valid()?);
+        // The identifier canonicalizes the path, which may spell it another way
+        // (a `\\?\` prefix on Windows).
+        let payload = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|identifier| identifier.ends_with("payload.usda"))
+            .expect("the payload is loaded");
+        let dropped = Rc::new(Cell::new(false));
+        stage.layer_handle(&payload).expect("held").add_sink(Probe {
+            stage: stage.downgrade(),
+            dropped: Rc::clone(&dropped),
+        })?;
+        stage.unload("/P")?;
+        assert!(dropped.get(), "the sink went with its layer");
+        assert_eq!(stage.layer_count(), 1);
         Ok(())
     }
 

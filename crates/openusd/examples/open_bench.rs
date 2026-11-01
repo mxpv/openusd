@@ -59,6 +59,14 @@
 //! through the `Prim` queries, so two builds can be compared with `diff`.
 //! `--load-none` opens with no payload loaded, and each `--load <path>` then
 //! loads that prim but none of its descendants.
+//!
+//! `--stream` reads the scene one chunk at a time through the one stage, in
+//! place of the phases after `open`: it loads each child of the default prim,
+//! else of the lone top-level prim, else each top-level prim, with its
+//! descendants, unloading the one before, traverses the stage, reads the
+//! chunk's arrays, and prints the heap and working set after each. Paired with
+//! `--load-none`, the heap it ends a chunk with is what an unload leaves
+//! resident.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(not(feature = "mmap"))]
@@ -77,7 +85,7 @@ fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
         eprintln!(
             "usage: open_bench [--time <t>] [--save] [--mute] [--retraverse] [--edit] [--no-heap] [--no-arrays] \
-             [--proxies | --all] [--mmap] [--status <file>] [--load-none] [--load <path>]... [--until <phase>] \
+             [--proxies | --all] [--mmap] [--status <file>] [--load-none] [--load <path>]... [--stream] [--until <phase>] \
              <root.usd[a|c|z]>"
         );
         process::exit(2);
@@ -102,6 +110,12 @@ fn main() -> Result<()> {
         stage.load(path.as_str(), LoadPolicy::WithoutDescendants)?;
     }
     phase.end("");
+
+    if args.stream {
+        stream(&stage, &args)?;
+        print_peaks();
+        return Ok(());
+    }
 
     let mut prims = Vec::new();
     if args.runs("metadata") {
@@ -137,18 +151,7 @@ fn main() -> Result<()> {
         // One cache scope over the reads: resolving the asset paths of a
         // packaged scene opens each package once.
         let _scope = ar::CacheScope::begin();
-        let time = args.time.map(TimeCode::new);
-        let (mut arrays, mut decoded) = (0usize, 0usize);
-        for path in &prims {
-            for attribute in stage.prim(path.clone())?.attributes()? {
-                if let Some(value) = attribute.get_at::<vt::Value>(time)?
-                    && let Some(bytes) = array_bytes(&value)
-                {
-                    arrays += 1;
-                    decoded += bytes;
-                }
-            }
-        }
+        let (arrays, decoded) = read_arrays(&stage, &prims, args.time)?;
         phase.end(&format!("arrays: {arrays}  decoded: {}", mib(decoded)));
     }
 
@@ -189,10 +192,7 @@ fn main() -> Result<()> {
         "graphs: {}  shared node data {}  copies {}  nodes copied {}",
         graphs.graphs, graphs.shared, graphs.copies, graphs.nodes_copied,
     );
-    eprintln!("heap peak: {}", mib(PEAK.load(Ordering::Relaxed)));
-    if let Some(memory) = Memory::read() {
-        eprintln!("working set peak: {}", mib(memory.peak_working_set));
-    }
+    print_peaks();
     let packages = usdz::package_stats();
     eprintln!(
         "packages: opens {}  directory parses {}  cache hits {}",
@@ -224,6 +224,8 @@ struct Args {
     load: Vec<String>,
     /// The last phase to run, every phase when `None`.
     until: Option<String>,
+    /// Whether to read the scene one top-level prim at a time.
+    stream: bool,
 }
 
 impl Args {
@@ -245,6 +247,7 @@ impl Args {
             load_none: false,
             load: Vec::new(),
             until: None,
+            stream: false,
         };
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -261,6 +264,7 @@ impl Args {
                 "--status" => parsed.status = Some(PathBuf::from(args.next()?)),
                 "--load-none" => parsed.load_none = true,
                 "--load" => parsed.load.push(args.next()?),
+                "--stream" => parsed.stream = true,
                 "--until" => parsed.until = Some(args.next().filter(|phase| PHASES.contains(&phase.as_str()))?),
                 _ => parsed.root = PathBuf::from(arg),
             }
@@ -292,6 +296,88 @@ fn traverse(stage: &Stage, predicate: PrimPredicate) -> Result<Vec<sdf::Path>> {
         stage.prim(path.clone())?.type_name()?;
     }
     Ok(prims)
+}
+
+/// Reads `stage` one chunk at a time, a chunk being a child of the default
+/// prim, else of the lone top-level prim, else a top-level prim: loads each
+/// with its descendants, unloading the one before, traverses the stage and
+/// reads the chunk's arrays, and prints the heap the chunk leaves.
+fn stream(stage: &Stage, args: &Args) -> Result<()> {
+    // A scene under one default prim, or one top-level prim, streams that
+    // prim's children.
+    let root = stage.prim(sdf::Path::abs_root())?.children()?;
+    let parent = match (stage.default_prim(), root.as_slice()) {
+        (Some(name), _) => sdf::default_prim_path(name.as_str()).unwrap_or_else(sdf::Path::abs_root),
+        (None, [only]) => only.path().clone(),
+        (None, _) => sdf::Path::abs_root(),
+    };
+    let tops: Vec<sdf::Path> = stage
+        .prim(parent)?
+        .children()?
+        .iter()
+        .map(|prim| prim.path().clone())
+        .collect();
+    let mut previous: Option<sdf::Path> = None;
+    for top in &tops {
+        let phase = Phase::start("chunk");
+        stage.load_and_unload(
+            [(top.clone(), LoadPolicy::WithDescendants)],
+            previous.replace(top.clone()),
+        )?;
+        // The scope ends before the heap is read, so the packages it kept open
+        // do not count as what the chunk leaves.
+        let (prims, arrays) = {
+            let _scope = ar::CacheScope::begin();
+            let prims: Vec<sdf::Path> = traverse(stage, args.predicate)?
+                .into_iter()
+                .filter(|path| path.has_prefix(top))
+                .collect();
+            let (arrays, _) = read_arrays(stage, &prims, args.time)?;
+            (prims, arrays)
+        };
+        phase.end(&format!(
+            "{top}  prims: {}  arrays: {arrays}  heap: {}  layers: {}",
+            prims.len(),
+            mib(LIVE.load(Ordering::Relaxed)),
+            stage.layer_count()
+        ));
+    }
+    let phase = Phase::start("unload");
+    if let Some(last) = previous {
+        stage.unload(last)?;
+    }
+    phase.end(&format!(
+        "heap: {}  layers: {}",
+        mib(LIVE.load(Ordering::Relaxed)),
+        stage.layer_count()
+    ));
+    Ok(())
+}
+
+/// Prints the most heap the run held and the process's working-set peak.
+fn print_peaks() {
+    eprintln!("heap peak: {}", mib(PEAK.load(Ordering::Relaxed)));
+    if let Some(memory) = Memory::read() {
+        eprintln!("working set peak: {}", mib(memory.peak_working_set));
+    }
+}
+
+/// Reads every attribute of `prims` at `time` (the default value when `None`),
+/// returning how many hold an array and the bytes the arrays decoded to.
+fn read_arrays(stage: &Stage, prims: &[sdf::Path], time: Option<f64>) -> Result<(usize, usize)> {
+    let time = time.map(TimeCode::new);
+    let (mut arrays, mut decoded) = (0usize, 0usize);
+    for path in prims {
+        for attribute in stage.prim(path.clone())?.attributes()? {
+            if let Some(value) = attribute.get_at::<vt::Value>(time)?
+                && let Some(bytes) = array_bytes(&value)
+            {
+                arrays += 1;
+                decoded += bytes;
+            }
+        }
+    }
+    Ok((arrays, decoded))
 }
 
 /// Writes one line per prim in `prims` to `file`: the path, then `1` or `0`

@@ -813,6 +813,59 @@ struct ActiveClip<'a> {
 }
 
 impl ClipCache {
+    /// Adds to `kept` every layer a clip set on a prim `cached` names is
+    /// anchored at or reads its manifest from. A set on a prim no cached index
+    /// holds keeps nothing: the prim resolves its sets afresh when it next
+    /// composes.
+    pub(crate) fn mark_live_layers(&self, kept: &mut HashSet<LayerId>, cached: impl Fn(&Path) -> bool) {
+        let sources = self
+            .set_sources
+            .iter()
+            .filter(|(prim, _)| cached(prim))
+            .flat_map(|(_, sets)| sets.values().map(|sources| &sources.from));
+        let manifests = self
+            .manifests
+            .iter()
+            .filter(|(key, _)| cached(&key.prim))
+            .map(|(_, entry)| &entry.generated_from);
+        for set in sources.chain(manifests) {
+            kept.insert(set.source.layer);
+            kept.extend(set.manifest_layer);
+        }
+    }
+
+    /// Drops every clip set anchored at a layer in `dead`, or reading its
+    /// manifest from one, layers leaving the stage's graph, with the manifest
+    /// the cache generated for it.
+    pub(crate) fn forget_layers(&mut self, dead: &HashSet<LayerId>) {
+        let stale = |set: &ResolvedClipSet| {
+            dead.contains(&set.source.layer) || set.manifest_layer.is_some_and(|layer| dead.contains(&layer))
+        };
+        // Each dropped set retracts the reverse registrations it made, which
+        // nothing could retract once its identifiers are gone.
+        let dependents = &mut self.dependents;
+        for (prim, sets) in &mut self.set_sources {
+            sets.retain(|_, sources| {
+                let keep = !stale(&sources.from);
+                if !keep {
+                    let key = sources.from.key(prim);
+                    Self::rewire_dependents(dependents, &key, &sources.identifiers, &HashSet::new());
+                }
+                keep
+            });
+        }
+        self.set_sources.retain(|_, sets| !sets.is_empty());
+        let keys: Vec<ClipSetKey> = self
+            .manifests
+            .iter()
+            .filter(|(_, entry)| stale(&entry.generated_from))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &keys {
+            self.drop_generated_manifest(key);
+        }
+    }
+
     /// The manifest layer of `resolved`, for a set whose manifest declares
     /// the attribute at `clip_path`, and `None` for a set with no manifest
     /// that does.
@@ -1308,7 +1361,10 @@ impl ClipCache {
     /// Everything a change to the layer `identifier` invalidates: the clip sets
     /// that read it, returned as the anchor prims whose composed values may have
     /// moved, having first dropped the synthesized manifests generated from its
-    /// content.
+    /// content. Every caller reports a layer the stage's graph has joined,
+    /// edited or lost, so the cache's own copy of it is dropped too: a clip
+    /// reads the graph's layer while the graph holds it, and opens its file
+    /// afresh once it leaves.
     ///
     /// A synthesized manifest is derived from what its source clips declare, so
     /// an edit to one restales it; an authored manifest and the clips
@@ -1316,6 +1372,7 @@ impl ClipCache {
     /// snapshotted before anything is dropped, since dropping mutates the very
     /// map the answer is read from.
     pub(super) fn invalidate_layer(&mut self, identifier: &str) -> Vec<Path> {
+        self.clip_layers.remove(identifier);
         let Some(dependents) = self.dependents.get(identifier) else {
             return Vec::new();
         };

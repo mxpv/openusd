@@ -110,6 +110,8 @@ pub struct Layer {
     /// a [`save`](Self::save) writes it back in. `None` for a layer built in
     /// memory, which saves in the format its identifier's extension names.
     format: Option<&'static dyn super::FileFormat>,
+    /// Whether a commit changed the layer since it was read or last saved.
+    unsaved: bool,
 }
 
 impl Layer {
@@ -207,6 +209,7 @@ impl Layer {
             subscribers: sink::Set::default(),
             resolver: None,
             format: None,
+            unsaved: false,
         }
     }
 
@@ -341,21 +344,29 @@ impl Layer {
         self.subscribers.remove(id);
     }
 
-    /// Whether the layer has edits staged in its overlay but not yet committed.
-    /// Mirrors C++ `SdfLayer::IsDirty` for the in-flight-edit case.
-    ///
-    /// Conservative about staged content: any uncommitted overlay write counts,
-    /// including an idempotent edit (a field re-set to the value the base already
-    /// holds) whose commit would derive no composition change.
+    /// Whether the layer holds edits not yet saved: committed since it was
+    /// read or last [saved](Self::save), or staged in its overlay and not yet
+    /// committed (C++ `SdfLayer::IsDirty`). An edit that a commit found to
+    /// change nothing does not count; a staged one does, even one that re-sets
+    /// a field to the value the base already holds.
     pub fn is_dirty(&self) -> bool {
-        !self.data.is_empty()
+        self.unsaved || !self.data.is_empty()
+    }
+
+    /// Whether reading the layer's file again would give back what the layer
+    /// holds: it was read from a file and holds no unsaved edits. An anonymous
+    /// layer or one built in memory has no file to read.
+    pub(crate) fn is_rereadable(&self) -> bool {
+        !self.is_anonymous() && self.format.is_some() && !self.is_dirty()
     }
 
     /// Commit any staged edits into the backend to keep their content, without
     /// deriving a change record or notifying sinks. Called when a layer joins a
     /// stage: its content is composed fresh by the layer-stack recompose, so a
-    /// record from prior direct edits would be redundant.
+    /// record from prior direct edits would be redundant. The edits stay
+    /// unsaved.
     pub(crate) fn discard_changes(&mut self) {
+        self.unsaved |= !self.data.is_empty();
         self.data.commit();
     }
 
@@ -556,6 +567,7 @@ impl Layer {
             };
             self.data = CowData::new(reopened.unwrap_or(serialized));
         }
+        self.unsaved &= replaced.is_err();
         replaced
     }
 
@@ -1242,6 +1254,7 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     // handed on, so the whole group's data lands together.
     let changed = guard.layers.iter().any(|layer| !layer.changes.is_empty());
     for layer in guard.layers.iter_mut() {
+        layer.unsaved |= !layer.changes.is_empty();
         layer.data.commit();
     }
     // The group is committed, so the guard's drop leaves every overlay in place.
@@ -1879,8 +1892,8 @@ mod tests {
         );
     }
 
-    /// `discard_changes` keeps committed content in the backend and leaves the
-    /// layer non-dirty, so a layer joining a stage is composed fresh with no stale
+    /// `discard_changes` keeps committed content in the backend and leaves
+    /// nothing staged, so a layer joining a stage is composed fresh with no stale
     /// change record.
     #[test]
     fn discard_changes_keeps_content() {
@@ -1892,7 +1905,7 @@ mod tests {
         });
 
         layer.discard_changes();
-        assert!(!layer.is_dirty());
+        assert!(layer.data.is_empty(), "nothing staged remains");
         assert!(
             layer.prim(Path::new("/World").unwrap()).unwrap().is_some(),
             "the authored content survives"
@@ -2857,6 +2870,21 @@ mod tests {
     /// gives, as if the layer had been read through it.
     fn opened_through(layer: &mut Layer, open: impl Fn() -> io::Result<Box<dyn ar::Asset>> + 'static) {
         layer.resolver = Some(Rc::new(ar::tests::TestResolver(open)));
+    }
+
+    /// A layer read from its file is clean, a committed edit makes it dirty,
+    /// and a save cleans it.
+    #[test]
+    fn save_clears_dirty() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = crate_fixture(dir.path())?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        assert!(!layer.is_dirty());
+        set_component(&mut layer);
+        assert!(layer.is_dirty());
+        layer.save()?;
+        assert!(!layer.is_dirty());
+        Ok(())
     }
 
     /// The crate fixture in `dir`, read into memory and edited, with its

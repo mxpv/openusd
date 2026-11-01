@@ -104,6 +104,13 @@ pub(super) struct Dependencies {
 }
 
 impl Dependencies {
+    /// Adds to `kept` every layer a cached prim index depends on outside its
+    /// layer stacks: a reference or payload target read only for its
+    /// `defaultPrim`.
+    pub(crate) fn mark_live_layers(&self, kept: &mut HashSet<LayerId>) {
+        kept.extend(self.by_default_prim.keys());
+    }
+
     /// Register every `(layer stack, node.path)` site referenced by `index` as a
     /// dependency of `prim_index_path`, together with the per-stack
     /// expression-variable names its build read (`expr_var_deps`, from

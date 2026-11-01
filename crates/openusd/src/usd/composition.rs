@@ -143,6 +143,19 @@ pub(super) trait CompositionHooks {
     fn observe_abort(&self, generation: u64) {
         let _ = generation;
     }
+
+    /// Tells the stage's internal observers that the layers in `layers` are
+    /// about to leave the graph. Runs no user code.
+    fn departed(&self, layers: &HashSet<pcp::LayerId>) {
+        let _ = layers;
+    }
+
+    /// The identifiers of the stage's edit target layer and of the layers
+    /// its open edit contexts will restore as the target, which a layer
+    /// reclamation keeps.
+    fn edit_target_identifiers(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One notice waiting in the outbox for delivery.
@@ -700,6 +713,62 @@ impl StageComposition {
             cache.mark_live_stacks(&mut marks);
             graph.sweep_stacks(marks);
         });
+    }
+
+    /// Drops the layers no live layer stack uses and nothing else keeps
+    /// (`LayerGraph::unused_layers`) once a load-rules change has unloaded
+    /// what used them: each first reaches the stage's observers as
+    /// [`departed`](CompositionHooks::departed), then leaves the graph, and
+    /// the registry frees it unless something else holds it (C++ releases a
+    /// payload's layer stacks, and with them its layers, as its prim indices
+    /// go). A clip set on one is dropped, and a clip that read one through the
+    /// graph reads its own copy again. Also kept is a layer with no file to
+    /// read it from again, anonymous or built in memory.
+    ///
+    /// Kept besides are a layer with unsaved edits and the edit target's
+    /// layer, the layers open edit contexts restore included. C++ frees a
+    /// dirty layer nothing holds and holds the edit target's weakly. An edit
+    /// leaves the prims it changed to recompose on their next read, so until
+    /// then a layer only they use owns no cached stack and leaves here too: it
+    /// is read from its file again on their next read, and the pins keep that
+    /// from losing edits.
+    //
+    // TODO: keep a drain-evicted prim's stacks owned until it recomposes or
+    // leaves the namespace (C++ `PcpLifeboat`, which C++ needs only within one
+    // change round as `UsdStage` recomposes at once). Then a layer reclaims at
+    // every edit seam, a clean layer a prim waiting to recompose uses stays
+    // (`/P`'s payload layer after an edit resyncs `/P` and `/Q` unloads), and
+    // the pins are a policy. Releasing a prim never read again needs its own
+    // rule.
+    fn reclaim_unused_layers(&self, hooks: &dyn CompositionHooks) {
+        // A layer leaves only once its last stack has. One a pin kept (a save
+        // not yet made, an edit target), or one the registry's read or edit
+        // held from a reclaim, leaves at the next load-rules change after.
+        if !self.layers.borrow().reclaim_due() || self.store.ensure_writable().is_err() {
+            return;
+        }
+        // TODO(perf): every reclaim walks every stack's members and every
+        // graph layer. `LayerStackRegistry::sweep` returning the layers whose
+        // `using` entry emptied would make those the only candidates.
+        let edit_targets = hooks.edit_target_identifiers();
+        let (unused, retry) = self.update_pair(|graph, cache| {
+            let mut kept = HashSet::new();
+            cache.mark_live_layers(&mut kept);
+            let pins = edit_targets.iter().filter_map(|target| graph.id_of(target)).collect();
+            graph.unused_layers(kept, &pins)
+        });
+        if !unused.is_empty() {
+            hooks.departed(&unused);
+        }
+        let departed = self.update_pair(|graph, cache| {
+            let departed = graph.remove_layers(&unused, retry);
+            cache.forget_layers(&unused, &departed.identifiers);
+            departed
+        });
+        // Freed with every composition borrow released: a freed layer's sinks
+        // drop with it, and they may reach the stage.
+        drop(departed);
+        self.store.sweep();
     }
 
     /// Add `layer` to the stage's graph, returning its id and whether it newly
@@ -1345,6 +1414,7 @@ impl StageComposition {
         edit(&mut rules);
         let victims = self.swap_load_rules(rules, hooks);
         self.reclaim_stale_stacks();
+        self.reclaim_unused_layers(hooks);
         victims
     }
 
