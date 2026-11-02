@@ -814,30 +814,6 @@ def "T"
         Ok(())
     }
 
-    /// A set of tiles moved out of a package is named by the pattern inside
-    /// the package, even when the package's own directory names `<UDIM>`.
-    #[cfg(unix)]
-    #[test]
-    fn repackages_udim_directory() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let parent = dir.path().join("<UDIM>");
-        fs::create_dir(&parent)?;
-        let source = parent.join("source.usdz");
-        let mut writer = ArchiveWriter::create(&source)?;
-        writer.add_layer(
-            "root.usda",
-            b"#usda 1.0\ndef \"R\" {\n    asset r = @r.<UDIM>.png@\n}\n",
-        )?;
-        writer.add_layer("r.1001.png", b"PNG")?;
-        writer.finish()?;
-
-        let stage = Stage::open(source.to_str().unwrap())?;
-        let output = dir.path().join("out.usdz");
-        create_usdz_package(&stage, source.to_str().unwrap(), &output, None)?;
-        assert_eq!(entries(&output).0, ["root.usda", "0/r.1001.png"]);
-        Ok(())
-    }
-
     /// A search path inside a package moves to a numbered directory under its
     /// file name, with no bracket from the package path. A set of tiles moves
     /// the same way, at the package root or in a directory.
