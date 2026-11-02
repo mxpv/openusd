@@ -292,8 +292,9 @@ pub(crate) struct LayerGraph {
     /// permanently marked in every sweep: their layers stay open for the
     /// graph's life and nothing else re-mints them.
     eager_stacks: Vec<LayerStackId>,
-    /// Whether a stack sweep removed a stack since the layers were last
-    /// reclaimed.
+    /// Whether a stack sweep removed a stack, or a clip set released a
+    /// layer ([`mark_reclaim_due`](Self::mark_reclaim_due)), since the layers
+    /// were last reclaimed.
     reclaim_due: bool,
     /// The layers the graph holds only for value clips, which take no part in
     /// composition: no stack holds one, its `subLayers` are not resolved, and
@@ -1427,6 +1428,12 @@ impl LayerGraph {
         let removed = self.stacks.sweep(marks);
         self.sublayers.retire_stacks(&removed);
         self.reclaim_due |= !removed.is_empty();
+    }
+
+    /// Makes a [`Reclaim::Unused`] reclaim due: a layer something released
+    /// may now be unused.
+    pub(crate) fn mark_reclaim_due(&mut self) {
+        self.reclaim_due = true;
     }
 
     /// Whether a `reclaim` may find a layer to free: a stack sweep removed a

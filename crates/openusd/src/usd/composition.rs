@@ -880,6 +880,11 @@ impl StageComposition {
         let pass = |view: &pcp::LayerView<'_>, cache: &mut pcp::IndexCache| cache.settle_pass(view, &mut recovered);
         let _ = self.fixpoint(pass, settled, hooks, found);
         found.subtrees.extend(recovered);
+        // A clip set no anchor resolves any more leaves its layers to the
+        // next reclaim.
+        if self.cache.borrow_mut().take_clips_released() {
+            self.layers.borrow_mut().mark_reclaim_due();
+        }
     }
 
     /// Settles the work set on a settled stage, for a caller whose own

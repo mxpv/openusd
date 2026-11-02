@@ -298,6 +298,8 @@ struct InvalidationEffects {
     spec: bool,
     /// The prim composes different values, as far as the scope reaches.
     value: Option<ValueScope>,
+    /// Clip metadata changed, so the prims beneath may read other clips.
+    clips: bool,
     /// Resolved-target memos the edit restales.
     targets: Vec<TargetMemoKey>,
     /// A property spec appeared or vanished, so the prim's composed property
@@ -615,8 +617,11 @@ impl Changes {
         // whole subtree here (`stage.cpp`'s `UsdIsClipRelatedField`, with an
         // `XXX` wishing it were narrower); restaling values is the narrower
         // answer.
-        let clips = entry.authored_fields().any(|field| clip::is_clip_field(field.as_str()));
-        effects.value = Some(if clips { ValueScope::Subtree } else { ValueScope::Prim });
+        effects.clips = entry.authored_fields().any(|field| clip::is_clip_field(field.as_str()));
+        effects.value = Some(match effects.clips {
+            true => ValueScope::Subtree,
+            false => ValueScope::Prim,
+        });
         effects
     }
 
@@ -722,6 +727,7 @@ impl Changes {
                 scope,
                 properties: effects.properties,
                 target_keys: effects.targets.into_iter().collect(),
+                clips: effects.clips,
             };
             let prim = path.prim_path();
             self.fanout_values(cache, graph, layer, &prim, &work);
@@ -837,6 +843,7 @@ impl Changes {
         item.scope = item.scope.max(work.scope);
         item.target_keys.extend(work.target_keys.iter().cloned());
         item.properties |= work.properties;
+        item.clips |= work.clips;
     }
 
     /// Drops every index depending on `(layer, path)`, plus the literal `path`
@@ -995,6 +1002,7 @@ impl Changes {
                 victim.clone(),
                 &ScopedInvalidation {
                     scope: ValueScope::Subtree,
+                    clips: true,
                     ..ScopedInvalidation::default()
                 },
             );
@@ -1120,6 +1128,7 @@ fn normalize_scopes(items: BTreeMap<Path, ScopedInvalidation>) -> Vec<(Path, Sco
         if absorbed {
             covering.target_keys.append(&mut item.target_keys);
             covering.properties |= item.properties;
+            covering.clips |= item.clips;
         }
         absorbed
     });

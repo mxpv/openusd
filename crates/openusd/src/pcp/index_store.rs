@@ -144,6 +144,10 @@ pub(crate) struct ScopedInvalidation {
     /// keep their memos. The graph is intact, so the index survives; the next
     /// query recomposes the targets live.
     pub target_keys: BTreeSet<TargetMemoKey>,
+    /// Whether the clip sets of the prims reached may resolve to other clips:
+    /// clip metadata changed, or an expression variable an `asset` value
+    /// reads.
+    pub clips: bool,
 }
 
 /// How far a value-tier invalidation reaches from the prim it is recorded at.

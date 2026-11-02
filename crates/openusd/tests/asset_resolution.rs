@@ -13,7 +13,7 @@ use openusd::pcp;
 use openusd::sdf;
 use openusd::usd::{self, Stage};
 use openusd::usdz::ArchiveWriter;
-use openusd::{ar, vt};
+use openusd::{ar, gf, vt};
 
 /// Writes `source` as `scene.usda` under `dir` and opens it against the
 /// process-wide schemas.
@@ -885,6 +885,119 @@ fn clip_asset_paths_expression() {
 
     assert_eq!(value_at(&stage, "/P.v", 1.0), Some(33.0));
     assert!(stage.composition_errors().is_empty());
+}
+
+/// A variable edit that points a clip set at another clip releases the one
+/// it left at the next reclaim, though nothing read the clipped value since.
+#[test]
+fn stepped_clip_released() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+    write_clip(&dir, "s021.usda", &[(1.0, 21.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\"`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+    let holds = |stage: &Stage, name: &str| stage.layer_identifiers().iter().any(|id| id.ends_with(name));
+    assert!(holds(&stage, "s020.usda"));
+
+    stage.set_expression_variables(HashMap::from([(
+        "SHOT".to_string(),
+        vt::Value::String("s021".to_string()),
+    )]))?;
+    // An unrelated load-rules change reclaims.
+    stage.unload("/Elsewhere")?;
+    assert!(!holds(&stage, "s020.usda"), "the clip the set left is released");
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(21.0));
+    Ok(())
+}
+
+/// A clip set stepped away and back with no read between keeps the clip it
+/// reads again.
+#[test]
+fn stepped_clip_returns() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+    write_clip(&dir, "s021.usda", &[(1.0, 21.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@`\"./${SHOT}.usda\"`@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+    let shot = |name: &str| HashMap::from([("SHOT".to_string(), vt::Value::String(name.to_string()))]);
+
+    stage.set_expression_variables(shot("s021"))?;
+    stage.set_expression_variables(shot("s020"))?;
+    stage.unload("/Elsewhere")?;
+    let held = stage.layer_identifiers();
+    assert!(held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
+    Ok(())
+}
+
+/// An edit to a clip set's schedule that leaves its clips keeps the clip
+/// layer it reads through the next reclaim.
+#[test]
+fn clip_schedule_edit_keeps() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@./s020.usda@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+
+    usd::ClipsAPI::from_prim_unchecked(stage.prim("/P")?).set_clip_active("default", vec![gf::vec2d(0.0, 0.0)])?;
+    stage.unload("/Elsewhere")?;
+    let held = stage.layer_identifiers();
+    assert!(held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
+    Ok(())
+}
+
+/// A variant switch that points a clip set at another clip releases the
+/// one it left at the next reclaim.
+#[test]
+fn clip_variant_switch_releases() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+    write_clip(&dir, "s021.usda", &[(1.0, 21.0)]);
+    let clips = |clip: &str| {
+        format!(
+            "            clips = {{\n                dictionary default = {{\n                    asset[] assetPaths \
+             = [@./{clip}@]\n                    double2[] active = [(1, 0)]\n                    string primPath = \
+             \"/P\"\n                }}\n            }}\n"
+        )
+    };
+    let stage = open_scene(
+        &dir,
+        &format!(
+            "#usda 1.0\ndef \"P\" (\n    variants = {{ string shot = \"a\" }}\n    prepend variantSets = \"shot\"\n)\n{{\n    \
+             double v\n    variantSet \"shot\" = {{\n        \"a\" (\n{}        ) {{}}\n        \"b\" (\n{}        ) {{}}\n    \
+             }}\n}}\n",
+            clips("s020.usda"),
+            clips("s021.usda"),
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+
+    stage.prim("/P")?.variant_sets().set_selection("shot", "b")?;
+    stage.unload("/Elsewhere")?;
+    let held = stage.layer_identifiers();
+    assert!(!held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(21.0));
+    Ok(())
 }
 
 /// An expression `manifestAssetPath` is evaluated, so the manifest it names is

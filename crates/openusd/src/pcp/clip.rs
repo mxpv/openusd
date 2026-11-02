@@ -24,6 +24,7 @@
 //! the evaluation and carries the same note.
 
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::sync::Arc;
 
 use crate::gf;
@@ -760,6 +761,13 @@ pub(crate) struct ClipCache {
     /// clips its set already names, and only for a set that authors no manifest
     /// of its own, so its sources are exactly that set's.
     dependents: HashMap<String, HashSet<ClipSetKey>>,
+    /// The anchors whose sets a restale may have pointed at other clips
+    /// while their index stayed cached, for settlement to register again as
+    /// they resolve now ([`refresh`](Self::refresh)).
+    stale: sdf::PathSet,
+    /// Whether a layer some set read lost its last registration, for the
+    /// stage to reclaim.
+    released: bool,
 }
 
 /// Where a clip or manifest layer a read names stands
@@ -833,10 +841,10 @@ impl ClipCache {
     /// `graph` holds it under. A set on a prim no cached index holds keeps
     /// nothing: the prim resolves its sets afresh when it next composes.
     ///
-    /// TODO: a clip layer leaves the graph only at a reclaim once no set a
-    /// cached prim holds names it, and reclaims run at load-rules changes and
-    /// mutes, so a session that steps an expression variable through many
-    /// values holds one clip layer per value visited until then.
+    /// TODO: a released clip layer leaves the graph at the next reclaim, and
+    /// reclaims run at load-rules changes and mutes, so a session that steps
+    /// an expression variable through many values holds one clip layer per
+    /// value visited until then. Reclaiming at every edit boundary ends it.
     pub(crate) fn mark_live_layers(
         &self,
         graph: &LayerGraph,
@@ -1388,7 +1396,7 @@ impl ClipCache {
             )
             .map(|entry| entry.identifiers)
             .unwrap_or_default();
-        Self::rewire_dependents(&mut self.dependents, &key, &previous, &identifiers);
+        self.released |= Self::rewire_dependents(&mut self.dependents, &key, &previous, &identifiers);
     }
 
     /// The clip and manifest layer identifiers `resolved` reads: every scheduled
@@ -1439,17 +1447,95 @@ impl ClipCache {
     /// was composed again or shown to be gone: they resolve afresh when it
     /// next composes, and until then name no layer to keep.
     pub(super) fn forget_prim(&mut self, anchor: &Path) {
+        self.stale.remove(anchor);
         let Some(sets) = self.set_sources.remove(anchor) else {
             return;
         };
-        // A set is registered as it is offered to value resolution, before
-        // any manifest is generated for it, so the registrations name every
-        // generated manifest too.
         for sources in sets.into_values() {
-            let key = sources.from.key(anchor);
-            Self::rewire_dependents(&mut self.dependents, &key, &sources.identifiers, &HashSet::new());
-            self.drop_generated_manifest(&key);
+            self.release_set(anchor, &sources);
         }
+    }
+
+    /// Drops what the set registered at `anchor` as `sources` held: the
+    /// layers it named stop depending on it, and a manifest generated for it
+    /// goes. A set is registered as it is offered to value resolution,
+    /// before any manifest is generated for it, so the registrations name
+    /// every generated manifest too.
+    fn release_set(&mut self, anchor: &Path, sources: &SetSources) {
+        let key = sources.from.key(anchor);
+        self.released |= Self::rewire_dependents(&mut self.dependents, &key, &sources.identifiers, &HashSet::new());
+        self.drop_generated_manifest(&key);
+    }
+
+    /// Records that a restale reached the subtrees at `roots` in a way that
+    /// can point a clip set at other clips: the anchors there whose sets are
+    /// registered may resolve elsewhere now.
+    pub(super) fn mark_stale(&mut self, roots: &[Path]) {
+        if roots.is_empty() || self.set_sources.is_empty() {
+            return;
+        }
+        // TODO(perf): every anchor is tested against every root; a
+        // prefix-ordered map would visit only the roots' subtrees.
+        let reached = self
+            .set_sources
+            .keys()
+            .filter(|anchor| roots.iter().any(|root| anchor.has_prefix(root)));
+        self.stale.extend(reached.cloned());
+    }
+
+    /// Whether a restaled anchor waits for [`refresh`](Self::refresh).
+    pub(super) fn has_stale(&self) -> bool {
+        !self.stale.is_empty()
+    }
+
+    /// The restaled anchors ([`mark_stale`](Self::mark_stale)).
+    pub(super) fn stale(&self) -> Vec<Path> {
+        self.stale.iter().cloned().collect()
+    }
+
+    /// Settles the restaled `anchor` with nothing to refresh.
+    pub(super) fn unmark(&mut self, anchor: &Path) {
+        self.stale.remove(anchor);
+    }
+
+    /// Settles the restaled `anchor` against `current`, the sets it resolves
+    /// now: each set registered at it is registered again as the set of its
+    /// name resolves ([`register_set_sources`](Self::register_set_sources)),
+    /// its generated manifest dropped when that moved, and one no longer
+    /// resolved is released ([`release_set`](Self::release_set)). A set only
+    /// `current` names waits for a read to offer it.
+    pub(super) fn refresh(&mut self, graph: &LayerView<'_>, anchor: &Path, current: &[ResolvedClipSet]) {
+        self.stale.remove(anchor);
+        let Some(sets) = self.set_sources.get_mut(anchor) else {
+            return;
+        };
+        let gone: Vec<SetSources> = sets
+            .extract_if(|name, _| !current.iter().any(|set| &set.set.name == name))
+            .map(|(_, sources)| sources)
+            .collect();
+        let moved: Vec<&ResolvedClipSet> = current
+            .iter()
+            .filter(|set| {
+                sets.get(&set.set.name)
+                    .is_some_and(|sources| !sources.from.same_resolution(set))
+            })
+            .collect();
+        if sets.is_empty() {
+            self.set_sources.remove(anchor);
+        }
+        for sources in &gone {
+            self.release_set(anchor, sources);
+        }
+        for set in moved {
+            self.drop_generated_manifest(&set.key(anchor));
+            self.register_set_sources(graph, anchor, set);
+        }
+    }
+
+    /// Takes whether a clip or manifest layer lost the last set that read
+    /// it.
+    pub(super) fn take_released(&mut self) -> bool {
+        mem::take(&mut self.released)
     }
 
     /// Discards the synthesized manifest generated for `key`, freeing its layer,
@@ -1463,7 +1549,8 @@ impl ClipCache {
 
     /// Moves `key`'s reverse registrations from `previous` to `current`:
     /// identifiers it no longer names drop it, the ones it gained take it on,
-    /// and an identifier nothing depends on any more leaves the map.
+    /// and an identifier nothing depends on any more leaves the map. Returns
+    /// whether one did, so its layer may now be reclaimed.
     ///
     /// Always called with the forward entry already replaced, so the two halves
     /// cannot end up disagreeing about what a set reads.
@@ -1472,7 +1559,8 @@ impl ClipCache {
         key: &ClipSetKey,
         previous: &HashSet<String>,
         current: &HashSet<String>,
-    ) {
+    ) -> bool {
+        let mut emptied = false;
         for identifier in previous.difference(current) {
             let Some(entry) = dependents.get_mut(identifier) else {
                 continue;
@@ -1480,11 +1568,13 @@ impl ClipCache {
             entry.remove(key);
             if entry.is_empty() {
                 dependents.remove(identifier);
+                emptied = true;
             }
         }
         for identifier in current.difference(previous) {
             dependents.entry(identifier.clone()).or_default().insert(key.clone());
         }
+        emptied
     }
 
     /// Whether the manifest layer `manifest` declares the attribute at
