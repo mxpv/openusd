@@ -354,6 +354,10 @@ impl StageComposition {
         let mut cache = self.cache.borrow_mut();
         let reported = cache.query_diagnostic_count();
         let result = query(&view, &mut cache);
+        // The prims a load or a load-rules swap dropped off an edit seam are
+        // released here, so a read-only session does not accumulate them.
+        // TODO: settle them here (rebuild or retire each) instead.
+        cache.release_evicted();
         cache.swap_pending_loads(demands);
         cache.swap_clip_loads(clips, reported);
         result
@@ -769,9 +773,9 @@ impl StageComposition {
     /// prim index, no pending demand, no eager graph root, no live
     /// descendant's variable-source ancestry — see `LayerGraph::sweep_stacks`.
     /// The sweep runs when a stack lost its last cache owner
-    /// (`IndexCache::ownership_lost`, unthresholded: a cached entry's removal
-    /// releases its stacks immediately, and the next edit seam collects and
-    /// retires the orphans' diagnostics) or when registry creation churn
+    /// (`IndexCache::ownership_lost`, unthresholded: a released work-set entry
+    /// stops owning its stacks, and the next edit seam collects and retires
+    /// the orphans' diagnostics) or when registry creation churn
     /// passed the gate (`LayerGraph::sweep_ripe`, which amortizes re-keying
     /// mints and interner value churn).
     ///
@@ -784,6 +788,9 @@ impl StageComposition {
     /// sweep there would reclaim out from under them.
     fn reclaim_stale_stacks(&self) {
         self.update_pair(|graph, cache| {
+            // The dropped prims' stacks are released before the sweep reads
+            // the owners. TODO: settle the dropped prims instead.
+            cache.release_evicted();
             if !cache.ownership_lost() && !graph.sweep_ripe() {
                 return;
             }

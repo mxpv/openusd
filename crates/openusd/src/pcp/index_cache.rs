@@ -1361,6 +1361,11 @@ impl IndexCache {
         self.store.ownership_lost()
     }
 
+    /// Releases the work set ([`IndexStore::release_evicted`]).
+    pub(crate) fn release_evicted(&mut self) {
+        self.store.release_evicted();
+    }
+
     /// Clears the ownership-loss flag after a sweep consumed it.
     pub(crate) fn reset_ownership_lost(&mut self) {
         self.store.reset_ownership_lost();
@@ -4049,6 +4054,7 @@ fn unculled_entry(index: PrimIndex, context: CompositionContext) -> PrimEntry {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::slice;
     use std::sync::Arc;
 
     use crate::Result;
@@ -7907,6 +7913,167 @@ def \"Ref\" {}
                 .any(|e| matches!(e, CompositionDiagnostic::InvalidRelocate { .. })),
             "fixing the relocate must clear the diagnostic"
         );
+        Ok(())
+    }
+
+    /// The paths the work set holds, parents before children.
+    fn evicted(cache: &IndexCache) -> Vec<String> {
+        super::super::index_store::tests::evicted(&cache.store)
+    }
+
+    /// Composes each of `paths`.
+    fn compose(graph: &LayerGraph, cache: &mut IndexCache, paths: &[&str]) -> Result<()> {
+        for path in paths {
+            cache.ensure_index(&graph.read_view(), &sdf::path(path)?)?;
+        }
+        Ok(())
+    }
+
+    /// The two-prim scene the work-set tests edit: `/Ref` references
+    /// `/Source`, and `/Other` stands apart.
+    const REFERENCING: &str = r#"#usda 1.0
+
+def "Source"
+{
+    def "Inner"
+    {
+        double x = 1
+    }
+}
+
+def "Ref" (
+    references = </Source>
+)
+{
+}
+
+def "Other"
+{
+}
+"#;
+
+    /// A value edit drops no index, so the work set stays empty.
+    #[test]
+    fn value_edit_evicts_nothing() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(REFERENCING);
+        compose(&graph, &mut cache, &["/Source", "/Source/Inner", "/Ref", "/Ref/Inner"])?;
+        edit_field(&mut graph, &mut cache, "/Source/Inner.x", FieldKey::Default)?;
+        assert!(evicted(&cache).is_empty());
+        Ok(())
+    }
+
+    /// A structural edit records exactly the cached prims it dropped. A prim
+    /// composed again leaves the work set, and releasing it empties the rest.
+    #[test]
+    fn structural_edit_evicts() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(REFERENCING);
+        compose(&graph, &mut cache, &["/Ref", "/Ref/Inner", "/Other"])?;
+        edit_field(&mut graph, &mut cache, "/Ref", FieldKey::References)?;
+        assert_eq!(evicted(&cache), ["/Ref", "/Ref/Inner"]);
+
+        compose(&graph, &mut cache, &["/Ref"])?;
+        assert_eq!(evicted(&cache), ["/Ref/Inner"], "a rebuilt prim settles");
+        cache.release_evicted();
+        assert!(evicted(&cache).is_empty());
+        Ok(())
+    }
+
+    /// A layer-stack invalidation records the cached prims composed from the
+    /// layer.
+    #[test]
+    fn layer_invalidation_evicts() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack(REFERENCING);
+        compose(&graph, &mut cache, &["/Ref", "/Other"])?;
+        let layer = graph.all_ids()[0];
+        cache.invalidate_layers(&graph, &HashSet::from([layer]));
+        let recorded = evicted(&cache);
+        assert!(recorded.iter().any(|path| path == "/Ref"), "{recorded:?}");
+        Ok(())
+    }
+
+    /// A load-rules change records the prims it unloads.
+    #[test]
+    fn load_rules_evict() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack(
+            r#"#usda 1.0
+
+def "Source"
+{
+    def "Inner"
+    {
+    }
+}
+
+def "P" (
+    payload = </Source>
+)
+{
+}
+"#,
+        );
+        compose(&graph, &mut cache, &["/P", "/P/Inner"])?;
+        let mut rules = LoadRules::all();
+        rules.unload(sdf::path("/P")?);
+        cache.set_load_rules(rules);
+        let recorded = evicted(&cache);
+        assert!(recorded.contains(&"/P".to_owned()), "{recorded:?}");
+        assert!(recorded.contains(&"/P/Inner".to_owned()), "{recorded:?}");
+        Ok(())
+    }
+
+    /// A retired prototype's materialized descendants join the work set once,
+    /// under its root, however many instances shared it.
+    #[test]
+    fn prototype_retire_evicts() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack(
+            r#"#usda 1.0
+
+def "Model"
+{
+    def "Part"
+    {
+    }
+}
+
+def "A" (
+    instanceable = true
+    references = </Model>
+)
+{
+}
+
+def "B" (
+    instanceable = true
+    references = </Model>
+)
+{
+}
+"#,
+        );
+        compose(&graph, &mut cache, &["/A", "/B"])?;
+        let root = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/A")?)?
+            .expect("an instance");
+        let shared = cache.prototype_of(&graph.read_view(), &sdf::path("/B")?)?;
+        assert_eq!(shared.as_ref(), Some(&root), "/A and /B share one prototype");
+        compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
+        let roots = cache.invalidate_prototypes(&[sdf::path("/A")?]);
+        assert_eq!(roots, slice::from_ref(&root));
+        let recorded = evicted(&cache);
+        let under_root = recorded.iter().filter(|path| path.starts_with(root.as_str()));
+        assert_eq!(under_root.count(), 2, "the root and its part, once: {recorded:?}");
+        assert!(recorded.contains(&format!("{root}/Part")), "{recorded:?}");
+        Ok(())
+    }
+
+    /// Applies an edit to `field` at `path` in the stack's one layer.
+    fn edit_field(graph: &mut LayerGraph, cache: &mut IndexCache, path: &str, field: FieldKey) -> Result<()> {
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path(path)?)
+            .note(field.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        changes.did_change(cache, graph, &[LayerChanges::plain(graph.all_ids()[0], &cl)]);
+        changes.apply(cache, graph);
         Ok(())
     }
 }

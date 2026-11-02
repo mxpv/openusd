@@ -6,13 +6,16 @@
 //! [`Dependencies`] map that drives surgical invalidation. The two are written
 //! and dropped in lockstep — every insert registers dependencies and every
 //! removal retracts them — so the store exposes only paired mutations, never raw
-//! mutable access to either map.
+//! mutable access to either map. A removal records the dropped prim in the
+//! work set ([`IndexStore::release_evicted`]), which keeps the stacks it owned
+//! until it is released.
 //! [`IndexCache`](super::index_cache::IndexCache) holds one and coordinates the
 //! cross-cutting concerns (transient query errors, the prototype registry, the
 //! value-clip cache) around the store's index and dependency queries.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::mem;
 
 use crate::sdf::{self, Path};
 
@@ -39,8 +42,10 @@ pub(super) struct IndexStore {
     /// because its build demanded a not-yet-loaded layer.
     empty_index: PrimIndex,
     /// Cache-owner counts: for each non-root layer stack, how many cached
-    /// entries' arenas reference it. Incremented by [`insert`](Self::insert)
-    /// and decremented by the removals, so the key set is exactly the stacks
+    /// entries' arenas, and how many work-set entries, reference it.
+    /// Incremented by [`insert`](Self::insert), kept when a removal moves an
+    /// entry into the work set, and decremented when the work set releases
+    /// it or an insert rebuilds its prim, so the key set is exactly the stacks
     /// the cache keeps alive — the mark set
     /// ([`mark_live_stacks`](Self::mark_live_stacks)) without walking any
     /// arena.
@@ -53,6 +58,11 @@ pub(super) struct IndexStore {
     /// Source of every [`PrimRevision`] this store hands out. Monotonic and
     /// never reset, so a value it minted is never minted again.
     next_revision: u64,
+    /// The work set: each cached prim a removal dropped, by path, with the
+    /// stacks its index owned, which stay counted as owned until the entry is
+    /// released ([`release_evicted`](Self::release_evicted)) or an insert
+    /// rebuilds its prim.
+    evicted: sdf::PathTable<Box<[LayerStackId]>>,
 }
 
 /// Validity token for a cached answer about one composed prim.
@@ -174,7 +184,8 @@ impl IndexStore {
             .flat_map(|(_, entry)| entry.errors.iter().chain(entry.property_errors.iter()))
     }
 
-    /// Marks every layer stack some cached prim index owns — the key set of
+    /// Marks every layer stack some cached prim index, or a work-set entry,
+    /// owns — the key set of
     /// the maintained owner counts, so no arena is walked. The counts cover
     /// every arena node, inert and culled included, since query paths still
     /// dereference their stacks (the spec-tier refresh reads culled nodes, and
@@ -234,6 +245,11 @@ impl IndexStore {
         debug_assert!(!self.entries.contains_key(path), "insert over a cached entry");
         for stack in owned_stacks(&index) {
             *self.stack_owners.entry(stack).or_default() += 1;
+        }
+        // A prim the work set held is rebuilt: the new entry counts its own
+        // stacks, so the dropped index's stop being owned.
+        if let Some(stacks) = self.evicted.remove(path) {
+            self.release_stacks(&stacks);
         }
         self.deps.add(path, &index, graph, expr_var_deps);
         let revision = self.mint_revision();
@@ -314,10 +330,10 @@ impl IndexStore {
         self.entries.subtree(prefix).map(|(path, _)| path.clone()).collect()
     }
 
-    /// Releases a removed entry's stack ownership, flagging a reclamation
+    /// Releases one ownership of each of `stacks`, flagging a reclamation
     /// pass when a stack loses its last cache owner.
-    fn release_owned(&mut self, index: &PrimIndex) {
-        for stack in owned_stacks(index) {
+    fn release_stacks(&mut self, stacks: &[LayerStackId]) {
+        for &stack in stacks {
             match self.stack_owners.entry(stack) {
                 Entry::Occupied(mut count) => {
                     *count.get_mut() -= 1;
@@ -332,12 +348,12 @@ impl IndexStore {
     }
 
     /// Drops the entry at each of `paths`, retracting their dependency
-    /// registrations together and releasing their stack ownership.
+    /// registrations together and recording each in the work set.
     pub(super) fn remove_all<'p>(&mut self, paths: impl IntoIterator<Item = &'p Path>) {
         let mut victims = Vec::new();
         for path in paths {
             if let Some(entry) = self.entries.remove(path) {
-                self.release_owned(&entry.index);
+                self.evict(path, &entry.index);
                 victims.push(path.clone());
             }
         }
@@ -345,8 +361,8 @@ impl IndexStore {
     }
 
     /// Drops each of `prefixes` and every namespace descendant, retracting the
-    /// removed entries' dependencies together and releasing their stack
-    /// ownership.
+    /// removed entries' dependencies together and recording each in the work
+    /// set.
     pub(super) fn remove_subtrees<'p>(&mut self, prefixes: impl IntoIterator<Item = &'p Path>) {
         let mut victims = Vec::new();
         for prefix in prefixes {
@@ -360,11 +376,35 @@ impl IndexStore {
                 "remove_subtrees called with empty prefix — use Path::abs_root() to drop everything",
             );
             for (victim, entry) in self.entries.remove_subtree(prefix) {
-                self.release_owned(&entry.index);
+                self.evict(&victim, &entry.index);
                 victims.push(victim);
             }
         }
         self.deps.remove_all(&victims);
+    }
+
+    /// Records `path`'s dropped `index` in the work set with the stacks it
+    /// owned, which stay counted as owned. A path is in the work set at most
+    /// once: dropping it again needs an insert first, which settles it.
+    fn evict(&mut self, path: &Path, index: &PrimIndex) {
+        let stacks: Box<[LayerStackId]> = owned_stacks(index).into_iter().collect();
+        let held = self.evicted.insert(path.clone(), stacks);
+        debug_assert!(held.is_none(), "a path in the work set was dropped again");
+    }
+
+    /// Releases the whole work set: every entry's stacks stop being owned,
+    /// flagging a reclamation pass for each that loses its last owner.
+    ///
+    /// TODO: settlement, which rebuilds or retires each prim the work set
+    /// holds, replaces this wholesale release.
+    pub(super) fn release_evicted(&mut self) {
+        if self.evicted.is_empty() {
+            return;
+        }
+        let evicted = mem::take(&mut self.evicted);
+        for (_, stacks) in evicted.iter() {
+            self.release_stacks(stacks);
+        }
     }
 
     /// Whether some stack lost its last cache owner since the last sweep.
@@ -674,7 +714,7 @@ fn dedup_owned(mut paths: Vec<Path>) -> Vec<Path> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use crate::pcp::layer_graph::ExternalStack;
@@ -899,5 +939,34 @@ mod tests {
             store.lookup_with_ancestors(&g, l1, &site).contains(&site),
             "the invalidation lookup does fold the self-registration in"
         );
+    }
+    /// The paths `store`'s work set holds, parents before children.
+    pub(crate) fn evicted(store: &IndexStore) -> Vec<String> {
+        let evicted = store.evicted.subtree(&Path::abs_root());
+        evicted.map(|(path, _)| path.to_string()).collect()
+    }
+
+    /// A dropped index's stacks stay owned while it waits in the work set,
+    /// so no sweep is scheduled; releasing the work set lets them go.
+    #[test]
+    fn evicted_holds_stacks() {
+        let g = graph(2);
+        let referenced = g.all_ids()[1];
+        let mut index = PrimIndex::default();
+        index.push_node(node(&g, referenced, &p("/Source"), MapFunction::identity()));
+        let stack = index.arena().next().expect("one node").layer_stack_id();
+        assert_ne!(stack, LayerStackId::ROOT, "the node is in its own stack");
+        let mut store = IndexStore::default();
+        register(&mut store, &g, &p("/Ref"), index);
+
+        store.remove_all([&p("/Ref")]);
+        assert_eq!(evicted(&store), ["/Ref"]);
+        assert!(store.stack_owners.contains_key(&stack), "still owned");
+        assert!(!store.ownership_lost());
+
+        store.release_evicted();
+        assert!(evicted(&store).is_empty());
+        assert!(!store.stack_owners.contains_key(&stack));
+        assert!(store.ownership_lost(), "the release schedules a sweep");
     }
 }
