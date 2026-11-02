@@ -315,7 +315,7 @@ struct InvalidationEffects {
 
 impl CacheChanges {
     /// The resynced paths that are already composed stage paths — the
-    /// significant tier's stage half, the prim tier, and the property specs
+    /// significant tier's stage half and the property specs
     /// this round added or removed. These are the paths a consumer must
     /// re-resolve (C++ `PcpCacheChanges` resync set).
     ///
@@ -332,8 +332,13 @@ impl CacheChanges {
     pub(crate) fn stage_resynced_paths(&self) -> impl Iterator<Item = &Path> {
         self.did_change_significantly
             .iter()
-            .chain(self.did_change_prims.iter())
             .chain(self.reported.stage_resync.iter())
+    }
+
+    /// The prims recomposed in place, in stage namespace: the prim tier,
+    /// whose entries drop one index each and say nothing of the paths below.
+    pub(crate) fn stage_recomposed_paths(&self) -> impl Iterator<Item = &Path> {
+        self.did_change_prims.iter()
     }
 
     /// The resynced paths expressed in the edited layer's namespace — the
@@ -365,15 +370,14 @@ impl CacheChanges {
     /// stands for a whole subtree — the significant tier, whose entries drop the
     /// index and every namespace descendant.
     ///
-    /// Only these may subsume another reported stage path by prefix. The prim
-    /// tier drops one index, so it says nothing about the paths beneath it.
+    /// Only these may subsume another reported stage path by prefix.
     pub(crate) fn stage_subtree_paths(&self) -> impl Iterator<Item = &Path> {
         self.did_change_significantly.iter()
     }
 
     /// The covering subset of
     /// [`authored_resynced_paths`](Self::authored_resynced_paths). The spec tier
-    /// is excluded for the same reason the prim tier is: refreshing `has_specs`
+    /// is excluded: refreshing `has_specs`
     /// at `/A` says nothing about `/A/B`, so an inert `over` added on the way to
     /// authoring `/A/B.x` must not swallow the attribute's own report.
     pub(crate) fn authored_subtree_paths(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {

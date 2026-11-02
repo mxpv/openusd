@@ -57,7 +57,7 @@ use super::composition::{self, PendingEdit, StageComposition};
 
 use super::authoring::{Operation, PlanStamp, PlanState, PrimOp};
 use super::interp::{self, InterpolationType};
-use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, TxnObserver, keep_ancestors};
+use super::sink::{PendingChange, Provenance, ResyncPaths, StageSink, StageSinkId, TxnObserver};
 use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics, StagePopulationMask};
 
 bitflags! {
@@ -1141,10 +1141,10 @@ impl composition::CompositionHooks for Stage {
     fn notify_stage(&self, notice: &composition::StageNotice) {
         self.each_sink(|sink| match notice {
             composition::StageNotice::EditTarget => sink.edit_target_changed(self),
-            composition::StageNotice::LoadRules(resynced) => sink.load_rules_changed(self, resynced),
-            composition::StageNotice::LoadsRetried(resynced) => sink.loads_retried(self, resynced),
+            composition::StageNotice::LoadRules(resynced) => sink.load_rules_changed(self, resynced.view()),
+            composition::StageNotice::LoadsRetried(resynced) => sink.loads_retried(self, resynced.view()),
             composition::StageNotice::Muting { layer, muted, resynced } => {
-                sink.layer_muting_changed(self, layer, *muted, resynced);
+                sink.layer_muting_changed(self, layer, *muted, resynced.view());
             }
         });
     }
@@ -2909,6 +2909,11 @@ impl Stage {
     /// no-op guarantee). `path` need not currently resolve to a composed
     /// prim, since loading a not-yet-visible descendant is the common case.
     ///
+    /// The stage's sinks hear [`StageSink::load_rules_changed`]: an observer
+    /// re-reads `path`'s subtree, and an ancestor whose own payload this
+    /// loads, and re-reads alone an ancestor recomposed only for the rule
+    /// derived again.
+    ///
     /// A `path` that normalizes into a `/__Prototype_N` prototype's namespace
     /// is silently ignored: load rules are always authored in real-namespace
     /// terms, so a rule on a synthetic prototype path would never be
@@ -2938,7 +2943,7 @@ impl Stage {
 
     /// Unloads `path`'s payload and everything beneath it (C++
     /// `UsdStage::Unload`). Same leniency as [`load`](Self::load) for a
-    /// prototype-namespace path.
+    /// prototype-namespace path, and the same notice.
     ///
     /// The layers the unloaded payloads brought in, and that nothing loaded
     /// still uses, leave the stage, and the registry frees each unless
@@ -3137,14 +3142,14 @@ impl Stage {
         (!pcp::is_prototype_namespace(&path)).then_some(path)
     }
 
-    /// Fires [`StageSink::load_rules_changed`] with the paths the edit
-    /// invalidated, reduced to the subtrees they stand for, after the cache
-    /// borrow is released. A no-op edit invalidates nothing and reports nothing.
-    fn notify_load_rules_changed(&self, mut resynced: Vec<sdf::Path>) {
+    /// Fires [`StageSink::load_rules_changed`] with what the edit changed:
+    /// the subtrees whose composition changed and the ancestors recomposed
+    /// in place, normalized. A no-op edit invalidates nothing and reports
+    /// nothing.
+    fn notify_load_rules_changed(&self, resynced: ResyncPaths) {
         if resynced.is_empty() || self.sinks.borrow().is_empty() {
             return;
         }
-        keep_ancestors(&mut resynced);
         self.composition
             .announce(composition::StageNotice::LoadRules(resynced), self);
     }
@@ -3164,11 +3169,11 @@ impl Stage {
     /// TODO(perf): a mute that reaches the root layer hands over every cached
     /// index, so this reduction is `keep_ancestors` at its worst case — see the
     /// `sdf::PathTable` covering set noted there.
-    fn notify_muting_changed(&self, changed: &str, muted: bool, mut resynced: Vec<sdf::Path>) {
+    fn notify_muting_changed(&self, changed: &str, muted: bool, resynced: Vec<sdf::Path>) {
         if self.sinks.borrow().is_empty() {
             return;
         }
-        keep_ancestors(&mut resynced);
+        let resynced = ResyncPaths::subtrees(resynced);
         let notice = composition::StageNotice::Muting {
             layer: changed.to_owned(),
             muted,
@@ -7968,8 +7973,8 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn stage_reload_retries_sublayer() -> Result<()> {
         struct Retried(Rc<RefCell<Vec<Vec<sdf::Path>>>>);
         impl StageSink for Retried {
-            fn loads_retried(&self, _: &Stage, resynced: &[sdf::Path]) {
-                self.0.borrow_mut().push(resynced.to_vec());
+            fn loads_retried(&self, _: &Stage, resynced: usd::Resynced<'_>) {
+                self.0.borrow_mut().push(resynced.subtrees.to_vec());
             }
         }
 
@@ -7998,7 +8003,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn edit_retry_unreported() -> Result<()> {
         struct Retried(Rc<Cell<usize>>);
         impl StageSink for Retried {
-            fn loads_retried(&self, _: &Stage, _: &[sdf::Path]) {
+            fn loads_retried(&self, _: &Stage, _: usd::Resynced<'_>) {
                 self.0.set(self.0.get() + 1);
             }
         }
@@ -8148,8 +8153,8 @@ def "P" (payload = @./clip.usda@</M>) {}
         type Notices = Rc<RefCell<Vec<(bool, Vec<sdf::Path>)>>>;
         struct Log(Notices);
         impl StageSink for Log {
-            fn layer_muting_changed(&self, _: &Stage, _: &str, muted: bool, resynced: &[sdf::Path]) {
-                self.0.borrow_mut().push((muted, resynced.to_vec()));
+            fn layer_muting_changed(&self, _: &Stage, _: &str, muted: bool, resynced: usd::Resynced<'_>) {
+                self.0.borrow_mut().push((muted, resynced.subtrees.to_vec()));
             }
         }
 
@@ -9178,7 +9183,7 @@ def "P" (payload = @./clip.usda@</M>) {}
                 let paths: Vec<_> = change.resynced.iter().map(|path| path.as_str().to_owned()).collect();
                 self.0.borrow_mut().push(format!("commit {}", paths.join(",")));
             }
-            fn layer_muting_changed(&self, _: &Stage, layer: &str, _: bool, _: &[sdf::Path]) {
+            fn layer_muting_changed(&self, _: &Stage, layer: &str, _: bool, _: usd::Resynced<'_>) {
                 self.0.borrow_mut().push(format!("mute {layer}"));
             }
         }

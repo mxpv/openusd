@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path as FsPath;
 use std::rc::Rc;
+use std::slice;
 use std::sync::Arc;
 
 use openusd::Result;
 use openusd::ar::Resolver as _;
 use openusd::usd::{
-    CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
+    CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Resynced, Stage,
     StageAuthoringError, StagePopulationMask, StageSink,
 };
 use openusd::usdz::ArchiveWriter;
@@ -28,8 +29,8 @@ use openusd::{ar, gf, kind, pcp, sdf, tf, usd, vt};
 struct RecordingSink {
     after: Option<Box<dyn Fn(&Stage, &CommittedChange<'_>)>>,
     edit_target: Option<Box<dyn Fn(&Stage)>>,
-    muting: Option<Box<dyn Fn(&Stage, &str, bool, &[sdf::Path])>>,
-    load_rules: Option<Box<dyn Fn(&Stage, &[sdf::Path])>>,
+    muting: Option<Box<dyn Fn(&Stage, &str, bool, Resynced<'_>)>>,
+    load_rules: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
 }
 
 impl StageSink for RecordingSink {
@@ -43,12 +44,12 @@ impl StageSink for RecordingSink {
             f(stage);
         }
     }
-    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool, resynced: &[sdf::Path]) {
+    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool, resynced: Resynced<'_>) {
         if let Some(f) = &self.muting {
             f(stage, layer, muted, resynced);
         }
     }
-    fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
+    fn load_rules_changed(&self, stage: &Stage, resynced: Resynced<'_>) {
         if let Some(f) = &self.load_rules {
             f(stage, resynced);
         }
@@ -155,8 +156,10 @@ struct Notices {
     asset_paths_resynced: Vec<sdf::Path>,
     /// What a layer mute/unmute invalidated.
     muting: Vec<sdf::Path>,
-    /// What a load-rules edit invalidated.
+    /// What a load-rules edit resynced, as subtrees.
     load_rules: Vec<sdf::Path>,
+    /// What a load-rules edit recomposed in place.
+    load_rules_prims: Vec<sdf::Path>,
 }
 
 /// Installs a sink recording every channel, for tests asserting exactly what an
@@ -173,12 +176,14 @@ fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
                 .extend(change.asset_paths_resynced.iter().cloned());
         })),
         muting: Some(Box::new(
-            move |_stage: &Stage, _layer: &str, _muted, resynced: &[sdf::Path]| {
-                muting.borrow_mut().muting.extend(resynced.iter().cloned());
+            move |_stage: &Stage, _layer: &str, _muted, resynced: Resynced<'_>| {
+                muting.borrow_mut().muting.extend(resynced.subtrees.iter().cloned());
             },
         )),
-        load_rules: Some(Box::new(move |_stage: &Stage, resynced: &[sdf::Path]| {
-            load_rules.borrow_mut().load_rules.extend(resynced.iter().cloned());
+        load_rules: Some(Box::new(move |_stage: &Stage, resynced: Resynced<'_>| {
+            let mut notices = load_rules.borrow_mut();
+            notices.load_rules.extend(resynced.subtrees.iter().cloned());
+            notices.load_rules_prims.extend(resynced.prims.iter().cloned());
         })),
         ..Default::default()
     });
@@ -2289,7 +2294,7 @@ fn mute_alternate_spelling() -> Result<()> {
     let _token = {
         let (muted, unmuted) = (muted.clone(), unmuted.clone());
         stage.add_sink(RecordingSink {
-            muting: Some(Box::new(move |_stage, layer, is_muted, _resynced: &[sdf::Path]| {
+            muting: Some(Box::new(move |_stage, layer, is_muted, _resynced: Resynced<'_>| {
                 if is_muted {
                     muted.borrow_mut().push(layer.to_string());
                 } else {
@@ -12960,10 +12965,13 @@ fn listener_layer_muting() -> Result<()> {
     let _token = {
         let (muted, unmuted) = (muted.clone(), unmuted.clone());
         stage.add_sink(RecordingSink {
-            muting: Some(Box::new(move |_stage, layer, is_muted, resynced: &[sdf::Path]| {
+            muting: Some(Box::new(move |_stage, layer, is_muted, resynced: Resynced<'_>| {
                 // No such layer is loaded, so the toggle invalidates nothing —
                 // and is still reported, unlike a no-op load-rules edit.
-                assert!(resynced.is_empty(), "nothing was cached against {layer}");
+                assert!(
+                    resynced.subtrees.is_empty() && resynced.prims.is_empty(),
+                    "nothing was cached against {layer}"
+                );
                 if is_muted {
                     muted.borrow_mut().push(layer.to_string());
                 } else {
@@ -14142,5 +14150,100 @@ def "A" (instanceable = true references = </Proto>) {}
         kept.filtered_children_from(PrimPredicate::DEFAULT, Some(composed))?
             .is_empty()
     );
+    Ok(())
+}
+
+/// Loading one element of a group on a stage that loads nothing resyncs that
+/// element alone, and recomposes its parent in place: the sibling, which
+/// composes as it did, is in neither set (#174). Unloading reports the same.
+#[test]
+fn load_reports_element_alone() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"world\" {\n    def \"element_0\" (payload = @e.usda@</E>) {}\n    def \"element_1\" \
+         (payload = @e.usda@</E>) {}\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("e.usda"),
+        "#usda 1.0\ndef \"E\" {\n    def \"Child\" {}\n}\n",
+    )?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(&dir.path().join("root.usda").to_string_lossy())?;
+    let notices = capture_notices(&stage);
+    let element = sdf::path("/world/element_0")?;
+
+    stage.load(element.clone(), LoadPolicy::WithDescendants)?;
+    {
+        let notices = notices.borrow();
+        assert_eq!(notices.load_rules, slice::from_ref(&element));
+        assert_eq!(notices.load_rules_prims, [sdf::path("/world")?]);
+    }
+    *notices.borrow_mut() = Notices::default();
+
+    stage.unload(element.clone())?;
+    let notices = notices.borrow();
+    assert_eq!(notices.load_rules, [element]);
+    assert_eq!(notices.load_rules_prims, [sdf::path("/world")?]);
+    Ok(())
+}
+
+/// Loading an element whose parent has a payload of its own includes the
+/// parent's payload too, which changes the parent's subtree: the parent is
+/// reported as a subtree resync, covering the element.
+#[test]
+fn load_reports_parent_payload() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"world\" (payload = @w.usda@</W>) {\n    def \"element_0\" (payload = @e.usda@</E>) \
+         {}\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("w.usda"),
+        "#usda 1.0\ndef \"W\" {\n    def \"Extra\" {}\n}\n",
+    )?;
+    fs::write(dir.path().join("e.usda"), "#usda 1.0\ndef \"E\" {}\n")?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(&dir.path().join("root.usda").to_string_lossy())?;
+    let notices = capture_notices(&stage);
+
+    stage.load("/world/element_0", LoadPolicy::WithDescendants)?;
+    let notices = notices.borrow();
+    assert_eq!(notices.load_rules, [sdf::path("/world")?]);
+    assert!(notices.load_rules_prims.is_empty());
+    Ok(())
+}
+
+/// Loading an element beside an instanced sibling resyncs the sibling: the
+/// change retires its prototype, so it composes under another.
+#[test]
+fn load_reports_instanced_sibling() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"world\" {\n    def \"element_0\" (payload = @e.usda@</E>) {}\n    def \"element_1\" \
+         (instanceable = true\n        references = @m.usda@</M>) {}\n}\n",
+    )?;
+    fs::write(dir.path().join("e.usda"), "#usda 1.0\ndef \"E\" {}\n")?;
+    fs::write(
+        dir.path().join("m.usda"),
+        "#usda 1.0\ndef \"M\" {\n    def \"Part\" {}\n}\n",
+    )?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(&dir.path().join("root.usda").to_string_lossy())?;
+    let sibling = sdf::path("/world/element_1")?;
+    let before = stage.prim(sibling.clone())?.prototype()?.expect("an instance");
+    let notices = capture_notices(&stage);
+
+    stage.load("/world/element_0", LoadPolicy::WithDescendants)?;
+    let after = stage.prim(sibling.clone())?.prototype()?.expect("an instance");
+    let notices = notices.borrow();
+    assert_ne!(after, before, "the change retired the sibling's prototype");
+    assert!(notices.load_rules.contains(&sibling), "{:?}", notices.load_rules);
+    assert_eq!(notices.load_rules_prims, [sdf::path("/world")?]);
     Ok(())
 }

@@ -42,7 +42,7 @@ use std::thread;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
-use super::sink::{Payload, Provenance};
+use super::sink::{Payload, Provenance, ResyncPaths};
 
 /// One transaction outcome awaiting reconciliation, in commit order.
 pub(super) enum Pending {
@@ -182,14 +182,14 @@ pub(super) enum StageNotice {
     /// The edit target changed.
     EditTarget,
     /// The load rules changed, resyncing these paths.
-    LoadRules(Vec<sdf::Path>),
+    LoadRules(ResyncPaths),
     /// The failed loads were tried again, resyncing these paths.
-    LoadsRetried(Vec<sdf::Path>),
+    LoadsRetried(ResyncPaths),
     /// A layer was muted or unmuted, resyncing these paths.
     Muting {
         layer: String,
         muted: bool,
-        resynced: Vec<sdf::Path>,
+        resynced: ResyncPaths,
     },
 }
 
@@ -213,6 +213,26 @@ pub(super) enum Interrupted {
     /// a layer of the stage, queueing edits the drain it runs inside applies
     /// first.
     NewWork,
+}
+
+/// What a load-rules change's `victims` mean to an observer. An ancestor
+/// whose effective rule the change only derived again recomposes in place.
+/// One whose inclusion flipped changed its subtree when it has a payload of
+/// its own (in `payloads`), which the flip includes or leaves out.
+fn classify(victims: pcp::RuleVictims, payloads: &HashSet<sdf::Path>) -> ResyncPaths {
+    let mut paths = ResyncPaths {
+        subtrees: victims.subtrees,
+        prims: Vec::new(),
+    };
+    for (ancestor, flipped) in victims.ancestors {
+        if flipped && payloads.contains(&ancestor) {
+            paths.subtrees.push(ancestor);
+        } else {
+            paths.prims.push(ancestor);
+        }
+    }
+    paths.normalize();
+    paths
 }
 
 /// What a panic interrupted when it poisoned the stage.
@@ -836,8 +856,7 @@ impl StageComposition {
         if !announce || resynced.is_empty() || !hooks.delivers() {
             return;
         }
-        super::sink::keep_ancestors(&mut resynced);
-        let notice = Notice::Stage(StageNotice::LoadsRetried(resynced));
+        let notice = Notice::Stage(StageNotice::LoadsRetried(ResyncPaths::subtrees(resynced)));
         self.outbox.borrow_mut().push_back(notice);
     }
 
@@ -1888,25 +1907,30 @@ impl StageComposition {
     /// Reads the load rules, applies `edit`, installs the result, and reclaims
     /// the stacks the change stranded — the deliberate mutation entry.
     ///
-    /// Returns the bounded set of paths whose cached index was dropped (empty
-    /// for a no-op edit). An unload can leave payload-target stacks
+    /// Returns what the change means to the stage's sinks, normalized: empty
+    /// for a no-op edit, or when no sink listens. An unload can leave
+    /// payload-target stacks
     /// unreferenced for a long stretch, so this reclaims while the seam is
     /// quiet, whenever accumulated registry churn has ripened the trigger.
     pub(super) fn install_load_rules(
         &self,
         edit: impl FnOnce(&mut pcp::LoadRules),
         hooks: &dyn CompositionHooks,
-    ) -> Vec<sdf::Path> {
+    ) -> ResyncPaths {
         // Drain before reading: a queued edit's notification may itself install
         // load rules, and `edit` is applied to whatever this read returns, so a
         // pre-drain snapshot would overwrite that change on the way back out.
         self.process_pending(hooks);
         if !self.sound() {
-            return Vec::new();
+            return ResyncPaths::default();
         }
         self.begin_round();
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
+        let payloads = match hooks.delivers() {
+            true => self.flipped_payloads(&rules, hooks),
+            false => HashSet::new(),
+        };
         let victims = self.swap_load_rules(rules, hooks);
         // The prims the change dropped settle before the stacks they held are
         // swept: an unloaded payload's prims are retired, and a loaded one's
@@ -1914,20 +1938,54 @@ impl StageComposition {
         self.guarded(Poisoned::Compose, || self.settle_work(Settled::Required, hooks));
         self.reclaim_stale_stacks();
         self.reclaim_unused_layers(hooks, pcp::Reclaim::Unused);
-        victims
+        match hooks.delivers() {
+            true => classify(victims, &payloads),
+            false => ResyncPaths::default(),
+        }
     }
 
-    /// Installs `rules` in place of the current table, returning the bounded set
-    /// of paths whose cached index was dropped.
+    /// The ancestors installing `rules` would flip the inclusion of, that
+    /// have a payload of their own, asked under the rules in force, so
+    /// composing one to ask loads nothing beneath it. One whose payload the
+    /// stage cannot read is taken to have one.
+    fn flipped_payloads(&self, rules: &pcp::LoadRules, hooks: &dyn CompositionHooks) -> HashSet<sdf::Path> {
+        let flipped: Vec<sdf::Path> = self
+            .settled_cache()
+            .rule_ancestors(rules)
+            .into_iter()
+            .filter_map(|(ancestor, flipped)| flipped.then_some(ancestor))
+            .collect();
+        if flipped.is_empty() {
+            return HashSet::new();
+        }
+        let answers = self.query(
+            |view, cache| {
+                let has = |path: &sdf::Path| cache.has_payload(view, path).unwrap_or(true);
+                Ok(flipped.iter().map(has).collect::<Vec<bool>>())
+            },
+            hooks,
+        );
+        match answers {
+            Ok(answers) => flipped
+                .into_iter()
+                .zip(answers)
+                .filter_map(|(path, has)| has.then_some(path))
+                .collect(),
+            Err(_) => flipped.into_iter().collect(),
+        }
+    }
+
+    /// Installs `rules` in place of the current table, returning what it
+    /// dropped ([`pcp::RuleVictims`]).
     ///
     /// Drains first so the mutation recomposes against a current graph and
     /// cache, matching [`apply_mute`](Self::apply_mute). Reclaims nothing: this
     /// is also the transient swap behind the loadability walk, which must leave
     /// the payload-target stacks it composes untouched.
-    pub(super) fn swap_load_rules(&self, rules: pcp::LoadRules, hooks: &dyn CompositionHooks) -> Vec<sdf::Path> {
+    pub(super) fn swap_load_rules(&self, rules: pcp::LoadRules, hooks: &dyn CompositionHooks) -> pcp::RuleVictims {
         self.process_pending(hooks);
         if !self.sound() {
-            return Vec::new();
+            return pcp::RuleVictims::default();
         }
         self.settled_cache_mut().set_load_rules(rules)
     }

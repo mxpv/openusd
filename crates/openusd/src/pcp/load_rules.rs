@@ -352,6 +352,56 @@ impl LoadRules {
 /// Every path whose raw entry differs between `before` and `after` — added,
 /// removed, or changed value. The touched set
 /// [`IndexCache::set_load_rules`] uses to bound invalidation.
+/// `rules` as [`IndexCache::set_load_rules`] stores it: no entry inside a
+/// `/__Prototype_N` namespace, minimized.
+fn canonical(mut rules: LoadRules) -> LoadRules {
+    let real: Vec<(Path, Rule)> = rules
+        .rules()
+        .into_iter()
+        .filter(|(p, _)| !is_prototype_namespace(p))
+        .collect();
+    rules.set_rules(real);
+    rules.minimize();
+    rules
+}
+
+/// The strict ancestors of `touched` a change from `before` to `after`
+/// derives again, leaving out the ones touched themselves;
+/// [`IndexCache::set_load_rules`]'s doc has the upward reasoning. Each comes
+/// with whether its effective rule's inclusion (loaded or not) differs
+/// between the two.
+fn rule_ancestors(before: &LoadRules, after: &LoadRules, touched: &[Path]) -> Vec<(Path, bool)> {
+    let mut victims: Vec<Path> = Vec::new();
+    for p in touched {
+        for ancestor in p.strict_ancestors_below_root() {
+            let rule = after.effective_rule(&ancestor);
+            if rule == Rule::All {
+                break;
+            }
+            // A self-authored `Only` is an equally terminal case: step 3
+            // of `effective_rule` returns it directly, without ever
+            // consulting descendants, exactly like step 1/2's `All`. An
+            // `Only` reached instead through a deeper entry's lookahead
+            // (step 4/5) is not terminal — it depends on what's below —
+            // so this checks the raw entry, not just the resolved rule.
+            if rule == Rule::Only && after.own_rule(&ancestor) == Some(Rule::Only) {
+                break;
+            }
+            victims.push(ancestor);
+        }
+    }
+    victims.sort();
+    victims.dedup();
+    victims.retain(|ancestor| touched.binary_search(ancestor).is_err());
+    victims
+        .into_iter()
+        .map(|ancestor| {
+            let flipped = before.is_loaded(&ancestor) != after.is_loaded(&ancestor);
+            (ancestor, flipped)
+        })
+        .collect()
+}
+
 fn diff_entries(before: &LoadRules, after: &LoadRules) -> Vec<Path> {
     let mut touched: Vec<Path> = Vec::new();
     for (p, r) in &before.rules {
@@ -390,10 +440,9 @@ impl IndexCache {
     }
 
     /// Installs `rules` wholesale, drops exactly the cached indices whose
-    /// composition could have changed, and returns those paths — empty when
-    /// the edit is a genuine no-op (`rules` resolves identically to the table
-    /// it replaced). The prototype roots retired with those indices are named
-    /// too, so the result is the complete set the install dropped.
+    /// composition could have changed, and returns what that means to an
+    /// observer ([`RuleVictims`]) — empty when the edit is a genuine no-op
+    /// (`rules` resolves identically to the table it replaced).
     ///
     /// Any entry rooted inside a `/__Prototype_N` namespace is dropped first:
     /// load rules are always authored in real-namespace terms (a prototype's
@@ -426,54 +475,45 @@ impl IndexCache {
     /// affect — an ancestor already at [`Rule::All`] is provably unaffected
     /// by anything below it, since that conclusion never consults
     /// descendants.
-    pub(crate) fn set_load_rules(&mut self, mut rules: LoadRules) -> Vec<Path> {
-        let real: Vec<(Path, Rule)> = rules
-            .rules()
-            .into_iter()
-            .filter(|(p, _)| !is_prototype_namespace(p))
-            .collect();
-        rules.set_rules(real);
-        rules.minimize();
-        let before = mem::replace(&mut self.load_rules, rules);
+    pub(crate) fn set_load_rules(&mut self, rules: LoadRules) -> RuleVictims {
+        let before = mem::replace(&mut self.load_rules, canonical(rules));
         let touched = diff_entries(&before, &self.load_rules);
         if touched.is_empty() {
-            return Vec::new();
+            return RuleVictims::default();
         }
         self.bump_edit_epoch();
         self.retire_query_errors();
         // A rule change can expose or hide a payload's whole subtree.
         self.invalidate_population();
-        let victims = self.load_rule_victims(&touched);
-        self.drop_index_victims(victims)
+        let ancestors = rule_ancestors(&before, &self.load_rules, &touched);
+        let victims: Vec<Path> = touched
+            .iter()
+            .chain(ancestors.iter().map(|(ancestor, _)| ancestor))
+            .cloned()
+            .collect();
+        // TODO(perf): an ancestor whose own payload contribution is unchanged
+        // composes as it did, so dropping its own index would do; dropping its
+        // subtree rebuilds every sibling of the entry the change touched.
+        // Needs the population memo and the instance keys shown not to read
+        // its children's rules.
+        let retired = self.invalidate_prototypes(&victims);
+        self.drop_index_subtrees(&victims);
+        // An instance whose prototype retired composes under another, so it
+        // is a subtree resync even beneath an ancestor recomposed in place.
+        let instances = self.retired_instances(&retired);
+        let mut subtrees = touched;
+        subtrees.extend(retired);
+        subtrees.extend(instances);
+        RuleVictims { subtrees, ancestors }
     }
 
-    /// The cached indices [`set_load_rules`](Self::set_load_rules) must drop
-    /// for a change touching `touched` — see that method's doc for the
-    /// downward/upward reasoning.
-    fn load_rule_victims(&self, touched: &[Path]) -> Vec<Path> {
-        let mut victims: Vec<Path> = Vec::new();
-        for p in touched {
-            victims.push(p.clone());
-            for ancestor in p.strict_ancestors_below_root() {
-                let rule = self.load_rules.effective_rule(&ancestor);
-                if rule == Rule::All {
-                    break;
-                }
-                // A self-authored `Only` is an equally terminal case: step 3
-                // of `effective_rule` returns it directly, without ever
-                // consulting descendants, exactly like step 1/2's `All`. An
-                // `Only` reached instead through a deeper entry's lookahead
-                // (step 4/5) is not terminal — it depends on what's below —
-                // so this checks the raw entry, not just the resolved rule.
-                if rule == Rule::Only && self.load_rules.own_rule(&ancestor) == Some(Rule::Only) {
-                    break;
-                }
-                victims.push(ancestor);
-            }
-        }
-        victims.sort();
-        victims.dedup();
-        victims
+    /// The ancestors installing `rules` would derive again
+    /// ([`set_load_rules`](Self::set_load_rules)), each with whether its
+    /// inclusion would flip. Changes nothing.
+    pub(crate) fn rule_ancestors(&self, rules: &LoadRules) -> Vec<(Path, bool)> {
+        let after = canonical(rules.clone());
+        let touched = diff_entries(&self.load_rules, &after);
+        rule_ancestors(&self.load_rules, &after, &touched)
     }
 
     /// The load rules governing `path`, in `path`'s scope — see
@@ -481,6 +521,21 @@ impl IndexCache {
     pub(super) fn scoped_load_rules<'a>(&'a self, path: &'a Path) -> (&'a LoadRules, Cow<'a, Path>) {
         self.scoped(path, &self.load_rules, |p| &p.relative_load_rules)
     }
+}
+
+/// What a load-rules change dropped from the cache
+/// ([`IndexCache::set_load_rules`]), apart by what it means to an observer.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RuleVictims {
+    /// The entries the change touched, the prototype roots retired with the
+    /// prims it dropped, and those prototypes' instances: each a subtree
+    /// whose composition changed.
+    pub(crate) subtrees: Vec<Path>,
+    /// The ancestors whose effective rule the change derives again, each with
+    /// whether the rule's inclusion flipped. One whose own payload the flip
+    /// includes or leaves out changed its subtree; any other recomposes in
+    /// place.
+    pub(crate) ancestors: Vec<(Path, bool)>,
 }
 
 #[cfg(test)]
@@ -821,7 +876,11 @@ mod tests {
         );
         let mut rules = cache.load_rules().clone();
         rules.unload(p("/A"));
-        assert_eq!(cache.set_load_rules(rules), vec![p("/A")]);
+        let victims = RuleVictims {
+            subtrees: vec![p("/A")],
+            ancestors: Vec::new(),
+        };
+        assert_eq!(cache.set_load_rules(rules), victims);
     }
 
     #[test]
@@ -833,7 +892,7 @@ mod tests {
             Diagnostics::default(),
         );
         let rules = cache.load_rules().clone();
-        assert!(cache.set_load_rules(rules).is_empty());
+        assert_eq!(cache.set_load_rules(rules), RuleVictims::default());
     }
 
     /// A caller-supplied table that is textually different but semantically
@@ -851,7 +910,7 @@ mod tests {
         );
         let mut explicit_all = LoadRules::all();
         explicit_all.add_rule(p("/"), Rule::All);
-        assert!(cache.set_load_rules(explicit_all).is_empty());
+        assert_eq!(cache.set_load_rules(explicit_all), RuleVictims::default());
         assert!(cache.load_rules().is_empty(), "the stored table stays canonical");
     }
 
@@ -869,10 +928,11 @@ mod tests {
         rules.unload(p("/World/Deep/Nested"));
         let victims = cache.set_load_rules(rules);
         assert_eq!(
-            victims,
+            victims.subtrees,
             vec![p("/World/Deep/Nested")],
             "an ancestor already at All is unaffected by a change below it"
         );
+        assert!(victims.ancestors.is_empty());
     }
 
     /// A self-authored `Only` ancestor (reached via `effective_rule`'s step 3,
@@ -893,10 +953,39 @@ mod tests {
         cache.set_load_rules(rules.clone());
         rules.load_with_descendants(p("/World/A/Deep"));
         let victims = cache.set_load_rules(rules);
+        assert_eq!(victims.subtrees, vec![p("/World/A/Deep")]);
         assert_eq!(
-            victims,
-            vec![p("/World/A"), p("/World/A/Deep")],
-            "/World's own self-authored Only is unaffected by a change under an unrelated child"
+            victims.ancestors,
+            vec![(p("/World/A"), true)],
+            "/World's own self-authored Only is unaffected by a change under an unrelated child, and /World/A \
+             comes to be loaded"
         );
+    }
+
+    /// Loading a second child under an ancestor already loaded through the
+    /// first derives the ancestor's rule again without flipping its
+    /// inclusion.
+    #[test]
+    fn set_load_rules_ancestor_kept_loaded() {
+        let mut cache = IndexCache::new(
+            VariantFallbackMap::new(),
+            LoadRules::none(),
+            PopulationMask::all(),
+            Diagnostics::default(),
+        );
+        let mut rules = cache.load_rules().clone();
+        rules.load_with_descendants(p("/World/A"));
+        let first = cache.set_load_rules(rules.clone());
+        assert_eq!(first.subtrees, vec![p("/World/A")]);
+        assert_eq!(
+            first.ancestors,
+            vec![(p("/World"), true)],
+            "loading a child loads its parent"
+        );
+
+        rules.load_with_descendants(p("/World/B"));
+        let second = cache.set_load_rules(rules);
+        assert_eq!(second.subtrees, vec![p("/World/B")]);
+        assert_eq!(second.ancestors, vec![(p("/World"), false)], "already loaded");
     }
 }

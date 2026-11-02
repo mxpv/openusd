@@ -1364,6 +1364,12 @@ impl IndexCache {
         self.store.ownership_lost()
     }
 
+    /// The instances that shared the prototypes rooted at `roots`, which an
+    /// invalidation retired.
+    pub(super) fn retired_instances(&self, roots: &[Path]) -> Vec<Path> {
+        self.store.retired_instances(roots)
+    }
+
     /// Whether the work set holds a prim to settle
     /// ([`settle_pass`](Self::settle_pass)).
     pub(crate) fn has_work(&self) -> bool {

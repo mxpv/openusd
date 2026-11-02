@@ -61,7 +61,7 @@ pub use schema_registry::{
     ApplyApiError, FamilySource, MetadataField, SchemaInfo, SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError,
     Schematics, VersionFilter,
 };
-pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
+pub use sink::{CommittedChange, PendingChange, Provenance, Resynced, StageSink, StageSinkId};
 pub use stage::{
     ComposedStatus, EditContext, EditTarget, EditTargetArc, InitialLoadSet, LayerRef, LoadPolicy, PrimPredicate,
     PrimStatus, Stage, StageAuthoringError, StageBuilder, TypeConflict, WeakStage,

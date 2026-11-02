@@ -379,6 +379,7 @@ pub use layer_graph::StackIdentity;
 pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, Reclaim, Reclaimable, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
+pub(crate) use load_rules::RuleVictims;
 pub use load_rules::{LoadRules, Rule};
 pub use mapping::MapFunction;
 pub(crate) use overlay::{Overlay, Planned, PrimFields};

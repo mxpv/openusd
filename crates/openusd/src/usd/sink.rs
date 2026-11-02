@@ -95,25 +95,28 @@ pub trait StageSink {
     /// Observe a layer mute/unmute (C++ `UsdNotice::LayerMutingChanged`, which
     /// C++ pairs with the `ObjectsChanged` its recompose sends).
     ///
-    /// `resynced` is what the toggle invalidated: the cached indices dropped and
-    /// the prototype roots retired with them, minimal in ancestors. Unlike
+    /// `resynced` names what the toggle invalidated, as subtrees: the cached
+    /// indices dropped and the prototype roots retired with them. Unlike
     /// [`load_rules_changed`](Self::load_rules_changed) it may be empty, since
     /// muting an identifier that resolves to nothing loaded still toggles the
     /// muted set, and the toggle is reported either way.
-    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool, resynced: &[sdf::Path]) {
+    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool, resynced: Resynced<'_>) {
         let _ = (stage, layer, muted, resynced);
     }
 
     /// Observe a payload load/unload change (C++ `UsdNotice::ObjectsChanged`
-    /// fired by `Load`/`Unload`/`LoadAndUnload`/`SetLoadRules`, treating every
-    /// reported path as a full resync).
+    /// fired by `Load`/`Unload`/`LoadAndUnload`/`SetLoadRules`).
     ///
-    /// `resynced` is the bounded set of paths
+    /// `resynced` names, as subtrees, the paths whose own payload inclusion
     /// [`Stage::load`]/[`Stage::unload`]/[`Stage::load_and_unload`]/
-    /// [`Stage::set_load_rules`] used to invalidate the cache, together with the
-    /// prototype roots retired with them, minimal in ancestors — never empty,
-    /// since a no-op edit fires no notification at all.
-    fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
+    /// [`Stage::set_load_rules`] changed, with an ancestor whose own payload
+    /// it includes or leaves out and the prototype roots retired with them;
+    /// and, as prims, the ancestors only recomposed for the rule derived
+    /// again. Loading `/world/element_0` on a stage that loads nothing names
+    /// `/world/element_0` as a subtree and, when `/world` has no payload of
+    /// its own, `/world` as a prim, leaving `/world/element_1` out. Never
+    /// empty, since a no-op edit fires no notification at all.
+    fn load_rules_changed(&self, stage: &Stage, resynced: Resynced<'_>) {
         let _ = (stage, resynced);
     }
 
@@ -122,10 +125,10 @@ pub trait StageSink {
     /// `UsdNotice::ObjectsChanged` fired by `Reload` for an asset that may
     /// now load, treating every reported path as a full resync).
     ///
-    /// `resynced` names the prims that recompose with a reference, payload
-    /// or sublayer that failed to load, minimal in ancestors; never empty,
+    /// `resynced` names, as subtrees, the prims that recompose with a
+    /// reference, payload or sublayer that failed to load; never empty,
     /// since a retry that resyncs nothing fires no notification.
-    fn loads_retried(&self, stage: &Stage, resynced: &[sdf::Path]) {
+    fn loads_retried(&self, stage: &Stage, resynced: Resynced<'_>) {
         let _ = (stage, resynced);
     }
 }
@@ -198,7 +201,9 @@ pub struct CommittedChange<'a> {
     /// Paths a consumer must re-resolve outright (C++ `ResyncedPaths`).
     /// Composed/stage namespace.
     ///
-    /// A prim path here had its index and namespace descendants dropped. A
+    /// A prim path here composes afresh from that prim down: its index and
+    /// namespace descendants were dropped, or a spec of it appeared or
+    /// vanished. A
     /// *property* path is one whose spec appeared or vanished: the owning prim
     /// composes exactly as it did, but the property itself is a different object
     /// than it was, so a handle to it must be re-resolved rather than re-read.
@@ -210,11 +215,21 @@ pub struct CommittedChange<'a> {
     /// the two can one entry lie under another, comparing them by prefix being
     /// meaningless.
     pub resynced: &'a [sdf::Path],
+    /// Prims recomposed in place: each prim's own composition was derived
+    /// again (its index rebuilt, its metadata or arcs possibly changed), but
+    /// the prims beneath it are not implied. Composed/stage namespace.
+    ///
+    /// Disjoint from [`resynced`](Self::resynced): a prim a resync covers is
+    /// left out, and a prim named in both is reported as a resync. Under a
+    /// [`Provenance::DirectLayerEdit`] that holds against the resyncs sharing
+    /// this set's namespace.
+    pub recomposed: &'a [sdf::Path],
     /// Paths that changed only in field or target info, without restructuring
     /// composition (C++ `ChangedInfoOnlyPaths`). Composed/stage namespace.
     ///
     /// Disjoint from [`resynced`](Self::resynced), which already implies
-    /// re-reading everything beneath it. Under a
+    /// re-reading everything beneath it, and from
+    /// [`recomposed`](Self::recomposed). Under a
     /// [`Provenance::DirectLayerEdit`] that holds against the resyncs sharing
     /// this set's namespace; an entry may still coincide with one of the stage
     /// paths reported alongside them, which names a different object.
@@ -394,6 +409,58 @@ impl<F: Fn(&Stage, &CommittedChange<'_>)> StageSink for F {
     }
 }
 
+/// The paths a stage notice reports, apart by what an observer re-reads:
+/// each of [`subtrees`](Self::subtrees) with everything beneath it, each of
+/// [`prims`](Self::prims) alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resynced<'a> {
+    /// Subtree resyncs, minimal in ancestors.
+    pub subtrees: &'a [sdf::Path],
+    /// Prims recomposed in place, none of them at or under a subtree resync.
+    pub prims: &'a [sdf::Path],
+}
+
+/// The owned paths behind a [`Resynced`], normalized once they are all in.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ResyncPaths {
+    pub(super) subtrees: Vec<sdf::Path>,
+    pub(super) prims: Vec<sdf::Path>,
+}
+
+impl ResyncPaths {
+    /// Subtree resyncs alone, normalized.
+    pub(super) fn subtrees(subtrees: Vec<sdf::Path>) -> Self {
+        let mut paths = Self {
+            subtrees,
+            prims: Vec::new(),
+        };
+        paths.normalize();
+        paths
+    }
+
+    /// Whether it names nothing.
+    pub(super) fn is_empty(&self) -> bool {
+        self.subtrees.is_empty() && self.prims.is_empty()
+    }
+
+    /// Keeps [`subtrees`](Self::subtrees) minimal in ancestors and drops a
+    /// prim a subtree covers.
+    pub(super) fn normalize(&mut self) {
+        keep_ancestors(&mut self.subtrees);
+        self.prims.sort();
+        self.prims.dedup();
+        self.prims.retain(|prim| !is_covered(&self.subtrees, prim));
+    }
+
+    /// Borrows the paths for a sink.
+    pub(super) fn view(&self) -> Resynced<'_> {
+        Resynced {
+            subtrees: &self.subtrees,
+            prims: &self.prims,
+        }
+    }
+}
+
 /// The owned backing for one [`CommittedChange`].
 ///
 /// A `CommittedChange` is a borrowed view valid only for the `after_commit`
@@ -411,6 +478,9 @@ pub(super) struct Payload {
     /// paths already and an edit target maps its own. Emptied by
     /// [`finish`](Self::finish) into [`stage`](Self::stage).
     authored: NamespacedPaths,
+    /// The prims recomposed in place, in composed stage namespace, which
+    /// yield to [`stage`](Self::stage)'s resyncs.
+    recomposed: Vec<sdf::Path>,
     /// The changed-info paths in composed stage namespace, which yield to
     /// [`stage`](Self::stage)'s resyncs. Emptied into
     /// [`changed_info_only`](Self::changed_info_only) by
@@ -440,8 +510,8 @@ struct NamespacedPaths {
     /// whole subtree, and so are the only sound covering prefixes.
     ///
     /// `resynced` mixes invalidation tiers, and only the significant tier and
-    /// the layer-stack victims drop a subtree — the prim tier drops one index,
-    /// and the spec tier refreshes a site in place. Pruning by prefix against
+    /// the layer-stack victims drop a subtree; the spec tier refreshes a site
+    /// in place. Pruning by prefix against
     /// the whole set would let an inert `over` at `/A` delete the report of an
     /// attribute authored at `/A/B.x`. Not reported — it is a projection of
     /// `resynced`.
@@ -487,8 +557,9 @@ impl Payload {
     /// reach composed stage namespace — its [`mapping`](Provenance::mapping)
     /// translates them, or leaves them untranslated for a local or direct edit.
     ///
-    /// [`resynced`](CommittedChange::resynced) is the union of the significant and
-    /// prim-tier composed paths; [`changed_info_only`](CommittedChange::changed_info_only)
+    /// [`resynced`](CommittedChange::resynced) is the union of the significant
+    /// and spec-tier composed paths, [`recomposed`](CommittedChange::recomposed)
+    /// the prim tier's; [`changed_info_only`](CommittedChange::changed_info_only)
     /// is every other edited path that authored a field value or edited
     /// relationship/connection targets. `scratch` is the merged change list;
     /// `layer_changes` is the per-layer split retained for
@@ -572,6 +643,7 @@ impl Payload {
         Self {
             stage,
             authored,
+            recomposed: changes.cache.stage_recomposed_paths().cloned().collect(),
             stage_info,
             authored_info,
             changed_info_only: Vec::new(),
@@ -615,11 +687,17 @@ impl Payload {
         self.stage.subtree.append(&mut stage_resynced);
         self.stage.normalize();
         self.authored.normalize();
+        // A recomposed prim covers only itself, and yields to a resync that
+        // reaches it.
+        self.recomposed.sort();
+        self.recomposed.dedup();
+        self.recomposed.retain(|p| !self.stage.reports(p));
 
         // Each half yields to the resyncs of its own namespace, which is why the
         // two are kept apart until here: a direct edit to a non-local layer
         // carries both, and a prefix test across namespaces means nothing.
-        self.stage_info.retain(|p| !self.stage.reports(p));
+        self.stage_info
+            .retain(|p| !self.stage.reports(p) && self.recomposed.binary_search(p).is_err());
         self.authored_info.retain(|p| !self.authored.reports(p));
 
         keep_ancestors(&mut asset_paths_resynced);
@@ -648,6 +726,7 @@ impl Payload {
     ) -> CommittedChange<'a> {
         CommittedChange {
             resynced: &self.stage.resynced,
+            recomposed: &self.recomposed,
             changed_info_only: &self.changed_info_only,
             asset_paths_resynced: &self.asset_paths_resynced,
             layer_identifier,
@@ -676,7 +755,7 @@ impl Payload {
 /// asset-path set is siblings all the way down, making this quadratic. An
 /// [`sdf::PathTable`] covering set would answer each test in O(depth); the same
 /// structure would bound [`is_covered`]'s scans.
-pub(super) fn keep_ancestors(paths: &mut Vec<sdf::Path>) {
+fn keep_ancestors(paths: &mut Vec<sdf::Path>) {
     paths.sort();
     let mut kept = 0;
     for i in 0..paths.len() {

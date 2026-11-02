@@ -763,6 +763,7 @@ mod tests {
         let layer_changes = [(root.clone(), change_list.clone())];
         let change = CommittedChange {
             resynced: &[],
+            recomposed: &[],
             changed_info_only: std::slice::from_ref(&size),
             asset_paths_resynced: &[],
             layer_identifier: &root,
