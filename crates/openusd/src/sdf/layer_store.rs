@@ -10,11 +10,12 @@
 //! before never names the layer the slot holds next.
 
 use std::cell::{BorrowMutError, Ref, RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::mem;
 use std::ptr;
 use std::rc::{Rc, Weak};
+use std::slice;
 
 use crate::ar;
 
@@ -53,6 +54,16 @@ pub enum LayerError {
     Foreign {
         /// The layer's identifier.
         identifier: String,
+    },
+
+    /// A reload found the layer's asset at another location than it was read
+    /// from, which the layer cannot move to.
+    #[error("layer {identifier} now resolves to {resolved}, and a reload cannot move it")]
+    Moved {
+        /// The layer's identifier.
+        identifier: String,
+        /// Where the identifier resolves now.
+        resolved: String,
     },
 
     /// The edit itself failed; nothing was committed.
@@ -242,6 +253,71 @@ impl LayerHandle {
     /// or an edit on the same registry.
     pub fn save(&self) -> Result<(), LayerError> {
         self.with_layer_mut(Layer::save)?.map_err(LayerError::from)
+    }
+
+    /// Reload the layer from its asset (see [`Layer::reload`]), returning
+    /// whether it did. Like an [`edit`](Self::edit) through a handle, the
+    /// reload is attributed to no stage: every stage holding the layer
+    /// recomposes what it reads from it, and drops the undo steps touching
+    /// it. Fails with [`LayerError::Busy`] from inside a read or an edit on
+    /// the same registry.
+    pub fn reload(&self, force: bool) -> crate::Result<bool> {
+        Self::reload_all(slice::from_ref(self), force)
+    }
+
+    /// Reload each of `handles`, layers of one registry, as
+    /// [`reload`](Self::reload) does, in one transaction (C++
+    /// `SdfLayer::ReloadLayers`), so a stage holding several of them
+    /// recomposes once, returning whether any reloaded. A layer named twice
+    /// reloads once. Every layer is tried: one that cannot be read is left as
+    /// it is, and the first such failure is returned once the others have
+    /// reloaded. Fails with [`LayerError::Busy`] from inside a read or an edit
+    /// on the registry, and with [`LayerError::Foreign`] for layers of two
+    /// registries, with nothing reloaded.
+    pub fn reload_all(handles: &[LayerHandle], force: bool) -> crate::Result<bool> {
+        let Some(first) = handles.first() else {
+            return Ok(false);
+        };
+        // Fail before any file is read when the commit could not land.
+        first.store.ensure_writable()?;
+        if let Some(foreign) = handles.iter().find(|handle| !Rc::ptr_eq(&handle.store, &first.store)) {
+            return Err(LayerError::Foreign {
+                identifier: foreign.identifier().to_owned(),
+            }
+            .into());
+        }
+        let _scope = ar::CacheScope::begin();
+        let mut failed = None;
+        let mut targets = Vec::new();
+        let mut reloads = Vec::new();
+        // TODO(rayon): each layer's read and diff is independent of the
+        // others'.
+        let mut seen = HashSet::new();
+        for handle in handles {
+            if !seen.insert(Rc::as_ptr(&handle.token)) {
+                continue;
+            }
+            match handle.read(|layer| layer.read_again(force))? {
+                Ok(Some(reload)) => {
+                    targets.push(handle);
+                    reloads.push(reload);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    failed.get_or_insert(error);
+                }
+            }
+        }
+        if targets.is_empty() {
+            return failed.map_or(Ok(false), Err);
+        }
+        first.store.edit(&targets, TxnContext::new(None), |edits| {
+            for (edit, reload) in edits.iter_mut().zip(reloads) {
+                edit.reload(reload);
+            }
+            Ok::<_, LayerError>(())
+        })?;
+        failed.map_or(Ok(true), Err)
     }
 
     /// Install a [`LayerSink`] on the layer (see
@@ -797,6 +873,43 @@ mod tests {
 
         document(&first, "shared")?;
         assert_eq!(documentation(&second).as_deref(), Some("shared"));
+        Ok(())
+    }
+
+    /// A layer named twice in one batch reloads once, reading its file once.
+    #[test]
+    fn reload_all_dedups() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("shared.usda");
+        fs::write(&path, "#usda 1.0\n")?;
+        let (registry, opens) = counting_registry();
+        let handle = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
+        sdf::layer::tests::append(&path, "def \"P\" {}\n")?;
+        assert!(LayerHandle::reload_all(&[handle.clone(), handle.clone()], false)?);
+        assert_eq!(opens.get(), 2, "one open, one reload");
+        assert!(handle.read(|layer| layer.prim("/P").map(|prim| prim.is_some()))??);
+        Ok(())
+    }
+
+    /// A batch naming layers of two registries reloads none of them, though
+    /// only one has changed.
+    #[test]
+    fn reload_all_foreign() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("changed.usda");
+        fs::write(&path, "#usda 1.0\n")?;
+        let registry = sdf::LayerRegistry::default();
+        let changed = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
+        let elsewhere = sdf::LayerRegistry::default()
+            .adopt(layer_with_prim("b.usda"))
+            .expect("adopts");
+        sdf::layer::tests::append(&path, "def \"P\" {}\n")?;
+        let reloaded = LayerHandle::reload_all(&[changed.clone(), elsewhere], false);
+        assert!(
+            matches!(reloaded, Err(crate::Error::Layer(LayerError::Foreign { .. }))),
+            "{reloaded:?}"
+        );
+        assert!(changed.read(|layer| layer.prim("/P").map(|prim| prim.is_none()))??);
         Ok(())
     }
 

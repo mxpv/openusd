@@ -37,6 +37,9 @@ use crate::vt::Value;
 #[derive(Debug, Default, Clone)]
 pub struct ChangeList {
     entries: Vec<(Path, ChangeEntry)>,
+    /// Whether the edit reloaded the layer's content from its asset
+    /// ([`did_reload_content`](Self::did_reload_content)).
+    reloaded: bool,
 }
 
 /// Per-path summary of changes.
@@ -190,9 +193,23 @@ impl ChangeList {
         Self::default()
     }
 
-    /// Returns `true` if no entries were recorded.
+    /// Returns `true` if no entries were recorded and the layer was not
+    /// reloaded.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && !self.reloaded
+    }
+
+    /// Whether the edit reloaded the layer's content from its asset (C++
+    /// `SdfChangeList::Entry::flags.didReloadContent`): its entries are the
+    /// specs the reload changed, and anything derived from the layer as a
+    /// whole may have moved.
+    pub fn did_reload_content(&self) -> bool {
+        self.reloaded
+    }
+
+    /// Sets whether the edit is a reload of the layer's content.
+    pub(crate) fn set_reloaded(&mut self, reloaded: bool) {
+        self.reloaded = reloaded;
     }
 
     /// Returns the authored entries in insertion order.
@@ -220,7 +237,7 @@ impl ChangeList {
     /// flags are unioned and the authored-field sets merged — rather than
     /// duplicating the path. Used to merge several layers' records into one for
     /// a batched edit's change notice, so a path edited in more than one layer
-    /// reports the union of its changes.
+    /// reports the union of its changes, and a reload of any reports one.
     //
     // TODO(perf): each merge is an `entry_mut` linear scan, so this is O(entries
     // × distinct paths). Fine for the notice path (only when a listener is
@@ -233,11 +250,14 @@ impl ChangeList {
                 merged.note(field.as_str(), *change);
             }
         }
+        self.reloaded |= other.reloaded;
     }
 
-    /// Discard all recorded entries, retaining the backing allocation.
+    /// Discard all recorded entries and the reload mark, retaining the
+    /// backing allocation.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.reloaded = false;
     }
 
     /// Derive a composition-invalidation record from `cow`'s staged overlay,
@@ -487,14 +507,6 @@ mod tests {
         Path::new(s).expect("valid path")
     }
 
-    /// A blank backend carrying just the pseudo-root — the state a freshly
-    /// created layer's overlay sits over.
-    fn rooted() -> Data {
-        let mut data = Data::new();
-        data.create_spec(Path::abs_root(), SpecType::PseudoRoot);
-        data
-    }
-
     /// The derived entry at `path`.
     fn entry_at<'a>(cl: &'a ChangeList, path: &str) -> &'a ChangeEntry {
         cl.iter()
@@ -530,7 +542,7 @@ mod tests {
     #[test]
     fn presence_split_from_value() {
         let field = FieldKey::Kind.as_str();
-        let mut base = rooted();
+        let mut base = Data::rooted();
         base.create_spec(p("/P"), SpecType::Prim);
 
         // Authoring the field where the base held none is a presence change.
@@ -568,7 +580,7 @@ mod tests {
     fn replacement_nets_presence() {
         let kept = FieldKey::Kind.as_str();
         let dropped = FieldKey::Documentation.as_str();
-        let mut base = rooted();
+        let mut base = Data::rooted();
         base.create_spec(p("/P"), SpecType::Prim);
         base.set_field(&p("/P"), kept, Value::token("component"));
         base.set_field(&p("/P"), dropped, Value::String("gone".into()));
@@ -591,7 +603,7 @@ mod tests {
     /// nothing at all.
     #[test]
     fn property_replacement_nets_all() {
-        let mut base = rooted();
+        let mut base = Data::rooted();
         base.create_spec(p("/P"), SpecType::Prim);
         base.create_spec(p("/P.attr"), SpecType::Attribute);
         base.set_field(&p("/P.attr"), FieldKey::TypeName.as_str(), Value::token("float"));
@@ -904,7 +916,7 @@ mod tests {
     /// `info_changed`.
     #[test]
     fn records_prim_tree_adds() {
-        let cl = derive(rooted(), |c| {
+        let cl = derive(Data::rooted(), |c| {
             PrimSpec::new(c, "/A/B/C", Specifier::Def, "Xform").unwrap();
             AttributeSpec::new(c, "/A/B/C.size", "double", Variability::Varying, true).unwrap();
         });
@@ -920,7 +932,7 @@ mod tests {
     /// `PrimSpec::over` creates missing specs as `over`, recording inert adds.
     #[test]
     fn over_records_inert() {
-        let cl = derive(rooted(), |c| {
+        let cl = derive(Data::rooted(), |c| {
             PrimSpec::over(c, "/X/Y").unwrap();
         });
         assert!(has_flag(&cl, "/X", ChangeFlags::ADD_INERT_PRIM));
@@ -931,7 +943,7 @@ mod tests {
     /// `info_changed` with no add flag.
     #[test]
     fn metadata_on_existing_prim() {
-        let mut base = rooted();
+        let mut base = Data::rooted();
         PrimSpec::new(&mut base, "/A", Specifier::Def, "").unwrap();
 
         let cl = derive(base, |c| {
@@ -959,7 +971,7 @@ mod tests {
     /// authoring path, records nothing.
     #[test]
     fn redundant_define_no_change() {
-        let mut base = rooted();
+        let mut base = Data::rooted();
         PrimSpec::new(&mut base, "/A", Specifier::Def, "Xform").unwrap();
 
         let cl = derive(base, |c| {

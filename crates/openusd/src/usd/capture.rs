@@ -370,12 +370,66 @@ impl Journal {
         self.drop_stale(|transaction| transaction.overlaps(footprints));
     }
 
-    /// Drop what the departure of the layers in `layers` from the stage made
-    /// stale, by [`invalidate`](Self::invalidate)'s rule: an edit to one no
-    /// longer reaches the journal, so history touching it cannot be kept
-    /// valid.
+    /// Drop the history on the layers in `layers`, which left the stage or
+    /// were reloaded: an edit to a layer that left no longer reaches the
+    /// journal, and a reload set a new baseline the history was not recorded
+    /// against, so history touching one cannot be kept valid. A step is
+    /// atomic, so one touching such a layer goes whole, and a step only on
+    /// other layers stays. The open groups close into one step, so a
+    /// transaction of any of them touching such a layer empties them all, and
+    /// a revert in progress touching one replays nothing more.
+    ///
+    /// What a dropped step authored on the other layers stays authored, as an
+    /// edit made elsewhere would: the newest older step overlapping it goes,
+    /// with every step older still, by [`invalidate`](Self::invalidate)'s
+    /// rule.
     fn depart(&mut self, layers: &HashSet<pcp::LayerId>) {
-        self.drop_stale(|transaction| transaction.layers.iter().any(|inverse| layers.contains(&inverse.layer)));
+        let touches =
+            |transaction: &Transaction| transaction.layers.iter().any(|inverse| layers.contains(&inverse.layer));
+        // The footprints the dropped transactions leave on the other layers.
+        let mut kept: Vec<(pcp::LayerId, Rc<sdf::Footprint>)> = Vec::new();
+        let keep = |kept: &mut Vec<(pcp::LayerId, Rc<sdf::Footprint>)>, transactions: &[Transaction]| {
+            let inverses = transactions.iter().flat_map(|transaction| &transaction.layers);
+            let others = inverses.filter(|inverse| !layers.contains(&inverse.layer));
+            kept.extend(others.map(|inverse| (inverse.layer, Rc::clone(&inverse.footprint))));
+        };
+        // From the newest: the reverts in progress, the open groups, then
+        // the stack's steps.
+        for revert in self.reverting.iter_mut().rev() {
+            if revert.iter().any(touches) {
+                keep(&mut kept, revert);
+                revert.clear();
+            }
+        }
+        if self.groups.iter().flatten().any(touches) {
+            for group in &mut self.groups {
+                keep(&mut kept, group);
+                group.clear();
+            }
+        }
+        let overlaps = |transaction: &Transaction, kept: &[(pcp::LayerId, Rc<sdf::Footprint>)]| {
+            transaction.layers.iter().any(|inverse| {
+                kept.iter()
+                    .any(|(layer, footprint)| *layer == inverse.layer && inverse.footprint.overlaps(footprint))
+            })
+        };
+        let mut dropped = vec![false; self.stack.len()];
+        let mut cut = 0;
+        for (at, step) in self.stack.iter().enumerate().rev() {
+            if step.iter().any(touches) {
+                dropped[at] = true;
+                keep(&mut kept, step);
+            } else if step.iter().any(|transaction| overlaps(transaction, &kept)) {
+                cut = at + 1;
+                break;
+            }
+        }
+        let mut at = 0;
+        self.stack.retain(|_| {
+            let stays = at >= cut && !dropped[at];
+            at += 1;
+            stays
+        });
     }
 
     /// Drop the newest transaction `stale` holds with every older one.

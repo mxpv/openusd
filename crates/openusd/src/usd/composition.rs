@@ -146,7 +146,8 @@ pub(super) trait CompositionHooks {
     }
 
     /// Tells the stage's internal observers that the layers in `layers` are
-    /// about to leave the graph. Runs no user code.
+    /// about to leave the graph, or were reloaded: history on them is stale.
+    /// Runs no user code.
     fn departed(&self, layers: &HashSet<pcp::LayerId>) {
         let _ = layers;
     }
@@ -176,6 +177,8 @@ pub(super) enum StageNotice {
     EditTarget,
     /// The load rules changed, resyncing these paths.
     LoadRules(Vec<sdf::Path>),
+    /// The failed loads were tried again, resyncing these paths.
+    LoadsRetried(Vec<sdf::Path>),
     /// A layer was muted or unmuted, resyncing these paths.
     Muting {
         layer: String,
@@ -228,6 +231,9 @@ pub(super) struct StageComposition {
     outbox: RefCell<VecDeque<Notice>>,
     /// Whether a delivery is running.
     delivering: Cell<bool>,
+    /// How many times the recorded load failures were forgotten
+    /// ([`retries`](Self::retries)).
+    retries: Cell<u64>,
 }
 
 impl StageComposition {
@@ -240,6 +246,7 @@ impl StageComposition {
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
             delivering: Cell::new(false),
+            retries: Cell::new(0),
         }
     }
 
@@ -468,14 +475,17 @@ impl StageComposition {
             }
             let drained = self.take_pending();
             let edited = drained.iter().any(|pending| matches!(pending, Pending::Edit(_)));
+            // A reload's retry is reported to the stage's sinks, as C++
+            // `UsdStage::Reload` reports what `PcpCache::Reload` resyncs; the
+            // retry any other edit makes recomposes what it reaches unreported.
+            let reloaded = drained
+                .iter()
+                .any(|pending| matches!(pending, Pending::Edit(edit) if edit.changes.did_reload_content()));
             let mut drained = drained.into_iter().peekable();
             // An edit changes the layers, so a target that previously failed to read
             // may now be readable: forget recorded load failures and drop the indices
             // that recorded one, so the next query re-demands and recomposes them.
-            let failures_cleared = edited && self.layers.borrow_mut().clear_failed_loads();
-            if failures_cleared {
-                self.cache.borrow_mut().drop_load_failed_indices();
-            }
+            let mut retried = if edited { self.forget_failed_loads() } else { None };
             // Entries committed under one transaction id are contiguous — a
             // transaction's layers record together, and the id increases across
             // transactions — so grouping by adjacent equal id carves the queue into
@@ -537,12 +547,59 @@ impl StageComposition {
             // rebuilt no stack: the failure diagnostics requeue as demands, so a
             // repaired asset loads and a still-broken one re-records the same
             // diagnostic.
-            if failures_cleared {
-                let requeued = self.layers.borrow().requeue_failed_sublayers();
-                self.resolve_sublayer_demands(requeued, hooks);
+            if let Some(dropped) = retried.take() {
+                self.retry_sublayers(dropped, reloaded, hooks);
             }
         }
         false
+    }
+
+    /// Forgets the recorded load failures (C++ `PcpChanges::DidMaybeFixAsset`
+    /// and `DidMaybeFixSublayer`), so a target or sublayer that failed to load
+    /// may load now: the indices that reported one recompose on their next
+    /// read, and each failed sublayer entry is demanded again. The stage's
+    /// sinks hear what this resyncs ([`StageNotice::LoadsRetried`]) at the
+    /// next delivery.
+    pub(super) fn retry_failed_loads(&self, hooks: &dyn CompositionHooks) {
+        if let Some(dropped) = self.forget_failed_loads() {
+            // The sweep goes first, as in a drain: it retires a reclaimed
+            // stack's failure diagnostics, so the requeue never demands a
+            // sublayer for a stack nothing uses.
+            self.reclaim_stale_stacks();
+            self.retry_sublayers(dropped, true, hooks);
+        }
+    }
+
+    /// How many times the recorded load failures were forgotten, so a caller
+    /// can tell whether a drain retried them.
+    pub(super) fn retries(&self) -> u64 {
+        self.retries.get()
+    }
+
+    /// Forgets the recorded load failures and drops the indices that reported
+    /// one, returning their paths, or `None` when no failure was recorded.
+    fn forget_failed_loads(&self) -> Option<Vec<sdf::Path>> {
+        let cleared = self.layers.borrow_mut().clear_failed_loads();
+        if cleared {
+            self.retries.set(self.retries.get() + 1);
+        }
+        cleared.then(|| self.cache.borrow_mut().drop_load_failed_indices())
+    }
+
+    /// The second half of a retry of the failed loads, once
+    /// [`forget_failed_loads`](Self::forget_failed_loads) dropped the indices
+    /// at `dropped`: demands again each sublayer entry whose load failed, and
+    /// when `announce` is set, queues a [`StageNotice::LoadsRetried`] naming
+    /// what the retry resyncs for the stage's sinks.
+    fn retry_sublayers(&self, mut resynced: Vec<sdf::Path>, announce: bool, hooks: &dyn CompositionHooks) {
+        let requeued = self.layers.borrow().requeue_failed_sublayers();
+        resynced.extend(self.resolve_sublayer_demands(requeued, hooks).1);
+        if !announce || resynced.is_empty() || !hooks.delivers() {
+            return;
+        }
+        super::sink::keep_ancestors(&mut resynced);
+        let notice = Notice::Stage(StageNotice::LoadsRetried(resynced));
+        self.outbox.borrow_mut().push_back(notice);
     }
 
     /// The delivering half of [`process_pending`](Self::process_pending): hand
@@ -574,9 +631,7 @@ impl StageComposition {
     /// [`pcp::Changes::did_change`] takes the per-layer split because
     /// classification is layer-relative; the event instead reports the merged
     /// record, attributed to the strongest edited layer. `provenance` says how the
-    /// records' layer-namespace paths reach stage namespace — a batched namespace
-    /// edit is [`Provenance::LocalStack`], the local layer stack sharing the
-    /// stage's namespace.
+    /// records' layer-namespace paths reach stage namespace.
     fn apply_change_sets(
         &self,
         generation: u64,
@@ -589,7 +644,21 @@ impl StageComposition {
         // Classification collects the notice's path-sets only when a sink is
         // listening; the invalidation half runs either way.
         let wants_notice = hooks.wants_notice();
+        // A reload that changed a layer's content brings it to a new baseline
+        // its undo history was not recorded against, so that history is
+        // dropped, as for a layer that leaves the stage. It goes before any
+        // observer or sink hears of the reload. A reload that found the
+        // content as it was leaves the history.
+        let reloaded: HashSet<pcp::LayerId> = edits
+            .iter()
+            .filter(|edit| edit.changes.did_reload_content() && !edit.changes.entries().is_empty())
+            .map(|edit| edit.layer)
+            .collect();
+        if !reloaded.is_empty() {
+            hooks.departed(&reloaded);
+        }
         let mut pcp_changes = match wants_notice {
+            true if matches!(provenance, Provenance::DirectLayerEdit) => pcp::Changes::reporting().with_authors(),
             true => pcp::Changes::reporting(),
             false => pcp::Changes::new(),
         };
@@ -614,7 +683,9 @@ impl StageComposition {
             for edit in edits {
                 merged.merge_from(edit.changes);
             }
-            Payload::new(&pcp_changes, &merged, layer_changes, &provenance)
+            let layers = self.layers.borrow();
+            let is_local = |layer| layers.in_root_stack(layer);
+            Payload::new(&pcp_changes, &merged, layer_changes, &provenance, &is_local)
         });
         let outcome = self.update_pair(|graph, cache| pcp_changes.apply(cache, graph));
         // The layer-stack tier's paths are known only after `apply` ran — a
@@ -658,11 +729,10 @@ impl StageComposition {
 
     /// The [`Provenance`] for one transaction's group of recorded edits. A staged
     /// provenance (published by a stage authoring method) rides the first layer
-    /// the transaction committed; an unstaged direct edit resolves from
-    /// local-layer membership — [`Provenance::LocalStack`] when the edited layer
-    /// is in the root layer stack (its paths are stage paths), else
-    /// [`Provenance::DirectLayerEdit`]. A multi-layer group with no staged
-    /// provenance is a local-stack batch (its layers share the stage namespace).
+    /// the transaction committed. A group with none resolves from local-layer
+    /// membership: [`Provenance::LocalStack`] when every edited layer is in
+    /// the root layer stack (its paths are stage paths), else
+    /// [`Provenance::DirectLayerEdit`].
     fn resolve_group_provenance(&self, group: &mut [PendingEdit]) -> Provenance {
         // Every layer of the transaction shares its provenance: once all but
         // the first are dropped, the first is the only owner.
@@ -675,18 +745,11 @@ impl StageComposition {
         if let Some(provenance) = shared {
             return Rc::unwrap_or_clone(provenance);
         }
-        match group {
-            [edit]
-                if !self
-                    .layers
-                    .borrow()
-                    .root_layer_stack()
-                    .iter()
-                    .any(|&(lid, _)| lid == edit.layer) =>
-            {
-                Provenance::DirectLayerEdit
-            }
-            _ => Provenance::LocalStack,
+        let layers = self.layers.borrow();
+        if group.iter().all(|edit| layers.in_root_stack(edit.layer)) {
+            Provenance::LocalStack
+        } else {
+            Provenance::DirectLayerEdit
         }
     }
 
@@ -1379,7 +1442,7 @@ impl StageComposition {
         self.process_pending(hooks);
         {
             let layers = self.settled_graph();
-            if layers.root_layer_stack().iter().any(|&(id, _)| id == target_layer) {
+            if layers.in_root_stack(target_layer) {
                 return Ok(pcp::LayerStackId::ROOT);
             }
         }

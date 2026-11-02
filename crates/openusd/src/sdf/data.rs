@@ -154,6 +154,14 @@ impl Data {
         Self::default()
     }
 
+    /// Create a container holding the pseudo-root alone, the content of a
+    /// layer with nothing authored.
+    pub fn rooted() -> Self {
+        let mut data = Self::new();
+        data.create_spec(Path::abs_root(), SpecType::PseudoRoot);
+        data
+    }
+
     /// Build a container from a map of pre-parsed spec records, the form a
     /// reader (e.g. the usda parser) produces.
     pub fn from_specs(specs: PathMap<SpecData>) -> Self {

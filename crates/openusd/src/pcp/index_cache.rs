@@ -2205,10 +2205,11 @@ impl IndexCache {
     /// ordinary layer-stack invalidation misses them; the stage calls this
     /// when a target may have become loadable: an edit cleared the graph's
     /// recorded load failures, or an asset that did not resolve now does.
-    pub(crate) fn drop_load_failed_indices(&mut self) {
+    /// Returns the paths of the indices it drops.
+    pub(crate) fn drop_load_failed_indices(&mut self) -> Vec<Path> {
         let failed = self.store.paths_with_failed_layer();
         if failed.is_empty() {
-            return;
+            return failed;
         }
         // The prims beneath one composed without the target too, and
         // recompose with it.
@@ -2220,6 +2221,7 @@ impl IndexCache {
         // repairing it can reveal prims — and instances — the population never
         // saw.
         self.invalidate_population();
+        failed
     }
 
     /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) for one change round's

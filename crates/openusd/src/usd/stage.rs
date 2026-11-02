@@ -1139,6 +1139,7 @@ impl composition::CompositionHooks for Stage {
             match notice {
                 composition::StageNotice::EditTarget => sink.edit_target_changed(self),
                 composition::StageNotice::LoadRules(resynced) => sink.load_rules_changed(self, resynced),
+                composition::StageNotice::LoadsRetried(resynced) => sink.loads_retried(self, resynced),
                 composition::StageNotice::Muting { layer, muted, resynced } => {
                     sink.layer_muting_changed(self, layer, *muted, resynced);
                 }
@@ -2778,6 +2779,52 @@ impl Stage {
             return Vec::new();
         };
         graph.identifiers_of(graph.sublayer_stack(parent_id).iter().map(|&(id, _)| id))
+    }
+
+    /// Reloads every layer the stage uses from its asset (C++
+    /// `UsdStage::Reload`), clip layers included, leaving out the session
+    /// layers and the sublayers beneath them, and muted layers. Each layer
+    /// reloads as [`sdf::LayerHandle::reload`] does, unforced: one with no
+    /// unsaved edits whose file is unchanged is not read. A sublayer that
+    /// failed to load is then tried again, and a reference or payload that
+    /// failed to load on its next read.
+    ///
+    /// The layers reload in one transaction ([`sdf::LayerHandle::reload_all`])
+    /// attributed to no stage, as a reload through a handle is: the stage's
+    /// sinks hear it as one committed change, and a retried load as
+    /// [`StageSink::loads_retried`](super::StageSink::loads_retried). Undo
+    /// steps touching a reloaded layer are dropped. Every layer is tried; the
+    /// first failure is returned.
+    ///
+    /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
+    /// a layer on the stage's registry.
+    pub fn reload(&self) -> Result<()> {
+        // A retry loads, and the drain a reload runs recomposes, so neither
+        // can run inside a read of the registry's layers.
+        self.settle()?;
+        self.composition.ensure_writable()?;
+        let handles: Vec<sdf::LayerHandle> = {
+            let layers = self.layers();
+            let used = layers.used_layers();
+            let session = layers.session_stack();
+            layers
+                .all_ids()
+                .iter()
+                .filter(|&&id| used.contains(&id) && session.iter().all(|&(member, _)| member != id))
+                .map(|&id| layers.handle(id).clone())
+                .collect()
+        };
+        // A drain of a reloaded layer's edit retries the failed loads (C++
+        // `PcpCache::Reload`), in every stage on the registry; this stage
+        // retries them itself when no edit reached it.
+        let retries = self.composition.retries();
+        let reloaded = sdf::LayerHandle::reload_all(&handles, false);
+        self.process_pending();
+        if self.composition.retries() == retries {
+            self.composition.retry_failed_loads(self);
+        }
+        self.process_pending();
+        reloaded.map(drop)
     }
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
@@ -4761,6 +4808,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::usd;
+    use crate::usdz;
 
     /// Assembles a [`Stage`] from hand-built layers, which the builder's
     /// registry takes, so a test can build a multi-layer stage (references,
@@ -7590,6 +7638,392 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(!stage.can_undo(), "the step on the muted layer went with it");
         stage.unmute_layer(&weak);
         assert!(stage.prim("/Saved")?.is_valid()?, "the saved edit reads back");
+        Ok(())
+    }
+
+    /// A stage reload reads only the files that changed, and composes what
+    /// they hold.
+    #[test]
+    fn stage_reload_reads_changed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let (registry, opens) = sdf::layer_registry::tests::counting_registry();
+        let stage = Stage::builder().registry(registry).open(&root)?;
+        assert!(stage.prim("/Sub")?.is_valid()?);
+        let read = opens.get();
+        stage.reload()?;
+        assert_eq!(opens.get(), read, "unchanged files are not read");
+        sdf::layer::tests::rewrite(&dir.path().join("sub.usda"), "#usda 1.0\ndef \"New\" {}\n")?;
+        stage.reload()?;
+        assert_eq!(opens.get(), read + 1, "only the changed file is read");
+        assert!(!stage.prim("/Sub")?.is_valid()?);
+        assert!(stage.prim("/New")?.is_valid()?);
+        Ok(())
+    }
+
+    /// Reloading a layer drops the undo steps touching it, and keeps the
+    /// steps on other layers, older ones included.
+    #[test]
+    fn reload_departs_undo() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let stage = usd::UndoStage::from(Stage::open(&root)?);
+        let root_id = stage.root_layer().identifier().to_string();
+        stage.edit_layer(&root_id, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/OnRoot", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let sub = layer_named(&stage, "sub.usda");
+        stage.edit_layer(&sub, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert_eq!(stage.undo_depth(), 2);
+        // The edit is saved, and the file changes elsewhere: the reload
+        // touches nothing the step did, yet sets a new baseline for its layer.
+        let handle = stage.layer_handle(&sub).expect("loaded");
+        handle.save()?;
+        sdf::layer::tests::append(&dir.path().join("sub.usda"), "def \"Elsewhere\" {}\n")?;
+        assert!(handle.reload(false)?);
+        assert!(stage.prim("/OnSub")?.is_valid()?, "the saved edit reads back");
+        assert!(stage.prim("/Elsewhere")?.is_valid()?);
+        assert_eq!(stage.undo_depth(), 1, "the step on the reloaded layer went");
+        assert!(stage.undo()?);
+        assert!(!stage.prim("/OnRoot")?.is_valid()?, "the older step on the root stays");
+        Ok(())
+    }
+
+    /// A reload that finds a layer's content as it was keeps the undo
+    /// history on it.
+    #[test]
+    fn reload_same_keeps_undo() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = usd::UndoStage::from(Stage::open(&shared_fixture(dir.path())?)?);
+        let sub = layer_named(&stage, "sub.usda");
+        stage.edit_layer(&sub, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let handle = stage.layer_handle(&sub).expect("loaded");
+        handle.save()?;
+        assert!(handle.reload(true)?, "a forced reload reads the file");
+        assert_eq!(stage.undo_depth(), 1);
+        Ok(())
+    }
+
+    /// A step that edited a reloaded layer and another one goes whole.
+    #[test]
+    fn reload_drops_whole_step() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = usd::UndoStage::from(Stage::open(&shared_fixture(dir.path())?)?);
+        let root_id = stage.root_layer().identifier().to_string();
+        let sub = layer_named(&stage, "sub.usda");
+        stage.batch_edit(&[&root_id, &sub], |edits| {
+            sdf::PrimSpec::new(edits[0].data_mut(), "/OnRoot", sdf::Specifier::Def, "")?;
+            sdf::PrimSpec::new(edits[1].data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert_eq!(stage.undo_depth(), 1);
+        let handle = stage.layer_handle(&sub).expect("loaded");
+        assert!(handle.reload(false)?, "the unsaved edit is discarded");
+        assert_eq!(stage.undo_depth(), 0);
+        assert!(stage.prim("/OnRoot")?.is_valid()?, "the root's half stays authored");
+        Ok(())
+    }
+
+    /// What a dropped step authored on another layer stays, so an older step
+    /// whose undo would overwrite it goes too.
+    #[test]
+    fn reload_drops_overlapped() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = usd::UndoStage::from(Stage::open(&shared_fixture(dir.path())?)?);
+        let root_id = stage.root_layer().identifier().to_string();
+        let sub = layer_named(&stage, "sub.usda");
+        stage.edit_layer(&root_id, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/P", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.batch_edit(&[&root_id, &sub], |edits| {
+            sdf::PrimSpec::new(edits[0].data_mut(), "/P/C", sdf::Specifier::Def, "")?;
+            sdf::PrimSpec::new(edits[1].data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert_eq!(stage.undo_depth(), 2);
+        let handle = stage.layer_handle(&sub).expect("loaded");
+        assert!(handle.reload(false)?);
+        assert_eq!(stage.undo_depth(), 0, "undoing /P would take the kept /P/C with it");
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A reload drops the undo steps on the reloaded layer in every stage
+    /// holding it, before a layer sink's callback on the reload can read the
+    /// history.
+    #[test]
+    fn reload_departs_shared() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(&root)?;
+        let b = Rc::new(usd::UndoStage::from(Stage::builder().registry(registry).open(&root)?));
+        let sub = layer_named(&b, "sub.usda");
+        b.edit_layer(&sub, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert_eq!(b.undo_depth(), 1);
+        let handle = a.layer_handle(&sub).expect("A holds the sublayer");
+        let seen = Rc::new(Cell::new(None));
+        let (record, held) = (Rc::clone(&seen), Rc::clone(&b));
+        handle.add_sink(move |_: &str, changes: &sdf::ChangeList| {
+            if changes.did_reload_content() {
+                record.set(Some(held.undo_depth()));
+            }
+        })?;
+        a.reload()?;
+        assert_eq!(seen.get(), Some(0), "the callback reads the dropped history");
+        assert_eq!(b.undo_depth(), 0);
+        Ok(())
+    }
+
+    /// A reload through a handle reaches every stage on the registry, which
+    /// resyncs the prims it changed and leaves the rest, as C++ does.
+    #[test]
+    fn reload_reaches_stages() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(&root)?;
+        let b = Stage::builder().registry(registry).open(&root)?;
+        assert!(b.prim("/A")?.is_valid()?);
+        let resynced = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&resynced);
+        b.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+            sink.borrow_mut().extend(change.resynced.iter().cloned());
+        });
+        sdf::layer::tests::append(FsPath::new(&root), "def \"Added\" {}\n")?;
+        let handle = a.layer_handle(a.root_layer().identifier()).expect("A holds its root");
+        assert!(handle.reload(false)?);
+        assert!(b.prim("/Added")?.is_valid()?, "the other stage reads the reload");
+        let resynced = resynced.borrow();
+        assert!(resynced.iter().any(|path| path.as_str() == "/Added"), "{resynced:?}");
+        assert!(!resynced.iter().any(|path| path.as_str() == "/A"), "{resynced:?}");
+        Ok(())
+    }
+
+    /// A changed package reloads: a layer inside one takes the package's
+    /// modification time.
+    #[test]
+    fn reload_reads_package() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let package = dir.path().join("scene.usdz");
+        let write = |text: &str| -> Result<()> {
+            let mut writer = usdz::ArchiveWriter::create(&package)?;
+            writer.add_layer("root.usda", text.as_bytes())?;
+            writer.finish()?;
+            Ok(())
+        };
+        write("#usda 1.0\ndef \"A\" {}\n")?;
+        let stage = Stage::open(package.to_str().expect("utf-8 path"))?;
+        assert!(stage.prim("/A")?.is_valid()?);
+        write("#usda 1.0\ndef \"B\" {}\n")?;
+        sdf::layer::tests::touch_later(&package)?;
+        stage.reload()?;
+        assert!(stage.prim("/B")?.is_valid()?);
+        assert!(!stage.prim("/A")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A layer built in memory has no file to read again, so a stage reload
+    /// leaves it as it is, though the registry gave it a resolver; an
+    /// anonymous one is emptied, as C++ does.
+    #[test]
+    fn reload_keeps_in_memory() -> Result<()> {
+        let stage = Stage::builder().open_layer(sdf::Layer::new_in_memory("root.usda"))?;
+        stage.define_prim("/A")?;
+        stage.reload()?;
+        assert!(stage.prim("/A")?.is_valid()?);
+        let anonymous = Stage::builder().in_memory("scratch.usda")?;
+        anonymous.define_prim("/A")?;
+        anonymous.reload()?;
+        assert!(!anonymous.prim("/A")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A layer the stage keeps only for its unsaved edits after its payload
+    /// unloads is not one the stage uses, so a stage reload leaves it, edits
+    /// included.
+    #[test]
+    fn reload_keeps_unused() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        stage.edit_layer(&layer_named(&stage, "payload.usda"), |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/Edited", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.unload("/P")?;
+        stage.reload()?;
+        stage.load("/P", LoadPolicy::WithDescendants)?;
+        assert!(stage.prim("/P/Edited")?.is_valid()?, "the unsaved edit survives");
+        Ok(())
+    }
+
+    /// A reload of layers outside the root layer stack is a direct layer
+    /// edit, and so is one reaching the root layer stack too, whose root
+    /// layer paths are stage paths.
+    #[test]
+    fn reload_direct_provenance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, payload) = payload_fixture(dir.path())?;
+        let sub = dir.path().join("sub.usda");
+        fs::write(&sub, "#usda 1.0\n")?;
+        let text = fs::read_to_string(&payload)?.replace("#usda 1.0\n", "#usda 1.0\n(subLayers = [@./sub.usda@])\n");
+        fs::write(&payload, text)?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&seen);
+        stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+            let direct = matches!(change.provenance, usd::Provenance::DirectLayerEdit);
+            let added = change.resynced.iter().any(|path| path.as_str() == "/X");
+            sink.borrow_mut().push((direct, added));
+        });
+        sdf::layer::tests::append(FsPath::new(&payload), "def \"Y\" {}\n")?;
+        sdf::layer::tests::append(&sub, "def \"Z\" {}\n")?;
+        stage.reload()?;
+        assert_eq!(
+            *seen.borrow(),
+            [(true, false)],
+            "one transaction, outside the root layer stack"
+        );
+        sdf::layer::tests::append(FsPath::new(&root), "def \"X\" {}\n")?;
+        sdf::layer::tests::append(FsPath::new(&payload), "def \"W\" {}\n")?;
+        stage.reload()?;
+        assert_eq!(
+            *seen.borrow(),
+            [(true, false), (true, true)],
+            "the root layer's prim resyncs"
+        );
+        Ok(())
+    }
+
+    /// A stage reload leaves the session layers as they are.
+    #[test]
+    fn stage_reload_keeps_session() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        let session = dir.path().join("session.usda");
+        fs::write(&session, "#usda 1.0\n")?;
+        let stage = Stage::builder()
+            .session_layer(session.to_str().expect("utf-8 path"))
+            .open(&root)?;
+        let session = layer_named(&stage, "session.usda");
+        stage.edit_layer(&session, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Session", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.reload()?;
+        assert!(stage.prim("/Session")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A stage reload tries a sublayer that failed to load again, and tells
+    /// the stage's sinks what the retry resynced.
+    #[test]
+    fn stage_reload_retries_sublayer() -> Result<()> {
+        struct Retried(Rc<RefCell<Vec<Vec<sdf::Path>>>>);
+        impl StageSink for Retried {
+            fn loads_retried(&self, _: &Stage, resynced: &[sdf::Path]) {
+                self.0.borrow_mut().push(resynced.to_vec());
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        fs::remove_file(dir.path().join("sub.usda"))?;
+        let stage = Stage::open(&root)?;
+        assert!(!stage.prim("/Sub")?.is_valid()?);
+        let retried = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Retried(Rc::clone(&retried)));
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        stage.reload()?;
+        assert!(
+            stage.prim("/Sub")?.is_valid()?,
+            "the sublayer loads once its file exists"
+        );
+        let retried = retried.borrow();
+        assert_eq!(retried.len(), 1, "{retried:?}");
+        assert!(!retried[0].is_empty());
+        Ok(())
+    }
+
+    /// An edit other than a reload tries the failed loads again without
+    /// reporting it.
+    #[test]
+    fn edit_retry_unreported() -> Result<()> {
+        struct Retried(Rc<Cell<usize>>);
+        impl StageSink for Retried {
+            fn loads_retried(&self, _: &Stage, _: &[sdf::Path]) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        fs::write(&root, "#usda 1.0\ndef \"P\" (references = @./missing.usda@) {}\n")?;
+        let stage = Stage::open(&root.to_string_lossy())?;
+        assert!(stage.prim("/P")?.is_valid()?, "the prim composes without its target");
+        let retried = Rc::new(Cell::new(0));
+        stage.add_sink(Retried(Rc::clone(&retried)));
+        let root_id = stage.root_layer().identifier().to_owned();
+        stage.edit_layer(&root_id, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/X", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(stage.prim("/X")?.is_valid()?);
+        assert_eq!(retried.get(), 0);
+        Ok(())
+    }
+
+    /// A reload through one stage tries the failed loads again in every stage
+    /// it reaches.
+    #[test]
+    fn reload_retries_shared() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        fs::remove_file(dir.path().join("sub.usda"))?;
+        let registry = sdf::LayerRegistry::default();
+        let a = Stage::builder().registry(registry.clone()).open(&root)?;
+        let b = Stage::builder().registry(registry).open(&root)?;
+        assert!(!b.prim("/Sub")?.is_valid()?);
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        sdf::layer::tests::append(FsPath::new(&root), "def \"Added\" {}\n")?;
+        a.reload()?;
+        assert!(a.prim("/Sub")?.is_valid()?);
+        assert!(b.prim("/Sub")?.is_valid()?, "the other stage loads the sublayer too");
+        Ok(())
+    }
+
+    /// A stage reload that must reload a layer fails with
+    /// [`sdf::LayerError::Busy`] from inside a read of its registry's layers.
+    #[test]
+    fn stage_reload_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = Stage::open(&shared_fixture(dir.path())?)?;
+        stage.edit_layer(&layer_named(&stage, "sub.usda"), |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Unsaved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let root = stage
+            .layer_handle(stage.root_layer().identifier())
+            .expect("the stage holds its root");
+        let reloaded = root.read(|_| stage.reload())?;
+        assert!(
+            matches!(reloaded, Err(crate::Error::Layer(sdf::LayerError::Busy))),
+            "{reloaded:?}"
+        );
         Ok(())
     }
 

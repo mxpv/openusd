@@ -116,6 +116,18 @@ pub trait StageSink {
     fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
         let _ = (stage, resynced);
     }
+
+    /// Observe the loads the stage tried again once a reload reached its
+    /// layers, through [`Stage::reload`] or a layer handle (C++
+    /// `UsdNotice::ObjectsChanged` fired by `Reload` for an asset that may
+    /// now load, treating every reported path as a full resync).
+    ///
+    /// `resynced` names the prims that recompose with a reference, payload
+    /// or sublayer that failed to load, minimal in ancestors; never empty,
+    /// since a retry that resyncs nothing fires no notification.
+    fn loads_retried(&self, stage: &Stage, resynced: &[sdf::Path]) {
+        let _ = (stage, resynced);
+    }
 }
 
 /// Where a committed edit originated, which determines the namespace its
@@ -127,11 +139,11 @@ pub trait StageSink {
 /// paths, the second are the edited layer's own.
 #[derive(Debug, Clone)]
 pub enum Provenance {
-    /// An edit to a layer of the local (root) layer stack: stage authoring
-    /// through the root edit target, a [`Stage::batch_edit`](super::Stage::batch_edit),
-    /// or a direct [`Stage::layer_handle`](super::Stage::layer_handle) edit to a local
-    /// layer. The local layer stack shares the stage's namespace, so paths are
-    /// already composed (stage) paths.
+    /// An edit to layers of the local (root) layer stack: stage authoring
+    /// through the root edit target, a [`Stage::batch_edit`](super::Stage::batch_edit)
+    /// of local layers, or a direct [`Stage::layer_handle`](super::Stage::layer_handle)
+    /// edit to a local layer. The local layer stack shares the stage's
+    /// namespace, so paths are already composed (stage) paths.
     LocalStack,
     /// Stage authoring through an edit target that remaps paths — a reference,
     /// payload, or variant arc. The carried mapping translates the authored
@@ -141,13 +153,15 @@ pub enum Provenance {
     /// `EditTarget` too; an identity-mapped target needs no translation and is
     /// instead [`LocalStack`](Self::LocalStack) or [`DirectLayerEdit`](Self::DirectLayerEdit).
     EditTarget(pcp::MapFunction),
-    /// A direct [`Stage::layer_handle`](super::Stage::layer_handle) edit to a non-local
-    /// (referenced or payload) layer. Nothing is translated
-    /// ([`mapping`](Self::mapping) is `None`): the literal authored paths stay in
-    /// the edited layer's own namespace, while the dependency-derived
-    /// [`resynced`](CommittedChange::resynced) paths (the composed prims that
-    /// reference the layer) are already in stage namespace. The two coexist
-    /// untranslated in one [`CommittedChange`], reaching the stage through
+    /// An edit reaching a non-local (referenced or payload) layer through no
+    /// edit target: a direct [`Stage::layer_handle`](super::Stage::layer_handle)
+    /// edit, or a [`Stage::batch_edit`](super::Stage::batch_edit) or reload
+    /// that includes one. No mapping translates it ([`mapping`](Self::mapping)
+    /// is `None`): a non-local layer's authored paths stay in that layer's own
+    /// namespace, while a local layer's edited with it, and the
+    /// dependency-derived [`resynced`](CommittedChange::resynced) paths (the
+    /// composed prims that reference the layer), are in stage namespace. The
+    /// two coexist in one [`CommittedChange`], reaching the stage through
     /// composition dependencies rather than a single path mapping.
     DirectLayerEdit,
 }
@@ -174,10 +188,11 @@ impl Provenance {
 ///
 /// [`resynced`](Self::resynced) and [`changed_info_only`](Self::changed_info_only)
 /// are in composed stage namespace for stage-authored edits and edits to a local
-/// layer. A direct edit to a non-local (referenced or payload) layer is reported
-/// in the edited layer's own namespace instead; [`provenance`](Self::provenance)
-/// says which. [`asset_paths_resynced`](Self::asset_paths_resynced) is stage
-/// namespace either way, being derived from composition dependencies rather
+/// layer. The paths a direct edit authors in a non-local (referenced or payload)
+/// layer are reported in that layer's own namespace instead;
+/// [`provenance`](Self::provenance) says when.
+/// [`asset_paths_resynced`](Self::asset_paths_resynced) is stage namespace
+/// either way, being derived from composition dependencies rather
 /// than from the authored change record.
 pub struct CommittedChange<'a> {
     /// Paths a consumer must re-resolve outright (C++ `ResyncedPaths`).
@@ -358,9 +373,11 @@ pub(crate) trait TxnObserver {
         let _ = generation;
     }
 
-    /// The layers in `layers` are about to leave the stage's graph: an edit to
-    /// one no longer reaches the stage. Runs between two borrows of the
-    /// stage's composition and touches only the observer's own state.
+    /// The layers in `layers` are about to leave the stage's graph, so an
+    /// edit to one no longer reaches the stage, or were reloaded from their
+    /// assets: what the observer recorded of them is stale. Runs between two
+    /// borrows of the stage's composition and touches only the observer's
+    /// own state.
     fn departed(&self, layers: &HashSet<pcp::LayerId>) {
         let _ = layers;
     }
@@ -486,23 +503,44 @@ impl Payload {
         scratch: &sdf::ChangeList,
         layer_changes: Vec<(String, sdf::ChangeList)>,
         provenance: &Provenance,
+        is_local: &dyn Fn(pcp::LayerId) -> bool,
     ) -> Self {
-        // Each provenance carries an authored path to composed stage namespace its
-        // own way. An edit target maps it through the arc it authors into; a path
-        // outside that mapping's domain — one the arc target cannot reach, so it
-        // could not have been authored through it — names no composed object and
-        // drops out of the report, though it still drives invalidation, which
-        // reads `CacheChanges` directly. A local layer shares the stage's
-        // namespace except for the variant selections a spec path carries
-        // (`/Prim{set=sel}child` composes into `/Prim/child`), which is the whole
-        // of its translation. A direct edit to a non-local layer reports that
-        // layer's own paths, variant spellings included. Every one of these can
-        // merge distinct layer paths onto one stage path, which the later dedup
+        // An authored path reaches the report by the rule of how it was
+        // authored. An edit target maps it through the arc it authors into; a
+        // path outside that mapping's domain — one the arc target cannot reach,
+        // so it could not have been authored through it — names no composed
+        // object and drops out of the report, though it still drives
+        // invalidation, which reads `CacheChanges` directly. Otherwise each
+        // layer that authored it names it by its own rule. A local layer shares
+        // the stage's namespace except for the variant selections a spec path
+        // carries (`/Prim{set=sel}child` composes into `/Prim/child`), which is
+        // the whole of its translation, and the path joins the stage half. A
+        // non-local layer's path stays in that layer's own namespace, variant
+        // spellings included, in the authored half. Every translation can merge
+        // distinct layer paths onto one stage path, which the later dedup
         // collapses.
-        let to_stage = |path: &sdf::Path| match provenance {
-            Provenance::EditTarget(m) => m.map_source_to_target(path),
-            Provenance::LocalStack => Some(path.strip_variant_selections()),
-            Provenance::DirectLayerEdit => Some(path.clone()),
+        let place = |(path, layers): (&sdf::Path, &[pcp::LayerId]),
+                     stage: &mut Vec<sdf::Path>,
+                     authored: &mut Vec<sdf::Path>| {
+            if let Provenance::EditTarget(m) = provenance {
+                stage.extend(m.map_source_to_target(path));
+                return;
+            }
+            // Every layer a local-stack edit names is local, and only a direct
+            // edit records the layers that authored each path.
+            let (local, other) = match provenance {
+                Provenance::LocalStack => (true, false),
+                _ => layers.iter().fold((false, false), |(local, other), &layer| {
+                    let here = is_local(layer);
+                    (local || here, other || !here)
+                }),
+            };
+            if local {
+                stage.push(path.strip_variant_selections());
+            }
+            if other {
+                authored.push(path.clone());
+            }
         };
         // The cache's stage half needs no translation: it is what a dependency
         // lookup answered, already in the composed namespace.
@@ -510,37 +548,27 @@ impl Payload {
             resynced: changes.cache.stage_resynced_paths().cloned().collect(),
             subtree: changes.cache.stage_subtree_paths().cloned().collect(),
         };
-        let mut authored = NamespacedPaths {
-            resynced: changes.cache.authored_resynced_paths().filter_map(&to_stage).collect(),
-            subtree: changes.cache.authored_subtree_paths().filter_map(&to_stage).collect(),
-        };
-        // A direct edit to a non-local layer is the one payload carrying two
-        // namespaces: nothing maps its authored paths, and the stage reports them
-        // in the edited layer's own namespace. Under any other provenance they
-        // are stage paths by now — a local layer shares the stage's namespace,
-        // and an edit target has mapped into it — so they join the stage half.
-        let info_is_authored = matches!(provenance, Provenance::DirectLayerEdit);
-        if !info_is_authored {
-            stage.resynced.append(&mut authored.resynced);
-            stage.subtree.append(&mut authored.subtree);
+        let mut authored = NamespacedPaths::default();
+        for path in changes.cache.authored_resynced_paths() {
+            place(path, &mut stage.resynced, &mut authored.resynced);
         }
-        // The `ChangeList` records paths in the edited layer's namespace, so it
-        // reaches stage namespace through the same rule, leaving it in whichever
-        // namespace the authored resyncs ended in. Subsumption against them is
-        // left to [`finish`](Self::finish), which owns the rule once the
-        // layer-stack tier's paths have landed.
+        for path in changes.cache.authored_subtree_paths() {
+            place(path, &mut stage.subtree, &mut authored.subtree);
+        }
+        // The `ChangeList` records paths in the edited layers' namespaces, so
+        // they reach the report through the same rule. Translation can collapse
+        // two spellings onto one stage path, which is the only thing here that
+        // needs re-ordering: both sets arrive sorted and unique out of their
+        // `BTreeSet`s. Subsumption against the resyncs is left to
+        // [`finish`](Self::finish), which owns the rule once the layer-stack
+        // tier's paths have landed.
         let mut stage_info: Vec<sdf::Path> = changes.cache.reported.stage_info.iter().cloned().collect();
-        let mut authored_info: Vec<sdf::Path> = changes.cache.reported.authored_info.iter().cloned().collect();
-        if !info_is_authored {
-            // Under every other provenance the authored spellings reach stage
-            // namespace by the same rule the resyncs took, so the two halves
-            // become one — and translation can collapse two spellings onto one
-            // path, which is the only thing here that needs re-ordering. Both
-            // halves arrive sorted and unique out of their `BTreeSet`s.
-            stage_info.extend(authored_info.drain(..).filter_map(|path| to_stage(&path)));
-            stage_info.sort();
-            stage_info.dedup();
+        let mut authored_info = Vec::new();
+        for path in changes.cache.reported.authored_info() {
+            place(path, &mut stage_info, &mut authored_info);
         }
+        stage_info.sort();
+        stage_info.dedup();
         Self {
             stage,
             authored,
@@ -677,6 +705,7 @@ fn is_covered_below(covering: &[sdf::Path], path: &sdf::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcp::change::Authored;
 
     fn p(s: &str) -> sdf::Path {
         sdf::Path::new(s).expect("valid path")
@@ -697,19 +726,34 @@ mod tests {
         info: &[&str],
         outcome: pcp::ApplyOutcome,
     ) -> Payload {
+        // A direct edit authors in a layer the stage does not hold locally.
+        let (local, other) = (pcp::LayerId::from_raw(0), pcp::LayerId::from_raw(1));
+        let author = match provenance {
+            Provenance::DirectLayerEdit => other,
+            _ => local,
+        };
         let mut changes = pcp::Changes::reporting();
         for path in stage {
             changes.cache.did_change_significantly.insert(p(path));
         }
         for path in authored {
             changes.cache.authored_significant.insert(p(path));
+            authored_in(&mut changes, Authored::Significant, path, author);
         }
         for path in info {
             changes.cache.reported.authored_info.insert(p(path));
+            authored_in(&mut changes, Authored::Info, path, author);
         }
-        let mut payload = Payload::new(&changes, &sdf::ChangeList::new(), Vec::new(), &provenance);
+        let is_local = |layer| layer == local;
+        let mut payload = Payload::new(&changes, &sdf::ChangeList::new(), Vec::new(), &provenance, &is_local);
         payload.finish(outcome);
         payload
+    }
+
+    /// Records that `layer` put `path` in the authored `set`.
+    fn authored_in(changes: &mut pcp::Changes, set: Authored, path: &str, layer: pcp::LayerId) {
+        let authors = changes.cache.reported.authors.entry(p(path)).or_default();
+        authors[set as usize].push(layer);
     }
 
     /// A resync stands for its whole subtree, so the reported sets are reduced
@@ -747,6 +791,29 @@ mod tests {
         };
         let payload = shaped(Provenance::LocalStack, &[], &[], &[], outcome);
         assert!(payload.asset_paths_resynced.is_empty());
+    }
+
+    /// A group editing a local and a non-local layer names each path by its
+    /// own layer: the local layer's variant spelling reaches stage namespace,
+    /// and the other layer's path stays as that layer spells it.
+    #[test]
+    fn mixed_layers_split() {
+        let (local, other) = (pcp::LayerId::from_raw(0), pcp::LayerId::from_raw(1));
+        let mut changes = pcp::Changes::reporting();
+        for (path, layer) in [("/A{v=x}B", local), ("/S{v=x}T", other)] {
+            changes.cache.authored_significant.insert(p(path));
+            authored_in(&mut changes, Authored::Significant, path, layer);
+        }
+        let is_local = |layer| layer == local;
+        let payload = Payload::new(
+            &changes,
+            &sdf::ChangeList::new(),
+            Vec::new(),
+            &Provenance::DirectLayerEdit,
+            &is_local,
+        );
+        assert_eq!(payload.stage.resynced, paths(&["/A/B"]));
+        assert_eq!(payload.authored.resynced, paths(&["/S{v=x}T"]));
     }
 
     /// A direct edit to a non-local layer reports two namespaces at once, so an

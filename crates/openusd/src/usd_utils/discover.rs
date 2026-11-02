@@ -699,7 +699,7 @@ impl Source<'_> {
 /// would let it find-or-open each (C++ `SdfLayer::FindOrOpen`).
 pub(super) enum SourceLayer<'a> {
     Live(&'a sdf::Layer),
-    Read(sdf::Layer),
+    Read(Box<sdf::Layer>),
 }
 
 impl<'a> SourceLayer<'a> {
@@ -723,7 +723,7 @@ impl<'a> SourceLayer<'a> {
         if let Some(layer) = graph.held(identifier, resolved.to_str()) {
             return Ok(Some(Self::Live(layer)));
         }
-        Ok(Some(Self::Read(registry.read_layer(identifier, resolved)?)))
+        Ok(Some(Self::Read(Box::new(registry.read_layer(identifier, resolved)?))))
     }
 }
 

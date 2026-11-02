@@ -46,6 +46,7 @@ use std::io::{self, Cursor, Write};
 use std::mem;
 use std::path::Path as FsPath;
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use crate::vt::Value;
 use crate::{ar, sdf, tf};
@@ -112,6 +113,54 @@ pub struct Layer {
     format: Option<&'static dyn super::FileFormat>,
     /// Whether a commit changed the layer since it was read or last saved.
     unsaved: bool,
+    /// The modification time its asset had when the layer was read or last
+    /// saved (C++ `SdfLayer::_assetModificationTime`), which a reload compares
+    /// to leave an unchanged file unread.
+    modified: AssetTime,
+    /// What the reload being staged read of the asset, applied when its edit
+    /// commits ([`LayerEdit::reload`]).
+    reloading: Option<Reloaded>,
+}
+
+/// A reload of a layer from its asset ([`Layer::read_again`]): the edits
+/// that bring the layer's content to the asset's, and the asset's state.
+pub(crate) struct Reload {
+    /// The edits, in the order they apply.
+    edits: Vec<ContentEdit>,
+    /// The asset's state, which the layer takes on when the reload commits.
+    reloaded: Reloaded,
+}
+
+/// What a reload read of a layer's asset besides its content.
+#[derive(Clone, Copy)]
+struct Reloaded {
+    /// The format the content was read in.
+    format: Option<&'static dyn super::FileFormat>,
+    /// The asset's modification time.
+    modified: AssetTime,
+}
+
+/// When a layer's asset was modified, as the layer last read or saved it.
+#[derive(Clone, Copy)]
+pub(crate) enum AssetTime {
+    /// The layer was not read from an asset.
+    Unread,
+    /// The layer was read from an asset its resolver reports no time for.
+    Unknown,
+    /// The layer was read from an asset modified at this time.
+    At(SystemTime),
+}
+
+/// One edit a [`Reload`] makes to a layer's content.
+enum ContentEdit {
+    /// Erase the spec at the path.
+    EraseSpec(Path),
+    /// Create a spec of the type at the path.
+    CreateSpec(Path, SpecType),
+    /// Erase the field of the spec at the path.
+    EraseField(Path, String),
+    /// Set the field of the spec at the path.
+    SetField(Path, String, Value),
 }
 
 impl Layer {
@@ -183,12 +232,14 @@ impl Layer {
             resolved,
             data,
             format,
+            modified,
         } = prepared;
         let real_path = resolved.to_string();
         let real_path = (real_path != identifier).then_some(real_path);
         let mut layer = Self::build(identifier, real_path, data);
         layer.resolver = Some(resolver);
         layer.format = format;
+        layer.modified = modified;
         layer
     }
 
@@ -210,6 +261,8 @@ impl Layer {
             resolver: None,
             format: None,
             unsaved: false,
+            modified: AssetTime::Unread,
+            reloading: None,
         }
     }
 
@@ -241,6 +294,7 @@ impl Layer {
     /// never sequences a rollback by hand.
     fn rollback(&mut self) {
         self.data.rollback();
+        self.reloading = None;
     }
 
     /// Author a batch of edits as one atomic unit: run `f` against the layer's
@@ -297,6 +351,7 @@ impl Layer {
     /// backend.
     fn veto(&mut self, txn: &TxnContext) -> Result<(), sink::Error> {
         self.changes.update(&self.data);
+        self.changes.set_reloaded(self.reloading.is_some());
         if !self.changes.is_empty() && !self.sinks.is_empty() {
             let change = self.pending_change(txn);
             self.sinks.iter().try_for_each(|sink| sink.before_commit(&change))?;
@@ -568,7 +623,99 @@ impl Layer {
             self.data = CowData::new(reopened.unwrap_or(serialized));
         }
         self.unsaved &= replaced.is_err();
+        if replaced.is_ok()
+            && let Some(resolver) = &self.resolver
+        {
+            let resolved = ar::ResolvedPath::new(self.real_path());
+            self.modified = asset_time(resolver.as_ref(), &self.identifier, &resolved);
+        }
         replaced
+    }
+
+    /// Reloads the layer from its asset (C++ `SdfLayer::Reload`), returning
+    /// whether it did. Its content becomes what the asset holds, with its
+    /// unsaved edits discarded, through one edit whose change list names the
+    /// specs that changed and [reports the reload](ChangeList::did_reload_content).
+    ///
+    /// Nothing is read, and the layer is left as it is, when `force` is not
+    /// set and the layer has no unsaved edits, its identifier resolves where
+    /// it did, and the asset's modification time is the one it had at the
+    /// last read or save. A layer that was not read from an asset is left as
+    /// it is, and an anonymous layer is emptied unless the format its tag
+    /// names [skips that](super::FileFormat::skip_anonymous_reload). An
+    /// identifier that no longer resolves, one that resolves elsewhere than
+    /// the layer was read from
+    /// ([`LayerError::Moved`](super::LayerError::Moved)), or an asset that
+    /// cannot be read is an error, and the layer is left as it is.
+    pub fn reload(&mut self, force: bool) -> crate::Result<bool> {
+        let _scope = ar::CacheScope::begin();
+        let Some(reload) = self.read_again(force)? else {
+            return Ok(false);
+        };
+        self.edit(|e| {
+            e.reload(reload);
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    /// What a [`reload`](Self::reload) brings the layer to, read from its
+    /// asset, or `None` when the reload leaves it as it is.
+    pub(crate) fn read_again(&self, force: bool) -> crate::Result<Option<Reload>> {
+        if self.is_anonymous() {
+            // The format that decides is the one the tag's extension names,
+            // as C++ `SdfLayer::CreateAnonymous` takes it, whatever format
+            // the content was read in; a tag naming none is the text
+            // format's.
+            let format = super::LayerRegistry::find_by_extension(ar::extension(&self.identifier));
+            if format.is_some_and(|format| format.skip_anonymous_reload()) {
+                return Ok(None);
+            }
+            let edits = content_edits(&self.data, &Data::rooted())?;
+            let reloaded = Reloaded {
+                format: self.format,
+                modified: AssetTime::Unread,
+            };
+            return Ok((!edits.is_empty()).then_some(Reload { edits, reloaded }));
+        }
+        // A layer read from no asset has nothing to read again: C++ tells one
+        // by its empty modification time, which a layer built in memory keeps
+        // though a registry gives it a resolver.
+        let Some(resolver) = self
+            .resolver
+            .as_ref()
+            .filter(|_| !matches!(self.modified, AssetTime::Unread))
+        else {
+            return Ok(None);
+        };
+        // The asset may have moved since it was read, so the identifier
+        // resolves again.
+        let resolved = super::LayerRegistry::resolve_layer_with(resolver.as_ref(), &self.identifier)
+            .ok_or_else(|| crate::Error::UnresolvedAsset(self.identifier.clone()))?;
+        // TODO: C++ reloads a layer from where its identifier resolves now
+        // (`DidChangeLayerResolvedPath`). A registry, a stage's graph and a
+        // handle index or anchor the layer by the real path it was read at, so
+        // a move needs them re-keyed, reported with the reload; until then a
+        // moved asset is refused, a package whose first layer was renamed
+        // among them.
+        if *resolved != *self.real_path() {
+            return Err(super::LayerError::Moved {
+                identifier: self.identifier.clone(),
+                resolved: resolved.to_string(),
+            }
+            .into());
+        }
+        let modified = asset_time(resolver.as_ref(), &self.identifier, &resolved);
+        if !force && !self.is_dirty() && modified.same(self.modified) {
+            return Ok(None);
+        }
+        let prepared = super::LayerRegistry::read(resolver.as_ref(), self.identifier.clone(), resolved, modified)?;
+        let reloaded = Reloaded {
+            format: prepared.format,
+            modified: prepared.modified,
+        };
+        let edits = content_edits(&self.data, prepared.data.as_ref())?;
+        Ok(Some(Reload { edits, reloaded }))
     }
 
     /// The layer's data read from a mapping of its saved file, when the
@@ -843,9 +990,7 @@ impl Layer {
     /// [`new_anonymous`](Self::new_anonymous) and, within the crate, composes
     /// layers whose identifiers must match an authored `subLayers` entry.
     pub(crate) fn new_in_memory(identifier: impl Into<String>) -> Self {
-        let mut data = Data::new();
-        data.create_spec(Path::abs_root(), SpecType::PseudoRoot);
-        Self::new(identifier, Box::new(data))
+        Self::new(identifier, Box::new(Data::rooted()))
     }
 
     /// Whether this layer's identifier is anonymous (the `anon:` prefix minted
@@ -1010,6 +1155,22 @@ impl LayerEdit<'_> {
     /// ([`AbstractData::create_spec`]).
     pub fn data_mut(&mut self) -> &mut dyn AbstractData {
         &mut self.layer.data
+    }
+
+    /// Brings the layer to the content a reload read
+    /// ([`Layer::read_again`]), and has the commit take on the asset's state
+    /// and report the reload ([`ChangeList::did_reload_content`]).
+    pub(crate) fn reload(&mut self, reload: Reload) {
+        let data = &mut self.layer.data;
+        for edit in reload.edits {
+            match edit {
+                ContentEdit::EraseSpec(path) => data.erase_spec(&path),
+                ContentEdit::CreateSpec(path, ty) => data.create_spec(path, ty),
+                ContentEdit::EraseField(path, field) => data.erase_field(&path, &field),
+                ContentEdit::SetField(path, field, value) => data.set_field(&path, &field, value),
+            }
+        }
+        self.layer.reloading = Some(reload.reloaded);
     }
 
     /// Remove the spec at `path`. Removing a prim also erases its descendant specs
@@ -1256,6 +1417,12 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     for layer in guard.layers.iter_mut() {
         layer.unsaved |= !layer.changes.is_empty();
         layer.data.commit();
+        // A reload leaves the layer as its asset holds it, so saved.
+        if let Some(reloaded) = layer.reloading.take() {
+            layer.format = reloaded.format;
+            layer.modified = reloaded.modified;
+            layer.unsaved = false;
+        }
     }
     // The group is committed, so the guard's drop leaves every overlay in place.
     guard.committed = true;
@@ -1378,8 +1545,73 @@ pub(crate) fn absolute_path_at(
     resolver.create_identifier(asset_path, anchor)
 }
 
+impl AssetTime {
+    /// Whether both name one modification of an asset (C++
+    /// `_ModificationTimesEqual`): two known times that are equal.
+    fn same(self, other: Self) -> bool {
+        matches!((self, other), (Self::At(a), Self::At(b)) if a == b)
+    }
+}
+
+/// The modification time of the asset `identifier` resolved to at `resolved`
+/// ([`ar::modification_timestamp`]).
+pub(crate) fn asset_time(resolver: &dyn ar::Resolver, identifier: &str, resolved: &ar::ResolvedPath) -> AssetTime {
+    ar::modification_timestamp(resolver, identifier, resolved).map_or(AssetTime::Unknown, AssetTime::At)
+}
+
+/// The edits that bring `old`'s content to `new`'s (C++
+/// `SdfLayer::_SetData`), so a change list names only what differs: a spec
+/// `new` lacks, or holds as another type, is erased, a missing one is
+/// created, and each field `new` holds differently is set or erased.
+///
+/// TODO(perf): every spec and field of both is read, the whole of a lazily
+/// decoded layer included, and the layer keeps its old storage (a crate
+/// file's buffer or mapping) under the changed fields it stages; one that
+/// reads its data on demand could take `new` whole and report that anything
+/// changed, as C++ `_AdoptData` does for data that streams.
+fn content_edits(old: &dyn AbstractData, new: &dyn AbstractData) -> Result<Vec<ContentEdit>, DataError> {
+    let mut edits = Vec::new();
+    // Deepest first, so a spec goes after those beneath it.
+    for path in old.spec_paths().iter().rev() {
+        if new.spec_type(path) != old.spec_type(path) {
+            edits.push(ContentEdit::EraseSpec(path.clone()));
+        }
+    }
+    // Parents first, as the paths sort.
+    for path in new.spec_paths() {
+        let Some(ty) = new.spec_type(&path) else {
+            continue;
+        };
+        // A spec erased or missing above is created with no fields.
+        let kept = old.spec_type(&path) == Some(ty);
+        if !kept {
+            edits.push(ContentEdit::CreateSpec(path.clone(), ty));
+        }
+        let fields = new.list_fields(&path).unwrap_or_default();
+        if kept {
+            for field in old.list_fields(&path).unwrap_or_default() {
+                if !fields.contains(&field) {
+                    edits.push(ContentEdit::EraseField(path.clone(), field));
+                }
+            }
+        }
+        for field in fields {
+            let Some(value) = new.try_field(&path, &field)? else {
+                continue;
+            };
+            // A value the old content cannot decode differs, so a reload
+            // repairs it.
+            let same = kept && matches!(old.try_field(&path, &field), Ok(Some(old)) if *old == *value);
+            if !same {
+                edits.push(ContentEdit::SetField(path.clone(), field, value.into_owned()));
+            }
+        }
+    }
+    Ok(edits)
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Result;
     use crate::vt;
@@ -1391,6 +1623,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use crate::sdf;
     use crate::usda;
@@ -1417,6 +1650,176 @@ mod tests {
         layer
             .save()
             .expect("a layer that loaded from a file can save back to it");
+        Ok(())
+    }
+
+    /// Writes `text` to `path` with a modification time past any it had.
+    pub(crate) fn rewrite(path: &FsPath, text: &str) -> Result<()> {
+        fs::write(path, text)?;
+        touch_later(path)
+    }
+
+    /// Appends `text` to the file at `path`, as [`rewrite`] writes.
+    pub(crate) fn append(path: &FsPath, text: &str) -> Result<()> {
+        let old = fs::read_to_string(path)?;
+        rewrite(path, &format!("{old}{text}"))
+    }
+
+    /// Sets the modification time of the file at `path` past any it had.
+    pub(crate) fn touch_later(path: &FsPath) -> Result<()> {
+        let later = SystemTime::now() + Duration::from_secs(60);
+        fs::File::options().write(true).open(path)?.set_modified(later)?;
+        Ok(())
+    }
+
+    /// A reload discards the unsaved edits of a layer whose file is unchanged.
+    #[test]
+    fn reload_discards_edits() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        fs::write(&path, "#usda 1.0\ndef \"A\" {}\n")?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/B", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(layer.is_dirty());
+        assert!(layer.reload(false)?, "a dirty layer reloads");
+        assert!(!layer.is_dirty());
+        assert!(layer.prim("/B")?.is_none(), "the edit is gone");
+        assert!(layer.prim("/A")?.is_some());
+        Ok(())
+    }
+
+    /// A clean layer whose file is unchanged is not read again unless forced.
+    #[test]
+    fn reload_skips_unchanged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        fs::write(&path, "#usda 1.0\ndef \"A\" {}\n")?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        assert!(!layer.reload(false)?);
+        assert!(layer.reload(true)?, "a forced reload reads the file");
+        Ok(())
+    }
+
+    /// A layer whose resolver reports no modification time is read again
+    /// on every reload, as C++ compares an unknown time equal to none.
+    #[test]
+    fn reload_unknown_time() -> Result<()> {
+        struct Timeless(ar::DefaultResolver);
+        impl ar::Resolver for Timeless {
+            fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+                self.0.create_identifier(asset_path, anchor)
+            }
+            fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+                self.0.resolve(asset_path)
+            }
+            fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+                self.0.resolve_for_new_asset(asset_path)
+            }
+            fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+                self.0.open_asset(resolved_path)
+            }
+            fn modification_timestamp(&self, _: &str, _: &ar::ResolvedPath) -> Option<SystemTime> {
+                None
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        fs::write(&path, "#usda 1.0\ndef \"A\" {}\n")?;
+        let mut layer = Layer::open_with(Timeless(ar::DefaultResolver::new()), path.to_string_lossy())?;
+        assert!(layer.reload(false)?);
+        Ok(())
+    }
+
+    /// A reload reads a changed file into the layer through an edit whose
+    /// change list names what changed and reports the reload.
+    #[test]
+    fn reload_reads_changed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        fs::write(&path, "#usda 1.0\ndef \"A\" {}\ndef \"B\" {}\n")?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&seen);
+        layer.add_sink(move |_: &str, changes: &ChangeList| {
+            let paths: Vec<String> = changes.entries().iter().map(|(path, _)| path.to_string()).collect();
+            record.borrow_mut().push((changes.did_reload_content(), paths));
+        });
+        rewrite(&path, "#usda 1.0\ndef \"A\" {}\ndef \"C\" {}\n")?;
+        assert!(layer.reload(false)?);
+        assert!(layer.prim("/B")?.is_none());
+        assert!(layer.prim("/C")?.is_some());
+        let seen = seen.borrow();
+        let (reloaded, paths) = seen.last().expect("the reload committed");
+        assert!(reloaded);
+        assert!(paths.iter().any(|path| path == "/B") && paths.iter().any(|path| path == "/C"));
+        assert!(
+            !paths.iter().any(|path| path == "/A"),
+            "an unchanged spec is not named: {paths:?}"
+        );
+        assert!(!layer.reload(false)?, "the reload recorded the file's time");
+        Ok(())
+    }
+
+    /// A reload that finds the asset elsewhere than it was read from is
+    /// refused, and the layer is left as it is.
+    #[test]
+    fn reload_refuses_moved() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        fs::create_dir_all(&first)?;
+        fs::create_dir_all(&second)?;
+        fs::write(second.join("scene.usda"), "#usda 1.0\ndef \"A\" {}\n")?;
+        let resolver = ar::DefaultResolver::with_search_paths([&first, &second]);
+        let mut layer = Layer::open_with(resolver, "scene.usda")?;
+        fs::write(first.join("scene.usda"), "#usda 1.0\ndef \"B\" {}\n")?;
+        let refused = layer.reload(true);
+        assert!(
+            matches!(refused, Err(crate::Error::Layer(sdf::LayerError::Moved { .. }))),
+            "{refused:?}"
+        );
+        assert!(layer.prim("/A")?.is_some());
+        Ok(())
+    }
+
+    /// An anonymous layer reloads empty, and an in-memory one with no asset
+    /// is left as it is.
+    #[test]
+    fn reload_without_asset() -> Result<()> {
+        let mut anonymous = Layer::new_anonymous("scratch");
+        anonymous.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(anonymous.reload(false)?);
+        assert!(anonymous.prim("/A")?.is_none());
+        assert!(!anonymous.reload(false)?, "an empty anonymous layer stays as it is");
+
+        // The crate format skips an anonymous reload, so a layer whose tag
+        // names it keeps its content.
+        let mut crate_layer = Layer::new_anonymous("scene.usdc");
+        crate_layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(!crate_layer.reload(false)?);
+        assert!(crate_layer.prim("/A")?.is_some());
+
+        // The format the tag names decides, though the content is text.
+        let mut bytes = Layer::from_bytes("schema.usd", b"#usda 1.0\ndef \"A\" {}\n".to_vec())?;
+        assert!(!bytes.reload(false)?);
+        assert!(bytes.prim("/A")?.is_some());
+
+        let mut memory = Layer::new_in_memory("memory.usda");
+        memory.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(!memory.reload(false)?);
+        assert!(memory.prim("/A")?.is_some());
         Ok(())
     }
 

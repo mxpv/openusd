@@ -20,7 +20,7 @@ mod copy;
 mod data;
 pub mod expr;
 mod file_format;
-mod layer;
+pub(crate) mod layer;
 pub(crate) mod layer_registry;
 mod layer_store;
 mod ordering;

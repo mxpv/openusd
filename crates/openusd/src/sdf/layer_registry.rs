@@ -207,6 +207,9 @@ pub(crate) struct PreparedLayer {
     /// The format the data was read in, or `None` for data that was never
     /// read in one (a layer built in memory).
     pub format: Option<&'static dyn sdf::FileFormat>,
+    /// When the asset was modified, taken before its content was read, so a
+    /// change made while it was read is not mistaken for the content read.
+    pub modified: sdf::layer::AssetTime,
 }
 
 /// A layer a load reached, with the identifier the load asked for it under.
@@ -481,9 +484,14 @@ impl LayerRegistry {
     /// not change the real path; a future `.usd` format with a non-identity
     /// `resolve_layer` would need the content sniff here too.
     pub(crate) fn resolve_layer(&self, identifier: &str) -> Option<ar::ResolvedPath> {
-        let resolved = self.resolver.resolve(identifier)?;
+        Self::resolve_layer_with(self.resolver.as_ref(), identifier)
+    }
+
+    /// [`resolve_layer`](Self::resolve_layer) through `resolver`.
+    pub(crate) fn resolve_layer_with(resolver: &dyn ar::Resolver, identifier: &str) -> Option<ar::ResolvedPath> {
+        let resolved = resolver.resolve(identifier)?;
         match Self::find_by_extension(&resolved.extension()) {
-            Some(format) => format.resolve_layer(self.resolver.as_ref(), &resolved),
+            Some(format) => format.resolve_layer(resolver, &resolved),
             None => Some(resolved),
         }
     }
@@ -593,7 +601,10 @@ impl LayerRegistry {
     /// The layer at `identifier`, which resolved to `resolved`, read from its
     /// asset.
     pub(crate) fn read_layer(&self, identifier: &str, resolved: ar::ResolvedPath) -> Result<sdf::Layer, LoadError> {
-        let prepared = self.read(identifier.to_owned(), resolved)?;
+        // TODO(perf): one more stat of the file per layer read; the asset the
+        // read opens could carry its modification time.
+        let modified = sdf::layer::asset_time(self.resolver.as_ref(), identifier, &resolved);
+        let prepared = Self::read(self.resolver.as_ref(), identifier.to_owned(), resolved, modified)?;
         Ok(sdf::Layer::new_resolved(prepared, Rc::clone(&self.resolver)))
     }
 
@@ -751,16 +762,21 @@ impl LayerRegistry {
         Ok(Some(layers))
     }
 
-    /// Reads the layer `identifier` resolved to at `resolved`, dispatching to
-    /// the registered format for its extension. The `.usd` extension is the
-    /// one ambiguous case — binary crate or text — so it reads the bytes once
-    /// and lets [`read_bytes`](Self::read_bytes) choose by content. C++
-    /// `SdfFileFormat::FindByExtension` + `CanRead`.
-    fn read(&self, identifier: String, resolved: ar::ResolvedPath) -> Result<PreparedLayer, LoadError> {
+    /// Reads the layer `identifier` resolved to at `resolved` through
+    /// `resolver`, dispatching to the registered format for its extension.
+    /// The `.usd` extension is the one ambiguous case — binary crate or text —
+    /// so it reads the bytes once and lets [`read_bytes`](Self::read_bytes)
+    /// choose by content. C++ `SdfFileFormat::FindByExtension` + `CanRead`.
+    /// `modified` is the asset's modification time, taken before the read.
+    pub(crate) fn read(
+        resolver: &dyn ar::Resolver,
+        identifier: String,
+        resolved: ar::ResolvedPath,
+        modified: sdf::layer::AssetTime,
+    ) -> Result<PreparedLayer, LoadError> {
         let ext = resolved.extension();
         let (data, format) = if ext.eq_ignore_ascii_case("usd") {
-            let bytes = self
-                .resolver
+            let bytes = resolver
                 .open_asset(&resolved)
                 .and_then(|asset| asset.into_buffer())
                 .map_err(sdf::FormatError::from)?;
@@ -769,13 +785,14 @@ impl LayerRegistry {
             let format = Self::find_by_extension(&ext).ok_or_else(|| LoadError::UnsupportedFormat {
                 resolved: resolved.to_string(),
             })?;
-            (format.read(self.resolver.as_ref(), &resolved)?, format)
+            (format.read(resolver, &resolved)?, format)
         };
         Ok(PreparedLayer {
             identifier,
             resolved,
             data,
             format: Some(format),
+            modified,
         })
     }
 
@@ -1019,7 +1036,8 @@ pub(crate) mod tests {
             return Ok(());
         };
         visited.insert(identifier.clone());
-        let layer = registry.read(identifier, resolved)?;
+        let modified = sdf::layer::AssetTime::Unknown;
+        let layer = LayerRegistry::read(registry.resolver.as_ref(), identifier, resolved, modified)?;
         let (data, resolved) = (layer.data.as_ref(), &layer.resolved);
         // Resolve this layer's arc/sublayer paths against its stack context (root
         // own overlaid by the inherited overrides). This eager test closure loads a

@@ -52,6 +52,10 @@ impl sdf::FileFormat for UsdaFileFormat {
         &["usda"]
     }
 
+    fn skip_anonymous_reload(&self) -> bool {
+        false
+    }
+
     fn matches_content(&self, prefix: &[u8]) -> bool {
         // The lexer skips whitespace before the cookie, so a layer that opens
         // with a blank line is still text (C++ `CanRead` reads the cookie the

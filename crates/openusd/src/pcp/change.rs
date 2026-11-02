@@ -72,6 +72,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem;
+use std::slice;
 
 use bitflags::bitflags;
 
@@ -128,6 +129,9 @@ pub(crate) struct Changes {
     /// dependency lookup per entry that a stage with no observer would throw
     /// away.
     report: bool,
+    /// Whether to record the layers that authored each reported path
+    /// ([`with_authors`](Self::with_authors)).
+    authors: bool,
 }
 
 /// One edited layer's committed record, with the prior field values the record
@@ -246,6 +250,37 @@ pub(crate) struct ReportedPaths {
     pub stage_resync: BTreeSet<Path>,
     /// The edited layer's own paths whose object appeared or vanished.
     pub authored_resync: BTreeSet<Path>,
+    /// The layers that authored each path of the authored sets, by the set,
+    /// so a notice names each path in its own layer's namespace. Recorded
+    /// only for a plan built [`with_authors`](Changes::with_authors); the spec
+    /// tier's sites carry their layer themselves.
+    pub authors: BTreeMap<Path, [Vec<LayerId>; 3]>,
+}
+
+/// An authored set a path's [`ReportedPaths::authors`] are recorded for.
+#[derive(Clone, Copy)]
+pub(crate) enum Authored {
+    /// [`CacheChanges::authored_significant`].
+    Significant,
+    /// [`ReportedPaths::authored_resync`].
+    Resync,
+    /// [`ReportedPaths::authored_info`].
+    Info,
+}
+
+impl ReportedPaths {
+    /// The layers that put `path` in the `set`.
+    fn authors(&self, set: Authored, path: &Path) -> &[LayerId] {
+        self.authors.get(path).map_or(&[], |authors| &authors[set as usize])
+    }
+
+    /// The edited layers' own paths that changed value or metadata, each with
+    /// the layers that authored it.
+    pub(crate) fn authored_info(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
+        self.authored_info
+            .iter()
+            .map(|path| (path, self.authors(Authored::Info, path)))
+    }
 }
 
 /// What one [`ChangeEntry`] invalidates.
@@ -308,11 +343,22 @@ impl CacheChanges {
     /// The spec tier is reported so an inert spec add/remove (e.g. an `over`) is
     /// surfaced, not silently dropped, even though it refreshes `has_specs` in
     /// place rather than rebuilding the index.
-    pub(crate) fn authored_resynced_paths(&self) -> impl Iterator<Item = &Path> {
-        self.authored_significant
-            .iter()
-            .chain(self.did_change_specs.iter().map(|(_, path)| path))
-            .chain(self.reported.authored_resync.iter())
+    ///
+    /// Each path comes with the layers that authored it.
+    pub(crate) fn authored_resynced_paths(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
+        let reported = &self.reported;
+        self.authored_subtree_paths()
+            .chain(
+                self.did_change_specs
+                    .iter()
+                    .map(|(layer, path)| (path, slice::from_ref(layer))),
+            )
+            .chain(
+                reported
+                    .authored_resync
+                    .iter()
+                    .map(|path| (path, reported.authors(Authored::Resync, path))),
+            )
     }
 
     /// The subset of [`stage_resynced_paths`](Self::stage_resynced_paths) that
@@ -330,8 +376,10 @@ impl CacheChanges {
     /// is excluded for the same reason the prim tier is: refreshing `has_specs`
     /// at `/A` says nothing about `/A/B`, so an inert `over` added on the way to
     /// authoring `/A/B.x` must not swallow the attribute's own report.
-    pub(crate) fn authored_subtree_paths(&self) -> impl Iterator<Item = &Path> {
-        self.authored_significant.iter()
+    pub(crate) fn authored_subtree_paths(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
+        self.authored_significant
+            .iter()
+            .map(|path| (path, self.reported.authors(Authored::Significant, path)))
     }
 
     /// Both halves of the significant tier, for invalidation — which drops every
@@ -447,6 +495,14 @@ impl Changes {
             report: true,
             ..Self::default()
         }
+    }
+
+    /// This plan, recording also the layers that authored each reported path
+    /// ([`ReportedPaths::authors`]), for a notice naming the paths of several
+    /// layers each in its own layer's namespace.
+    pub(crate) fn with_authors(mut self) -> Self {
+        self.authors = true;
+        self
     }
 
     /// Diff phase: classify each [`ChangeEntry`] into the appropriate
@@ -703,12 +759,29 @@ impl Changes {
     /// prim owns it.
     fn report_entry(&mut self, cache: &IndexCache, graph: &LayerGraph, layer: LayerId, path: &Path, report: Report) {
         let reported = &mut self.cache.reported;
-        let (stage, authored) = match report {
-            Report::Info => (&mut reported.stage_info, &mut reported.authored_info),
-            Report::Resync => (&mut reported.stage_resync, &mut reported.authored_resync),
+        let (stage, authored, set) = match report {
+            Report::Info => (&mut reported.stage_info, &mut reported.authored_info, Authored::Info),
+            Report::Resync => (
+                &mut reported.stage_resync,
+                &mut reported.authored_resync,
+                Authored::Resync,
+            ),
         };
         authored.insert(path.clone());
         stage.extend(cache.store().graph_ancestor_lookup(graph, layer, path));
+        self.record_author(set, layer, path);
+    }
+
+    /// Records that `layer` put `path` in the authored `set`, for a plan
+    /// built [`with_authors`](Self::with_authors).
+    fn record_author(&mut self, set: Authored, layer: LayerId, path: &Path) {
+        if self.authors {
+            let authors = self.cache.reported.authors.entry(path.clone()).or_default();
+            let layers = &mut authors[set as usize];
+            if !layers.contains(&layer) {
+                layers.push(layer);
+            }
+        }
     }
 
     /// Records that the prims observing `(layer, prim)` may compose different
@@ -780,6 +853,7 @@ impl Changes {
         // first-time add will need its index built from scratch on next
         // access.
         self.cache.authored_significant.insert(path.clone());
+        self.record_author(Authored::Significant, layer, path);
     }
 
     /// Authoring this field on a prim path forces a graph rebuild.

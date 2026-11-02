@@ -1264,6 +1264,22 @@ pub fn is_package_relative_path(path: &str) -> bool {
     path.contains('[') && path.ends_with(']')
 }
 
+/// The modification timestamp of the asset `asset_path` resolved to at
+/// `resolved`, asked of `resolver`. An asset inside a package
+/// (`pkg.usdz[layer.usda]`) has its outermost package's, as C++
+/// `ArResolver::GetModificationTimestamp` dispatches a package-relative path
+/// above the resolver that serves it.
+pub fn modification_timestamp(
+    resolver: &dyn Resolver,
+    asset_path: &str,
+    resolved: &ResolvedPath,
+) -> Option<SystemTime> {
+    let outer = |path: &str| split_package_relative_path_outer(path).map(|(package, _)| package);
+    let asset_path = outer(asset_path).map_or(Cow::Borrowed(asset_path), Cow::Owned);
+    let package = resolved.to_str().and_then(outer).map(ResolvedPath::new);
+    resolver.modification_timestamp(&asset_path, package.as_ref().unwrap_or(resolved))
+}
+
 /// Splits a package-relative path at the outermost bracket.
 ///
 /// Returns the outer package path and the inner packaged path.

@@ -2370,6 +2370,28 @@ impl LayerGraph {
         &self.order[..self.session_layer_count]
     }
 
+    /// The composed session layers: the root layer stack's members ahead of
+    /// the root layer, `${VAR}` sublayers included (C++
+    /// `PcpLayerStack::GetSessionLayers`).
+    pub(crate) fn session_stack(&self) -> &[(LayerId, LayerOffset)] {
+        let stack = self.root_layer_stack();
+        let end = stack
+            .iter()
+            .position(|&(id, _)| Some(id) == self.root)
+            .unwrap_or(stack.len());
+        &stack[..end]
+    }
+
+    /// The layers the stage uses: every live stack's members and the layers
+    /// held for value clips alone (C++ `UsdStage::GetUsedLayers`). A layer
+    /// the graph keeps only for a pin, or one beneath a muted layer, is not
+    /// among them.
+    pub(crate) fn used_layers(&self) -> HashSet<LayerId> {
+        let mut used = self.stacks.member_layers();
+        used.extend(&self.clip_only);
+        used
+    }
+
     /// The root layer's id (the first non-session layer), if any.
     pub(crate) fn root_id(&self) -> Option<LayerId> {
         self.root
@@ -2470,6 +2492,12 @@ impl LayerGraph {
     /// local opinions.
     pub(crate) fn root_layer_stack(&self) -> &[(LayerId, LayerOffset)] {
         self.stacks.members(LayerStackId::ROOT)
+    }
+
+    /// Whether `layer` is a member of the root layer stack (C++
+    /// `PcpLayerStack::HasLayer`).
+    pub(crate) fn in_root_stack(&self, layer: LayerId) -> bool {
+        self.root_layer_stack().iter().any(|&(id, _)| id == layer)
     }
 
     /// Resolves a [`LayerStackId`] back to its members (the `(layer id, effective

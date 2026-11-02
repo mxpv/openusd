@@ -105,8 +105,7 @@ impl Stage {
         self.settle()?;
         let assets = assets.mode();
         let root = sdf::Path::abs_root();
-        let mut data = sdf::Data::new();
-        data.create_spec(root.clone(), sdf::SpecType::PseudoRoot);
+        let mut data = sdf::Data::rooted();
         write_fields(&mut data, &root, stage_fields(self, assets)?);
 
         // Everything the stage holds, whatever its status: a class prim is

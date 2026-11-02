@@ -157,6 +157,13 @@ pub trait FileFormat: Sync {
         false
     }
 
+    /// Whether a reload leaves an anonymous layer of this format as it is
+    /// (C++ `SdfFileFormat::ShouldSkipAnonymousReload`). Otherwise the reload
+    /// empties it. Defaults to `true`.
+    fn skip_anonymous_reload(&self) -> bool {
+        true
+    }
+
     /// Decode a layer's data from `bytes`, already read out of `source_name`.
     ///
     /// `source_name` is where the bytes came from, for diagnostics that quote a
