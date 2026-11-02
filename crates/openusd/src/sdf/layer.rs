@@ -46,6 +46,7 @@ use std::io::{self, Cursor, Write};
 use std::mem;
 use std::path::Path as FsPath;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::vt::Value;
@@ -215,6 +216,30 @@ impl Layer {
         let mut layer = Self::new(identifier, data);
         layer.format = Some(format);
         Ok(layer)
+    }
+
+    /// An anonymous layer tagged `tag` reading through `data`, which it
+    /// shares with everyone else holding it.
+    ///
+    /// Edits stage as usual, and the first one committed copies the whole
+    /// data while anyone else still holds it (see [`AbstractData`] for
+    /// [`Arc`]), so the shared data is never written. `data` holds its
+    /// pseudo-root spec ([`Data::rooted`]). Shared data can cross threads
+    /// where a layer cannot: a thread builds a layer of its own over it. The
+    /// layer is anonymous, so a reload empties it. `tag` names the data's
+    /// origin for diagnostics, as in [`new_anonymous`](Self::new_anonymous).
+    pub fn from_shared(tag: impl fmt::Display, data: Arc<Data>) -> Self {
+        // TODO: two kinds of shared layer are left to their own design. A
+        // lazily decoded backend (`usdc::CrateData`) cannot copy out inside
+        // the infallible mutators, since decoding every field can fail: it
+        // needs a fallible materialization before the transaction, or the
+        // immutable crate backing shared beneath writable spec metadata and an
+        // overlay, which keeps decoding lazy. A shared layer with an identity
+        // needs the origin an opened layer has, its identifier and its
+        // resolved location (`real_path`) under a resolver, and a decision on
+        // whether it can save or reload.
+        debug_assert!(data.has_spec(&Path::abs_root()), "shared data holds its pseudo-root");
+        Self::new(Self::anonymous_identifier(tag), Box::new(data))
     }
 
     /// Construct a loaded layer recording its resolved physical location.
@@ -1623,6 +1648,7 @@ pub(crate) mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
     use std::time::Duration;
 
     use crate::sdf;
@@ -1700,6 +1726,47 @@ pub(crate) mod tests {
         let mut layer = Layer::open(path.to_string_lossy())?;
         assert!(!layer.reload(false)?);
         assert!(layer.reload(true)?, "a forced reload reads the file");
+        Ok(())
+    }
+
+    /// A layer over shared data copies it at its first committed edit, and
+    /// leaves the shared data as it was; an edit that does not commit copies
+    /// nothing.
+    #[test]
+    fn from_shared_copies() -> Result<()> {
+        let mut data = Data::rooted();
+        sdf::PrimSpec::new(&mut data, "/A", sdf::Specifier::Def, "")?;
+        let shared = Arc::new(data);
+        // A layer on another thread reads the data, and an edit through one
+        // layer leaves another's as it was.
+        let elsewhere = Arc::clone(&shared);
+        let read = thread::spawn(move || {
+            Layer::from_shared("elsewhere", elsewhere)
+                .prim("/A")
+                .map(|a| a.is_some())
+        });
+        assert!(read.join().expect("the thread finishes")?);
+        let other = Layer::from_shared("other", Arc::clone(&shared));
+        let mut layer = Layer::from_shared("shared", Arc::clone(&shared));
+        assert!(layer.is_anonymous());
+        assert!(layer.prim("/A")?.is_some());
+        let refused = layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Refused", sdf::Specifier::Def, "")?;
+            Err(AuthoringError::InvalidPath {
+                path: sdf::Path::new("/Refused")?,
+                reason: "refused",
+            })
+        });
+        assert!(refused.is_err());
+        assert_eq!(Arc::strong_count(&shared), 3, "a rolled back edit copies nothing");
+        layer.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/B", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert_eq!(Arc::strong_count(&shared), 2, "the commit copied the data");
+        assert!(layer.prim("/B")?.is_some());
+        assert!(other.prim("/B")?.is_none());
+        assert!(!shared.has_spec(&sdf::Path::new("/B")?));
         Ok(())
     }
 

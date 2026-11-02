@@ -1631,10 +1631,16 @@ impl SchemaRegistryBuilder {
     fn add_layers(&mut self, source: FamilySource<'_>) -> Result<(), SchemaRegistryError> {
         let family = self.claim_family(source.name)?;
 
-        // TODO: the registry copies each layer's specs because `AbstractData` is
-        // not `Send + Sync`, so a lazily decoded backend cannot be shared (see
-        // [`Schematics`]). Making the trait thread-safe would let a family hold
-        // its reader and decode a fallback on demand.
+        // TODO: share immutable schema data snapshots. The copy gives the
+        // registry an owned snapshot: one shared across threads, unchanged by a
+        // later edit or reload of the source layer, whose decode failures
+        // surface here at registration. A family handed over as shared
+        // `sdf::Data` (an `Arc`, as `sdf::Layer::from_shared` reads it) could
+        // be retained without the copy, which a `&sdf::Layer` cannot offer. A
+        // binary backend could keep its immutable bytes behind thread-safe
+        // decoding once registration validates the schema structure and
+        // fallback decode failures have a defined route to callers. Measure
+        // registry construction and memory first.
         let schematics = Arc::new(Schematics {
             family: family.clone(),
             resolved_location: source.schematics.anchor_location(),

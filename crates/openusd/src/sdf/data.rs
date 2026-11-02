@@ -3,7 +3,7 @@
 //! Parallels C++ `SdfData`. A flat map from [`Path`] to [`SpecData`] that can
 //! be populated programmatically and then handed to a writer.
 
-use std::{borrow::Cow, collections::HashSet};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 use crate::sdf::{Path, PathMap, SpecData, SpecType};
 use crate::vt::Value;
@@ -333,6 +333,65 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
 
     fn erase_field(&mut self, path: &Path, field: &str) {
         (**self).erase_field(path, field);
+    }
+}
+
+/// Data shared by everyone holding it, which a write copies first: each
+/// mutator goes through [`Arc::make_mut`], so the others keep the data as it
+/// was. A write that changes nothing copies nothing.
+///
+/// TODO(perf): the copy is of the whole data, every spec and value. Specs
+/// held each behind its own `Arc` (or a persistent map) would let a write
+/// copy only the specs it touches.
+impl<T: AbstractData + Clone> AbstractData for Arc<T> {
+    fn has_spec(&self, path: &Path) -> bool {
+        (**self).has_spec(path)
+    }
+
+    fn has_field(&self, path: &Path, field: &str) -> bool {
+        (**self).has_field(path, field)
+    }
+
+    fn spec_type(&self, path: &Path) -> Option<SpecType> {
+        (**self).spec_type(path)
+    }
+
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        (**self).try_field(path, field)
+    }
+
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
+        (**self).list_fields(path)
+    }
+
+    fn field_mask(&self, path: &Path, fields: &[&str]) -> u32 {
+        (**self).field_mask(path, fields)
+    }
+
+    fn spec_paths(&self) -> Vec<Path> {
+        (**self).spec_paths()
+    }
+
+    fn create_spec(&mut self, path: Path, ty: SpecType) {
+        Arc::make_mut(self).create_spec(path, ty);
+    }
+
+    fn erase_spec(&mut self, path: &Path) {
+        if self.has_spec(path) {
+            Arc::make_mut(self).erase_spec(path);
+        }
+    }
+
+    fn set_field(&mut self, path: &Path, field: &str, value: Value) {
+        if self.has_spec(path) {
+            Arc::make_mut(self).set_field(path, field, value);
+        }
+    }
+
+    fn erase_field(&mut self, path: &Path, field: &str) {
+        if self.has_field(path, field) {
+            Arc::make_mut(self).erase_field(path, field);
+        }
     }
 }
 
@@ -668,6 +727,28 @@ pub(crate) fn mask_of(fields: &[&str], mut authors: impl FnMut(&str) -> bool) ->
 mod tests {
     use super::*;
     use crate::sdf::path;
+
+    /// Data shared across threads: a layer on each reads it.
+    #[test]
+    fn data_crosses_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Data>();
+    }
+
+    /// A write to shared data copies it, and leaves the other holder's as
+    /// it was.
+    #[test]
+    fn shared_write_copies() {
+        let root = path("/Root").unwrap();
+        let mut data = Data::new();
+        data.create_spec(root.clone(), SpecType::Prim);
+        let original = Arc::new(data);
+        let mut copy = Arc::clone(&original);
+        copy.set_field(&root, "comment", Value::from("edited"));
+        assert!(!Arc::ptr_eq(&original, &copy));
+        assert!(!original.has_field(&root, "comment"));
+        assert!(copy.has_field(&root, "comment"));
+    }
 
     #[test]
     fn create_and_query_spec() {

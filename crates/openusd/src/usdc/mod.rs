@@ -176,8 +176,8 @@ impl Spec {
 /// High level interface to binary data.
 ///
 /// TODO(rayon): the file's tables are read-only after open and every decode
-/// runs over `&self`. This is therefore `Send + Sync` as soon as `sdf::Path`
-/// and `tf::Token` are, which the schema registry waits on too.
+/// runs over `&self` of a `Send + Sync` value, so decodes of distinct fields
+/// can run in parallel.
 pub struct CrateData {
     file: CrateFile,
     data: sdf::PathMap<Spec>,
@@ -454,6 +454,13 @@ mod tests {
     use super::*;
     use crate::Result;
     use crate::sdf::{AbstractData, FileFormat};
+
+    /// Crate data can be shared across threads.
+    #[test]
+    fn crate_data_shared() {
+        fn shared<T: Send + Sync>() {}
+        shared::<CrateData>();
+    }
 
     /// A crate layer read from an asset that shares its bytes decodes from
     /// those bytes and keeps a reference to them.
