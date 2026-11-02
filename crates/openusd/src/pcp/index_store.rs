@@ -16,11 +16,13 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
+use std::slice;
 
 use crate::sdf::{self, Path};
 
 use super::dependencies::Dependencies;
 use super::diagnostics::Diagnostics;
+use super::instancing::RetiredPrototype;
 use super::layer_graph::{LayerGraph, LayerView};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
@@ -43,10 +45,11 @@ pub(super) struct IndexStore {
     empty_index: PrimIndex,
     /// Cache-owner counts: for each non-root layer stack, how many cached
     /// entries' arenas, and how many work-set entries, reference it.
-    /// Incremented by [`insert`](Self::insert), kept when a removal moves an
-    /// entry into the work set, and decremented when the work set releases
-    /// it or an insert rebuilds its prim, so the key set is exactly the stacks
-    /// the cache keeps alive — the mark set
+    /// Incremented by [`insert`](Self::insert) and by each copy
+    /// [`transfer_work`](Self::transfer_work) places, kept when a removal
+    /// moves an entry into the work set, and decremented when a work-set
+    /// entry settles, retires or is released, so the key set is exactly the
+    /// stacks the cache keeps alive — the mark set
     /// ([`mark_live_stacks`](Self::mark_live_stacks)) without walking any
     /// arena.
     stack_owners: HashMap<LayerStackId, usize>,
@@ -62,7 +65,21 @@ pub(super) struct IndexStore {
     /// stacks its index owned, which stay counted as owned until the entry is
     /// released ([`release_evicted`](Self::release_evicted)) or an insert
     /// rebuilds its prim.
-    evicted: sdf::PathTable<Box<[LayerStackId]>>,
+    evicted: sdf::PathTable<Unsettled>,
+    /// The prototypes an invalidation retired, with the instances that shared
+    /// them, kept with the work set until settlement transfers their
+    /// descendants' work or the work set is released.
+    retired: Vec<RetiredPrototype>,
+}
+
+/// A cached prim a removal dropped, waiting in the work set.
+#[derive(Debug)]
+pub(super) struct Unsettled {
+    /// The stacks the dropped index owned, still counted as owned.
+    stacks: Box<[LayerStackId]>,
+    /// The last attempt to settle the prim, when it failed: the error's
+    /// text and the round it failed in.
+    failure: Option<(String, u64)>,
 }
 
 /// Validity token for a cached answer about one composed prim.
@@ -243,14 +260,10 @@ impl IndexStore {
         // Owner counts pair one increment per entry with one decrement at its
         // removal; a silent overwrite would double-count.
         debug_assert!(!self.entries.contains_key(path), "insert over a cached entry");
-        for stack in owned_stacks(&index) {
-            *self.stack_owners.entry(stack).or_default() += 1;
-        }
+        self.own_stacks(owned_stacks(&index));
         // A prim the work set held is rebuilt: the new entry counts its own
         // stacks, so the dropped index's stop being owned.
-        if let Some(stacks) = self.evicted.remove(path) {
-            self.release_stacks(&stacks);
-        }
+        self.settle(path);
         self.deps.add(path, &index, graph, expr_var_deps);
         let revision = self.mint_revision();
         self.entries.insert(
@@ -330,10 +343,17 @@ impl IndexStore {
         self.entries.subtree(prefix).map(|(path, _)| path.clone()).collect()
     }
 
+    /// Records one more ownership of each of `stacks`.
+    fn own_stacks(&mut self, stacks: impl IntoIterator<Item = LayerStackId>) {
+        for stack in stacks {
+            *self.stack_owners.entry(stack).or_default() += 1;
+        }
+    }
+
     /// Releases one ownership of each of `stacks`, flagging a reclamation
     /// pass when a stack loses its last cache owner.
-    fn release_stacks(&mut self, stacks: &[LayerStackId]) {
-        for &stack in stacks {
+    fn release_stacks(&mut self, stacks: impl IntoIterator<Item = LayerStackId>) {
+        for stack in stacks {
             match self.stack_owners.entry(stack) {
                 Entry::Occupied(mut count) => {
                     *count.get_mut() -= 1;
@@ -384,26 +404,43 @@ impl IndexStore {
     }
 
     /// Records `path`'s dropped `index` in the work set with the stacks it
-    /// owned, which stay counted as owned. A path is in the work set at most
-    /// once: dropping it again needs an insert first, which settles it.
+    /// owned, which stay counted as owned. A path is never both cached and in
+    /// the work set: an insert settles it, and
+    /// [`transfer_work`](Self::transfer_work) places no copy on a cached
+    /// path, so dropping it again finds no entry for it there.
     fn evict(&mut self, path: &Path, index: &PrimIndex) {
         let stacks: Box<[LayerStackId]> = owned_stacks(index).into_iter().collect();
-        let held = self.evicted.insert(path.clone(), stacks);
+        let held = self.evicted.insert(path.clone(), Unsettled { stacks, failure: None });
         debug_assert!(held.is_none(), "a path in the work set was dropped again");
     }
 
-    /// Releases the whole work set: every entry's stacks stop being owned,
-    /// flagging a reclamation pass for each that loses its last owner.
+    /// One [`CompositionDiagnostic::SettlementFailed`] per failed work-set
+    /// entry.
+    pub(super) fn settlement_failures(&self) -> impl Iterator<Item = CompositionDiagnostic> + '_ {
+        let work = self.evicted.subtree(&Path::abs_root());
+        work.filter_map(|(path, unsettled)| {
+            let (reason, _) = unsettled.failure.as_ref()?;
+            Some(CompositionDiagnostic::SettlementFailed {
+                path: path.clone(),
+                reason: reason.clone(),
+            })
+        })
+    }
+
+    /// Releases the whole work set, retired-prototype records included:
+    /// every entry's stacks stop being owned, flagging a reclamation pass for
+    /// each that loses its last owner.
     ///
     /// TODO: settlement, which rebuilds or retires each prim the work set
     /// holds, replaces this wholesale release.
     pub(super) fn release_evicted(&mut self) {
+        self.retired.clear();
         if self.evicted.is_empty() {
             return;
         }
         let evicted = mem::take(&mut self.evicted);
-        for (_, stacks) in evicted.iter() {
-            self.release_stacks(stacks);
+        for (_, unsettled) in evicted.iter() {
+            self.release_stacks(unsettled.stacks.iter().copied());
         }
     }
 
@@ -682,6 +719,115 @@ impl IndexStore {
     pub(super) fn seed_instanceable(&mut self, prim: &Path, instanceable: bool) {
         if let Some(entry) = self.entries.get_mut(prim) {
             entry.instanceable = Some((entry.revision, instanceable));
+        }
+    }
+}
+
+/// The work set's settlement operations: what composing a dropped prim
+/// again, or showing it gone, does to its entry.
+impl IndexStore {
+    /// The work set's paths, parents before children, less those whose
+    /// settling failed in `round`.
+    pub(super) fn work(&self, round: u64) -> Vec<Path> {
+        let work = self.evicted.subtree(&Path::abs_root());
+        work.filter(|(_, unsettled)| unsettled.failure.as_ref().is_none_or(|&(_, failed)| failed != round))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    /// Whether the work set holds `path`.
+    pub(super) fn is_unsettled(&self, path: &Path) -> bool {
+        self.evicted.contains_key(path)
+    }
+
+    /// Records that settling `path` failed with `reason` in `round`. The
+    /// prim keeps its stacks; one failure is kept per prim, the last.
+    pub(super) fn fail(&mut self, path: &Path, reason: String, round: u64) {
+        if let Some(unsettled) = self.evicted.get_mut(path) {
+            unsettled.failure = Some((reason, round));
+        }
+    }
+
+    /// Records the failure for every work-set entry at and beneath `root`:
+    /// what settling them waits on failed.
+    pub(super) fn fail_work(&mut self, root: &Path, reason: &str, round: u64) {
+        let work: Vec<Path> = self.evicted.subtree(root).map(|(path, _)| path.clone()).collect();
+        for path in work {
+            self.fail(&path, reason.to_owned(), round);
+        }
+    }
+
+    /// Settles `path`: its stacks stop being owned and it leaves the work
+    /// set.
+    pub(super) fn settle(&mut self, path: &Path) {
+        if let Some(settled) = self.evicted.remove(path) {
+            self.release_stacks(settled.stacks.iter().copied());
+        }
+    }
+
+    /// Retires `path`, which composes nothing or which the population does
+    /// not reach: the cached entry there, built only to decide that, is
+    /// dropped without entering the work set, and the work-set entries at
+    /// and beneath it leave it. Their stacks stop being owned.
+    pub(super) fn retire(&mut self, path: &Path) {
+        if let Some(entry) = self.entries.remove(path) {
+            self.deps.remove_all(slice::from_ref(path));
+            self.release_stacks(owned_stacks(&entry.index));
+        }
+        for (_, retired) in self.evicted.remove_subtree(path) {
+            self.release_stacks(retired.stacks.iter().copied());
+        }
+    }
+
+    /// Keeps `records` with the work set, for settlement to transfer their
+    /// descendants' work.
+    pub(super) fn retire_prototypes(&mut self, records: impl IntoIterator<Item = RetiredPrototype>) {
+        self.retired.extend(records);
+    }
+
+    /// Takes the retired-prototype records out for settlement to transfer.
+    pub(super) fn take_retired(&mut self) -> Vec<RetiredPrototype> {
+        mem::take(&mut self.retired)
+    }
+
+    /// Moves `root`'s work subtree under each of `targets`, re-rooted, each
+    /// copy owning its stacks and carrying its failure; with no target, the
+    /// work leaves the work set. A copy landing on a path the work set holds
+    /// already merges into that entry, which owns each stack once; one
+    /// landing on a cached prim is dropped, since that prim composed already.
+    pub(super) fn transfer_work(&mut self, root: &Path, targets: &[Path]) {
+        let taken = self.evicted.remove_subtree(root);
+        for target in targets {
+            for (path, unsettled) in &taken {
+                let Some(path) = path.replace_prefix(root, target) else {
+                    continue;
+                };
+                if self.entries.contains_key(&path) {
+                    continue;
+                }
+                let held = self.evicted.get(&path).map_or(&[][..], |held| &held.stacks[..]);
+                let added: Vec<LayerStackId> = unsettled
+                    .stacks
+                    .iter()
+                    .copied()
+                    .filter(|stack| !held.contains(stack))
+                    .collect();
+                self.own_stacks(added.iter().copied());
+                if let Some(held) = self.evicted.get_mut(&path) {
+                    held.stacks = held.stacks.iter().chain(&added).copied().collect();
+                    if held.failure.is_none() {
+                        held.failure.clone_from(&unsettled.failure);
+                    }
+                } else {
+                    let stacks = added.into_boxed_slice();
+                    let failure = unsettled.failure.clone();
+                    self.evicted.insert(path, Unsettled { stacks, failure });
+                }
+            }
+        }
+        // Each copy counted its own stacks, so the taken entries' go.
+        for (_, unsettled) in taken {
+            self.release_stacks(unsettled.stacks.iter().copied());
         }
     }
 }
@@ -968,5 +1114,43 @@ pub(crate) mod tests {
         assert!(evicted(&store).is_empty());
         assert!(!store.stack_owners.contains_key(&stack));
         assert!(store.ownership_lost(), "the release schedules a sweep");
+    }
+    /// Transferred work owns its stacks once per copy, a copy merging into a
+    /// held entry owns each stack once, and work with no target leaves.
+    #[test]
+    fn transfer_counts_stacks() {
+        let g = graph(2);
+        let referenced = g.all_ids()[1];
+        let indexed = || {
+            let mut index = PrimIndex::default();
+            index.push_node(node(&g, referenced, &p("/Source"), MapFunction::identity()));
+            index
+        };
+        let stack = indexed().arena().next().expect("one node").layer_stack_id();
+        let mut store = IndexStore::default();
+        for path in ["/__Prototype_1", "/__Prototype_1/Part", "/__Prototype_2/Part"] {
+            register(&mut store, &g, &p(path), indexed());
+        }
+        store.remove_subtrees([&p("/__Prototype_1"), &p("/__Prototype_2")]);
+        assert_eq!(store.stack_owners[&stack], 3);
+
+        // Two groups, one of them landing on a held entry.
+        store.transfer_work(&p("/__Prototype_1"), &[p("/__Prototype_2"), p("/__Prototype_3")]);
+        assert_eq!(
+            evicted(&store),
+            [
+                "/__Prototype_2",
+                "/__Prototype_2/Part",
+                "/__Prototype_3",
+                "/__Prototype_3/Part"
+            ]
+        );
+        assert_eq!(store.stack_owners[&stack], 4, "one owner per entry");
+
+        store.transfer_work(&p("/__Prototype_3"), &[]);
+        assert_eq!(evicted(&store), ["/__Prototype_2", "/__Prototype_2/Part"]);
+        assert_eq!(store.stack_owners[&stack], 2);
+        store.release_evicted();
+        assert!(!store.stack_owners.contains_key(&stack));
     }
 }

@@ -7444,7 +7444,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     #[test]
     fn clip_load_busy() -> Result<()> {
         let busy = |result: &Result<Option<f64>>| match result {
-            Err(crate::Error::Query(pcp::QueryError::Layer(error))) => matches!(**error, sdf::LayerError::Busy),
+            Err(crate::Error::Query(error)) => error.is_busy(),
             _ => false,
         };
         let dir = tempfile::tempdir()?;

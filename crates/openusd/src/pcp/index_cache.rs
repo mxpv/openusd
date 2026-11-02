@@ -25,7 +25,7 @@ use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
-use super::instancing::{Answer, PrimRecord, PrototypeRegistry};
+use super::instancing::{Answer, PrimRecord, PrototypeRegistry, RetiredPrototype};
 use super::layer_graph::{LayerGraph, LayerStackIdentifier, LayerView, MuteChange, sublayer_introducer};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::load_rules::LoadRules;
@@ -1551,14 +1551,15 @@ impl IndexCache {
     }
 
     /// Returns the recoverable composition errors encountered so far: the
-    /// one-shot collection errors, the current per-prim build errors, and the
-    /// transient query errors.
+    /// one-shot collection errors, the current per-prim build errors, the
+    /// transient query errors, and the work set's settlement failures.
     pub(crate) fn composition_errors(&self) -> Diagnostics {
         self.collection_diagnostics
             .iter()
             .chain(self.store.errors())
             .chain(&self.query_diagnostics)
             .cloned()
+            .chain(self.store.settlement_failures())
             .collect()
     }
 
@@ -2292,6 +2293,15 @@ impl IndexCache {
     /// [`Self::drop_indices`].
     pub(super) fn drop_index_subtrees<'p>(&mut self, prefixes: impl IntoIterator<Item = &'p Path>) {
         self.store.remove_subtrees(prefixes);
+    }
+
+    /// Drops each of `retired`'s prototype subtrees into the work set,
+    /// keeping the records with it for settlement to transfer their
+    /// descendants' work.
+    pub(super) fn drop_prototypes(&mut self, retired: Vec<RetiredPrototype>) {
+        self.store
+            .remove_subtrees(retired.iter().map(|prototype| &prototype.root));
+        self.store.retire_prototypes(retired);
     }
 
     /// Invalidates the cache after a layer-set change restructures only some
@@ -3903,6 +3913,157 @@ impl IndexCache {
     }
 }
 
+/// Settlement: each prim the work set holds is composed again, or shown to be
+/// gone, so the stacks its dropped index owned are held only while it needs
+/// them (C++ `UsdStage::_RecomposePrims`, here bounded to the prims the cache
+/// held).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called once settlement runs at the stage's seams")
+)]
+impl IndexCache {
+    /// Settles what the work set holds, parents first, in settlement round
+    /// `round`.
+    ///
+    /// A retired prototype's descendants first move under the groups its
+    /// surviving instances settle into. Then each prim is decided by
+    /// [`settle_prim`](Self::settle_prim): rebuilt, which settles it;
+    /// excluded or absent, which retires it with its work subtree; or
+    /// pending, which keeps it. An error composing a prim keeps it, with the
+    /// layers its last composition used, and records the failure, which a
+    /// later round tries again; one that failed in `round` is not tried again
+    /// in it. A busy store stops the pass, every prim it had not reached
+    /// kept.
+    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>, round: u64) -> Result<(), QueryError> {
+        self.transfer_prototypes(graph, round)?;
+        // TODO(rayon): siblings settle independently once their parent has,
+        // so each level of the work set could be decided in parallel.
+        for path in self.store.work(round) {
+            // An ancestor's retirement took it already.
+            if !self.store.is_unsettled(&path) {
+                continue;
+            }
+            match self.settle_prim(graph, &path) {
+                Ok(Settlement::Rebuilt) => self.store.settle(&path),
+                Ok(Settlement::Excluded | Settlement::Absent) => self.store.retire(&path),
+                Ok(Settlement::Pending) => {}
+                Err(error) if error.is_busy() => return Err(error),
+                Err(error) => self.store.fail(&path, error.to_string(), round),
+            }
+        }
+        Ok(())
+    }
+
+    /// Decides the work-set prim at `path`. Deciding it rebuilds its index,
+    /// unless the prim is served from elsewhere (an instance proxy reads its
+    /// prototype's index) or composes nothing.
+    fn settle_prim(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<Settlement, QueryError> {
+        // Taken before the population decision, whose ancestors' composition
+        // can demand a layer too.
+        let pending_before = self.pending_loads.len();
+        let settlement = if !self.population_reaches(graph, path)? {
+            Settlement::Excluded
+        } else if !self.has_spec(graph, path)? {
+            Settlement::Absent
+        } else {
+            Settlement::Rebuilt
+        };
+        Ok(match self.provisional(path, pending_before) {
+            true => Settlement::Pending,
+            false => settlement,
+        })
+    }
+
+    /// Moves each retired prototype's descendants' work under the groups the
+    /// instances that shared it now belong to, once per group, or under an
+    /// instance that left instancing, or retires it when no instance remains.
+    /// An enclosing prototype moves first, so a nested instance is found under
+    /// the group the enclosing one moved to. A prototype whose instances'
+    /// decision is provisional, or failed, keeps its record for the next
+    /// pass, and so do the prototypes nested in it. A failure is recorded
+    /// on the prototype's work, and not tried again in `round`; a busy store
+    /// stops the transfers, every record not reached kept.
+    fn transfer_prototypes(&mut self, graph: &LayerView<'_>, round: u64) -> Result<(), QueryError> {
+        let records = self.store.take_retired();
+        let order = nesting_order(&records);
+        let mut records: Vec<Option<RetiredPrototype>> = records.into_iter().map(Some).collect();
+        let mut moved: HashMap<Path, Vec<Path>> = HashMap::new();
+        let mut kept: HashSet<Path> = HashSet::new();
+        let mut busy = None;
+        // TODO(rayon): the targets of records no other encloses are
+        // independent of each other.
+        for at in order {
+            let mut record = records[at].take().expect("the nesting order visits each record once");
+            let enclosed_kept = record
+                .instances
+                .iter()
+                .any(|instance| instance.root_prim().is_some_and(|root| kept.contains(&root)));
+            let targets = if busy.is_some() || enclosed_kept || record.failed_in == Some(round) {
+                None
+            } else {
+                match self.prototype_targets(graph, &record, &moved) {
+                    Ok(targets) => targets,
+                    Err(error) if error.is_busy() => {
+                        busy = Some(error);
+                        None
+                    }
+                    Err(error) => {
+                        self.store.fail_work(&record.root, &error.to_string(), round);
+                        record.failed_in = Some(round);
+                        None
+                    }
+                }
+            };
+            if let Some(targets) = targets {
+                self.store.transfer_work(&record.root, &targets);
+                moved.insert(record.root, targets);
+            } else {
+                // Kept with its instances where this pass's transfers placed
+                // them: `moved` lasts one pass.
+                record.instances = record
+                    .instances
+                    .iter()
+                    .flat_map(|instance| translated(instance, &moved))
+                    .collect();
+                kept.insert(record.root.clone());
+                self.store.retire_prototypes([record]);
+            }
+        }
+        busy.map_or(Ok(()), Err)
+    }
+
+    /// The groups `record`'s instances belong to now, as `moved` places
+    /// them, each once: an instance's prototype, or the instance itself when
+    /// it left instancing; an instance deleted or outside the population has
+    /// none. `None` while some instance's decision is provisional.
+    fn prototype_targets(
+        &mut self,
+        graph: &LayerView<'_>,
+        record: &RetiredPrototype,
+        moved: &HashMap<Path, Vec<Path>>,
+    ) -> Result<Option<Vec<Path>>, QueryError> {
+        let mut targets = Vec::new();
+        let mut provisional = false;
+        for instance in record.instances.iter().flat_map(|instance| translated(instance, moved)) {
+            let pending_before = self.pending_loads.len();
+            let present = self.population_reaches(graph, &instance)? && self.has_spec(graph, &instance)?;
+            let target = match present {
+                false => None,
+                true if self.is_instance(graph, &instance)? => self.prototype_of(graph, &instance)?,
+                true => Some(instance.clone()),
+            };
+            provisional |= self.provisional(&instance, pending_before);
+            targets.extend(target);
+        }
+        if provisional {
+            return Ok(None);
+        }
+        targets.sort();
+        targets.dedup();
+        Ok(Some(targets))
+    }
+}
+
 /// Calls `visit` with each name a prim's contributing sites list in
 /// `propertyChildren`, with the node and site listing it, weakest to strongest:
 /// contributing nodes in reverse strength order and, within each, its
@@ -4035,6 +4196,74 @@ fn target_prim_inherits_class(
 /// Whether `payload` names a target, by asset path or prim path.
 fn payload_has_target(payload: &sdf::Payload) -> bool {
     !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
+}
+
+/// What settling one work-set prim decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settlement {
+    /// The prim composes, so its index is rebuilt.
+    Rebuilt,
+    /// The population does not reach the prim: the mask hides it, or its
+    /// parent is not populated.
+    Excluded,
+    /// The prim composes nothing.
+    Absent,
+    /// The decision demanded a layer not yet loaded, so it is provisional,
+    /// whichever way it went.
+    Pending,
+}
+
+/// The order to transfer `records` in: each after every record whose root
+/// encloses one of its instances. A prototype root is a root prim, so an
+/// instance's enclosing record is the one rooted at its root prim.
+fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {
+    let by_root: HashMap<&Path, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(at, record)| (&record.root, at))
+        .collect();
+    let mut waits = vec![0_usize; records.len()];
+    let mut enclosed: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+    for (at, record) in records.iter().enumerate() {
+        let outer: HashSet<usize> = record
+            .instances
+            .iter()
+            .filter_map(|instance| by_root.get(&instance.root_prim()?).copied())
+            .filter(|&outer| outer != at)
+            .collect();
+        waits[at] = outer.len();
+        for outer in outer {
+            enclosed[outer].push(at);
+        }
+    }
+    let mut order: Vec<usize> = (0..records.len()).filter(|&at| waits[at] == 0).collect();
+    let mut next = 0;
+    while let Some(&at) = order.get(next) {
+        next += 1;
+        for &inner in &enclosed[at] {
+            waits[inner] -= 1;
+            if waits[inner] == 0 {
+                order.push(inner);
+            }
+        }
+    }
+    debug_assert_eq!(order.len(), records.len(), "prototype nesting is acyclic");
+    // A record still waiting, which acyclic nesting rules out, goes last.
+    order.extend((0..records.len()).filter(|&at| waits[at] > 0));
+    order
+}
+
+/// `instance` as the transfers in `moved` place it: under each group its
+/// enclosing prototype moved to, or itself when no enclosing one moved.
+fn translated(instance: &Path, moved: &HashMap<Path, Vec<Path>>) -> Vec<Path> {
+    let enclosing = instance.root_prim().and_then(|root| Some((moved.get(&root)?, root)));
+    match enclosing {
+        Some((targets, root)) => targets
+            .iter()
+            .filter_map(|target| instance.replace_prefix(&root, target))
+            .collect(),
+        None => vec![instance.clone()],
+    }
 }
 
 /// An entry for [`IndexCache::compose_unculled`]'s private table: `index`
@@ -8071,9 +8300,388 @@ def "B" (
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path(path)?)
             .note(field.as_str(), sdf::FieldChange::Value);
+        run_change(graph, cache, &cl);
+        Ok(())
+    }
+
+    /// Commits `f` to the stack's root layer and runs the change through the
+    /// cache.
+    fn apply_edit(
+        graph: &mut LayerGraph,
+        cache: &mut IndexCache,
+        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
+    ) -> Result<()> {
+        let root = graph.root_id().expect("a root layer");
+        let cl = edit_layer(graph.handle(root), f)?;
+        run_change(graph, cache, &cl);
+        Ok(())
+    }
+
+    /// Runs `cl`, a change to the stack's root layer, through the cache.
+    fn run_change(graph: &mut LayerGraph, cache: &mut IndexCache, cl: &sdf::ChangeList) {
+        let root = graph.root_id().expect("a root layer");
         let mut changes = Changes::new();
-        changes.did_change(cache, graph, &[LayerChanges::plain(graph.all_ids()[0], &cl)]);
+        changes.did_change(cache, graph, &[LayerChanges::plain(root, cl)]);
         changes.apply(cache, graph);
+    }
+
+    /// A dropped prim that still composes is rebuilt, which settles it.
+    #[test]
+    fn settle_rebuilds() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(REFERENCING);
+        compose(&graph, &mut cache, &["/Ref", "/Ref/Inner"])?;
+        edit_field(&mut graph, &mut cache, "/Ref", FieldKey::References)?;
+        assert_eq!(evicted(&cache), ["/Ref", "/Ref/Inner"]);
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert!(evicted(&cache).is_empty());
+        assert!(cache.is_indexed(&sdf::path("/Ref")?) && cache.is_indexed(&sdf::path("/Ref/Inner")?));
+        Ok(())
+    }
+
+    /// Deactivating a parent rebuilds the parent, which still composes, and
+    /// retires its child, which the population no longer reaches.
+    #[test]
+    fn settle_retires_excluded() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"P\" {\n    def \"C\" {}\n}\n");
+        compose(&graph, &mut cache, &["/P", "/P/C"])?;
+        apply_edit(&mut graph, &mut cache, |e| {
+            e.data_mut()
+                .set_field(&sdf::path("/P")?, FieldKey::Active.as_str(), Value::Bool(false));
+            Ok(())
+        })?;
+        assert_eq!(evicted(&cache), ["/P", "/P/C"]);
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert!(evicted(&cache).is_empty());
+        assert!(cache.is_indexed(&sdf::path("/P")?), "the inactive prim is rebuilt");
+        assert!(
+            !cache.is_indexed(&sdf::path("/P/C")?),
+            "its child is retired, not built"
+        );
+        Ok(())
+    }
+
+    /// A deleted prim composes nothing, so it is retired, and no index is
+    /// left for it.
+    #[test]
+    fn settle_retires_absent() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"P\" {\n    def \"C\" {}\n}\n");
+        compose(&graph, &mut cache, &["/P", "/P/C"])?;
+        apply_edit(&mut graph, &mut cache, |e| {
+            e.remove_spec(&sdf::path("/P/C")?)?;
+            Ok(())
+        })?;
+        assert!(evicted(&cache).contains(&"/P/C".to_owned()));
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert!(evicted(&cache).is_empty());
+        assert!(!cache.is_indexed(&sdf::path("/P/C")?));
+        Ok(())
+    }
+
+    /// Authors `active` on `path` as `value` and runs the change through the
+    /// cache.
+    fn set_active(graph: &mut LayerGraph, cache: &mut IndexCache, path: &str, value: Value) -> Result<()> {
+        let path = sdf::path(path)?;
+        apply_edit(graph, cache, |e| {
+            e.data_mut().set_field(&path, FieldKey::Active.as_str(), value);
+            Ok(())
+        })
+    }
+
+    /// The paths `cache` reports settlement failures at.
+    fn settlement_failures(cache: &IndexCache) -> Vec<String> {
+        let errors = cache.composition_errors();
+        let failed = errors.iter().filter_map(|diagnostic| match diagnostic {
+            CompositionDiagnostic::SettlementFailed { path, .. } => Some(path.to_string()),
+            _ => None,
+        });
+        failed.collect()
+    }
+
+    /// A prim whose composition fails keeps its entry, reported as a
+    /// diagnostic, and is not tried again in the round it failed in; once the
+    /// error is fixed, the next round settles it, and the diagnostic goes.
+    #[test]
+    fn settle_retries_failed() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"P\" {\n    def \"C\" {}\n}\n");
+        compose(&graph, &mut cache, &["/P", "/P/C"])?;
+        // `/P/C`'s population reads `/P`'s `active`, which no longer decodes.
+        set_active(&mut graph, &mut cache, "/P", Value::String("yes".to_owned()))?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert_eq!(evicted(&cache), ["/P/C"]);
+        assert_eq!(settlement_failures(&cache), ["/P/C"]);
+
+        set_active(&mut graph, &mut cache, "/P", Value::Bool(true))?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert_eq!(evicted(&cache), ["/P/C"], "not tried again in the round it failed in");
+        cache.settle_pass(&graph.read_view(), 2)?;
+        assert!(evicted(&cache).is_empty());
+        assert!(settlement_failures(&cache).is_empty());
+        Ok(())
+    }
+
+    /// Instances of one model, grouped under `/G`.
+    const GROUPED: &str = r#"#usda 1.0
+
+def "Model"
+{
+    def "Part"
+    {
+    }
+}
+
+def "G"
+{
+    def "A" (
+        instanceable = true
+        references = </Model>
+    )
+    {
+    }
+
+    def "B" (
+        instanceable = true
+        references = </Model>
+    )
+    {
+    }
+}
+"#;
+
+    /// A prototype whose instances' groups cannot be decided keeps its
+    /// record and reports the failure on its work, without stopping the
+    /// pass; once the error is fixed, a later round transfers it.
+    #[test]
+    fn settle_transfer_failed() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(GROUPED);
+        compose(&graph, &mut cache, &["/G", "/G/A", "/G/B"])?;
+        let root = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/G/A")?)?
+            .expect("an instance");
+        cache.prototype_of(&graph.read_view(), &sdf::path("/G/B")?)?;
+        compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
+
+        set_active(&mut graph, &mut cache, "/G", Value::String("yes".to_owned()))?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        let part = root.append_path("Part")?.to_string();
+        assert!(
+            settlement_failures(&cache).contains(&part),
+            "{:?}",
+            settlement_failures(&cache)
+        );
+
+        set_active(&mut graph, &mut cache, "/G", Value::Bool(true))?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert!(
+            evicted(&cache).contains(&part),
+            "not tried again in the round it failed in"
+        );
+        cache.settle_pass(&graph.read_view(), 2)?;
+        let group = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/G/A")?)?
+            .expect("an instance");
+        assert!(cache.is_indexed(&group.append_path("Part")?));
+        assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
+        assert!(settlement_failures(&cache).is_empty());
+        Ok(())
+    }
+
+    /// Two instances of one model, each with a part, and a second model.
+    const INSTANCED: &str = r#"#usda 1.0
+
+def "Model"
+{
+    def "Part"
+    {
+    }
+}
+
+def "Other"
+{
+    def "Part"
+    {
+    }
+}
+
+def "A" (
+    instanceable = true
+    references = </Model>
+)
+{
+}
+
+def "B" (
+    instanceable = true
+    references = </Model>
+)
+{
+}
+"#;
+
+    /// Composes `/A` and `/B` and their shared prototype's part, returning
+    /// the prototype's root.
+    fn shared_part(graph: &LayerGraph, cache: &mut IndexCache) -> Result<Path> {
+        compose(graph, cache, &["/A", "/B"])?;
+        let root = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/A")?)?
+            .expect("an instance");
+        cache.prototype_of(&graph.read_view(), &sdf::path("/B")?)?;
+        compose(graph, cache, &[&format!("{root}/Part")])?;
+        Ok(root)
+    }
+
+    /// A retired prototype's descendants move once under the group its
+    /// instances settle into, and are rebuilt there.
+    #[test]
+    fn settle_transfers_prototype() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack(INSTANCED);
+        shared_part(&graph, &mut cache)?;
+        cache.invalidate_prototypes(&[sdf::path("/A")?]);
+        cache.settle_pass(&graph.read_view(), 1)?;
+        let group = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
+            .expect("an instance");
+        assert_eq!(
+            cache.prototype_of(&graph.read_view(), &sdf::path("/A")?)?.as_ref(),
+            Some(&group)
+        );
+        assert!(
+            cache.is_indexed(&group.append_path("Part")?),
+            "the part is rebuilt once, in the group"
+        );
+        assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
+        Ok(())
+    }
+
+    /// Deleting the canonical instance leaves the other to carry the
+    /// prototype's work.
+    #[test]
+    fn settle_canonical_deleted() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(INSTANCED);
+        shared_part(&graph, &mut cache)?;
+        apply_edit(&mut graph, &mut cache, |e| {
+            e.remove_spec(&sdf::path("/A")?)?;
+            Ok(())
+        })?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        let group = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
+            .expect("an instance");
+        assert!(cache.is_indexed(&group.append_path("Part")?));
+        assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
+        Ok(())
+    }
+
+    /// A shared prototype splitting into two groups gives each group one copy
+    /// of its descendants' work.
+    #[test]
+    fn settle_splits_prototype() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(INSTANCED);
+        shared_part(&graph, &mut cache)?;
+        apply_edit(&mut graph, &mut cache, |e| {
+            let references = sdf::ReferenceListOp::explicit([sdf::Reference {
+                prim_path: sdf::path("/Other")?,
+                ..Default::default()
+            }]);
+            e.data_mut().set_field(
+                &sdf::path("/B")?,
+                FieldKey::References.as_str(),
+                Value::ReferenceListOp(references),
+            );
+            Ok(())
+        })?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        let a = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/A")?)?
+            .expect("an instance");
+        let b = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
+            .expect("an instance");
+        assert_ne!(a, b, "two groups");
+        assert!(cache.is_indexed(&a.append_path("Part")?) && cache.is_indexed(&b.append_path("Part")?));
+        assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
+        Ok(())
+    }
+    /// Deactivating the instances' parent retires the prototype's work, and
+    /// nothing below the inactive parent is composed to decide it.
+    #[test]
+    fn settle_transfer_excluded() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(GROUPED);
+        compose(&graph, &mut cache, &["/G", "/G/A", "/G/B"])?;
+        let root = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/G/A")?)?
+            .expect("an instance");
+        cache.prototype_of(&graph.read_view(), &sdf::path("/G/B")?)?;
+        compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
+
+        set_active(&mut graph, &mut cache, "/G", Value::Bool(false))?;
+        cache.settle_pass(&graph.read_view(), 1)?;
+        assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
+        assert!(!cache.is_indexed(&sdf::path("/G/A")?), "the instance is not composed");
+        Ok(())
+    }
+
+    /// Two instances of a model holding an instance of a second model.
+    const NESTED: &str = r#"#usda 1.0
+
+def "Model"
+{
+    def "Part"
+    {
+    }
+}
+
+def "Outer"
+{
+    def "In" (
+        instanceable = true
+        references = </Model>
+    )
+    {
+    }
+}
+
+def "A" (
+    instanceable = true
+    references = </Outer>
+)
+{
+}
+
+def "B" (
+    instanceable = true
+    references = </Outer>
+)
+{
+}
+"#;
+
+    /// A nested prototype's work follows its instance, which lives in the
+    /// enclosing prototype, into the group the enclosing one moved to.
+    #[test]
+    fn settle_nested_prototype() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack(NESTED);
+        let view = graph.read_view();
+        compose(&graph, &mut cache, &["/A", "/B"])?;
+        let outer = cache.prototype_of(&view, &sdf::path("/A")?)?.expect("an instance");
+        cache.prototype_of(&view, &sdf::path("/B")?)?;
+        let inner_instance = outer.append_path("In")?;
+        compose(&graph, &mut cache, &[inner_instance.as_str()])?;
+        let inner = cache.prototype_of(&view, &inner_instance)?.expect("a nested instance");
+        compose(&graph, &mut cache, &[&format!("{inner}/Part")])?;
+
+        let retired = cache.invalidate_prototypes(&[sdf::path("/A")?]);
+        assert_eq!(retired, [outer.clone(), inner.clone()], "the cascade retires both");
+        cache.settle_pass(&view, 1)?;
+
+        let outer = cache.prototype_of(&view, &sdf::path("/A")?)?.expect("an instance");
+        let inner = cache
+            .prototype_of(&view, &outer.append_path("In")?)?
+            .expect("a nested instance");
+        assert!(
+            cache.is_indexed(&inner.append_path("Part")?),
+            "the part follows the nested group"
+        );
+        assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
         Ok(())
     }
 }

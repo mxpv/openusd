@@ -307,7 +307,7 @@ impl PrototypeRegistry {
     /// plus the affected roots. The closure is computed in full before anything
     /// is removed, since the table entries are the edges to the deeper
     /// prototypes.
-    fn remove_affected(&mut self, changed: &[Path]) -> Vec<Path> {
+    fn remove_affected(&mut self, changed: &[Path]) -> Vec<RetiredPrototype> {
         let mut affected = sdf::PathSet::default();
         let mut worklist: Vec<&Path> = changed.iter().collect();
         while let Some(p) = worklist.pop() {
@@ -321,20 +321,41 @@ impl PrototypeRegistry {
                 }
             }
         }
+        let mut retired = Vec::with_capacity(affected.len());
         for root in &affected {
             if let Some(prototype) = self.by_root.remove(root) {
                 for instance in &prototype.instances {
                     self.by_instance.remove(instance);
                 }
+                retired.push(RetiredPrototype {
+                    root: root.clone(),
+                    instances: prototype.instances,
+                    failed_in: None,
+                });
             }
         }
         self.by_key.retain(|_, root| !affected.contains(root));
         // Sorted so a cascade returns its roots in a stable order, whatever the
         // hash set's iteration happens to be.
-        let mut dropped: Vec<Path> = affected.into_iter().collect();
-        dropped.sort();
-        dropped
+        retired.sort_by(|a, b| a.root.cmp(&b.root));
+        retired
     }
+}
+
+/// A prototype an invalidation retired, kept with the work set so its
+/// descendants' work can follow the instances that shared it into the groups
+/// they settle into.
+#[derive(Debug)]
+pub(super) struct RetiredPrototype {
+    /// The prototype's `/__Prototype_N` root.
+    pub(super) root: Path,
+    /// The instances that shared it, as the registry held them, or where
+    /// settlement has moved them since: each by its composed path, a nested
+    /// instance by its path inside the enclosing prototype. The first was the
+    /// canonical instance.
+    pub(super) instances: Vec<Path>,
+    /// The settlement round deciding its instances' groups last failed in.
+    pub(super) failed_in: Option<u64>,
 }
 
 /// The reserved name every synthetic prototype root starts with. The mint
@@ -465,8 +486,9 @@ impl IndexCache {
         // own, so those memos go with them.
         self.clear_population_memos();
         let retired = self.prototypes.remove_affected(changed);
-        self.drop_index_subtrees(&retired);
-        retired
+        let roots: Vec<Path> = retired.iter().map(|prototype| prototype.root.clone()).collect();
+        self.drop_prototypes(retired);
+        roots
     }
 
     /// Whether the stage's population admits `path` — the mask exposes it, it
@@ -1042,6 +1064,8 @@ impl IndexCache {
 mod tests {
     use super::*;
 
+    use std::slice;
+
     fn path(s: &str) -> Path {
         Path::new(s).expect("valid test path")
     }
@@ -1072,7 +1096,8 @@ mod tests {
 
         // A change under /C touches only its prototype.
         let dropped = reg.remove_affected(&[path("/C/Child")]);
-        assert_eq!(dropped, vec![p1.clone()]);
+        assert_eq!(roots(&dropped), vec![p1.clone()]);
+        assert_eq!(dropped[0].instances, [path("/C")]);
         assert_eq!(reg.canonical_of(&p0), Some(path("/A")));
         assert!(reg.canonical_of(&p1).is_none());
 
@@ -1091,7 +1116,7 @@ mod tests {
         let (p1, _) = reg.register(key("mid"), &path(&format!("{p0}/Inner")));
         let (p2, _) = reg.register(key("inner"), &path(&format!("{p1}/Nested")));
 
-        let dropped = reg.remove_affected(&[path("/A")]);
+        let dropped = roots(&reg.remove_affected(&[path("/A")]));
         for root in [&p0, &p1, &p2] {
             assert!(dropped.contains(root), "{root} must be dropped");
             assert!(reg.canonical_of(root).is_none(), "{root} must be unmapped");
@@ -1118,10 +1143,15 @@ mod tests {
         let (p0, _) = reg.register(key("p"), &path("/Group/A"));
 
         // The prototype root itself is on the chain.
-        assert_eq!(reg.remove_affected(std::slice::from_ref(&p0)), vec![p0.clone()]);
+        assert_eq!(roots(&reg.remove_affected(slice::from_ref(&p0))), vec![p0.clone()]);
 
         // Re-register, then touch an ancestor of the instance.
         let (p0b, _) = reg.register(key("p"), &path("/Group/A"));
-        assert_eq!(reg.remove_affected(&[path("/Group")]), vec![p0b]);
+        assert_eq!(roots(&reg.remove_affected(&[path("/Group")])), vec![p0b]);
+    }
+
+    /// The roots of `retired`, in order.
+    fn roots(retired: &[RetiredPrototype]) -> Vec<Path> {
+        retired.iter().map(|prototype| prototype.root.clone()).collect()
     }
 }

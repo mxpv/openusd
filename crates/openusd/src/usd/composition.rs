@@ -316,7 +316,8 @@ impl StageComposition {
     ///
     /// 1. the graph's, replaced on every rebuild;
     /// 2. the cache's, in its own order — one-shot collection diagnostics,
-    ///    then per-prim build diagnostics, then the transient query channel.
+    ///    then per-prim build diagnostics, then the transient query channel,
+    ///    then settlement failures.
     ///
     /// Both borrows are taken here, beside the two cells, so no caller has
     /// to hold one across the other. The caller still owes the other half of

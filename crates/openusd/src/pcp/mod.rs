@@ -537,6 +537,15 @@ pub enum QueryError {
     Layer(Box<sdf::LayerError>),
 }
 
+impl QueryError {
+    /// Whether this is a layer store refusing a read or an edit in progress
+    /// ([`sdf::LayerError::Busy`]): the query can be asked again once that
+    /// read or edit ends.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Layer(error) if matches!(**error, sdf::LayerError::Busy))
+    }
+}
+
 impl From<sdf::LayerError> for QueryError {
     fn from(error: sdf::LayerError) -> Self {
         Self::Layer(Box::new(error))
@@ -992,6 +1001,18 @@ pub enum CompositionDiagnostic {
         layer: String,
         /// The structural rule the relocate violates.
         reason: InvalidRelocateReason,
+    },
+
+    /// A cached prim an invalidation dropped could not be composed again, so
+    /// the cache keeps the layer stacks its last composition used until it
+    /// composes or is shown to be gone. Reported while the failure lasts; a
+    /// later settlement round tries again.
+    #[error("{path} could not be composed again: {reason}")]
+    SettlementFailed {
+        /// The prim's path.
+        path: Path,
+        /// The error composing it raised.
+        reason: String,
     },
 }
 
