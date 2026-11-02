@@ -7,8 +7,8 @@
 //! and dropped in lockstep — every insert registers dependencies and every
 //! removal retracts them — so the store exposes only paired mutations, never raw
 //! mutable access to either map. A removal records the dropped prim in the
-//! work set ([`IndexStore::release_evicted`]), which keeps the stacks it owned
-//! until it is released.
+//! work set, which keeps the stacks it owned until settlement rebuilds or
+//! retires it.
 //! [`IndexCache`](super::index_cache::IndexCache) holds one and coordinates the
 //! cross-cutting concerns (transient query errors, the prototype registry, the
 //! value-clip cache) around the store's index and dependency queries.
@@ -48,7 +48,7 @@ pub(super) struct IndexStore {
     /// Incremented by [`insert`](Self::insert) and by each copy
     /// [`transfer_work`](Self::transfer_work) places, kept when a removal
     /// moves an entry into the work set, and decremented when a work-set
-    /// entry settles, retires or is released, so the key set is exactly the
+    /// entry settles or retires, so the key set is exactly the
     /// stacks the cache keeps alive — the mark set
     /// ([`mark_live_stacks`](Self::mark_live_stacks)) without walking any
     /// arena.
@@ -62,14 +62,19 @@ pub(super) struct IndexStore {
     /// never reset, so a value it minted is never minted again.
     next_revision: u64,
     /// The work set: each cached prim a removal dropped, by path, with the
-    /// stacks its index owned, which stay counted as owned until the entry is
-    /// released ([`release_evicted`](Self::release_evicted)) or an insert
-    /// rebuilds its prim.
+    /// stacks its index owned, which stay counted as owned until the entry
+    /// settles or retires.
     evicted: sdf::PathTable<Unsettled>,
     /// The prototypes an invalidation retired, with the instances that shared
     /// them, kept with the work set until settlement transfers their
-    /// descendants' work or the work set is released.
+    /// descendants' work.
     retired: Vec<RetiredPrototype>,
+    /// The settlement round: a prim whose settling failed is not tried again
+    /// in the round it failed in ([`begin_round`](Self::begin_round)).
+    round: u64,
+    /// How many prims removals have moved into the work set. Monotonic, so a
+    /// caller can tell whether work was added since it last looked.
+    evictions: u64,
 }
 
 /// A cached prim a removal dropped, waiting in the work set.
@@ -103,6 +108,11 @@ impl PrimRevision {
     /// cannot collide with a stamp any cached answer holds.
     pub(super) fn placeholder() -> Self {
         Self(0)
+    }
+
+    /// The revision's number, unique to it.
+    pub(crate) fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -247,7 +257,8 @@ impl IndexStore {
     /// build `errors`, registering its dependencies — the `(layer, site)` map
     /// derived from the index plus the build's per-stack expression-variable
     /// names (`expr_var_deps`). The single insertion point: entries and
-    /// dependencies are written together.
+    /// dependencies are written together. Returns whether it settled a
+    /// work-set entry at `path`.
     pub(super) fn insert(
         &mut self,
         graph: &LayerGraph,
@@ -256,14 +267,14 @@ impl IndexStore {
         context: CompositionContext,
         errors: Diagnostics,
         expr_var_deps: ExprVarDeps,
-    ) {
+    ) -> bool {
         // Owner counts pair one increment per entry with one decrement at its
         // removal; a silent overwrite would double-count.
         debug_assert!(!self.entries.contains_key(path), "insert over a cached entry");
         self.own_stacks(owned_stacks(&index));
         // A prim the work set held is rebuilt: the new entry counts its own
         // stacks, so the dropped index's stop being owned.
-        self.settle(path);
+        let settled = self.settle(path);
         self.deps.add(path, &index, graph, expr_var_deps);
         let revision = self.mint_revision();
         self.entries.insert(
@@ -276,8 +287,10 @@ impl IndexStore {
                 resolved_targets: HashMap::new(),
                 instanceable: None,
                 revision,
+                built: revision,
             },
         );
+        settled
     }
 
     /// The next unused [`PrimRevision`]. Every stamp comes from here, so two
@@ -298,6 +311,12 @@ impl IndexStore {
     /// cached — which no cached answer may validate against.
     pub(super) fn revision_at(&self, path: &Path) -> Option<PrimRevision> {
         self.entries.get(path).map(|entry| entry.revision)
+    }
+
+    /// The revision the index cached at `path` was built at, which a restale
+    /// keeps, or `None` when none is cached.
+    pub(super) fn built_at(&self, path: &Path) -> Option<PrimRevision> {
+        self.entries.get(path).map(|entry| entry.built)
     }
 
     /// Stamps a fresh revision on the cached entry at `path`, dropping the
@@ -412,6 +431,7 @@ impl IndexStore {
         let stacks: Box<[LayerStackId]> = owned_stacks(index).into_iter().collect();
         let held = self.evicted.insert(path.clone(), Unsettled { stacks, failure: None });
         debug_assert!(held.is_none(), "a path in the work set was dropped again");
+        self.evictions += 1;
     }
 
     /// One [`CompositionDiagnostic::SettlementFailed`] per failed work-set
@@ -427,21 +447,10 @@ impl IndexStore {
         })
     }
 
-    /// Releases the whole work set, retired-prototype records included:
-    /// every entry's stacks stop being owned, flagging a reclamation pass for
-    /// each that loses its last owner.
-    ///
-    /// TODO: settlement, which rebuilds or retires each prim the work set
-    /// holds, replaces this wholesale release.
-    pub(super) fn release_evicted(&mut self) {
-        self.retired.clear();
-        if self.evicted.is_empty() {
-            return;
-        }
-        let evicted = mem::take(&mut self.evicted);
-        for (_, unsettled) in evicted.iter() {
-            self.release_stacks(unsettled.stacks.iter().copied());
-        }
+    /// Whether the work set holds a prim to settle, or a retired prototype
+    /// whose descendants' work to transfer.
+    pub(super) fn has_work(&self) -> bool {
+        !self.evicted.is_empty() || !self.retired.is_empty()
     }
 
     /// Whether some stack lost its last cache owner since the last sweep.
@@ -726,13 +735,34 @@ impl IndexStore {
 /// The work set's settlement operations: what composing a dropped prim
 /// again, or showing it gone, does to its entry.
 impl IndexStore {
+    /// Starts a settlement round, in which a prim whose settling failed
+    /// before is tried again.
+    pub(super) fn begin_round(&mut self) {
+        self.round += 1;
+    }
+
+    /// The current settlement round.
+    pub(super) fn round(&self) -> u64 {
+        self.round
+    }
+
+    /// How many prims removals have moved into the work set so far.
+    pub(super) fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
     /// The work set's paths, parents before children, less those whose
-    /// settling failed in `round`.
-    pub(super) fn work(&self, round: u64) -> Vec<Path> {
+    /// settling failed in the current round.
+    pub(super) fn work(&self) -> Vec<Path> {
         let work = self.evicted.subtree(&Path::abs_root());
-        work.filter(|(_, unsettled)| unsettled.failure.as_ref().is_none_or(|&(_, failed)| failed != round))
-            .map(|(path, _)| path.clone())
-            .collect()
+        work.filter(|(_, unsettled)| {
+            unsettled
+                .failure
+                .as_ref()
+                .is_none_or(|&(_, failed)| failed != self.round)
+        })
+        .map(|(path, _)| path.clone())
+        .collect()
     }
 
     /// Whether the work set holds `path`.
@@ -740,9 +770,11 @@ impl IndexStore {
         self.evicted.contains_key(path)
     }
 
-    /// Records that settling `path` failed with `reason` in `round`. The
-    /// prim keeps its stacks; one failure is kept per prim, the last.
-    pub(super) fn fail(&mut self, path: &Path, reason: String, round: u64) {
+    /// Records that settling `path` failed with `reason` in the current
+    /// round. The prim keeps its stacks; one failure is kept per prim, the
+    /// last.
+    pub(super) fn fail(&mut self, path: &Path, reason: String) {
+        let round = self.round;
         if let Some(unsettled) = self.evicted.get_mut(path) {
             unsettled.failure = Some((reason, round));
         }
@@ -750,33 +782,38 @@ impl IndexStore {
 
     /// Records the failure for every work-set entry at and beneath `root`:
     /// what settling them waits on failed.
-    pub(super) fn fail_work(&mut self, root: &Path, reason: &str, round: u64) {
+    pub(super) fn fail_work(&mut self, root: &Path, reason: &str) {
         let work: Vec<Path> = self.evicted.subtree(root).map(|(path, _)| path.clone()).collect();
         for path in work {
-            self.fail(&path, reason.to_owned(), round);
+            self.fail(&path, reason.to_owned());
         }
     }
 
     /// Settles `path`: its stacks stop being owned and it leaves the work
-    /// set.
-    pub(super) fn settle(&mut self, path: &Path) {
-        if let Some(settled) = self.evicted.remove(path) {
-            self.release_stacks(settled.stacks.iter().copied());
-        }
+    /// set. Returns whether the work set held it.
+    pub(super) fn settle(&mut self, path: &Path) -> bool {
+        let Some(settled) = self.evicted.remove(path) else {
+            return false;
+        };
+        self.release_stacks(settled.stacks.iter().copied());
+        true
     }
 
     /// Retires `path`, which composes nothing or which the population does
     /// not reach: the cached entry there, built only to decide that, is
     /// dropped without entering the work set, and the work-set entries at
-    /// and beneath it leave it. Their stacks stop being owned.
-    pub(super) fn retire(&mut self, path: &Path) {
+    /// and beneath it leave it. Their stacks stop being owned. Returns the
+    /// work-set paths that left.
+    pub(super) fn retire(&mut self, path: &Path) -> Vec<Path> {
         if let Some(entry) = self.entries.remove(path) {
             self.deps.remove_all(slice::from_ref(path));
             self.release_stacks(owned_stacks(&entry.index));
         }
-        for (_, retired) in self.evicted.remove_subtree(path) {
-            self.release_stacks(retired.stacks.iter().copied());
+        let retired = self.evicted.remove_subtree(path);
+        for (_, unsettled) in &retired {
+            self.release_stacks(unsettled.stacks.iter().copied());
         }
+        retired.into_iter().map(|(path, _)| path).collect()
     }
 
     /// Keeps `records` with the work set, for settlement to transfer their
@@ -795,7 +832,8 @@ impl IndexStore {
     /// work leaves the work set. A copy landing on a path the work set holds
     /// already merges into that entry, which owns each stack once; one
     /// landing on a cached prim is dropped, since that prim composed already.
-    pub(super) fn transfer_work(&mut self, root: &Path, targets: &[Path]) {
+    /// Returns the paths the work left, under `root`.
+    pub(super) fn transfer_work(&mut self, root: &Path, targets: &[Path]) -> Vec<Path> {
         let taken = self.evicted.remove_subtree(root);
         for target in targets {
             for (path, unsettled) in &taken {
@@ -826,9 +864,12 @@ impl IndexStore {
             }
         }
         // Each copy counted its own stacks, so the taken entries' go.
-        for (_, unsettled) in taken {
+        let mut left = Vec::with_capacity(taken.len());
+        for (path, unsettled) in taken {
             self.release_stacks(unsettled.stacks.iter().copied());
+            left.push(path);
         }
+        left
     }
 }
 
@@ -1110,7 +1151,7 @@ pub(crate) mod tests {
         assert!(store.stack_owners.contains_key(&stack), "still owned");
         assert!(!store.ownership_lost());
 
-        store.release_evicted();
+        store.retire(&Path::abs_root());
         assert!(evicted(&store).is_empty());
         assert!(!store.stack_owners.contains_key(&stack));
         assert!(store.ownership_lost(), "the release schedules a sweep");
@@ -1150,7 +1191,7 @@ pub(crate) mod tests {
         store.transfer_work(&p("/__Prototype_3"), &[]);
         assert_eq!(evicted(&store), ["/__Prototype_2", "/__Prototype_2/Part"]);
         assert_eq!(store.stack_owners[&stack], 2);
-        store.release_evicted();
+        store.retire(&Path::abs_root());
         assert!(!store.stack_owners.contains_key(&stack));
     }
 }

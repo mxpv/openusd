@@ -164,6 +164,9 @@ pub(crate) struct PrimEntry {
     /// mints every value and stamps a fresh one wherever it inserts an entry or
     /// mutates one in place. See [`PrimRevision`].
     pub(super) revision: PrimRevision,
+    /// The [`revision`](Self::revision) the index was built at, which a
+    /// restale of its answers keeps.
+    pub(super) built: PrimRevision,
 }
 
 /// Which path-list-op field a [`TargetMemo`] resolved. Narrower than
@@ -1568,6 +1571,7 @@ pub(crate) mod tests {
                         resolved_targets: HashMap::new(),
                         instanceable: None,
                         revision: PrimRevision::placeholder(),
+                        built: PrimRevision::placeholder(),
                     },
                 );
                 last = Some(index);

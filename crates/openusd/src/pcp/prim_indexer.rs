@@ -4100,6 +4100,7 @@ mod tests {
                 resolved_targets: Default::default(),
                 instanceable: None,
                 revision: PrimRevision::placeholder(),
+                built: PrimRevision::placeholder(),
             },
         );
         let child = Indexer::new(&s.read_view(), &ctx, &VariantFallbackMap::new(), &cached, ambient, true)

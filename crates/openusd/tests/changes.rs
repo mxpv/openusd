@@ -40,6 +40,11 @@ fn exists(stage: &usd::Stage, path: &str) -> bool {
     stage.prim(path).unwrap().is_valid().unwrap()
 }
 
+/// The revision of the prim index cached at `path`.
+fn revision(stage: &usd::Stage, path: &str) -> Option<u64> {
+    stage.index_revision(&sdf::path(path).unwrap())
+}
+
 fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
     stage
         .prim(path)
@@ -114,7 +119,8 @@ fn author_keeps_sibling_indexed() {
 /// `/Foo/Bar`'s sole node is the skipped self-Root, so it registers only in the
 /// layer-agnostic `by_path` map and never appears in the per-layer subtree
 /// lookup. The literal-path subtree drop in `fanout_significant` still reaches
-/// it, because it is a namespace descendant of the changed `/Foo`.
+/// it, because it is a namespace descendant of the changed `/Foo`, so it
+/// recomposes.
 #[test]
 fn significant_at_ancestor_drops_descendant() {
     let stage = open_in_memory();
@@ -125,11 +131,13 @@ fn significant_at_ancestor_drops_descendant() {
     let _ = stage.prim("/Foo/Bar").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Foo/Bar").unwrap()));
+    let before = revision(&stage, "/Foo/Bar");
 
     stage.override_prim("/Foo").unwrap().set_instanceable(true).unwrap();
 
-    assert!(
-        !stage.is_indexed(&sdf::path("/Foo/Bar").unwrap()),
+    assert_ne!(
+        revision(&stage, "/Foo/Bar"),
+        before,
         "a significant change at /Foo must invalidate its self-root-only descendant /Foo/Bar",
     );
 }
@@ -159,7 +167,8 @@ fn attribute_value_keeps_owner_indexed() {
     assert_eq!(attr.get().unwrap(), Some(vt::Value::Double(2.0)));
 }
 
-/// `instanceable` is a significant-promoter — authoring it drops the index.
+/// `instanceable` is a significant-promoter: authoring it recomposes the
+/// owner.
 #[test]
 fn set_instanceable_invalidates_owner() {
     let stage = open_in_memory();
@@ -168,17 +177,17 @@ fn set_instanceable_invalidates_owner() {
     let _ = stage.prim("/Inst").unwrap().type_name().unwrap();
     let _ = stage.prim("/Other").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Inst").unwrap()));
+    let inst = revision(&stage, "/Inst");
+    let other = revision(&stage, "/Other");
 
     stage.override_prim("/Inst").unwrap().set_instanceable(true).unwrap();
 
-    assert!(
-        !stage.is_indexed(&sdf::path("/Inst").unwrap()),
+    assert_ne!(
+        revision(&stage, "/Inst"),
+        inst,
         "instanceable is a significant-tier field; owner must be invalidated",
     );
-    assert!(
-        stage.is_indexed(&sdf::path("/Other").unwrap()),
-        "unrelated prim must remain indexed",
-    );
+    assert_eq!(revision(&stage, "/Other"), other, "unrelated prim must keep its index",);
 }
 
 /// Authoring `instanceable` on an ancestor turns an already queried
@@ -368,7 +377,7 @@ fn idempotent_override_preserves_cache() {
 }
 
 /// `add_applied_schema` writes `apiSchemas`, which is resolved off the cached
-/// prim index — the owner's index must drop.
+/// prim index — the owner must recompose.
 #[test]
 fn add_applied_schema_invalidates_owner() {
     let stage = open_in_memory();
@@ -378,11 +387,13 @@ fn add_applied_schema_invalidates_owner() {
         Vec::<tf::Token>::new()
     );
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
+    let before = revision(&stage, "/A");
 
     prim.add_applied_schema("MaterialBindingAPI").unwrap();
 
-    assert!(
-        !stage.is_indexed(&sdf::path("/A").unwrap()),
+    assert_ne!(
+        revision(&stage, "/A"),
+        before,
         "apiSchemas authoring must invalidate the owner's cached prim index",
     );
     assert_eq!(
@@ -471,13 +482,16 @@ fn default_prim_resync_notice() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_default_prim_fixture(&dir, Some("Source"))?;
     let notices = capture_notices(&stage);
+    let empty = revision(&stage, "/Empty");
+    let explicit = revision(&stage, "/Explicit");
 
     set_target_default_prim(&stage, "Second")?;
 
-    assert!(!stage.is_indexed(&sdf::path("/Empty")?), "the consumer is evicted");
-    assert!(
-        stage.is_indexed(&sdf::path("/Explicit")?),
-        "an explicit target composes the same, so it is reported but not evicted"
+    assert_ne!(revision(&stage, "/Empty"), empty, "the consumer recomposes");
+    assert_eq!(
+        revision(&stage, "/Explicit"),
+        explicit,
+        "an explicit target composes the same, so it is reported but keeps its index"
     );
     assert_eq!(stage.attribute("/Empty.y")?.get::<f64>()?, Some(2.0));
     let notices = notices.borrow();
@@ -663,14 +677,16 @@ fn unused_var_keeps_index() -> Result<()> {
     Ok(())
 }
 
-/// Changing a variable's value drops exactly the prims whose builds recorded
-/// reading it: `/User`'s variant selection recomposes to the new branch while
-/// `/Other` stays indexed.
+/// Changing a variable's value invalidates exactly the prims whose builds
+/// recorded reading it: `/User`'s variant selection recomposes to the new
+/// branch while `/Other` keeps its index.
 #[test]
 fn used_var_drops_user() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_variant_fixture(&dir)?;
     let notices = capture_notices(&stage);
+    let user = revision(&stage, "/User");
+    let other = revision(&stage, "/Other");
 
     stage.set_expression_variables(HashMap::from([("SEL".to_string(), vt::Value::String("y".to_string()))]))?;
 
@@ -680,12 +696,14 @@ fn used_var_drops_user() -> Result<()> {
         assert_eq!(notices.asset_paths_resynced, paths(&["/"]));
         assert_eq!(notices.changed_info_only, paths(&["/"]));
     }
-    assert!(
-        !stage.is_indexed(&sdf::path("/User")?),
-        "/User recorded reading SEL, so its index drops"
+    assert_ne!(
+        revision(&stage, "/User"),
+        user,
+        "/User recorded reading SEL, so it recomposes"
     );
-    assert!(
-        stage.is_indexed(&sdf::path("/Other")?),
+    assert_eq!(
+        revision(&stage, "/Other"),
+        other,
         "/Other reads no variable — its index survives"
     );
     assert_eq!(
@@ -699,7 +717,8 @@ fn used_var_drops_user() -> Result<()> {
 
 /// A changed name that feeds a stack's own `${VAR}` sublayer entry is
 /// significant for every prim using the stack — the membership swaps — so even
-/// a prim reading no variable drops (C++ step 3, the sublayer-dependency hit).
+/// a prim reading no variable recomposes (C++ step 3, the sublayer-dependency
+/// hit).
 #[test]
 fn sublayer_dep_drops_stack() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -737,11 +756,13 @@ def "B" {
     assert_eq!(stage.attribute("/A.x")?.get::<f64>()?, Some(1.0), "W=a at open");
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
     let notices = capture_notices(&stage);
+    let other = revision(&stage, "/Other");
 
     stage.set_expression_variables(HashMap::from([("W".to_string(), vt::Value::String("b".to_string()))]))?;
 
-    assert!(
-        !stage.is_indexed(&sdf::path("/Other")?),
+    assert_ne!(
+        revision(&stage, "/Other"),
+        other,
         "W selects a root-stack sublayer, so the change is stack-significant"
     );
     {
@@ -805,6 +826,8 @@ def "P" {
     let stage = usd::Stage::open(root.to_str().unwrap())?;
     assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
+    let p = revision(&stage, "/P");
+    let other = revision(&stage, "/Other");
 
     let notices = capture_notices(&stage);
     let target_id = identifier_by_leaf(&stage, "t.usda");
@@ -813,8 +836,9 @@ def "P" {
         .expect("target layer is live")
         .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".to_string()))])))?;
 
-    assert!(
-        !stage.is_indexed(&sdf::path("/P")?),
+    assert_ne!(
+        revision(&stage, "/P"),
+        p,
         "the target stack's variable source flipped, so its user resyncs"
     );
     {
@@ -831,8 +855,9 @@ def "P" {
         // is not one of them, so it survives untouched.
         assert_eq!(notices.changed_info_only, paths(&["/"]));
     }
-    assert!(
-        stage.is_indexed(&sdf::path("/Other")?),
+    assert_eq!(
+        revision(&stage, "/Other"),
+        other,
         "/Other does not use the target stack — its index survives"
     );
     assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0), "/P recomposes");
@@ -907,11 +932,14 @@ def "O" {
     );
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(3.0));
     let notices = capture_notices(&stage);
+    let p = revision(&stage, "/P");
+    let other = revision(&stage, "/Other");
 
     stage.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("y".to_string()))]))?;
 
-    assert!(
-        !stage.is_indexed(&sdf::path("/P")?),
+    assert_ne!(
+        revision(&stage, "/P"),
+        p,
         "the delta cascades to the seeded target stack and finds /P's recorded read"
     );
     {
@@ -924,8 +952,9 @@ def "O" {
         );
         assert_eq!(notices.changed_info_only, paths(&["/"]));
     }
-    assert!(
-        stage.is_indexed(&sdf::path("/Other")?),
+    assert_eq!(
+        revision(&stage, "/Other"),
+        other,
         "/Other reads no variable — its index survives"
     );
     assert_eq!(

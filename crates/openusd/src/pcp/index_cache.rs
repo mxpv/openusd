@@ -1324,8 +1324,11 @@ impl IndexCache {
         clips: &mut HashSet<LayerId>,
     ) {
         self.store.dependencies().mark_live_layers(kept);
-        self.clip_cache
-            .mark_live_layers(graph, kept, clips, |prim| self.store.is_indexed(prim));
+        self.clip_cache.mark_live_layers(graph, kept, clips, |prim| {
+            // A prim the work set holds keeps what it last read, as its
+            // stacks do.
+            self.store.is_indexed(prim) || self.store.is_unsettled(prim)
+        });
     }
 
     /// Drops what the cache holds of the layers in `dead`, which are leaving
@@ -1361,9 +1364,22 @@ impl IndexCache {
         self.store.ownership_lost()
     }
 
-    /// Releases the work set ([`IndexStore::release_evicted`]).
-    pub(crate) fn release_evicted(&mut self) {
-        self.store.release_evicted();
+    /// Whether the work set holds a prim to settle
+    /// ([`settle_pass`](Self::settle_pass)).
+    pub(crate) fn has_work(&self) -> bool {
+        self.store.has_work()
+    }
+
+    /// Starts a settlement round ([`settle_pass`](Self::settle_pass)), in
+    /// which a prim whose settling failed before is tried again.
+    pub(crate) fn begin_round(&mut self) {
+        self.store.begin_round();
+    }
+
+    /// How many prims invalidations have moved into the work set so far, to
+    /// tell whether a query added any.
+    pub(crate) fn evictions(&self) -> u64 {
+        self.store.evictions()
     }
 
     /// Clears the ownership-loss flag after a sweep consumed it.
@@ -1375,6 +1391,13 @@ impl IndexCache {
     /// no index is cached there — which no cached answer validates against.
     pub(crate) fn prim_revision(&self, path: &Path) -> Option<PrimRevision> {
         self.store.revision_at(path)
+    }
+
+    /// The [`PrimRevision`] the prim index cached at `path` was built at:
+    /// unlike [`prim_revision`](Self::prim_revision), a restale of its
+    /// answers keeps it.
+    pub(crate) fn built_revision(&self, path: &Path) -> Option<PrimRevision> {
+        self.store.built_at(path)
     }
 
     /// Retires the cached answers of the prims a change round named: each is
@@ -2189,7 +2212,10 @@ impl IndexCache {
         errors: Diagnostics,
         expr_var_deps: ExprVarDeps,
     ) {
-        self.store.insert(graph, path, index, context, errors, expr_var_deps);
+        // A prim the work set held composes afresh, its clip sets with it.
+        if self.store.insert(graph, path, index, context, errors, expr_var_deps) {
+            self.clip_cache.forget_prim(path);
+        }
     }
 
     /// Drop the cached entry (index, child context, and build errors) of each
@@ -3917,13 +3943,9 @@ impl IndexCache {
 /// gone, so the stacks its dropped index owned are held only while it needs
 /// them (C++ `UsdStage::_RecomposePrims`, here bounded to the prims the cache
 /// held).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called once settlement runs at the stage's seams")
-)]
 impl IndexCache {
-    /// Settles what the work set holds, parents first, in settlement round
-    /// `round`.
+    /// Settles what the work set holds, parents first, in the current
+    /// settlement round ([`begin_round`](Self::begin_round)).
     ///
     /// A retired prototype's descendants first move under the groups its
     /// surviving instances settle into. Then each prim is decided by
@@ -3931,24 +3953,35 @@ impl IndexCache {
     /// excluded or absent, which retires it with its work subtree; or
     /// pending, which keeps it. An error composing a prim keeps it, with the
     /// layers its last composition used, and records the failure, which a
-    /// later round tries again; one that failed in `round` is not tried again
-    /// in it. A busy store stops the pass, every prim it had not reached
-    /// kept.
-    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>, round: u64) -> Result<(), QueryError> {
-        self.transfer_prototypes(graph, round)?;
+    /// later round tries again; one that failed in this round is not tried
+    /// again in it. A busy store stops the pass, every prim it had not
+    /// reached kept. A prim that leaves the work set forgets its clip sets,
+    /// which resolve afresh when it next composes.
+    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
+        self.transfer_prototypes(graph)?;
         // TODO(rayon): siblings settle independently once their parent has,
         // so each level of the work set could be decided in parallel.
-        for path in self.store.work(round) {
+        for path in self.store.work() {
             // An ancestor's retirement took it already.
             if !self.store.is_unsettled(&path) {
                 continue;
             }
             match self.settle_prim(graph, &path) {
-                Ok(Settlement::Rebuilt) => self.store.settle(&path),
-                Ok(Settlement::Excluded | Settlement::Absent) => self.store.retire(&path),
+                // A prim served from elsewhere (an instance proxy reads its
+                // prototype's index) settles here, its build not at its path.
+                Ok(Settlement::Rebuilt) => {
+                    if self.store.settle(&path) {
+                        self.clip_cache.forget_prim(&path);
+                    }
+                }
+                Ok(Settlement::Excluded | Settlement::Absent) => {
+                    for anchor in self.store.retire(&path) {
+                        self.clip_cache.forget_prim(&anchor);
+                    }
+                }
                 Ok(Settlement::Pending) => {}
                 Err(error) if error.is_busy() => return Err(error),
-                Err(error) => self.store.fail(&path, error.to_string(), round),
+                Err(error) => self.store.fail(&path, error.to_string()),
             }
         }
         Ok(())
@@ -3981,9 +4014,10 @@ impl IndexCache {
     /// the group the enclosing one moved to. A prototype whose instances'
     /// decision is provisional, or failed, keeps its record for the next
     /// pass, and so do the prototypes nested in it. A failure is recorded
-    /// on the prototype's work, and not tried again in `round`; a busy store
+    /// on the prototype's work, and not tried again in this round; a busy store
     /// stops the transfers, every record not reached kept.
-    fn transfer_prototypes(&mut self, graph: &LayerView<'_>, round: u64) -> Result<(), QueryError> {
+    fn transfer_prototypes(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
+        let round = self.store.round();
         let records = self.store.take_retired();
         let order = nesting_order(&records);
         let mut records: Vec<Option<RetiredPrototype>> = records.into_iter().map(Some).collect();
@@ -4008,14 +4042,17 @@ impl IndexCache {
                         None
                     }
                     Err(error) => {
-                        self.store.fail_work(&record.root, &error.to_string(), round);
+                        self.store.fail_work(&record.root, &error.to_string());
                         record.failed_in = Some(round);
                         None
                     }
                 }
             };
             if let Some(targets) = targets {
-                self.store.transfer_work(&record.root, &targets);
+                // The prototype's anchors leave with its work.
+                for anchor in self.store.transfer_work(&record.root, &targets) {
+                    self.clip_cache.forget_prim(&anchor);
+                }
                 moved.insert(record.root, targets);
             } else {
                 // Kept with its instances where this pass's transfers placed
@@ -4277,6 +4314,7 @@ fn unculled_entry(index: PrimIndex, context: CompositionContext) -> PrimEntry {
         resolved_targets: HashMap::new(),
         instanceable: None,
         revision: PrimRevision::placeholder(),
+        built: PrimRevision::placeholder(),
     }
 }
 
@@ -8202,7 +8240,7 @@ def "Other"
 
         compose(&graph, &mut cache, &["/Ref"])?;
         assert_eq!(evicted(&cache), ["/Ref/Inner"], "a rebuilt prim settles");
-        cache.release_evicted();
+        cache.store.retire(&Path::abs_root());
         assert!(evicted(&cache).is_empty());
         Ok(())
     }
@@ -8332,7 +8370,7 @@ def "B" (
         compose(&graph, &mut cache, &["/Ref", "/Ref/Inner"])?;
         edit_field(&mut graph, &mut cache, "/Ref", FieldKey::References)?;
         assert_eq!(evicted(&cache), ["/Ref", "/Ref/Inner"]);
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(cache.is_indexed(&sdf::path("/Ref")?) && cache.is_indexed(&sdf::path("/Ref/Inner")?));
         Ok(())
@@ -8350,7 +8388,7 @@ def "B" (
             Ok(())
         })?;
         assert_eq!(evicted(&cache), ["/P", "/P/C"]);
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(cache.is_indexed(&sdf::path("/P")?), "the inactive prim is rebuilt");
         assert!(
@@ -8371,7 +8409,7 @@ def "B" (
             Ok(())
         })?;
         assert!(evicted(&cache).contains(&"/P/C".to_owned()));
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(!cache.is_indexed(&sdf::path("/P/C")?));
         Ok(())
@@ -8406,14 +8444,15 @@ def "B" (
         compose(&graph, &mut cache, &["/P", "/P/C"])?;
         // `/P/C`'s population reads `/P`'s `active`, which no longer decodes.
         set_active(&mut graph, &mut cache, "/P", Value::String("yes".to_owned()))?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert_eq!(evicted(&cache), ["/P/C"]);
         assert_eq!(settlement_failures(&cache), ["/P/C"]);
 
         set_active(&mut graph, &mut cache, "/P", Value::Bool(true))?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert_eq!(evicted(&cache), ["/P/C"], "not tried again in the round it failed in");
-        cache.settle_pass(&graph.read_view(), 2)?;
+        cache.begin_round();
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(settlement_failures(&cache).is_empty());
         Ok(())
@@ -8461,7 +8500,7 @@ def "G"
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
 
         set_active(&mut graph, &mut cache, "/G", Value::String("yes".to_owned()))?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         let part = root.append_path("Part")?.to_string();
         assert!(
             settlement_failures(&cache).contains(&part),
@@ -8470,12 +8509,13 @@ def "G"
         );
 
         set_active(&mut graph, &mut cache, "/G", Value::Bool(true))?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(
             evicted(&cache).contains(&part),
             "not tried again in the round it failed in"
         );
-        cache.settle_pass(&graph.read_view(), 2)?;
+        cache.begin_round();
+        cache.settle_pass(&graph.read_view())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/G/A")?)?
             .expect("an instance");
@@ -8536,7 +8576,7 @@ def "B" (
         let (graph, mut cache) = in_memory_stack(INSTANCED);
         shared_part(&graph, &mut cache)?;
         cache.invalidate_prototypes(&[sdf::path("/A")?]);
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
             .expect("an instance");
@@ -8562,7 +8602,7 @@ def "B" (
             e.remove_spec(&sdf::path("/A")?)?;
             Ok(())
         })?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
             .expect("an instance");
@@ -8589,7 +8629,7 @@ def "B" (
             );
             Ok(())
         })?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         let a = cache
             .prototype_of(&graph.read_view(), &sdf::path("/A")?)?
             .expect("an instance");
@@ -8614,7 +8654,7 @@ def "B" (
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
 
         set_active(&mut graph, &mut cache, "/G", Value::Bool(false))?;
-        cache.settle_pass(&graph.read_view(), 1)?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
         assert!(!cache.is_indexed(&sdf::path("/G/A")?), "the instance is not composed");
         Ok(())
@@ -8671,7 +8711,7 @@ def "B" (
 
         let retired = cache.invalidate_prototypes(&[sdf::path("/A")?]);
         assert_eq!(retired, [outer.clone(), inner.clone()], "the cascade retires both");
-        cache.settle_pass(&view, 1)?;
+        cache.settle_pass(&view)?;
 
         let outer = cache.prototype_of(&view, &sdf::path("/A")?)?.expect("an instance");
         let inner = cache

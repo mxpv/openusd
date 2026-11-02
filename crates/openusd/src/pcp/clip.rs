@@ -759,10 +759,6 @@ pub(crate) struct ClipCache {
     /// manifest needs no registration of its own — it is generated from the very
     /// clips its set already names, and only for a set that authors no manifest
     /// of its own, so its sources are exactly that set's.
-    ///
-    /// TODO(perf): a registration is retracted when its set re-resolves, which
-    /// leaves the entries of an anchor whose index was dropped and never queried
-    /// again. Bounding it needs the cache to tell this one what it evicted.
     dependents: HashMap<String, HashSet<ClipSetKey>>,
 }
 
@@ -1437,6 +1433,23 @@ impl ClipCache {
     /// caller checks before deriving an identifier to ask about.
     pub(super) fn has_clip_sources(&self) -> bool {
         !self.dependents.is_empty()
+    }
+
+    /// Forgets the clip sets anchored at `anchor`, a prim whose dropped index
+    /// was composed again or shown to be gone: they resolve afresh when it
+    /// next composes, and until then name no layer to keep.
+    pub(super) fn forget_prim(&mut self, anchor: &Path) {
+        let Some(sets) = self.set_sources.remove(anchor) else {
+            return;
+        };
+        // A set is registered as it is offered to value resolution, before
+        // any manifest is generated for it, so the registrations name every
+        // generated manifest too.
+        for sources in sets.into_values() {
+            let key = sources.from.key(anchor);
+            Self::rewire_dependents(&mut self.dependents, &key, &sources.identifiers, &HashSet::new());
+            self.drop_generated_manifest(&key);
+        }
     }
 
     /// Discards the synthesized manifest generated for `key`, freeing its layer,

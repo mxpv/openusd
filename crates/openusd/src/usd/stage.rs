@@ -2619,6 +2619,16 @@ impl Stage {
         self.cache().is_indexed(path)
     }
 
+    /// The revision of the prim index cached at `path`, or `None` when none
+    /// is: a number that changes whenever the index is built again. With
+    /// [`is_indexed`](Self::is_indexed), useful for verifying surgical
+    /// invalidation, since a prim an edit invalidates is composed again
+    /// before the edit returns, unless its settling failed or a read or an
+    /// edit of the stage's layers held them.
+    pub fn index_revision(&self, path: &sdf::Path) -> Option<u64> {
+        self.cache().built_revision(path).map(pcp::PrimRevision::get)
+    }
+
     /// Total number of cached prim indices.
     pub fn indexed_count(&self) -> usize {
         self.cache().indexed_count()
@@ -2796,8 +2806,8 @@ impl Stage {
     /// layers and the sublayers beneath them, and muted layers. Each layer
     /// reloads as [`sdf::LayerHandle::reload`] does, unforced: one with no
     /// unsaved edits whose file is unchanged is not read. A sublayer that
-    /// failed to load is then tried again, and a reference or payload that
-    /// failed to load on its next read.
+    /// failed to load is then tried again, and so is a reference or payload
+    /// that failed to load, as the prims that read it compose again.
     ///
     /// The layers reload in one transaction ([`sdf::LayerHandle::reload_all`])
     /// attributed to no stage, as a reload through a handle is: the stage's
@@ -3043,19 +3053,30 @@ impl Stage {
     // TODO(perf): when the stage's current rules are not already
     // `LoadRules::all()`, the install and the restore each evict the whole
     // store (the root rule itself changes), so a stage opened with
-    // `InitialLoadSet::LoadNone` pays two full-store recomposes per call. A
-    // scratch cache the walk composes into, left uncommitted, would avoid
-    // this, but is a larger change than this method currently needs.
+    // `InitialLoadSet::LoadNone` pays two full-store recomposes per call: the
+    // install's evictions wait, unsettled, until the restore, and the
+    // restore's settle as the walk ends. A scratch cache the walk composes
+    // into, left uncommitted, would avoid this, and with it the
+    // `suspend_settling` flag that keeps the walk's own reads from settling
+    // under the swapped rules, but is a larger change than this method
+    // currently needs.
     pub fn find_loadable(&self, root: impl sdf::IntoPath) -> Result<Vec<sdf::Path>> {
         let root = sdf::try_into_path(root)?.prim_path();
         self.settle()?;
-        let _guard = LoadRulesGuard {
-            stage: self,
-            original: self.load_rules(),
+        let walked = {
+            // Declared first, so it drops after the restore.
+            let _suspended = self.composition.suspend_settling();
+            let _guard = LoadRulesGuard {
+                stage: self,
+                original: self.load_rules(),
+            };
+            self.composition.swap_load_rules(pcp::LoadRules::all(), self);
+            let mut found = Vec::new();
+            self.walk_loadable(&root, &mut found).map(|()| found)
         };
-        self.composition.swap_load_rules(pcp::LoadRules::all(), self);
-        let mut found = Vec::new();
-        self.walk_loadable(&root, &mut found)?;
+        // The prims the swaps dropped settle under the rules restored.
+        self.composition.settle_work(composition::Settled::Required, self);
+        let mut found = walked?;
         found.sort();
         found.dedup();
         Ok(found)
@@ -7011,6 +7032,7 @@ def \"Sub\" {}
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&root)?;
         assert_eq!(stage.find_loadable("/")?, [sdf::path("/P")?]);
+        assert!(!stage.cache().has_work(), "the walk settled what its swaps dropped");
         assert_eq!(stage.layer_count(), 2, "finding the payload read its layer");
         stage.define_prim("/Other")?;
         stage.unload("/P")?;
@@ -8552,16 +8574,18 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(stage.prim(indep.clone())?.is_valid()?);
         assert!(stage.is_indexed(&refp) && stage.is_indexed(&indep));
 
+        let revisions = |stage: &Stage| (stage.index_revision(&refp), stage.index_revision(&indep));
+        let before = revisions(&stage);
         stage.mute_layer("target.usda");
-        assert!(!stage.is_indexed(&refp), "the referencing prim is recomposed");
-        assert!(stage.is_indexed(&indep), "the independent prim keeps its cached index");
+        let muted = revisions(&stage);
+        assert_ne!(muted.0, before.0, "the referencing prim is recomposed");
+        assert!(muted.0.is_some(), "settlement rebuilt it");
+        assert_eq!(muted.1, before.1, "the independent prim keeps its cached index");
 
-        // Rebuild the referencing prim's index (now recording the muted target),
-        // then unmute and confirm it is dropped again while the sibling stays warm.
-        assert!(stage.prim(refp.clone())?.is_valid()?);
         stage.unmute_layer("target.usda");
-        assert!(!stage.is_indexed(&refp), "unmuting recomposes the referencing prim");
-        assert!(stage.is_indexed(&indep), "unmuting leaves the independent prim cached");
+        let unmuted = revisions(&stage);
+        assert_ne!(unmuted.0, muted.0, "unmuting recomposes the referencing prim");
+        assert_eq!(unmuted.1, before.1, "unmuting leaves the independent prim cached");
         Ok(())
     }
 
@@ -8633,13 +8657,19 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(stage.is_indexed(&refp) && stage.is_indexed(&indep));
 
         // Edit the reference target's sublayer stack — only /Ref reads it.
+        let before = (stage.index_revision(&refp), stage.index_revision(&indep));
         let extra = sdf::Layer::new_in_memory("extra.usda");
         stage.insert_layer("target.usda", 0, extra, sdf::LayerOffset::IDENTITY)?;
-        assert!(
-            !stage.is_indexed(&refp),
+        assert_ne!(
+            stage.index_revision(&refp),
+            before.0,
             "the referencing prim recomposes against the edited target stack"
         );
-        assert!(stage.is_indexed(&indep), "the independent prim keeps its cached index");
+        assert_eq!(
+            stage.index_revision(&indep),
+            before.1,
+            "the independent prim keeps its cached index"
+        );
         Ok(())
     }
 
@@ -10210,6 +10240,104 @@ def "P" (payload = @./clip.usda@</M>) {}
             0,
             "nor is the first, to the sinks after the one that poisoned"
         );
+        Ok(())
+    }
+
+    /// Two payloaded prims, `/P` and `/Q`, and a class `/P` can inherit,
+    /// opened through a registry that counts the assets it opens.
+    fn payload_pair(dir: &FsPath) -> Result<(Stage, Rc<Cell<usize>>)> {
+        fs::write(
+            dir.join("root.usda"),
+            "#usda 1.0\ndef \"P\" (payload = @p.usda@</X>) {}\ndef \"Q\" (payload = @q.usda@</Y>) {}\nclass \
+             \"Base\" {}\n",
+        )?;
+        fs::write(dir.join("p.usda"), "#usda 1.0\ndef \"X\" {\n    def \"C\" {}\n}\n")?;
+        fs::write(dir.join("q.usda"), "#usda 1.0\ndef \"Y\" {}\n")?;
+        let (registry, opens) = sdf::layer_registry::tests::counting_registry();
+        let stage = Stage::builder()
+            .registry(registry)
+            .open(&dir.join("root.usda").to_string_lossy())?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        assert!(stage.prim("/Q")?.is_valid()?);
+        Ok((stage, opens))
+    }
+
+    /// A prim an edit resyncs is composed again at once and keeps its payload
+    /// layer: unloading another prim does not free it, so a later read of the
+    /// prim neither opens its file again nor sees a change made to the file.
+    #[test]
+    fn resynced_keeps_payload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, opens) = payload_pair(dir.path())?;
+        let root = stage.root_layer().identifier().to_owned();
+        stage.edit_layer(&root, |e| {
+            let inherits = sdf::PathListOp::prepended([sdf::path("/Base")?]);
+            e.data_mut().set_field(
+                &sdf::path("/P")?,
+                sdf::FieldKey::InheritPaths.as_str(),
+                vt::Value::PathListOp(inherits),
+            );
+            Ok(())
+        })?;
+        assert!(stage.is_indexed(&sdf::path("/P")?), "composed again with the edit");
+        stage.unload("/Q")?;
+        fs::write(
+            dir.path().join("p.usda"),
+            "#usda 1.0\ndef \"X\" {\n    def \"D\" {}\n}\n",
+        )?;
+        let opened = opens.get();
+
+        assert!(
+            stage.prim("/P/C")?.is_valid()?,
+            "the layer held before the file changed"
+        );
+        assert!(!stage.prim("/P/D")?.is_valid()?);
+        assert_eq!(opens.get(), opened, "the payload is not read again");
+        Ok(())
+    }
+
+    /// An edit that retargets a payload loads the new target as it lands,
+    /// since the prim it changed is composed again at once.
+    #[test]
+    fn retarget_loads_early() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, _) = payload_pair(dir.path())?;
+        fs::write(dir.path().join("r.usda"), "#usda 1.0\ndef \"Z\" {}\n")?;
+        let root = stage.root_layer().identifier().to_owned();
+        let layers = stage.layer_count();
+        stage.edit_layer(&root, |e| {
+            let payloads = sdf::PayloadListOp::explicit([sdf::Payload {
+                asset_path: "r.usda".into(),
+                prim_path: sdf::path("/Z")?,
+                ..Default::default()
+            }]);
+            e.data_mut().set_field(
+                &sdf::path("/P")?,
+                sdf::FieldKey::Payload.as_str(),
+                vt::Value::PayloadListOp(payloads),
+            );
+            Ok(())
+        })?;
+        assert_eq!(stage.layer_count(), layers + 1, "the new target loaded with the edit");
+        Ok(())
+    }
+
+    /// Deleting a prim retires it: it is not composed again, and a later
+    /// load-rules change frees its payload layer.
+    #[test]
+    fn deleted_prim_retires() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, _) = payload_pair(dir.path())?;
+        let root = stage.root_layer().identifier().to_owned();
+        let layers = stage.layer_count();
+        stage.edit_layer(&root, |e| {
+            e.remove_spec(&sdf::path("/P")?)?;
+            Ok(())
+        })?;
+        assert!(!stage.is_indexed(&sdf::path("/P")?));
+        assert!(!stage.is_indexed(&sdf::path("/P/C")?));
+        stage.unload("/Q")?;
+        assert_eq!(stage.layer_count(), layers - 2, "both payload layers leave");
         Ok(())
     }
 }

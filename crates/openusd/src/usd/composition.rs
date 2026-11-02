@@ -197,8 +197,8 @@ pub(super) enum StageNotice {
 /// queue of recorded edits first, or runs inside the drain that took it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Settled {
-    /// The queue was drained: a public read. Edits the fixpoint's own loads
-    /// queue are reconciled before its next pass.
+    /// The queue was drained: a read, or a settlement a mutation runs. Edits
+    /// the fixpoint's own loads queue are reconciled before its next pass.
     Required,
     /// A drain took the queue and is composing it. Edits the fixpoint's
     /// loads queue go to that drain, which applies them in commit order.
@@ -281,6 +281,12 @@ pub(super) struct StageComposition {
     /// What a panic interrupted, when one left the composition half-built:
     /// it cannot be finished, so the stage composes nothing more.
     poisoned: Cell<Option<Poisoned>>,
+    /// How many snapshots drains have reconciled, so a read can tell whether
+    /// settling after it applied edits.
+    snapshots: Cell<u64>,
+    /// Whether settling is suspended, while a walk composes under load rules
+    /// it swapped in for itself ([`suspend_settling`](Self::suspend_settling)).
+    suspended: Cell<bool>,
     /// Whether a delivery is running.
     delivering: Cell<bool>,
     /// Whether a drain is reconciling, so the composition is part-applied:
@@ -309,6 +315,8 @@ impl StageComposition {
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
             poisoned: Cell::new(None),
+            snapshots: Cell::new(0),
+            suspended: Cell::new(false),
             delivering: Cell::new(false),
             reconciling: Cell::new(false),
             loading: Cell::new(false),
@@ -423,10 +431,6 @@ impl StageComposition {
         let mut cache = self.cache.borrow_mut();
         let reported = cache.query_diagnostic_count();
         let result = query(&view, &mut cache);
-        // The prims a load or a load-rules swap dropped off an edit seam are
-        // released here, so a read-only session does not accumulate them.
-        // TODO: settle them here (rebuild or retire each) instead.
-        cache.release_evicted();
         cache.swap_pending_loads(demands);
         cache.swap_clip_loads(clips, reported);
         result
@@ -641,12 +645,21 @@ impl StageComposition {
         let _hold = self.store.hold();
         self.reconciling.set(true);
         let _reconciling = sdf::StopRunning(&self.reconciling);
+        // A drain the stage's caller starts, which retries the failed loads,
+        // starts a settlement round; one a read's loads need does not.
+        if retry {
+            self.begin_round();
+        }
         self.guarded(Poisoned::Compose, || self.drain(retry, hooks))
     }
 
     /// Reconciles snapshots of the queue until it stays empty, for
     /// [`reconcile`](Self::reconcile).
     fn drain(&self, retry: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+        // A drain the stage's caller starts settles what it drops. One a
+        // read's loads need leaves that to the read, which settles after its
+        // passes, so its parked demands stay the cache's through this drain.
+        let settles = retry;
         let mut retry = retry;
         while !self.pending_is_empty() {
             // A drain reads, and may load, the stage's layers. From inside a
@@ -656,6 +669,7 @@ impl StageComposition {
             // (`assert_settled`) before it answers from stale composition.
             self.store.ensure_writable()?;
             let mut drained: VecDeque<Pending> = self.take_pending().into();
+            self.snapshots.set(self.snapshots.get() + 1);
             let edited = drained.iter().any(|pending| matches!(pending, Pending::Edit(_)));
             // A reload's retry is reported to the stage's sinks, as C++
             // `UsdStage::Reload` reports what `PcpCache::Reload` resyncs; the
@@ -665,7 +679,7 @@ impl StageComposition {
                 .any(|pending| matches!(pending, Pending::Edit(edit) if edit.changes.did_reload_content()));
             // An edit changes the layers, so a target that previously failed to read
             // may now be readable: forget recorded load failures and drop the indices
-            // that recorded one, so the next query re-demands and recomposes them.
+            // that recorded one, so settlement re-demands and recomposes them.
             let retried = match edited && mem::take(&mut retry) {
                 true => self.forget_failed_loads(),
                 false => None,
@@ -682,6 +696,12 @@ impl StageComposition {
                     Group::Edit(group) => self.apply_group(group, hooks),
                 }
             }
+            // The prims the snapshot dropped settle before the stacks they
+            // held are swept. Edits their loads commit go to the next
+            // snapshot, which settles what is left after it.
+            if settles {
+                self.settle_work(Settled::Taken, hooks);
+            }
             if !edited {
                 continue;
             }
@@ -695,9 +715,50 @@ impl StageComposition {
             // diagnostic.
             if let Some(dropped) = retried {
                 self.retry_sublayers(dropped, reloaded, hooks);
+                // A failed load the retry opens settles the prims it dropped,
+                // and the stacks they released are swept.
+                if settles {
+                    self.settle_work(Settled::Taken, hooks);
+                    self.reclaim_stale_stacks();
+                }
             }
         }
         Ok(())
+    }
+
+    /// Starts a settlement round, at a drain or a mutation the stage's caller
+    /// makes: a prim whose settling failed before is tried again in it.
+    fn begin_round(&self) {
+        self.cache.borrow_mut().begin_round();
+    }
+
+    /// Settles the work set: each prim an invalidation dropped is composed
+    /// again or shown to be gone ([`pcp::IndexCache::settle_pass`]), in the
+    /// current round, loading what that demands. A store a read or an edit
+    /// holds leaves the rest for a later settlement; a failure settling a
+    /// prim is recorded on it. Does nothing while
+    /// [suspended](Self::suspend_settling).
+    ///
+    /// Under [`Settled::Taken`] it stops for edits its loads commit
+    /// ([`Interrupted::NewWork`]), which the drain it runs inside applies
+    /// first. Under [`Settled::Required`] edits loads the caller ran before
+    /// it committed are reconciled first.
+    pub(super) fn settle_work(&self, settled: Settled, hooks: &dyn CompositionHooks) {
+        if self.suspended.get() || !self.cache.borrow().has_work() {
+            return;
+        }
+        if settled == Settled::Required && !self.pending_is_empty() && self.reconcile(false, hooks).is_err() {
+            return;
+        }
+        let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks);
+    }
+
+    /// Suspends settling until the returned guard drops, for a walk that
+    /// composes under load rules it swapped in for itself: the prims the swap
+    /// dropped settle under the rules restored.
+    /// A suspension nested in another leaves it to the outer one to end.
+    pub(super) fn suspend_settling(&self) -> Option<sdf::StopRunning<'_>> {
+        (!self.suspended.replace(true)).then(|| sdf::StopRunning(&self.suspended))
     }
 
     /// Applies one transaction's recorded edits, a group of the drain's
@@ -725,20 +786,26 @@ impl StageComposition {
 
     /// Forgets the recorded load failures (C++ `PcpChanges::DidMaybeFixAsset`
     /// and `DidMaybeFixSublayer`), so a target or sublayer that failed to load
-    /// may load now: the indices that reported one recompose on their next
-    /// read, and each failed sublayer entry is demanded again. The stage's
+    /// may load now: the prims whose indices reported one compose again, and
+    /// each failed sublayer entry is demanded again. The stage's
     /// sinks hear what this resyncs ([`StageNotice::LoadsRetried`]) at the
     /// next delivery.
     pub(super) fn retry_failed_loads(&self, hooks: &dyn CompositionHooks) {
         if !self.sound() {
             return;
         }
+        self.begin_round();
         if let Some(dropped) = self.forget_failed_loads() {
             // The sweep goes first, as in a drain: it retires a reclaimed
             // stack's failure diagnostics, so the requeue never demands a
             // sublayer for a stack nothing uses.
             self.reclaim_stale_stacks();
-            self.guarded(Poisoned::Compose, || self.retry_sublayers(dropped, true, hooks));
+            self.guarded(Poisoned::Compose, || {
+                self.retry_sublayers(dropped, true, hooks);
+                self.settle_work(Settled::Required, hooks);
+            });
+            // The stacks the settled prims released are swept too.
+            self.reclaim_stale_stacks();
         }
     }
 
@@ -939,9 +1006,10 @@ impl StageComposition {
     /// prim index, no pending demand, no eager graph root, no live
     /// descendant's variable-source ancestry — see `LayerGraph::sweep_stacks`.
     /// The sweep runs when a stack lost its last cache owner
-    /// (`IndexCache::ownership_lost`, unthresholded: a released work-set entry
-    /// stops owning its stacks, and the next edit seam collects and retires
-    /// the orphans' diagnostics) or when registry creation churn
+    /// (`IndexCache::ownership_lost`, unthresholded: a work-set entry that
+    /// settles or retires stops owning its stacks, and the next edit seam
+    /// collects and retires the orphans' diagnostics) or when registry
+    /// creation churn
     /// passed the gate (`LayerGraph::sweep_ripe`, which amortizes re-keying
     /// mints and interner value churn).
     ///
@@ -954,9 +1022,6 @@ impl StageComposition {
     /// sweep there would reclaim out from under them.
     fn reclaim_stale_stacks(&self) {
         self.update_pair(|graph, cache| {
-            // The dropped prims' stacks are released before the sweep reads
-            // the owners. TODO: settle the dropped prims instead.
-            cache.release_evicted();
             if !cache.ownership_lost() && !graph.sweep_ripe() {
                 return;
             }
@@ -980,28 +1045,10 @@ impl StageComposition {
     ///
     /// Kept besides are a layer with unsaved edits and the edit target's
     /// layer, the layers open edit contexts restore included. C++ frees a
-    /// dirty layer nothing holds and holds the edit target's weakly. An edit
-    /// leaves the prims it changed to recompose on their next read, so until
-    /// then a layer only they use owns no cached stack and leaves here too: it
-    /// is read from its file again on their next read, and the pins keep that
-    /// from losing edits.
-    //
-    // TODO: keep what a drain-evicted prim used until it recomposes (C++
-    // `PcpLifeboat`), so a clean layer a prim waiting to recompose uses stays
-    // (`/P`'s payload layer after an edit resyncs `/P` and `/Q` unloads);
-    // today it is read from its file again and undo history on it is dropped.
-    // C++ holds for one change round, as `UsdStage` recomposes at once; here a
-    // prim recomposes on its next read, so a hold kept until then has no end
-    // for a prim never read again (a deleted subtree, a deactivated or masked
-    // parent). Holding the stacks as cache owners keeps their sublayer
-    // diagnostics in `composition_errors`; holding their layers needs that
-    // release, and probing child names here composes under `update_pair`.
-    // Two designs fit: hold the stacks as owners, released where change
-    // processing tells a removed prim from a changed one, with held stacks'
-    // diagnostics filtered; or recompose resynced prims at the end of the
-    // drain and hold for one round. Either lets a layer reclaim at every edit
-    // seam (after the drain, never while delivering, not on the read path)
-    // and makes the pins a policy.
+    /// dirty layer nothing holds and holds the edit target's weakly. A prim an
+    /// edit dropped and settlement has not decided (its settling failed, or a
+    /// store a read or an edit held stopped it) keeps the stacks it used, and
+    /// with them their layers.
     fn reclaim_unused_layers(&self, hooks: &dyn CompositionHooks, reclaim: pcp::Reclaim) {
         // A layer leaves only once its last stack has. One a pin kept (a save
         // not yet made, an edit target), or one the registry's read or edit
@@ -1499,10 +1546,28 @@ impl StageComposition {
     ) -> Result<T, pcp::QueryError> {
         // The passes build indices through the resolver, and the loads
         // between them run it too.
+        let mut query = query;
         self.guarded(Poisoned::Compose, || {
-            match self.fixpoint(query, Settled::Required, hooks) {
-                Ok(result) => result,
-                Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
+            loop {
+                let evictions = self.cache.borrow().evictions();
+                let result = match self.fixpoint(&mut query, Settled::Required, hooks) {
+                    Ok(result) => result,
+                    Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
+                };
+                // The prims the read's own loads dropped (a joined layer that
+                // relocates, a failure recorded) settle before it returns.
+                // Work a drain or a mutation left, a prim whose settling
+                // failed, waits for the next.
+                if self.cache.borrow().evictions() == evictions {
+                    return result;
+                }
+                let snapshots = self.snapshots.get();
+                self.settle_work(Settled::Required, hooks);
+                // Settling reconciled edits its loads committed, which can
+                // change the answer: the query runs again.
+                if self.snapshots.get() == snapshots {
+                    return result;
+                }
             }
         })
     }
@@ -1628,6 +1693,7 @@ impl StageComposition {
         }
         // From inside a load or a drain the composition is part-built.
         self.assert_settled();
+        self.begin_round();
         let (changed, mut resynced, demands) = self.guarded(Poisoned::Compose, || {
             self.update_pair(|graph, cache| {
                 let change = mutate(graph)?;
@@ -1645,7 +1711,13 @@ impl StageComposition {
         // An unmuted sublayer that left the graph while muted has no fanout to
         // name the prims it reaches: it joins again here, and the prims its
         // join dropped are the resyncs it adds.
-        let joined = self.guarded(Poisoned::Compose, || self.resolve_sublayer_demands(demands, hooks).1);
+        let joined = self.guarded(Poisoned::Compose, || {
+            let joined = self.resolve_sublayer_demands(demands, hooks).1;
+            // The prims the mute dropped settle before the stacks they held
+            // are swept.
+            self.settle_work(Settled::Required, hooks);
+            joined
+        });
         resynced.extend(joined);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
@@ -1832,9 +1904,14 @@ impl StageComposition {
         if !self.sound() {
             return Vec::new();
         }
+        self.begin_round();
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
         let victims = self.swap_load_rules(rules, hooks);
+        // The prims the change dropped settle before the stacks they held are
+        // swept: an unloaded payload's prims are retired, and a loaded one's
+        // rebuilt.
+        self.guarded(Poisoned::Compose, || self.settle_work(Settled::Required, hooks));
         self.reclaim_stale_stacks();
         self.reclaim_unused_layers(hooks, pcp::Reclaim::Unused);
         victims

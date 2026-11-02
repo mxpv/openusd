@@ -495,13 +495,13 @@ fn unmute_restores_diagnostic() -> Result<()> {
     Ok(())
 }
 
-/// `composition_errors()` reflects the composition performed so far: an
-/// unrelated mute that drops the only prim index referencing a target
-/// releases the target stack's last owner, so the sweep at the mute seam
-/// retires the stack and its missing-sublayer diagnostic together;
-/// recomposing the prim re-derives the diagnostic from current state.
+/// `composition_errors()` reflects the current composition: an unrelated mute
+/// composes the prim that references a target again, which still reaches the
+/// target's missing sublayer, and deleting the prim releases the target
+/// stack's last owner, so the sweep at that edit retires the stack and its
+/// diagnostic together.
 #[test]
-fn eviction_rederives_diagnostic() -> Result<()> {
+fn retired_prim_retires_diagnostic() -> Result<()> {
     let dir = tempfile::tempdir()?;
     // `/A` references `target` (which has a missing sublayer); the unrelated
     // sublayer `s` also contributes an opinion to `/A`, so muting `s` evicts `/A`'s
@@ -528,21 +528,25 @@ fn eviction_rederives_diagnostic() -> Result<()> {
         "the reached target's missing sublayer is reported"
     );
 
-    // Muting the unrelated `s` drops `/A`'s cached index — the target stack's
-    // only owner — so the mute seam's sweep retires the stack and its
-    // diagnostic together.
+    // Muting the unrelated `s` composes `/A` again, which still reaches the
+    // target.
     stage.mute_layer("s.usda");
     assert!(
-        !reports_unresolved_sublayer(&stage, "missing.usda"),
-        "the orphaned target's diagnostic retires with its stack, got {:?}",
+        reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the recomposed prim still reaches the target, got {:?}",
         stage.composition_errors()
     );
 
-    // Recomposing `/A` re-reaches the target and re-derives the diagnostic.
-    let _ = child_names(&stage, "/A")?;
+    // Deleting `/A` retires it, the target stack's only owner, so the edit's
+    // sweep retires the stack and its diagnostic together.
+    let root = stage.root_layer().identifier().to_owned();
+    stage.edit_layer(&root, |e| {
+        e.remove_spec(&sdf::path("/A")?)?;
+        Ok(())
+    })?;
     assert!(
-        reports_unresolved_sublayer(&stage, "missing.usda"),
-        "recomposition re-derives the diagnostic, got {:?}",
+        !reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the orphaned target's diagnostic retires with its stack, got {:?}",
         stage.composition_errors()
     );
     Ok(())
