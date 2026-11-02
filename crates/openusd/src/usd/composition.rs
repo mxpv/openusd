@@ -334,6 +334,8 @@ pub(super) struct StageComposition {
     /// How many snapshots drains have reconciled, so a read can tell whether
     /// settling after it applied edits.
     snapshots: Cell<u64>,
+    /// Whether layer reclaims are held ([`hold_reclaims`](Self::hold_reclaims)).
+    reclaims_held: Cell<bool>,
     /// Whether settling is suspended, while a walk composes under load rules
     /// it swapped in for itself ([`suspend_settling`](Self::suspend_settling)).
     suspended: Cell<bool>,
@@ -369,6 +371,7 @@ impl StageComposition {
             poisoned: Cell::new(None),
             snapshots: Cell::new(0),
             suspended: Cell::new(false),
+            reclaims_held: Cell::new(false),
             delivering: Cell::new(false),
             reconciling: Cell::new(false),
             loading: Cell::new(false),
@@ -694,12 +697,28 @@ impl StageComposition {
         }
     }
 
+    /// [`process_pending`](Self::process_pending) at the end of an edit of
+    /// the stage's layers, then the reclaim of the layers it left unused:
+    /// the boundary an edit ends at.
+    pub(super) fn end_edit(&self, hooks: &dyn CompositionHooks) {
+        self.process_pending(hooks);
+        self.reclaim(hooks, pcp::Reclaim::Unused);
+    }
+
+    /// Holds layer reclaims until the returned guard drops, for a run of
+    /// edits a departing layer must not interrupt (an undo replaying one
+    /// step's transactions): what they leave unused is reclaimed after. A
+    /// hold nested in another leaves it to the outer one to end.
+    pub(super) fn hold_reclaims(&self) -> Option<sdf::StopRunning<'_>> {
+        (!self.reclaims_held.replace(true)).then(|| sdf::StopRunning(&self.reclaims_held))
+    }
+
     /// Whether layers may be reclaimed now: stacks may be swept
-    /// ([`sweepable`](Self::sweepable)), and no delivery runs, whose
-    /// observers and sinks would hear a layer depart ahead of the notices
-    /// queued before it.
+    /// ([`sweepable`](Self::sweepable)), no delivery runs, whose observers
+    /// and sinks would hear a layer depart ahead of the notices queued
+    /// before it, and no [hold](Self::hold_reclaims) is in place.
     fn at_boundary(&self) -> bool {
-        !self.delivering.get() && self.sweepable()
+        !self.delivering.get() && !self.reclaims_held.get() && self.sweepable()
     }
 
     /// Whether stacks may be swept now: no layer load is part-way through,
@@ -1177,8 +1196,9 @@ impl StageComposition {
     /// passed the gate (`LayerGraph::sweep_ripe`, which amortizes re-keying
     /// mints and interner value churn).
     ///
-    /// Called only at edit seams — the end of a pending-edit drain, a mute, a
-    /// deliberate load-rules mutation — never inside the load path, and runs
+    /// Called only at edit seams — a pending-edit drain, the end of an edit,
+    /// a mute, a deliberate load-rules mutation — never inside the load
+    /// path, and runs
     /// only when [sweepable](Self::sweepable), leaving the sweep to the next
     /// call otherwise. An edit
     /// strands an instance by re-keying its source or by dropping its last
@@ -1214,8 +1234,8 @@ impl StageComposition {
     }
 
     /// Drops the layers no live layer stack uses and nothing else keeps
-    /// (`LayerGraph::unused_layers`) once a load-rules change has unloaded
-    /// what used them, or, with [`pcp::Reclaim::Muted`], once a mute has
+    /// (`LayerGraph::unused_layers`) once an edit or a load-rules change has
+    /// left them unused, or, with [`pcp::Reclaim::Muted`], once a mute has
     /// pruned them: each first reaches the stage's observers as
     /// [`departed`](CompositionHooks::departed), then leaves the graph, and
     /// the registry frees it unless something else holds it (C++ releases a
@@ -1243,32 +1263,44 @@ impl StageComposition {
             pcp::Reclaim::Muted => deferred.muted = skipped,
         }
         self.deferred.set(deferred);
-        // A layer leaves only once its last stack has. One a pin kept (a save
-        // not yet made, an edit target) leaves at the next load-rules change
-        // after.
-        if skipped || !self.layers.borrow().reclaim_due(reclaim) {
+        if skipped {
             return;
         }
+        // A layer leaves only once its last stack has. One a pin kept (a save
+        // not yet made, an edit target) leaves at the first boundary after the
+        // pin lapses.
+        let pins = || -> HashSet<pcp::LayerId> {
+            let graph = self.layers.borrow();
+            let targets = hooks.edit_target_identifiers();
+            targets.iter().filter_map(|target| graph.id_of(target)).collect()
+        };
+        let due = {
+            let graph = self.layers.borrow();
+            graph.reclaim_due(reclaim) || (reclaim == pcp::Reclaim::Unused && graph.lapsed(pins))
+        };
+        if !due {
+            return;
+        }
+        let pins = pins();
         // TODO(perf): every reclaim walks every stack's members and every
         // graph layer. `LayerStackRegistry::sweep` returning the layers whose
         // `using` entry emptied would make those the only candidates.
-        let edit_targets = hooks.edit_target_identifiers();
-        let pcp::Reclaimable { unused, demoted, retry } = self.update_pair(|graph, cache| {
+        let reclaimable = self.update_pair(|graph, cache| {
             let (mut kept, mut clips) = (HashSet::new(), HashSet::new());
             cache.mark_live_layers(graph, &mut kept, &mut clips);
-            let pins = edit_targets.iter().filter_map(|target| graph.id_of(target)).collect();
             graph.unused_layers(kept, &clips, &pins, reclaim)
         });
+        let unused = &reclaimable.unused;
         if !unused.is_empty() {
-            hooks.departed(&unused);
+            hooks.departed(unused);
         }
         // Removing the layers rebuilds the stacks that held them.
         let departed = self.guarded(Poisoned::Compose, || {
             self.update_pair(|graph, cache| {
                 // A layer composition left that a clip still reads stays, for the
                 // clip alone.
-                let departed = graph.remove_layers(&unused, &demoted, retry);
-                cache.forget_layers(&unused, &departed.identifiers);
+                let departed = graph.remove_layers(&reclaimable);
+                cache.forget_layers(unused, &departed.identifiers);
                 departed
             })
         });

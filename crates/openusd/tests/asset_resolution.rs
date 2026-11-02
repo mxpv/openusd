@@ -888,7 +888,7 @@ fn clip_asset_paths_expression() {
 }
 
 /// A variable edit that points a clip set at another clip releases the one
-/// it left at the next reclaim, though nothing read the clipped value since.
+/// it left as the edit ends, though nothing read the clipped value since.
 #[test]
 fn stepped_clip_released() -> openusd::Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -910,15 +910,13 @@ fn stepped_clip_released() -> openusd::Result<()> {
         "SHOT".to_string(),
         vt::Value::String("s021".to_string()),
     )]))?;
-    // An unrelated load-rules change reclaims.
-    stage.unload("/Elsewhere")?;
     assert!(!holds(&stage, "s020.usda"), "the clip the set left is released");
     assert_eq!(value_at(&stage, "/P.v", 1.0), Some(21.0));
     Ok(())
 }
 
-/// A clip set stepped away and back with no read between keeps the clip it
-/// reads again.
+/// A clip set stepped away and back with no read between reads its clip
+/// again, and keeps it through a later edit.
 #[test]
 fn stepped_clip_returns() -> openusd::Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -937,14 +935,15 @@ fn stepped_clip_returns() -> openusd::Result<()> {
 
     stage.set_expression_variables(shot("s021"))?;
     stage.set_expression_variables(shot("s020"))?;
-    stage.unload("/Elsewhere")?;
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+    stage.define_prim("/Other")?;
     let held = stage.layer_identifiers();
     assert!(held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
     Ok(())
 }
 
 /// An edit to a clip set's schedule that leaves its clips keeps the clip
-/// layer it reads through the next reclaim.
+/// layer it reads.
 #[test]
 fn clip_schedule_edit_keeps() -> openusd::Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -960,14 +959,13 @@ fn clip_schedule_edit_keeps() -> openusd::Result<()> {
     assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
 
     usd::ClipsAPI::from_prim_unchecked(stage.prim("/P")?).set_clip_active("default", vec![gf::vec2d(0.0, 0.0)])?;
-    stage.unload("/Elsewhere")?;
     let held = stage.layer_identifiers();
     assert!(held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
     Ok(())
 }
 
 /// A variant switch that points a clip set at another clip releases the
-/// one it left at the next reclaim.
+/// one it left as the edit ends.
 #[test]
 fn clip_variant_switch_releases() -> openusd::Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -993,7 +991,6 @@ fn clip_variant_switch_releases() -> openusd::Result<()> {
     assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
 
     stage.prim("/P")?.variant_sets().set_selection("shot", "b")?;
-    stage.unload("/Elsewhere")?;
     let held = stage.layer_identifiers();
     assert!(!held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
     assert_eq!(value_at(&stage, "/P.v", 1.0), Some(21.0));

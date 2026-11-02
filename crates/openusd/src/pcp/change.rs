@@ -959,6 +959,9 @@ impl Changes {
             .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)
         {
             let recompute = graph.recompute_sublayers(Some(&self.layer_stack_layers));
+            // A stack rebuilt in place can drop a sublayer no stack holds
+            // any more.
+            graph.mark_reclaim_due();
             (recompute.affected, recompute.vars_deltas)
         } else if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
             let mut relocated = graph.recompute_relocates();

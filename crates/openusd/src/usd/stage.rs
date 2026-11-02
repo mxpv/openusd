@@ -1184,6 +1184,17 @@ impl Stage {
         self.composition.process_pending(self);
     }
 
+    /// Runs `replay`, edits that undo one step, holding layer reclaims until
+    /// it returns, then ends at a boundary.
+    pub(super) fn holding_reclaims<T>(&self, replay: impl FnOnce() -> T) -> T {
+        let result = {
+            let _held = self.composition.hold_reclaims();
+            replay()
+        };
+        self.composition.end_edit(self);
+        result
+    }
+
     /// [`process_pending`](Self::process_pending) for a fallible read (see
     /// [`StageComposition::settle`]).
     pub(crate) fn settle(&self) -> Result<(), pcp::QueryError> {
@@ -1405,8 +1416,10 @@ struct StageDelivery(WeakStage);
 
 impl sdf::LayerSink for StageDelivery {
     fn after_commit(&self, _change: &sdf::CommittedLayerChange<'_>) {
+        // An edit made through a handle, which reaches the stage only here,
+        // ends at a boundary too.
         if let Some(stage) = self.0.upgrade() {
-            stage.process_pending();
+            stage.composition.end_edit(&stage);
         }
     }
 }
@@ -2324,7 +2337,7 @@ impl Stage {
             self.commit_layer(&layers, layer_id, mapping.as_ref(), |layer| f(layer, authored))
         };
         let edited = edited.map(|committed| self.composition.deliver(committed, self));
-        self.process_pending();
+        self.composition.end_edit(self);
         edited
     }
 
@@ -2438,7 +2451,7 @@ impl Stage {
         let result =
             result.map(|committed| committed.is_some_and(|committed| self.composition.deliver(committed, self)));
         if commit {
-            self.process_pending();
+            self.composition.end_edit(self);
         }
         result
     }
@@ -2606,9 +2619,9 @@ impl Stage {
     /// Layers behind references and payloads load on demand as composition
     /// reaches their arcs, and value-clip layers as a value read reaches them,
     /// so this is the count loaded by the queries performed so far, less the
-    /// layers an [`unload`](Self::unload) or other load-rules change freed,
-    /// mirroring C++ `UsdStage::GetUsedLayers` (which counts clip layers by
-    /// default). The root layer stack is always fully loaded.
+    /// layers an edit, an [`unload`](Self::unload) or another load-rules
+    /// change freed, mirroring C++ `UsdStage::GetUsedLayers` (which counts
+    /// clip layers by default). The root layer stack is always fully loaded.
     pub fn layer_count(&self) -> usize {
         self.layers().len()
     }
@@ -2646,9 +2659,9 @@ impl Stage {
     /// composition opened them).
     ///
     /// Reference, payload and value-clip layers load on demand, so this lists
-    /// the layers reached by the queries performed so far, less those a
-    /// load-rules change freed (C++ `UsdStage::GetUsedLayers`). Traverse the
-    /// stage to force every reachable layer to load.
+    /// the layers reached by the queries performed so far, less those an
+    /// edit or a load-rules change freed (C++ `UsdStage::GetUsedLayers`).
+    /// Traverse the stage to force every reachable layer to load.
     pub fn layer_identifiers(&self) -> Vec<String> {
         self.layers().identifiers()
     }
@@ -2844,7 +2857,7 @@ impl Stage {
         if self.composition.retries() == retries {
             self.composition.retry_failed_loads(self);
         }
-        self.process_pending();
+        self.composition.end_edit(self);
         reloaded.map(drop)
     }
 
@@ -3054,9 +3067,8 @@ impl Stage {
     ///
     /// It also leaves every payload-target layer under `root` loaded, though
     /// the load *rules* are restored: the swaps free no layer, so one stays
-    /// until the next load-rules change ([`load`](Self::load),
-    /// [`unload`](Self::unload) and the rest) drops the layers no loaded prim
-    /// uses.
+    /// until the next edit or load-rules change drops the layers no loaded
+    /// prim uses.
     /// C++'s own `FindLoadable` equally must traverse (and thus compose)
     /// every candidate subtree.
     // TODO(perf): when the stage's current rules are not already
@@ -4224,7 +4236,7 @@ impl Stage {
         // stage then composes the child given here, not a copy read from its
         // file.
         let edited = edited.map(|(committed, joined)| self.composition.join_edited(joined, committed, self));
-        self.process_pending();
+        self.composition.end_edit(self);
         edited
     }
 
@@ -4276,7 +4288,7 @@ impl Stage {
         match edited {
             Some(edited) => {
                 let edited = edited.map(|committed| self.composition.deliver(committed, self));
-                self.process_pending();
+                self.composition.end_edit(self);
                 edited
             }
             None => Ok(false),
@@ -7092,10 +7104,10 @@ def \"Sub\" {}
         Ok(())
     }
 
-    /// A payload layer whose stack an edit's sweep already removed leaves at
-    /// the next load-rules change.
+    /// A payload layer the load rules leave unused after a walk read it
+    /// leaves at the next edit.
     #[test]
-    fn unload_frees_orphan() -> Result<()> {
+    fn walk_orphan_freed() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&root)?;
@@ -7103,7 +7115,6 @@ def \"Sub\" {}
         assert!(!stage.cache().has_work(), "the walk settled what its swaps dropped");
         assert_eq!(stage.layer_count(), 2, "finding the payload read its layer");
         stage.define_prim("/Other")?;
-        stage.unload("/P")?;
         assert_eq!(stage.layer_count(), 1);
         Ok(())
     }
@@ -7157,7 +7168,7 @@ def "M" (
     }
 
     /// An unload made while a handle edit holds the registry's layers frees
-    /// nothing then, and the next load-rules change frees the layer.
+    /// nothing then, and the next edit or load-rules change frees the layer.
     #[test]
     fn unload_inside_edit() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -7229,7 +7240,7 @@ def "M" (
     }
 
     /// A payload layer an unload kept for its unsaved edits leaves at the next
-    /// load-rules change once it is saved.
+    /// edit once it is saved.
     #[test]
     fn saved_layer_leaves_later() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -7244,7 +7255,8 @@ def "M" (
         stage.unload("/P")?;
         assert_eq!(stage.layer_count(), 2, "the dirty layer stays");
         stage.layer_handle(&payload).expect("held").save()?;
-        stage.load("/Nothing", LoadPolicy::WithDescendants)?;
+        assert_eq!(stage.layer_count(), 2, "a save edits nothing on the stage");
+        stage.define_prim("/T")?;
         assert_eq!(stage.layer_count(), 1, "saved, it leaves");
         Ok(())
     }
@@ -10435,7 +10447,8 @@ def "P" (payload = @./clip.usda@</M>) {}
     }
 
     /// An edit that retargets a payload loads the new target as it lands,
-    /// since the prim it changed is composed again at once.
+    /// since the prim it changed is composed again at once, and frees the
+    /// target it left.
     #[test]
     fn retarget_loads_early() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -10456,12 +10469,48 @@ def "P" (payload = @./clip.usda@</M>) {}
             );
             Ok(())
         })?;
-        assert_eq!(stage.layer_count(), layers + 1, "the new target loaded with the edit");
+        assert_eq!(stage.layer_count(), layers, "the new target loaded, the old one left");
+        let held = stage.layer_identifiers();
+        assert!(held.iter().any(|id| id.ends_with("r.usda")), "{held:?}");
+        assert!(!held.iter().any(|id| id.ends_with("p.usda")), "{held:?}");
         Ok(())
     }
 
-    /// Deleting a prim retires it: it is not composed again, and a later
-    /// load-rules change frees its payload layer.
+    /// A prim deleted through a layer handle frees its payload layer as the
+    /// handle's edit ends.
+    #[test]
+    fn handle_delete_frees() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, _) = payload_pair(dir.path())?;
+        let root = stage.root_layer().identifier().to_owned();
+        let layers = stage.layer_count();
+        stage.layer_handle(&root).expect("the root layer").edit(|e| {
+            e.remove_spec(&sdf::path("/P")?)?;
+            Ok(())
+        })?;
+        assert_eq!(stage.layer_count(), layers - 1);
+        Ok(())
+    }
+
+    /// Removing a sublayer frees it with the edit.
+    #[test]
+    fn removed_sublayer_frees() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n",
+        )?;
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"S\" {}\n")?;
+        let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+        assert_eq!(stage.layer_count(), 2);
+        let root = stage.root_layer().identifier().to_owned();
+        assert!(stage.remove_layer(&root, "./sub.usda")?);
+        assert_eq!(stage.layer_count(), 1);
+        Ok(())
+    }
+
+    /// Deleting a prim retires it: it is not composed again, and the edit
+    /// frees its payload layer.
     #[test]
     fn deleted_prim_retires() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -10474,8 +10523,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         })?;
         assert!(!stage.is_indexed(&sdf::path("/P")?));
         assert!(!stage.is_indexed(&sdf::path("/P/C")?));
-        stage.unload("/Q")?;
-        assert_eq!(stage.layer_count(), layers - 2, "both payload layers leave");
+        assert_eq!(stage.layer_count(), layers - 1, "its payload layer left with the edit");
         Ok(())
     }
 }

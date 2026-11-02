@@ -296,6 +296,9 @@ pub(crate) struct LayerGraph {
     /// layer ([`mark_reclaim_due`](Self::mark_reclaim_due)), since the layers
     /// were last reclaimed.
     reclaim_due: bool,
+    /// The layers the last reclaim kept only for a pin that can lapse
+    /// ([`Reclaimable::lapsing`]): a reclaim is due once one lapses.
+    lapsing: Vec<LayerId>,
     /// The layers the graph holds only for value clips, which take no part in
     /// composition: no stack holds one, its `subLayers` are not resolved, and
     /// its relocates are neither validated nor reported. A layer joins this
@@ -500,6 +503,9 @@ pub(crate) struct Reclaimable {
     pub(crate) demoted: HashSet<LayerId>,
     /// Whether the next reclaim runs whether or not a sweep removes a stack.
     pub(crate) retry: bool,
+    /// The layers kept only for a pin that can lapse: one in `pins`, or one
+    /// with unsaved edits.
+    pub(crate) lapsing: Vec<LayerId>,
 }
 
 /// Which layers a reclaim ([`LayerGraph::unused_layers`]) may free.
@@ -740,6 +746,7 @@ impl LayerGraph {
             sublayers: SublayerState::default(),
             eager_stacks: Vec::new(),
             reclaim_due: false,
+            lapsing: Vec::new(),
             clip_only: HashSet::new(),
         }
     }
@@ -1440,12 +1447,25 @@ impl LayerGraph {
     /// stack since the layers were last reclaimed
     /// ([`remove_layers`](Self::remove_layers)), or the last reclaim kept a
     /// layer it may free later; or, for [`Reclaim::Muted`], a loaded layer is
-    /// muted.
+    /// muted. A pin the last reclaim kept a layer for can lapse too
+    /// ([`lapsed`](Self::lapsed)).
     pub(crate) fn reclaim_due(&self, reclaim: Reclaim) -> bool {
         match reclaim {
             Reclaim::Unused => self.reclaim_due,
             Reclaim::Muted => !self.muted.is_empty(),
         }
+    }
+
+    /// Whether a layer the last reclaim kept only for a pin is neither in
+    /// `pins` nor has unsaved edits any more, so a reclaim may free it. The
+    /// pins are asked for only when such a layer exists.
+    pub(crate) fn lapsed(&self, pins: impl FnOnce() -> HashSet<LayerId>) -> bool {
+        if self.lapsing.is_empty() {
+            return false;
+        }
+        let (pins, view) = (pins(), self.read_view());
+        let lapsed = |id: &LayerId| self.nodes.contains_key(id) && !pins.contains(id) && !view.layer(*id).is_dirty();
+        self.lapsing.iter().any(lapsed)
     }
 
     /// The layers no live layer stack holds and nothing else keeps, for the
@@ -1464,9 +1484,9 @@ impl LayerGraph {
     /// nothing above keeps it for composition, it is returned to be demoted
     /// to clips only ([`remove_layers`](Self::remove_layers)), pinned or not.
     ///
-    /// Also returns whether to retry at the next reclaim, for
-    /// [`remove_layers`](Self::remove_layers): a layer was kept only for a pin
-    /// that can lapse, one in `pins` or one with unsaved edits, or a
+    /// Also returns, for [`remove_layers`](Self::remove_layers), the layers
+    /// kept only for a pin that can lapse, one in `pins` or one with unsaved
+    /// edits, and whether to retry at the next reclaim: a
     /// [`Reclaim::Muted`] left out an unused layer.
     pub(crate) fn unused_layers(
         &self,
@@ -1494,7 +1514,7 @@ impl LayerGraph {
         // Only a layer nothing else keeps is read for whether it could be
         // read back: one with unsaved edits, or with no file to read it from.
         let view = self.read_view();
-        let mut retry = false;
+        let mut lapsing = Vec::new();
         let pinned: Vec<LayerId> = self
             .order
             .iter()
@@ -1503,10 +1523,13 @@ impl LayerGraph {
             .filter(|id| {
                 let layer = view.layer(*id);
                 let lapses = pins.contains(id) || layer.is_dirty();
-                retry |= lapses;
+                if lapses {
+                    lapsing.push(*id);
+                }
                 lapses || !layer.is_rereadable()
             })
             .collect();
+        let mut retry = false;
         kept.extend(&pinned);
         self.keep_sublayers(&mut kept, pinned);
         // A clip layer stays for its clip after the walk, which reaches past
@@ -1525,7 +1548,12 @@ impl LayerGraph {
             // a later reclaim.
             retry |= unused.len() + demoted.len() < all;
         }
-        Reclaimable { unused, demoted, retry }
+        Reclaimable {
+            unused,
+            demoted,
+            retry,
+            lapsing,
+        }
     }
 
     /// Adds to `kept` every sublayer, transitively, of the layers in `walk`.
@@ -1547,14 +1575,19 @@ impl LayerGraph {
     /// composition ([`clip_only`](Self::clip_only)): each keeps its node and
     /// drops its sublayer edges and relocates until a composition join
     /// promotes it again. With `retry`, the next reclaim runs whether or not a
-    /// sweep removes a stack.
+    /// sweep removes a stack; one runs too once a layer in `lapsing` lapses
+    /// ([`reclaim_due`](Self::reclaim_due)).
     pub(crate) fn remove_layers(
         &mut self,
-        dead: &HashSet<LayerId>,
-        demoted: &HashSet<LayerId>,
-        retry: bool,
+        Reclaimable {
+            unused: dead,
+            demoted,
+            retry,
+            lapsing,
+        }: &Reclaimable,
     ) -> DepartedLayers {
-        self.reclaim_due = retry;
+        self.reclaim_due = *retry;
+        self.lapsing.clone_from(lapsing);
         let mut identifiers = Vec::new();
         if dead.is_empty() && demoted.is_empty() {
             return DepartedLayers {

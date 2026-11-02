@@ -376,7 +376,7 @@ pub use index_cache::{GraphStats, SpecSiteRecord};
 pub(crate) use index_store::PrimRevision;
 pub(crate) use instancing::is_prototype_namespace;
 pub use layer_graph::StackIdentity;
-pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, Reclaim, Reclaimable, SublayerDemand};
+pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, Reclaim, SublayerDemand};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub(crate) use load_rules::RuleVictims;

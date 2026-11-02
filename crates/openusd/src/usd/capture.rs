@@ -226,25 +226,29 @@ impl UndoStage {
     /// the revert ends there.
     fn revert(&self, transactions: Vec<Transaction>) -> Result<(), (StageAuthoringError, Vec<Transaction>)> {
         let journal = self.capture.log();
-        // Ends the revert even if a replay panics (a user sink could panic
-        // mid-commit), so a panic can never leave capture suspended.
-        let _reverting = Reverting::begin(journal, transactions);
-        loop {
-            let next = journal.borrow_mut().reverting.last_mut().and_then(Vec::pop);
-            let Some(transaction) = next else {
-                return Ok(());
-            };
-            // A single-mapping replay is atomic, so a failure applied nothing.
-            if let Err(error) = self.replay(&transaction) {
-                let mut journal = journal.borrow_mut();
-                let rest = journal
-                    .reverting
-                    .last_mut()
-                    .expect("a revert holds its list until it ends");
-                rest.push(transaction);
-                return Err((error, mem::take(rest)));
+        // A layer the replays leave unused departs after the last of them:
+        // departing mid-revert would drop the rest of the step.
+        self.capture.holding_reclaims(|| {
+            // Ends the revert even if a replay panics (a user sink could panic
+            // mid-commit), so a panic can never leave capture suspended.
+            let _reverting = Reverting::begin(journal, transactions);
+            loop {
+                let next = journal.borrow_mut().reverting.last_mut().and_then(Vec::pop);
+                let Some(transaction) = next else {
+                    return Ok(());
+                };
+                // A single-mapping replay is atomic, so a failure applied nothing.
+                if let Err(error) = self.replay(&transaction) {
+                    let mut journal = journal.borrow_mut();
+                    let rest = journal
+                        .reverting
+                        .last_mut()
+                        .expect("a revert holds its list until it ends");
+                    rest.push(transaction);
+                    return Err((error, mem::take(rest)));
+                }
             }
-        }
+        })
     }
 
     /// Replay `transaction`'s per-layer inverse edits as one atomic

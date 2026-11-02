@@ -840,11 +840,6 @@ impl ClipCache {
     /// to `clips` every layer one reads as a clip or manifest, by the id
     /// `graph` holds it under. A set on a prim no cached index holds keeps
     /// nothing: the prim resolves its sets afresh when it next composes.
-    ///
-    /// TODO: a released clip layer leaves the graph at the next reclaim, and
-    /// reclaims run at load-rules changes and mutes, so a session that steps
-    /// an expression variable through many values holds one clip layer per
-    /// value visited until then. Reclaiming at every edit boundary ends it.
     pub(crate) fn mark_live_layers(
         &self,
         graph: &LayerGraph,
