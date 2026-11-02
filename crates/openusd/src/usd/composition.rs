@@ -257,6 +257,27 @@ impl Poisoned {
     }
 }
 
+/// The reclamation skipped away from a boundary
+/// ([`StageComposition::at_boundary`]): inside a delivery, made when the
+/// drain it runs in ends, or while the store was held or the composition
+/// borrowed, made at the next call that drains.
+#[derive(Debug, Clone, Copy, Default)]
+struct Deferred {
+    /// A stack sweep.
+    stacks: bool,
+    /// A [`pcp::Reclaim::Unused`] reclaim.
+    unused: bool,
+    /// A [`pcp::Reclaim::Muted`] reclaim.
+    muted: bool,
+}
+
+impl Deferred {
+    /// Whether anything was skipped.
+    fn any(self) -> bool {
+        self.stacks || self.unused || self.muted
+    }
+}
+
 /// The stage's composed state: the loaded layers, the indices composed from
 /// them, and the edits recorded but not yet composed.
 ///
@@ -304,6 +325,9 @@ pub(super) struct StageComposition {
     /// carries ([`discover`](Self::discover)): the next drain's snapshot
     /// reports it with its own findings.
     discovered: RefCell<ResyncPaths>,
+    /// The stack sweeps and layer reclaims skipped away from a boundary
+    /// ([`at_boundary`](Self::at_boundary)).
+    deferred: Cell<Deferred>,
     /// What a panic interrupted, when one left the composition half-built:
     /// it cannot be finished, so the stage composes nothing more.
     poisoned: Cell<Option<Poisoned>>,
@@ -341,6 +365,7 @@ impl StageComposition {
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
             discovered: RefCell::default(),
+            deferred: Cell::default(),
             poisoned: Cell::new(None),
             snapshots: Cell::new(0),
             suspended: Cell::new(false),
@@ -622,9 +647,13 @@ impl StageComposition {
             self.pending.take();
             self.outbox.take();
             self.discovered.take();
+            self.deferred.take();
             return;
         }
         if self.pending_is_empty() && self.outbox.borrow().is_empty() {
+            // Reclamation a panic kept a delivery's drain from finishing
+            // finishes at the next call.
+            self.reclaim_deferred(hooks);
             return;
         }
         // A layer freed while the drain or a delivery runs drops at the end,
@@ -643,6 +672,46 @@ impl StageComposition {
                 break;
             }
         }
+        // The outermost drain ends at a boundary: the layers a mutation
+        // inside its delivery left go now.
+        self.reclaim_deferred(hooks);
+    }
+
+    /// Makes the reclamation skipped away from a boundary, unless a drain
+    /// this call runs inside, from a layer load, is part-way through. Each
+    /// reclaim checks the rest of the boundary itself.
+    fn reclaim_deferred(&self, hooks: &dyn CompositionHooks) {
+        let deferred = self.deferred.get();
+        if self.reconciling.get() || !deferred.any() {
+            return;
+        }
+        self.reclaim_stale_stacks();
+        if deferred.unused {
+            self.reclaim_unused_layers(hooks, pcp::Reclaim::Unused);
+        }
+        if deferred.muted {
+            self.reclaim_unused_layers(hooks, pcp::Reclaim::Muted);
+        }
+    }
+
+    /// Whether layers may be reclaimed now: stacks may be swept
+    /// ([`sweepable`](Self::sweepable)), and no delivery runs, whose
+    /// observers and sinks would hear a layer depart ahead of the notices
+    /// queued before it.
+    fn at_boundary(&self) -> bool {
+        !self.delivering.get() && self.sweepable()
+    }
+
+    /// Whether stacks may be swept now: no layer load is part-way through,
+    /// nothing borrows the composition or holds the layers' store, and the
+    /// stage is not poisoned. A drain sweeps between its phases, so one
+    /// running is left to its caller to rule out.
+    fn sweepable(&self) -> bool {
+        !self.loading.get()
+            && !self.layers.is_borrowed()
+            && !self.cache.is_borrowed()
+            && self.poisoned.get().is_none()
+            && self.store.ensure_writable().is_ok()
     }
 
     /// The reconciling half of [`process_pending`](Self::process_pending):
@@ -766,12 +835,11 @@ impl StageComposition {
                     };
                     let requeued = self.layers.borrow().requeue_failed_sublayers();
                     self.resolve_sublayer_demands(requeued, hooks, into);
-                    // A failed load the retry opens settles the prims it dropped,
-                    // and the stacks they released are swept.
-                    if settles {
-                        self.settle_work(Settled::Taken, hooks, into);
-                        self.reclaim_stale_stacks();
-                    }
+                    // A failed load the retry opens settles the prims it
+                    // dropped, and the stacks they released are swept: only
+                    // a drain the caller starts retries.
+                    self.settle_work(Settled::Taken, hooks, into);
+                    self.reclaim_stale_stacks();
                     self.report(StageNotice::LoadsRetried, again, hooks);
                 }
             }
@@ -1105,13 +1173,23 @@ impl StageComposition {
     /// mints and interner value churn).
     ///
     /// Called only at edit seams — the end of a pending-edit drain, a mute, a
-    /// deliberate load-rules mutation — never inside the load path: an edit
+    /// deliberate load-rules mutation — never inside the load path, and runs
+    /// only when [sweepable](Self::sweepable), leaving the sweep to the next
+    /// call otherwise. An edit
     /// strands an instance by re-keying its source or by dropping its last
     /// owning index, while [`load_demanded`](Self::load_demanded) and
     /// [`resolve_authoring_stack`](Self::resolve_authoring_stack) hold
     /// freshly resolved handles that no cached index references yet, which a
     /// sweep there would reclaim out from under them.
     fn reclaim_stale_stacks(&self) {
+        let skipped = !self.sweepable();
+        self.deferred.set(Deferred {
+            stacks: skipped,
+            ..self.deferred.get()
+        });
+        if skipped {
+            return;
+        }
         self.update_pair(|graph, cache| {
             if !cache.ownership_lost() && !graph.sweep_ripe() {
                 return;
@@ -1121,6 +1199,13 @@ impl StageComposition {
             cache.mark_live_stacks(&mut marks);
             graph.sweep_stacks(marks);
         });
+    }
+
+    /// Ends a mutation of the stage's composition: sweeps the stacks it
+    /// stranded, then reclaims the layers `reclaim` names.
+    fn reclaim(&self, hooks: &dyn CompositionHooks, reclaim: pcp::Reclaim) {
+        self.reclaim_stale_stacks();
+        self.reclaim_unused_layers(hooks, reclaim);
     }
 
     /// Drops the layers no live layer stack uses and nothing else keeps
@@ -1140,11 +1225,23 @@ impl StageComposition {
     /// edit dropped and settlement has not decided (its settling failed, or a
     /// store a read or an edit held stopped it) keeps the stacks it used, and
     /// with them their layers.
+    ///
+    /// Away from a [boundary](Self::at_boundary) the reclaim waits for the
+    /// end of the next drain that reaches one.
     fn reclaim_unused_layers(&self, hooks: &dyn CompositionHooks, reclaim: pcp::Reclaim) {
+        // Away from a boundary the stack sweep that makes a layer unused was
+        // skipped too, so the reclaim waits whether or not one is due yet.
+        let mut deferred = self.deferred.get();
+        let skipped = !self.at_boundary();
+        match reclaim {
+            pcp::Reclaim::Unused => deferred.unused = skipped,
+            pcp::Reclaim::Muted => deferred.muted = skipped,
+        }
+        self.deferred.set(deferred);
         // A layer leaves only once its last stack has. One a pin kept (a save
-        // not yet made, an edit target), or one the registry's read or edit
-        // held from a reclaim, leaves at the next load-rules change after.
-        if !self.layers.borrow().reclaim_due(reclaim) || self.store.ensure_writable().is_err() {
+        // not yet made, an edit target) leaves at the next load-rules change
+        // after.
+        if skipped || !self.layers.borrow().reclaim_due(reclaim) {
             return;
         }
         // TODO(perf): every reclaim walks every stack's members and every
@@ -1839,8 +1936,7 @@ impl StageComposition {
         // discards variable deltas, so the sweep is what reclaims it. Discarding
         // them costs no notice; `LayerGraph::recompose_for_mute` carries the
         // argument.
-        self.reclaim_stale_stacks();
-        self.reclaim_unused_layers(hooks, pcp::Reclaim::Muted);
+        self.reclaim(hooks, pcp::Reclaim::Muted);
         Some((changed, found))
     }
 
@@ -2042,8 +2138,7 @@ impl StageComposition {
         self.guarded(Poisoned::Compose, || {
             self.settle_work(Settled::Required, hooks, &mut found);
         });
-        self.reclaim_stale_stacks();
-        self.reclaim_unused_layers(hooks, pcp::Reclaim::Unused);
+        self.reclaim(hooks, pcp::Reclaim::Unused);
         if !hooks.delivers() {
             return ResyncPaths::default();
         }

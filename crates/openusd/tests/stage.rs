@@ -823,6 +823,48 @@ fn broken_target_silent() -> Result<()> {
     Ok(())
 }
 
+/// A referenced stack's sublayer diagnostic survives a resync of the prim
+/// that uses the stack, and goes once nothing uses it.
+#[test]
+fn stack_diagnostic_lifetime() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (\n    references = @ref.usda@</R>\n) {}\n",
+    )?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\ndef \"R\" {}\n",
+    )?;
+    fs::write(dir.path().join("other.usda"), "#usda 1.0\ndef \"O\" {}\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    let prim = stage.prim("/P")?;
+    assert!(prim.is_valid()?);
+    assert_eq!(unresolved_sublayer_count(&stage, "missing.usda"), 1);
+
+    let other = sdf::Reference {
+        asset_path: "other.usda".into(),
+        prim_path: sdf::Path::new("/O")?,
+        ..Default::default()
+    };
+    prim.references().add(other.clone())?;
+    assert!(stage.prim("/P")?.is_valid()?);
+    assert_eq!(
+        unresolved_sublayer_count(&stage, "missing.usda"),
+        1,
+        "the stack survives the resync"
+    );
+
+    stage.prim("/P")?.references().set([other])?;
+    assert!(stage.prim("/P")?.is_valid()?);
+    assert_eq!(
+        unresolved_sublayer_count(&stage, "missing.usda"),
+        0,
+        "nothing uses the stack"
+    );
+    Ok(())
+}
+
 /// A cold direct query into a descendant of an instanceable reference (no prior
 /// traversal) composes through the prototype, not an empty namespace: the
 /// instance-proxy redirect is not memoized while the reference layer is still

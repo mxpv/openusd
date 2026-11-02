@@ -2863,7 +2863,8 @@ impl Stage {
     /// A layer a value clip reads stays for the clip alone, composing nothing.
     /// A sublayer muted at open ([`StageBuilder::mute`]) is not read.
     /// [`unmute_layer`](Self::unmute_layer) reads a freed layer from its file
-    /// again.
+    /// again. Called from a [`StageSink`], the layers leave once the delivery
+    /// that called it is over.
     ///
     /// The layer need not be loaded: muting an identifier the stage does not
     /// (yet) contain records it and takes effect if such a layer is later
@@ -2954,7 +2955,9 @@ impl Stage {
     /// weakly; so does a layer with no file to read it from again, and a layer
     /// a value clip reads stays for the clip alone, composing nothing. Loading
     /// the payload again reads a freed layer from its file. A
-    /// [`sdf::LayerSink`] does not hold its layer, and goes with it.
+    /// [`sdf::LayerSink`] does not hold its layer, and goes with it. Called
+    /// from a [`StageSink`], the layers leave once the delivery that called
+    /// it is over.
     pub fn unload(&self, path: impl sdf::IntoPath) -> Result<(), sdf::PathParseError> {
         self.unload_path(&sdf::try_into_path(path)?);
         Ok(())
@@ -6921,6 +6924,68 @@ def \"Sub\" {}
         assert!(registry.find(&payload)?.is_none(), "and the registry");
         stage.load("/P", LoadPolicy::WithDescendants)?;
         assert!(stage.prim("/P/C")?.is_valid()?, "loading it again reads it again");
+        Ok(())
+    }
+
+    /// A sink that unloads a payload from its callback keeps the payload's
+    /// layer through the delivery: the layer leaves once the drain the
+    /// delivery runs in ends, before the edit that started it returns.
+    #[test]
+    fn sink_unload_frees_later() -> Result<()> {
+        struct Unloader {
+            during: Rc<Cell<Option<usize>>>,
+        }
+        impl StageSink for Unloader {
+            fn after_commit(&self, stage: &Stage, _: &usd::CommittedChange<'_>) {
+                if self.during.get().is_none() {
+                    stage.unload("/P").expect("the unload succeeds");
+                    self.during.set(Some(stage.layer_count()));
+                }
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let (root, payload) = payload_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder().registry(registry.clone()).open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        assert_eq!(stage.layer_count(), 2);
+        let during = Rc::new(Cell::new(None));
+        stage.add_sink(Unloader {
+            during: Rc::clone(&during),
+        });
+
+        stage.define_prim("/T")?;
+        assert_eq!(during.get(), Some(2), "the layer stays through the delivery");
+        assert_eq!(stage.layer_count(), 1, "and leaves when the drain ends");
+        assert!(registry.find(&payload)?.is_none());
+        Ok(())
+    }
+
+    /// A sink panic that ends the delivery before its drain's end leaves the
+    /// reclaim an unload in a sink deferred for the next call into the stage.
+    #[test]
+    fn deferred_reclaim_survives_panic() -> Result<()> {
+        struct Unloader;
+        impl StageSink for Unloader {
+            fn after_commit(&self, stage: &Stage, _: &usd::CommittedChange<'_>) {
+                stage.unload("/P").expect("the unload succeeds");
+            }
+            fn load_rules_changed(&self, _: &Stage, _: usd::Resynced<'_>) {
+                panic!("the sink fails");
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let (root, payload) = payload_fixture(dir.path())?;
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder().registry(registry.clone()).open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        stage.add_sink(Unloader);
+
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| stage.define_prim("/T")));
+        assert!(unwound.is_err());
+        assert!(stage.prim("/T")?.is_valid()?);
+        assert_eq!(stage.layer_count(), 1, "the next call frees the layer");
+        assert!(registry.find(&payload)?.is_none());
         Ok(())
     }
 
