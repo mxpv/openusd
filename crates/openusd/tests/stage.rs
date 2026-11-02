@@ -31,6 +31,7 @@ struct RecordingSink {
     edit_target: Option<Box<dyn Fn(&Stage)>>,
     muting: Option<Box<dyn Fn(&Stage, &str, bool, Resynced<'_>)>>,
     load_rules: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
+    recomposed: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
 }
 
 impl StageSink for RecordingSink {
@@ -51,6 +52,11 @@ impl StageSink for RecordingSink {
     }
     fn load_rules_changed(&self, stage: &Stage, resynced: Resynced<'_>) {
         if let Some(f) = &self.load_rules {
+            f(stage, resynced);
+        }
+    }
+    fn recomposed(&self, stage: &Stage, resynced: Resynced<'_>) {
+        if let Some(f) = &self.recomposed {
             f(stage, resynced);
         }
     }
@@ -708,6 +714,112 @@ fn failed_load_retried_after_edit() -> Result<()> {
         Some(vt::Value::Double(7.0)),
         "the repaired reference composes once the failure is cleared"
     );
+    Ok(())
+}
+
+/// What the stage's sinks heard, in order: each transaction's resyncs as
+/// `("commit", paths)` and each recomposed notice's subtrees as
+/// `("recomposed", paths)`.
+type Heard = Rc<RefCell<Vec<(&'static str, Vec<sdf::Path>)>>>;
+
+/// Opens `root.usda` in `dir`, whose `/P` references each of the unreadable
+/// `targets` and whose `/O` holds the attribute `x`, composes `/P` so the
+/// failures are recorded, and installs a sink recording what it hears.
+fn open_broken_targets(dir: &FsPath, targets: &[&str]) -> Result<(Stage, Heard)> {
+    let references: Vec<String> = targets.iter().map(|target| format!("@{target}@")).collect();
+    fs::write(
+        dir.join("root.usda"),
+        format!(
+            "#usda 1.0\ndef \"P\" (\n    references = [{}]\n) {{}}\ndef \"O\" {{\n    double x = 1\n}}\n",
+            references.join(", ")
+        ),
+    )?;
+    for target in targets {
+        fs::write(dir.join(target), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    }
+    let stage = Stage::open(dir.join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()?);
+    let heard: Heard = Rc::new(RefCell::new(Vec::new()));
+    let (commits, recomposed) = (Rc::clone(&heard), Rc::clone(&heard));
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_, change| {
+            commits.borrow_mut().push(("commit", change.resynced.to_vec()));
+        })),
+        recomposed: Some(Box::new(move |_, resynced| {
+            recomposed.borrow_mut().push(("recomposed", resynced.subtrees.to_vec()));
+        })),
+        ..Default::default()
+    });
+    Ok((stage, heard))
+}
+
+/// Repairs `target` in `dir` to supply the child `name`.
+fn repair(dir: &FsPath, target: &str, name: &str) -> Result<()> {
+    fs::write(
+        dir.join(target),
+        format!("#usda 1.0\n(\n    defaultPrim = \"T\"\n)\ndef \"T\" {{\n    def \"{name}\" {{}}\n}}\n"),
+    )?;
+    Ok(())
+}
+
+/// An unrelated edit that retries a failed load reports the prim the
+/// repaired target recomposes, after the edit's own notice.
+#[test]
+fn repaired_target_reported() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
+    repair(dir.path(), "target.usda", "Child")?;
+
+    stage.define_prim("/Trigger")?;
+    assert_eq!(
+        *heard.borrow(),
+        [("commit", paths(&["/Trigger"])), ("recomposed", paths(&["/P"]))]
+    );
+    assert!(stage.prim("/P/Child")?.is_valid()?);
+    Ok(())
+}
+
+/// A value edit, which drops no index of its own, reports a repair too.
+#[test]
+fn repair_after_value_edit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
+    repair(dir.path(), "target.usda", "Child")?;
+
+    stage.attribute("/O.x")?.set(2.0)?;
+    assert_eq!(
+        *heard.borrow(),
+        [("commit", Vec::new()), ("recomposed", paths(&["/P"]))]
+    );
+    Ok(())
+}
+
+/// Repairing one of two failed targets reports the prim, which recomposes
+/// with the repaired one while the other still fails.
+#[test]
+fn partial_repair_reported() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (stage, heard) = open_broken_targets(dir.path(), &["a.usda", "b.usda"])?;
+    repair(dir.path(), "a.usda", "Child")?;
+
+    stage.define_prim("/Trigger")?;
+    assert_eq!(
+        *heard.borrow(),
+        [("commit", paths(&["/Trigger"])), ("recomposed", paths(&["/P"]))]
+    );
+    assert!(stage.prim("/P/Child")?.is_valid()?);
+    Ok(())
+}
+
+/// A retry whose target still fails reports nothing for it: the prim
+/// composes as it did.
+#[test]
+fn broken_target_silent() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
+
+    stage.define_prim("/Trigger")?;
+    assert_eq!(*heard.borrow(), [("commit", paths(&["/Trigger"]))]);
     Ok(())
 }
 

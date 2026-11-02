@@ -141,11 +141,13 @@ pub trait StageSink {
     /// Observe what composition found that no other notice carries: as
     /// subtrees, the prims dropped by the layer loads a read, an authoring
     /// call or a drain's settling ran (a joined layer that relocates, a
-    /// failed load recorded); as prims, the anchors whose value clips now
-    /// read a layer they found missing before. A drain of edits to the
-    /// stage's layers reports what its snapshot found, with what was found
-    /// outside a drain since the last one, after the snapshot's transaction
-    /// notices: a read delivers nothing. Never empty.
+    /// failed load recorded), and the prims an edit's retry of the failed
+    /// loads recomposed otherwise (a repaired reference); as prims, the
+    /// anchors whose value clips now read a layer they found missing before.
+    /// A drain of edits to the stage's layers reports what its snapshot
+    /// found, with what was found outside a drain since the last one, after
+    /// the snapshot's transaction notices and less what those resynced: a
+    /// read delivers nothing. Never empty.
     fn recomposed(&self, stage: &Stage, resynced: Resynced<'_>) {
         let _ = (stage, resynced);
     }
@@ -225,6 +227,9 @@ pub struct CommittedChange<'a> {
     /// *property* path is one whose spec appeared or vanished: the owning prim
     /// composes exactly as it did, but the property itself is a different object
     /// than it was, so a handle to it must be re-resolved rather than re-read.
+    /// The prims the transaction's own layer loads dropped are here too;
+    /// what settling the drain's work finds reaches
+    /// [`StageSink::recomposed`].
     ///
     /// Minimal in ancestors: an entry stands for its whole subtree, so a
     /// resynced `/foo` appears without `/foo/bar`. A
@@ -458,6 +463,14 @@ impl ResyncPaths {
         self.prims.sort();
         self.prims.dedup();
         self.prims.retain(|prim| !is_covered(&self.subtrees, prim));
+    }
+
+    /// Drops every path `covering`'s subtrees reach, which a notice already
+    /// reported.
+    pub(super) fn uncover(&mut self, covering: &[sdf::Path]) {
+        // TODO(perf): a sorted `covering` could be searched by prefix.
+        self.subtrees.retain(|path| !is_covered(covering, path));
+        self.prims.retain(|path| !is_covered(covering, path));
     }
 
     /// Borrows the paths for a sink.
@@ -732,6 +745,12 @@ impl Payload {
         self.changed_info_only.dedup();
     }
 
+    /// The subtrees the finished payload resyncs in composed stage
+    /// namespace, each standing for everything beneath it.
+    pub(super) fn covering(&self) -> &[sdf::Path] {
+        &self.stage.subtree
+    }
+
     /// Borrow this payload as a [`CommittedChange`] for the `after_commit` call.
     pub(super) fn committed_change<'a>(
         &'a self,
@@ -909,6 +928,18 @@ mod tests {
         );
         assert_eq!(payload.stage.resynced, paths(&["/A/B"]));
         assert_eq!(payload.authored.resynced, paths(&["/S{v=x}T"]));
+    }
+
+    /// What a notice's subtrees reach leaves both sets; a sibling stays.
+    #[test]
+    fn uncover_drops_reached() {
+        let mut found = ResyncPaths {
+            subtrees: paths(&["/A/B", "/C"]),
+            prims: paths(&["/A", "/A/D", "/E"]),
+        };
+        found.uncover(&paths(&["/A"]));
+        assert_eq!(found.subtrees, paths(&["/C"]));
+        assert_eq!(found.prims, paths(&["/E"]));
     }
 
     /// A direct edit to a non-local layer reports two namespaces at once, so an

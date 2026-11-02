@@ -85,6 +85,12 @@ pub(super) struct Unsettled {
     /// The last attempt to settle the prim, when it failed: the error's
     /// text and the round it failed in.
     failure: Option<(String, u64)>,
+    /// Whether the drop reached no notice
+    /// ([`unreport`](IndexStore::unreport)).
+    unreported: bool,
+    /// The failed layers the dropped index recorded
+    /// ([`failed_layers`](IndexStore::failed_layers)).
+    failed: Box<[CompositionDiagnostic]>,
 }
 
 /// Validity token for a cached answer about one composed prim.
@@ -392,7 +398,7 @@ impl IndexStore {
         let mut victims = Vec::new();
         for path in paths {
             if let Some(entry) = self.entries.remove(path) {
-                self.evict(path, &entry.index);
+                self.evict(path, &entry);
                 victims.push(path.clone());
             }
         }
@@ -415,21 +421,27 @@ impl IndexStore {
                 "remove_subtrees called with empty prefix — use Path::abs_root() to drop everything",
             );
             for (victim, entry) in self.entries.remove_subtree(prefix) {
-                self.evict(&victim, &entry.index);
+                self.evict(&victim, &entry);
                 victims.push(victim);
             }
         }
         self.deps.remove_all(&victims);
     }
 
-    /// Records `path`'s dropped `index` in the work set with the stacks it
-    /// owned, which stay counted as owned. A path is never both cached and in
+    /// Records `path`'s dropped `entry` in the work set with the stacks its
+    /// index owned, which stay counted as owned, and the failed layers it
+    /// recorded. A path is never both cached and in
     /// the work set: an insert settles it, and
     /// [`transfer_work`](Self::transfer_work) places no copy on a cached
     /// path, so dropping it again finds no entry for it there.
-    fn evict(&mut self, path: &Path, index: &PrimIndex) {
-        let stacks: Box<[LayerStackId]> = owned_stacks(index).into_iter().collect();
-        let held = self.evicted.insert(path.clone(), Unsettled { stacks, failure: None });
+    fn evict(&mut self, path: &Path, entry: &PrimEntry) {
+        let unsettled = Unsettled {
+            stacks: owned_stacks(&entry.index).into_iter().collect(),
+            failure: None,
+            unreported: false,
+            failed: failed_layers(entry).cloned().collect(),
+        };
+        let held = self.evicted.insert(path.clone(), unsettled);
         debug_assert!(held.is_none(), "a path in the work set was dropped again");
         self.evictions += 1;
     }
@@ -464,23 +476,26 @@ impl IndexStore {
     }
 
     /// The paths whose entry recorded a [`MalformedLayer`](CompositionDiagnostic::MalformedLayer)
-    /// build error — an arc to an unreadable target that may now be readable, so
+    /// or [`UnresolvedLayer`](CompositionDiagnostic::UnresolvedLayer) build
+    /// error — an arc to an unreadable target that may now be readable, so
     /// the index should be dropped and re-demanded. Such an index carries no
     /// dependency on the failed target, so an ordinary layer-stack invalidation
     /// misses it.
     pub(super) fn paths_with_failed_layer(&self) -> Vec<Path> {
-        self.entries
+        let failed = self
+            .entries
             .iter()
-            .filter(|(_, entry)| {
-                entry.errors.iter().any(|e| {
-                    matches!(
-                        e,
-                        CompositionDiagnostic::MalformedLayer { .. } | CompositionDiagnostic::UnresolvedLayer { .. }
-                    )
-                })
-            })
-            .map(|(path, _)| path.clone())
-            .collect()
+            .filter(|(_, entry)| failed_layers(entry).next().is_some());
+        failed.map(|(path, _)| path.clone()).collect()
+    }
+
+    /// The failed layers the entry at `path` recorded, as
+    /// [`paths_with_failed_layer`](Self::paths_with_failed_layer) finds them;
+    /// none when nothing is cached there.
+    pub(super) fn failed_layers(&self, path: &Path) -> Box<[CompositionDiagnostic]> {
+        self.entries
+            .get(path)
+            .map_or_else(Box::default, |entry| failed_layers(entry).cloned().collect())
     }
 
     /// Spec-tier refresh (C++ `Pcp_RescanForSpecs`): for every cached index that
@@ -770,6 +785,24 @@ impl IndexStore {
         self.evicted.contains_key(path)
     }
 
+    /// The failed layers the work set's entry at `path` recorded when it
+    /// was dropped with no notice naming it; `None` for any other entry, or
+    /// when the work set does not hold `path`.
+    pub(super) fn unreported(&self, path: &Path) -> Option<Box<[CompositionDiagnostic]>> {
+        let unsettled = self.evicted.get(path).filter(|unsettled| unsettled.unreported)?;
+        Some(unsettled.failed.clone())
+    }
+
+    /// Marks the work-set entries at `paths` as dropped with no notice
+    /// naming them.
+    pub(super) fn unreport(&mut self, paths: &[Path]) {
+        for path in paths {
+            if let Some(unsettled) = self.evicted.get_mut(path) {
+                unsettled.unreported = true;
+            }
+        }
+    }
+
     /// Records that settling `path` failed with `reason` in the current
     /// round. The prim keeps its stacks; one failure is kept per prim, the
     /// last.
@@ -836,8 +869,9 @@ impl IndexStore {
     /// Moves `root`'s work subtree under each of `targets`, re-rooted, each
     /// copy owning its stacks and carrying its failure; with no target, the
     /// work leaves the work set. A copy landing on a path the work set holds
-    /// already merges into that entry, which owns each stack once; one
-    /// landing on a cached prim is dropped, since that prim composed already.
+    /// already merges into that entry, which owns each stack once and is
+    /// unreported only when both were; one landing on a cached prim is
+    /// dropped, since that prim composed already.
     /// Returns the paths the work left, under `root`.
     pub(super) fn transfer_work(&mut self, root: &Path, targets: &[Path]) -> Vec<Path> {
         let taken = self.evicted.remove_subtree(root);
@@ -862,10 +896,15 @@ impl IndexStore {
                     if held.failure.is_none() {
                         held.failure.clone_from(&unsettled.failure);
                     }
+                    held.unreported &= unsettled.unreported;
                 } else {
-                    let stacks = added.into_boxed_slice();
-                    let failure = unsettled.failure.clone();
-                    self.evicted.insert(path, Unsettled { stacks, failure });
+                    let copy = Unsettled {
+                        stacks: added.into_boxed_slice(),
+                        failure: unsettled.failure.clone(),
+                        unreported: unsettled.unreported,
+                        failed: unsettled.failed.clone(),
+                    };
+                    self.evicted.insert(path, copy);
                 }
             }
         }
@@ -904,6 +943,17 @@ fn dedup_owned(mut paths: Vec<Path>) -> Vec<Path> {
     let mut seen = sdf::PathSet::default();
     paths.retain(|p| seen.insert(p.clone()));
     paths
+}
+
+/// The build errors `entry` recorded that name an unreadable or unresolved
+/// layer: arcs to targets that may load now.
+fn failed_layers(entry: &PrimEntry) -> impl Iterator<Item = &CompositionDiagnostic> {
+    entry.errors.iter().filter(|error| {
+        matches!(
+            error,
+            CompositionDiagnostic::MalformedLayer { .. } | CompositionDiagnostic::UnresolvedLayer { .. }
+        )
+    })
 }
 
 #[cfg(test)]

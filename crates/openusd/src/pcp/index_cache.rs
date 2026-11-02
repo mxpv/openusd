@@ -2262,6 +2262,12 @@ impl IndexCache {
         failed
     }
 
+    /// Marks the work-set prims at `paths` as dropped with no notice naming
+    /// them: [`settle_pass`](Self::settle_pass) returns each it settles.
+    pub(crate) fn unreport(&mut self, paths: &[Path]) {
+        self.store.unreport(paths);
+    }
+
     /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) for one change round's
     /// inert spec adds and removes, each a `(layer, path)` site. The store
     /// refreshes every affected index's `has_specs` flags in place per site,
@@ -3959,7 +3965,12 @@ impl IndexCache {
     /// again in it. A busy store stops the pass, every prim it had not
     /// reached kept. A prim that leaves the work set forgets its clip sets,
     /// which resolve afresh when it next composes.
-    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
+    ///
+    /// Each prim it settles whose drop no notice named
+    /// ([`unreport`](Self::unreport)) joins `recovered` when it retired, or
+    /// when its rebuilt index records other failed layers than the dropped
+    /// one did ([`drop_load_failed_indices`](Self::drop_load_failed_indices)).
+    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>, recovered: &mut Vec<Path>) -> Result<(), QueryError> {
         self.transfer_prototypes(graph)?;
         // TODO(rayon): siblings settle independently once their parent has,
         // so each level of the work set could be decided in parallel.
@@ -3968,6 +3979,7 @@ impl IndexCache {
             if !self.store.is_unsettled(&path) {
                 continue;
             }
+            let unreported = self.store.unreported(&path);
             match self.settle_prim(graph, &path) {
                 // A prim served from elsewhere (an instance proxy reads its
                 // prototype's index) settles here, its build not at its path.
@@ -3975,10 +3987,16 @@ impl IndexCache {
                     if self.store.settle(&path) {
                         self.clip_cache.forget_prim(&path);
                     }
+                    if unreported.is_some_and(|failed| failed != self.store.failed_layers(&path)) {
+                        recovered.push(path);
+                    }
                 }
                 Ok(Settlement::Excluded | Settlement::Absent) => {
                     for anchor in self.store.retire(&path) {
                         self.clip_cache.forget_prim(&anchor);
+                    }
+                    if unreported.is_some() {
+                        recovered.push(path);
                     }
                 }
                 Ok(Settlement::Pending) => {}
@@ -8372,7 +8390,7 @@ def "B" (
         compose(&graph, &mut cache, &["/Ref", "/Ref/Inner"])?;
         edit_field(&mut graph, &mut cache, "/Ref", FieldKey::References)?;
         assert_eq!(evicted(&cache), ["/Ref", "/Ref/Inner"]);
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert!(evicted(&cache).is_empty());
         assert!(cache.is_indexed(&sdf::path("/Ref")?) && cache.is_indexed(&sdf::path("/Ref/Inner")?));
         Ok(())
@@ -8390,7 +8408,7 @@ def "B" (
             Ok(())
         })?;
         assert_eq!(evicted(&cache), ["/P", "/P/C"]);
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert!(evicted(&cache).is_empty());
         assert!(cache.is_indexed(&sdf::path("/P")?), "the inactive prim is rebuilt");
         assert!(
@@ -8411,7 +8429,7 @@ def "B" (
             Ok(())
         })?;
         assert!(evicted(&cache).contains(&"/P/C".to_owned()));
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert!(evicted(&cache).is_empty());
         assert!(!cache.is_indexed(&sdf::path("/P/C")?));
         Ok(())
@@ -8446,15 +8464,15 @@ def "B" (
         compose(&graph, &mut cache, &["/P", "/P/C"])?;
         // `/P/C`'s population reads `/P`'s `active`, which no longer decodes.
         set_active(&mut graph, &mut cache, "/P", Value::String("yes".to_owned()))?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert_eq!(evicted(&cache), ["/P/C"]);
         assert_eq!(settlement_failures(&cache), ["/P/C"]);
 
         set_active(&mut graph, &mut cache, "/P", Value::Bool(true))?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert_eq!(evicted(&cache), ["/P/C"], "not tried again in the round it failed in");
         cache.begin_round();
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert!(evicted(&cache).is_empty());
         assert!(settlement_failures(&cache).is_empty());
         Ok(())
@@ -8502,7 +8520,7 @@ def "G"
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
 
         set_active(&mut graph, &mut cache, "/G", Value::String("yes".to_owned()))?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         let part = root.append_path("Part")?.to_string();
         assert!(
             settlement_failures(&cache).contains(&part),
@@ -8511,13 +8529,13 @@ def "G"
         );
 
         set_active(&mut graph, &mut cache, "/G", Value::Bool(true))?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert!(
             evicted(&cache).contains(&part),
             "not tried again in the round it failed in"
         );
         cache.begin_round();
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/G/A")?)?
             .expect("an instance");
@@ -8578,7 +8596,7 @@ def "B" (
         let (graph, mut cache) = in_memory_stack(INSTANCED);
         shared_part(&graph, &mut cache)?;
         cache.invalidate_prototypes(&[sdf::path("/A")?]);
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
             .expect("an instance");
@@ -8604,7 +8622,7 @@ def "B" (
             e.remove_spec(&sdf::path("/A")?)?;
             Ok(())
         })?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
             .expect("an instance");
@@ -8631,7 +8649,7 @@ def "B" (
             );
             Ok(())
         })?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         let a = cache
             .prototype_of(&graph.read_view(), &sdf::path("/A")?)?
             .expect("an instance");
@@ -8656,7 +8674,7 @@ def "B" (
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
 
         set_active(&mut graph, &mut cache, "/G", Value::Bool(false))?;
-        cache.settle_pass(&graph.read_view())?;
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
         assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
         assert!(!cache.is_indexed(&sdf::path("/G/A")?), "the instance is not composed");
         Ok(())
@@ -8713,7 +8731,7 @@ def "B" (
 
         let retired = cache.invalidate_prototypes(&[sdf::path("/A")?]);
         assert_eq!(retired, [outer.clone(), inner.clone()], "the cascade retires both");
-        cache.settle_pass(&view)?;
+        cache.settle_pass(&view, &mut Vec::new())?;
 
         let outer = cache.prototype_of(&view, &sdf::path("/A")?)?.expect("an instance");
         let inner = cache
