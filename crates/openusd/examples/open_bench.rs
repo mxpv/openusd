@@ -79,7 +79,7 @@ use std::time::Instant;
 use std::{env, fs};
 
 use openusd::usd::{EditTarget, InitialLoadSet, LoadPolicy, PrimPredicate, Stage, TimeCode};
-use openusd::{Error, Result, ar, sdf, usdz, vt};
+use openusd::{Error, Result, ar, pcp, sdf, usdz, vt};
 
 fn main() -> Result<()> {
     let Some(args) = Args::parse() else {
@@ -113,6 +113,7 @@ fn main() -> Result<()> {
 
     if args.stream {
         stream(&stage, &args)?;
+        print_tally(stage.tally());
         print_peaks();
         return Ok(());
     }
@@ -165,14 +166,16 @@ fn main() -> Result<()> {
             .filter(|layer| *layer != root);
         if let Some(layer) = layer {
             let phase = Phase::start("mute");
+            let before = stage.tally();
             stage.mute_layer(layer.as_str());
             stage.unmute_layer(&layer);
-            phase.end(&format!("layer: {layer}"));
+            phase.end(&format!("layer: {layer}  {}", tally_delta(before, stage.tally())));
         }
     }
 
     if args.save && args.runs("save") {
         let phase = Phase::start("save");
+        let before = stage.tally();
         let prim = prims.first().cloned().unwrap_or_else(sdf::Path::abs_root);
         stage.edit(|edit| -> Result<()> {
             let path = prim.append_property("openBench").map_err(Error::from)?;
@@ -184,7 +187,7 @@ fn main() -> Result<()> {
             .layer_handle(&identifier)
             .expect("the root layer is live")
             .save()?;
-        phase.end("");
+        phase.end(&tally_delta(before, stage.tally()));
     }
 
     let graphs = stage.graph_stats();
@@ -192,6 +195,7 @@ fn main() -> Result<()> {
         "graphs: {}  shared node data {}  copies {}  nodes copied {}",
         graphs.graphs, graphs.shared, graphs.copies, graphs.nodes_copied,
     );
+    print_tally(stage.tally());
     print_peaks();
     let packages = usdz::package_stats();
     eprintln!(
@@ -446,6 +450,24 @@ fn copy_to_temp(root: &Path) -> Result<PathBuf> {
 
 /// One timed phase: the instant it began, and the heap and the process
 /// counters it began with.
+/// Prints what composing and settling have cost over the whole run.
+fn print_tally(tally: pcp::Tally) {
+    eprintln!(
+        "tally: visits {}  population checks {}  builds {}  demands {}",
+        tally.visits, tally.population_checks, tally.builds, tally.demands,
+    );
+}
+
+/// What a phase's settling cost, from the tallies before and after it.
+fn tally_delta(before: pcp::Tally, after: pcp::Tally) -> String {
+    format!(
+        "settled: visits {}  population checks {}  builds {}",
+        after.visits - before.visits,
+        after.population_checks - before.population_checks,
+        after.builds - before.builds,
+    )
+}
+
 struct Phase {
     name: &'static str,
     start: Instant,

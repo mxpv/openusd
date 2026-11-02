@@ -2654,6 +2654,12 @@ impl Stage {
         self.cache().graph_stats()
     }
 
+    /// What composing the stage and settling its edits have cost so far. The
+    /// read settles queued edits first, and counts what that costs.
+    pub fn tally(&self) -> pcp::Tally {
+        self.cache().tally()
+    }
+
     /// Returns the identifiers of the layers loaded so far, in collection order
     /// (session and root layer stack first, then arc-target layers in the order
     /// composition opened them).

@@ -557,6 +557,7 @@ impl IndexCache {
     /// composes every child of a populated prim. Nothing at `path` itself is
     /// composed to answer.
     pub(crate) fn population_reaches(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
+        self.tally.population_checks += 1;
         if !self.mask_includes(path) {
             return Ok(false);
         }

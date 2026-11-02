@@ -94,6 +94,8 @@ pub struct IndexCache {
     /// ([`resolve_clip_value`](Self::resolve_clip_value) and friends) delegate
     /// per-anchor clip work to once they have ensured the relevant indices.
     clip_cache: ClipCache,
+    /// What composing and settling have cost so far ([`tally`](Self::tally)).
+    pub(super) tally: Tally,
     /// Shared-prototype registry for scene-graph instancing (spec 11.3.3),
     /// internal machinery driven by the instancing glue in
     /// [`super::instancing`] (a second `impl IndexCache`). Callers go through
@@ -1056,6 +1058,23 @@ pub struct GraphStats {
     pub nodes_copied: u64,
 }
 
+/// What composing and settling have cost so far
+/// ([`Stage::tally`](crate::usd::Stage::tally)), to measure that settling
+/// stays bounded by what an edit dropped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// Work-set prims a settlement pass visited.
+    pub visits: u64,
+    /// Times a prim's population was decided past its parent's memo: whether
+    /// the parent populates it.
+    pub population_checks: u64,
+    /// Prim index builds made to cache an index, those a missing layer cut
+    /// short or an error ended included.
+    pub builds: u64,
+    /// Layer loads builds demanded, once per build asking for a layer.
+    pub demands: u64,
+}
+
 /// One spec contributing to a composed property or prim, resolved out of the
 /// graph's arena handles (C++ `SdfPropertySpecHandle` / `SdfPrimSpecHandle`
 /// paired with its cumulative layer offset).
@@ -1260,6 +1279,7 @@ impl IndexCache {
             load_rules,
             population_mask,
             clip_cache: ClipCache::default(),
+            tally: Tally::default(),
             prototypes: PrototypeRegistry::default(),
             records: sdf::PathMap::default(),
             population_epoch: 0,
@@ -2196,6 +2216,11 @@ impl IndexCache {
     /// Number of cached prim indices.
     pub fn indexed_count(&self) -> usize {
         self.store.len()
+    }
+
+    /// What composing and settling have cost so far.
+    pub fn tally(&self) -> Tally {
+        self.tally
     }
 
     /// How much node data the cache holds and how much composing it copied.
@@ -3834,6 +3859,7 @@ impl IndexCache {
         // compose independently once their parent is cached, and this is the
         // natural per-prim `par_iter` boundary; the entries each build
         // returns are then inserted by the driver.
+        self.tally.builds += 1;
         let (mut index, mut build_errors, pending_loads, expr_var_deps, nodes_copied) = PrimIndex::build_with_cache(
             path,
             graph,
@@ -3843,6 +3869,8 @@ impl IndexCache {
             load_payloads,
         )?;
         self.count_copy(nodes_copied);
+        let demands = pending_loads.iter().filter(|demand| !demand.recheck).count();
+        self.tally.demands += demands as u64;
         self.pending_loads.extend(pending_loads);
         // A reference/payload arc demanded a layer that is not yet loaded — here,
         // or in an ancestor that then seeded this build incompletely —
@@ -3997,6 +4025,7 @@ impl IndexCache {
             if !self.store.is_unsettled(&path) {
                 continue;
             }
+            self.tally.visits += 1;
             let unreported = self.store.unreported(&path);
             match self.settle_prim(graph, &path) {
                 // A prim served from elsewhere (an instance proxy reads its
@@ -8255,9 +8284,9 @@ def \"Ref\" {}
     }
 
     /// Composes each of `paths`.
-    fn compose(graph: &LayerGraph, cache: &mut IndexCache, paths: &[&str]) -> Result<()> {
+    fn compose(graph: &LayerGraph, cache: &mut IndexCache, paths: &[impl AsRef<str>]) -> Result<()> {
         for path in paths {
-            cache.ensure_index(&graph.read_view(), &sdf::path(path)?)?;
+            cache.ensure_index(&graph.read_view(), &sdf::path(path.as_ref())?)?;
         }
         Ok(())
     }
@@ -8707,6 +8736,145 @@ def "B" (
         assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
         Ok(())
     }
+
+    /// Settles the work set once, returning what that cost.
+    fn settle_cost(graph: &LayerGraph, cache: &mut IndexCache) -> Result<Tally> {
+        cache.tally = Tally::default();
+        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        Ok(cache.tally)
+    }
+
+    /// A resynced root with 10,000 cached children settles each once.
+    #[test]
+    fn settle_bounded_siblings() -> Result<()> {
+        const N: usize = 10_000;
+        let children: String = (0..N).map(|i| format!("    def \"C{i}\" {{}}\n")).collect();
+        let (mut graph, mut cache) = in_memory_stack(&format!("#usda 1.0\ndef \"Root\" {{\n{children}}}\n"));
+        let mut paths = vec!["/Root".to_string()];
+        paths.extend((0..N).map(|i| format!("/Root/C{i}")));
+        compose(&graph, &mut cache, &paths)?;
+        edit_field(&mut graph, &mut cache, "/Root", FieldKey::References)?;
+        let victims = evicted(&cache).len() as u64;
+        assert_eq!(victims, N as u64 + 1);
+
+        let cost = settle_cost(&graph, &mut cache)?;
+        assert!(evicted(&cache).is_empty());
+        assert_eq!(cost.visits, victims, "{cost:?}");
+        assert!(cost.builds <= victims, "{cost:?}");
+        assert!(cost.population_checks <= 2 * victims, "{cost:?}");
+        Ok(())
+    }
+
+    /// A resynced chain 200 prims deep settles each once, each population
+    /// decision answered from its parent's.
+    #[test]
+    fn settle_bounded_depth() -> Result<()> {
+        const DEPTH: usize = 200;
+        let mut source = String::new();
+        for depth in 0..DEPTH {
+            source.push_str(&format!("{}def \"D{depth}\" {{\n", " ".repeat(depth)));
+        }
+        for depth in (0..DEPTH).rev() {
+            source.push_str(&format!("{}}}\n", " ".repeat(depth)));
+        }
+        let (mut graph, mut cache) = in_memory_stack(&format!("#usda 1.0\n{source}"));
+        let paths: Vec<String> = (1..=DEPTH)
+            .map(|depth| (0..depth).map(|i| format!("/D{i}")).collect())
+            .collect();
+        compose(&graph, &mut cache, &paths)?;
+        edit_field(&mut graph, &mut cache, "/D0", FieldKey::References)?;
+        let victims = evicted(&cache).len() as u64;
+        assert_eq!(victims, DEPTH as u64);
+
+        let cost = settle_cost(&graph, &mut cache)?;
+        assert!(evicted(&cache).is_empty());
+        assert_eq!(cost.visits, victims, "{cost:?}");
+        assert!(cache.is_indexed(&sdf::path(&paths[DEPTH - 1])?), "the leaf is rebuilt");
+        assert!(cost.population_checks <= 3 * victims, "{cost:?}");
+        assert!(cost.builds <= victims, "{cost:?}");
+        Ok(())
+    }
+
+    /// A scene of `instances` instanceable prims, each referencing `/Model`
+    /// with `parts` parts, beside `/Other` with as many.
+    fn many_instances(parts: usize, instances: usize) -> String {
+        let model: String = (0..parts).map(|i| format!("    def \"P{i}\" {{}}\n")).collect();
+        let mut source = format!("#usda 1.0\ndef \"Model\" {{\n{model}}}\ndef \"Other\" {{\n{model}}}\n");
+        for i in 0..instances {
+            source.push_str(&format!(
+                "def \"I{i}\" (\n    instanceable = true\n    references = </Model>\n) {{}}\n"
+            ));
+        }
+        source
+    }
+
+    /// A retired prototype shared by thousands of instances moves its
+    /// descendants' work once per resulting group: its settling scales with
+    /// descendants plus instances, and a split into two groups with twice
+    /// the descendants.
+    #[test]
+    fn settle_bounded_prototype() -> Result<()> {
+        const PARTS: usize = 2_000;
+        const INSTANCES: usize = 2_000;
+        let (mut graph, mut cache) = in_memory_stack(&many_instances(PARTS, INSTANCES));
+        let instances: Vec<String> = (0..INSTANCES).map(|i| format!("/I{i}")).collect();
+        compose(&graph, &mut cache, &instances)?;
+        // Each instance joins the prototype as a read finds it.
+        let register = |graph: &LayerGraph, cache: &mut IndexCache| -> Result<()> {
+            for instance in &instances {
+                cache.prototype_of(&graph.read_view(), &sdf::path(instance)?)?;
+            }
+            Ok(())
+        };
+        register(&graph, &mut cache)?;
+        let root = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/I0")?)?
+            .expect("an instance");
+        let parts: Vec<String> = (0..PARTS).map(|i| format!("{root}/P{i}")).collect();
+        compose(&graph, &mut cache, &parts)?;
+        let bound = (PARTS + INSTANCES) as u64;
+
+        // One group: every instance keeps sharing the model.
+        cache.invalidate_prototypes(&[sdf::path("/I0")?]);
+        let cost = settle_cost(&graph, &mut cache)?;
+        assert!(evicted(&cache).is_empty());
+        assert!(cost.visits >= PARTS as u64, "the parts settled: {cost:?}");
+        assert!(cost.visits <= 2 * bound, "{cost:?}");
+        assert!(cost.builds <= 2 * bound, "{cost:?}");
+
+        // Two groups: half the instances reference `/Other`.
+        register(&graph, &mut cache)?;
+        apply_edit(&mut graph, &mut cache, |e| {
+            for i in (0..INSTANCES).step_by(2) {
+                let references = sdf::ReferenceListOp::explicit([sdf::Reference {
+                    prim_path: sdf::path("/Other")?,
+                    ..Default::default()
+                }]);
+                e.data_mut().set_field(
+                    &sdf::path(format!("/I{i}"))?,
+                    FieldKey::References.as_str(),
+                    Value::ReferenceListOp(references),
+                );
+            }
+            Ok(())
+        })?;
+        let cost = settle_cost(&graph, &mut cache)?;
+        assert!(evicted(&cache).is_empty());
+        let other = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/I0")?)?
+            .expect("an instance");
+        let model = cache
+            .prototype_of(&graph.read_view(), &sdf::path("/I1")?)?
+            .expect("an instance");
+        assert_ne!(other, model, "two groups");
+        assert!(cache.is_indexed(&other.append_path("P0")?) && cache.is_indexed(&model.append_path("P0")?));
+        let split = (2 * PARTS + INSTANCES) as u64;
+        assert!(cost.visits >= 2 * PARTS as u64, "the parts settled in both: {cost:?}");
+        assert!(cost.visits <= 2 * split, "{cost:?}");
+        assert!(cost.builds <= 2 * split, "{cost:?}");
+        Ok(())
+    }
+
     /// Deactivating the instances' parent retires the prototype's work, and
     /// nothing below the inactive parent is composed to decide it.
     #[test]
