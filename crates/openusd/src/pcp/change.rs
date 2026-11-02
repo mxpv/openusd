@@ -970,8 +970,11 @@ impl Changes {
         // warm. The blanket subsumes the vars deltas: a prim using a stack whose
         // variables cascaded from an edited layer composes that layer's stack
         // somewhere on its arc chain, so the layer fanout already reaches it. A
-        // membership change can also admit prims no cached index names yet, so the
-        // resync reported is the pseudo-root, not the evicted set.
+        // change to the root stack can admit root prims no cached index names
+        // yet, so it resyncs the pseudo-root (C++ `_DidChangeLayerStack` on the
+        // root stack). Any other stack's prims compose beneath the prims that
+        // use it, whose evicted indices are the resync (C++ resyncs the stack's
+        // dependents).
         //
         // The asset-path channel is collected from the deltas whichever branch runs,
         // matching C++, which records `didChangeExpressionVariables` on a
@@ -997,8 +1000,11 @@ impl Changes {
             );
         }
         let mut resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
-            cache.invalidate_layers(graph, &affected);
-            vec![Path::abs_root()]
+            let evicted = cache.invalidate_layers(graph, &affected);
+            match affected.iter().any(|&layer| graph.in_root_stack(layer)) {
+                true => vec![Path::abs_root()],
+                false => evicted,
+            }
         } else {
             apply_vars_deltas(cache, graph, &vars_deltas)
         };

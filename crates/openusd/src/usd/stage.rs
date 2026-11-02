@@ -1143,6 +1143,7 @@ impl composition::CompositionHooks for Stage {
             composition::StageNotice::EditTarget => sink.edit_target_changed(self),
             composition::StageNotice::LoadRules(resynced) => sink.load_rules_changed(self, resynced.view()),
             composition::StageNotice::LoadsRetried(resynced) => sink.loads_retried(self, resynced.view()),
+            composition::StageNotice::Recomposed(found) => sink.recomposed(self, found.view()),
             composition::StageNotice::Muting { layer, muted, resynced } => {
                 sink.layer_muting_changed(self, layer, *muted, resynced.view());
             }
@@ -3080,7 +3081,7 @@ impl Stage {
             self.walk_loadable(&root, &mut found).map(|()| found)
         };
         // The prims the swaps dropped settle under the rules restored.
-        self.composition.settle_work(composition::Settled::Required, self);
+        self.composition.settle_now(self);
         let mut found = walked?;
         found.sort();
         found.dedup();
@@ -3169,11 +3170,11 @@ impl Stage {
     /// TODO(perf): a mute that reaches the root layer hands over every cached
     /// index, so this reduction is `keep_ancestors` at its worst case — see the
     /// `sdf::PathTable` covering set noted there.
-    fn notify_muting_changed(&self, changed: &str, muted: bool, resynced: Vec<sdf::Path>) {
+    fn notify_muting_changed(&self, changed: &str, muted: bool, mut resynced: ResyncPaths) {
         if self.sinks.borrow().is_empty() {
             return;
         }
-        let resynced = ResyncPaths::subtrees(resynced);
+        resynced.normalize();
         let notice = composition::StageNotice::Muting {
             layer: changed.to_owned(),
             muted,
@@ -4219,12 +4220,9 @@ impl Stage {
         // before the parent's sinks hear of the edit. A sink that reads the
         // stage then composes the child given here, not a copy read from its
         // file.
-        let edited = edited.map(|(committed, joined)| {
-            self.composition.intern_layer(joined, self);
-            self.composition.deliver(committed, self);
-        });
+        let edited = edited.map(|(committed, joined)| self.composition.join_edited(joined, committed, self));
         self.process_pending();
-        edited.map(|_| ())
+        edited
     }
 
     /// Removes the sublayer `child` from `parent`'s `subLayers` and its aligned
@@ -7567,6 +7565,75 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
+    /// A read that recovers a clip it found missing earlier tells the
+    /// stage's sinks at the next drain of an edit, not during the read: the
+    /// clip's anchor is recomposed.
+    #[test]
+    fn clip_recovery_reported() -> Result<()> {
+        struct Recomposed(Rc<RefCell<Vec<Vec<sdf::Path>>>>);
+        impl StageSink for Recomposed {
+            fn recomposed(&self, _: &Stage, resynced: usd::Resynced<'_>) {
+                self.0.borrow_mut().push(resynced.prims.to_vec());
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "late.usda")?;
+        let stage = Stage::open(&root)?;
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Recomposed(Rc::clone(&heard)));
+        assert_eq!(clip_x(&stage)?, None);
+        fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
+
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        assert!(heard.borrow().is_empty(), "a read delivers nothing");
+        stage.process_pending();
+        assert!(heard.borrow().is_empty(), "nothing is queued to drain");
+        stage.define_prim("/Unrelated")?;
+        assert_eq!(*heard.borrow(), [vec![sdf::path("/A")?]]);
+        Ok(())
+    }
+
+    /// A sublayer an edit names, opened by that transaction's demand
+    /// resolution, reports what its join recomposes in the transaction's
+    /// own notice: here the anchor whose clip found the layer missing. The
+    /// referenced stack's change resyncs the prim that uses it.
+    #[test]
+    fn demand_join_in_commit() -> Result<()> {
+        type Heard = Vec<(Vec<sdf::Path>, Vec<sdf::Path>)>;
+        struct Recomposed(Rc<RefCell<Heard>>);
+        impl StageSink for Recomposed {
+            fn after_commit(&self, _: &Stage, change: &usd::CommittedChange<'_>) {
+                self.0
+                    .borrow_mut()
+                    .push((change.resynced.to_vec(), change.recomposed.to_vec()));
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "late.usda")?;
+        fs::write(
+            dir.path().join("root.usda"),
+            format!(
+                "{}def \"B\" (references = @./ref.usda@</R>) {{}}\n",
+                fs::read_to_string(&root)?
+            ),
+        )?;
+        fs::write(dir.path().join("ref.usda"), "#usda 1.0\ndef \"R\" {}\n")?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/B")?.is_valid()?);
+        assert_eq!(clip_x(&stage)?, None);
+        fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Recomposed(Rc::clone(&heard)));
+
+        stage.edit_layer(&layer_named(&stage, "ref.usda"), |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["./late.usda"]);
+            Ok(())
+        })?;
+        assert_eq!(*heard.borrow(), [(vec![sdf::path("/B")?], vec![sdf::path("/A")?])]);
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        Ok(())
+    }
+
     /// A clip whose asset does not resolve sources nothing, and the read
     /// finds no value.
     #[test]
@@ -9727,6 +9794,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             |view, cache| cache.is_populated(view, &inner),
             composition::Settled::Taken,
             &stage,
+            &mut ResyncPaths::default(),
         );
         assert!(matches!(stopped, Err(composition::Interrupted::NewWork)));
         assert!(!stage.composition.pending_is_empty(), "the edit waits for the drain");

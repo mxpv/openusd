@@ -185,6 +185,9 @@ pub(super) enum StageNotice {
     LoadRules(ResyncPaths),
     /// The failed loads were tried again, resyncing these paths.
     LoadsRetried(ResyncPaths),
+    /// What an operation discovered that no other notice carries: the prims
+    /// a read's or a mutation's layer loads dropped or restaled.
+    Recomposed(ResyncPaths),
     /// A layer was muted or unmuted, resyncing these paths.
     Muting {
         layer: String,
@@ -219,11 +222,9 @@ pub(super) enum Interrupted {
 /// whose effective rule the change only derived again recomposes in place.
 /// One whose inclusion flipped changed its subtree when it has a payload of
 /// its own (in `payloads`), which the flip includes or leaves out.
-fn classify(victims: pcp::RuleVictims, payloads: &HashSet<sdf::Path>) -> ResyncPaths {
-    let mut paths = ResyncPaths {
-        subtrees: victims.subtrees,
-        prims: Vec::new(),
-    };
+/// They join `paths`, which comes back normalized.
+fn classify(victims: pcp::RuleVictims, payloads: &HashSet<sdf::Path>, mut paths: ResyncPaths) -> ResyncPaths {
+    paths.subtrees.extend(victims.subtrees);
     for (ancestor, flipped) in victims.ancestors {
         if flipped && payloads.contains(&ancestor) {
             paths.subtrees.push(ancestor);
@@ -293,11 +294,16 @@ pub(super) struct StageComposition {
     ///   (drain-on-read). Stage-routed and raw layer edits flow through the
     ///   identical path.
     pending: RefCell<Vec<Pending>>,
-    /// Notices the drain reconciled, delivered in order by
+    /// Notices the drain reconciled, and those a mutation queues behind them
+    /// (a retry of the failed loads), delivered in order by
     /// [`deliver_notices`](Self::deliver_notices). A drain made from inside a
     /// delivery only reconciles: what it adds waits behind the notices already
     /// here.
     outbox: RefCell<VecDeque<Notice>>,
+    /// What reads and other operations outside a drain found that no notice
+    /// carries ([`discover`](Self::discover)): the next drain's snapshot
+    /// reports it with its own findings.
+    discovered: RefCell<ResyncPaths>,
     /// What a panic interrupted, when one left the composition half-built:
     /// it cannot be finished, so the stage composes nothing more.
     poisoned: Cell<Option<Poisoned>>,
@@ -334,6 +340,7 @@ impl StageComposition {
             store,
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
+            discovered: RefCell::default(),
             poisoned: Cell::new(None),
             snapshots: Cell::new(0),
             suspended: Cell::new(false),
@@ -614,6 +621,7 @@ impl StageComposition {
         if self.poisoned.get().is_some() {
             self.pending.take();
             self.outbox.take();
+            self.discovered.take();
             return;
         }
         if self.pending_is_empty() && self.outbox.borrow().is_empty() {
@@ -704,6 +712,9 @@ impl StageComposition {
                 true => self.forget_failed_loads(),
                 false => None,
             };
+            // What operations found since the last drain is reported with
+            // what this snapshot finds, after its transactions.
+            let mut found = self.discovered.take();
             while let Some(group) = next_group(&mut drained) {
                 match group {
                     Group::Aborted(generation) => {
@@ -720,28 +731,34 @@ impl StageComposition {
             // held are swept. Edits their loads commit go to the next
             // snapshot, which settles what is left after it.
             if settles {
-                self.settle_work(Settled::Taken, hooks);
+                self.settle_work(Settled::Taken, hooks, &mut found);
             }
-            if !edited {
-                continue;
-            }
-            // Sweep before the requeue below: a sweep retires a reclaimed stack's
-            // failure diagnostics, so requeueing never re-derives a demand whose
-            // barrier would read a reclaimed stack's variables.
-            self.reclaim_stale_stacks();
-            // A cleared sublayer failure retries even when this round's edits
-            // rebuilt no stack: the failure diagnostics requeue as demands, so a
-            // repaired asset loads and a still-broken one re-records the same
-            // diagnostic.
-            if let Some(dropped) = retried {
-                self.retry_sublayers(dropped, reloaded, hooks);
-                // A failed load the retry opens settles the prims it dropped,
-                // and the stacks they released are swept.
-                if settles {
-                    self.settle_work(Settled::Taken, hooks);
-                    self.reclaim_stale_stacks();
+            if edited {
+                // Sweep before the requeue below: a sweep retires a reclaimed stack's
+                // failure diagnostics, so requeueing never re-derives a demand whose
+                // barrier would read a reclaimed stack's variables.
+                self.reclaim_stale_stacks();
+                // A cleared sublayer failure retries even when this round's edits
+                // rebuilt no stack: the failure diagnostics requeue as demands, so a
+                // repaired asset loads and a still-broken one re-records the same
+                // diagnostic.
+                if let Some(dropped) = retried {
+                    let mut again = ResyncPaths::default();
+                    self.retry_sublayers(dropped, hooks, &mut again);
+                    // A failed load the retry opens settles the prims it dropped,
+                    // and the stacks they released are swept. A reload's
+                    // settling is part of its retry, as in `retry_failed_loads`.
+                    if settles {
+                        self.settle_work(Settled::Taken, hooks, if reloaded { &mut again } else { &mut found });
+                        self.reclaim_stale_stacks();
+                    }
+                    if reloaded {
+                        self.report(StageNotice::LoadsRetried, again, hooks);
+                    }
                 }
             }
+            // What settling the snapshot's work found follows its notices.
+            self.report(StageNotice::Recomposed, found, hooks);
         }
         Ok(())
     }
@@ -762,15 +779,63 @@ impl StageComposition {
     /// Under [`Settled::Taken`] it stops for edits its loads commit
     /// ([`Interrupted::NewWork`]), which the drain it runs inside applies
     /// first. Under [`Settled::Required`] edits loads the caller ran before
-    /// it committed are reconciled first.
-    pub(super) fn settle_work(&self, settled: Settled, hooks: &dyn CompositionHooks) {
+    /// it committed are reconciled first. What its loads drop joins `found`.
+    fn settle_work(&self, settled: Settled, hooks: &dyn CompositionHooks, found: &mut ResyncPaths) {
         if self.suspended.get() || !self.cache.borrow().has_work() {
             return;
         }
         if settled == Settled::Required && !self.pending_is_empty() && self.reconcile(false, hooks).is_err() {
             return;
         }
-        let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks);
+        let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks, found);
+    }
+
+    /// Settles the work set on a settled stage, for a caller whose own
+    /// change dropped prims (a walk under rules it swapped), reporting what
+    /// the settling's loads find.
+    pub(super) fn settle_now(&self, hooks: &dyn CompositionHooks) {
+        let mut found = ResyncPaths::default();
+        self.settle_work(Settled::Required, hooks, &mut found);
+        self.discover(found, hooks);
+    }
+
+    /// Records `found`, what an operation outside a drain (a read, a
+    /// mutation's own loads) dropped that no notice carries, for the next
+    /// drain to report. Nothing is kept with no sink to tell.
+    fn discover(&self, found: ResyncPaths, hooks: &dyn CompositionHooks) {
+        if found.is_empty() || !hooks.delivers() {
+            return;
+        }
+        let mut discovered = self.discovered.borrow_mut();
+        discovered.subtrees.extend(found.subtrees);
+        discovered.prims.extend(found.prims);
+    }
+
+    /// Queues `notice` naming `paths`, what an operation found, behind the
+    /// notices queued before it, for the next delivery to hand the stage's
+    /// sinks. Nothing is queued for no paths, or with no sink to tell.
+    fn report(&self, notice: fn(ResyncPaths) -> StageNotice, mut paths: ResyncPaths, hooks: &dyn CompositionHooks) {
+        if paths.is_empty() || !hooks.delivers() {
+            return;
+        }
+        paths.normalize();
+        self.outbox.borrow_mut().push_back(Notice::Stage(notice(paths)));
+    }
+
+    /// Joins `joined`, a layer an edit just sublayered, to the stage, then
+    /// delivers the edit's notifications: its sinks then compose the layer
+    /// given here, not a copy read from its file. The anchors whose clip
+    /// sets read it are reported.
+    pub(super) fn join_edited(
+        &self,
+        joined: sdf::LoadedLayer,
+        committed: sdf::Committed,
+        hooks: &dyn CompositionHooks,
+    ) {
+        let mut found = ResyncPaths::default();
+        self.intern_layer(joined, hooks, &mut found);
+        self.discover(found, hooks);
+        self.deliver(committed, hooks);
     }
 
     /// Suspends settling until the returned guard drops, for a walk that
@@ -821,8 +886,10 @@ impl StageComposition {
             // sublayer for a stack nothing uses.
             self.reclaim_stale_stacks();
             self.guarded(Poisoned::Compose, || {
-                self.retry_sublayers(dropped, true, hooks);
-                self.settle_work(Settled::Required, hooks);
+                let mut again = ResyncPaths::default();
+                self.retry_sublayers(dropped, hooks, &mut again);
+                self.settle_work(Settled::Required, hooks, &mut again);
+                self.report(StageNotice::LoadsRetried, again, hooks);
             });
             // The stacks the settled prims released are swept too.
             self.reclaim_stale_stacks();
@@ -847,17 +914,12 @@ impl StageComposition {
 
     /// The second half of a retry of the failed loads, once
     /// [`forget_failed_loads`](Self::forget_failed_loads) dropped the indices
-    /// at `dropped`: demands again each sublayer entry whose load failed, and
-    /// when `announce` is set, queues a [`StageNotice::LoadsRetried`] naming
-    /// what the retry resyncs for the stage's sinks.
-    fn retry_sublayers(&self, mut resynced: Vec<sdf::Path>, announce: bool, hooks: &dyn CompositionHooks) {
+    /// at `dropped`: demands again each sublayer entry whose load failed.
+    /// What the retry resyncs, `dropped` included, joins `found`.
+    fn retry_sublayers(&self, dropped: Vec<sdf::Path>, hooks: &dyn CompositionHooks, found: &mut ResyncPaths) {
+        found.subtrees.extend(dropped);
         let requeued = self.layers.borrow().requeue_failed_sublayers();
-        resynced.extend(self.resolve_sublayer_demands(requeued, hooks).1);
-        if !announce || resynced.is_empty() || !hooks.delivers() {
-            return;
-        }
-        let notice = Notice::Stage(StageNotice::LoadsRetried(ResyncPaths::subtrees(resynced)));
-        self.outbox.borrow_mut().push_back(notice);
+        self.resolve_sublayer_demands(requeued, hooks, found);
     }
 
     /// The delivering half of [`process_pending`](Self::process_pending): hand
@@ -956,24 +1018,20 @@ impl StageComposition {
             Payload::new(&pcp_changes, &merged, layer_changes, &provenance, &is_local)
         });
         let outcome = self.update_pair(|graph, cache| pcp_changes.apply(cache, graph));
+        // The recompose may have demanded sublayers — a `${VAR}` entry the
+        // edited variables newly select, or a just-authored literal naming an
+        // unloaded layer; open them before observers read the settled stage.
+        // The prims their joins drop are this transaction's too.
+        let mut found = ResyncPaths::default();
+        self.resolve_recorded_demands(hooks, &mut found);
         // The layer-stack tier's paths are known only after `apply` ran — a
         // vars-only edit resyncs its dependents, and names the subtrees whose
         // asset values may re-resolve, exactly when the rebuild changed some
         // stack's composed variables — so they land on the payload here rather
         // than at the snapshot above.
         if let Some(payload) = payload.as_mut() {
-            payload.finish(outcome);
+            payload.finish(outcome, found);
         }
-        // TODO: the demand resolution below can drop further indices, and the
-        // payload is already final, so those never reach
-        // `CommittedChange::resynced`. Closing this needs a seam that lets a
-        // finished payload take a late addition, and `IndexCache::invalidate_layers`
-        // widened to report what it dropped.
-
-        // The recompose may have demanded sublayers — a `${VAR}` entry the
-        // edited variables newly select, or a just-authored literal naming an
-        // unloaded layer; open them before observers read the settled stage.
-        self.resolve_recorded_demands(hooks);
 
         if let Some(payload) = payload {
             let layer_identifier = edits
@@ -1116,16 +1174,21 @@ impl StageComposition {
     /// layer the stage holds reports its edits no matter who authors them.
     /// The layer's node holds the subscription, which ends when the layer
     /// leaves the graph.
-    pub(super) fn intern_layer(&self, layer: sdf::LoadedLayer, hooks: &dyn CompositionHooks) -> (pcp::LayerId, bool) {
+    ///
+    /// The anchors whose clip sets read the layer, which read it now, join
+    /// `found` as prims.
+    fn intern_layer(
+        &self,
+        layer: sdf::LoadedLayer,
+        hooks: &dyn CompositionHooks,
+        found: &mut ResyncPaths,
+    ) -> (pcp::LayerId, bool) {
         let (id, fresh, named) = self.join_layer(layer, false, hooks);
-        // The anchors it restaled go unreported: a join carries no payload to
-        // add them to, the same gap the demand-loading `TODO` beside
-        // `Payload::finish` records. Values are correct either way; an
-        // observer is simply not told, and learns on its next read.
-        let _restaled = self
+        let restaled = self
             .cache
             .borrow_mut()
             .invalidate_clip_sources(named.iter().map(String::as_str));
+        found.prims.extend(restaled);
         (id, fresh)
     }
 
@@ -1184,7 +1247,7 @@ impl StageComposition {
     /// pass reads nothing from it rather than asking again.
     ///
     /// Returns whether a layer joined or a failure was newly marked.
-    fn load_clips(&self, clips: &[String], hooks: &dyn CompositionHooks) -> bool {
+    fn load_clips(&self, clips: &[String], hooks: &dyn CompositionHooks, found: &mut ResyncPaths) -> bool {
         let _loading = self.begin_load();
         let registry = self.layers.borrow().layer_registry().clone();
         let mut progress = false;
@@ -1206,15 +1269,16 @@ impl StageComposition {
                 Err(sdf::layer_registry::LoadError::Layer(sdf::LayerError::Busy)) => continue,
                 Err(error) => pcp::LoadFailure::Unreadable(Arc::new(error)),
             };
-            progress |= self.record_load_failure(identifier, failure);
+            progress |= self.record_load_failure(identifier, failure, found);
         }
         // The clip sets that name a clip opened for the first time need no
         // invalidation: the only pass that read it as still to open is the
         // one the query loop discards. One that read a recovered clip as
         // missing answered other reads with it, which now change. The anchors
-        // go unreported, as `intern_layer`'s do.
+        // join `found` as prims.
         if !recovered.is_empty() {
-            let _restaled = self.cache.borrow_mut().invalidate_clip_sources(recovered);
+            let restaled = self.cache.borrow_mut().invalidate_clip_sources(recovered);
+            found.prims.extend(restaled);
         }
         progress
     }
@@ -1235,8 +1299,9 @@ impl StageComposition {
 
     /// Wires the layers in `joined`, which just joined composition (newly
     /// loaded, or promoted from clips only), into the graph's sublayer edges
-    /// and relocates before any stack is composed against them.
-    fn wire_joined(&self, joined: &HashSet<pcp::LayerId>) {
+    /// and relocates before any stack is composed against them. The cached
+    /// prims that drops join `found`.
+    fn wire_joined(&self, joined: &HashSet<pcp::LayerId>, found: &mut ResyncPaths) {
         let mut graph = self.layers.borrow_mut();
         // A layer joined, and an asset may have appeared: one recorded as
         // unresolved that the resolver now finds is forgotten, and the
@@ -1245,14 +1310,18 @@ impl StageComposition {
         // which an asset that did not exist then need not share with the
         // one it has now.
         if graph.forget_resolvable_failures() {
-            self.cache.borrow_mut().drop_load_failed_indices();
+            found
+                .subtrees
+                .extend(self.cache.borrow_mut().drop_load_failed_indices());
         }
         let relocated = graph.wire_joined(joined);
         // A joined layer that introduces relocates restructures prims composed
         // against its stack; drop their cached indices so they recompose with
         // the relocates applied.
         if !relocated.is_empty() {
-            self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
+            found
+                .subtrees
+                .extend(self.cache.borrow_mut().invalidate_layers(&graph, &relocated));
         }
     }
 
@@ -1261,8 +1330,9 @@ impl StageComposition {
     /// the asset failed with before (a target that was missing and is now
     /// there but cannot be read). Re-marking an asset that failed the same way
     /// on an earlier pass must not keep the query loop running forever, and a
-    /// read failure is never retried, so the kind changes at most once.
-    fn record_load_failure(&self, asset_path: &str, failure: pcp::LoadFailure) -> bool {
+    /// read failure is never retried, so the kind changes at most once. The
+    /// cached prims that drops join `found`.
+    fn record_load_failure(&self, asset_path: &str, failure: pcp::LoadFailure, found: &mut ResyncPaths) -> bool {
         let mut graph = self.layers.borrow_mut();
         let prior = graph.load_failure(asset_path).map(mem::discriminant);
         let changed = prior != Some(mem::discriminant(&failure));
@@ -1270,7 +1340,9 @@ impl StageComposition {
         // The indices built since the earlier failure reported it; they
         // recompose to report this one.
         if changed && prior.is_some() {
-            self.cache.borrow_mut().drop_load_failed_indices();
+            found
+                .subtrees
+                .extend(self.cache.borrow_mut().drop_load_failed_indices());
         }
         changed
     }
@@ -1292,8 +1364,9 @@ impl StageComposition {
     ///
     /// Returns whether the pass made progress — a layer joined or a target was
     /// newly marked failed — so the caller recomposes once more; a demanded path
-    /// already loaded or already known unreadable is skipped.
-    fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks) -> bool {
+    /// already loaded or already known unreadable is skipped. The cached
+    /// prims the loads drop or restale join `found`.
+    fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks, found: &mut ResyncPaths) -> bool {
         if pending.is_empty() {
             return false;
         }
@@ -1355,7 +1428,7 @@ impl StageComposition {
                 let failure = match opened {
                     Ok(Some(layers)) => {
                         for layer in layers {
-                            let (id, fresh) = self.intern_layer(layer, hooks);
+                            let (id, fresh) = self.intern_layer(layer, hooks, found);
                             if fresh {
                                 joined.insert(id);
                             }
@@ -1370,13 +1443,13 @@ impl StageComposition {
                     Err(err) => Some(pcp::LoadFailure::Unreadable(Arc::new(err))),
                 };
                 if let Some(failure) = failure {
-                    newly_failed |= self.record_load_failure(asset_path, failure);
+                    newly_failed |= self.record_load_failure(asset_path, failure, found);
                 }
             }
         }
         let grew = !joined.is_empty();
         if grew {
-            self.wire_joined(&joined);
+            self.wire_joined(&joined, found);
         }
         // Mint each demand's layer stack now that the edges are wired. The layer
         // graph applies the stack-selection policy idempotently, so a stack the
@@ -1410,7 +1483,7 @@ impl StageComposition {
         // `${VAR}` entry whose selected layer nothing has loaded, including a
         // target's own self-selected sublayer under an empty inherited context;
         // open them under each demanding stack's composed variables.
-        let sublayers_loaded = self.resolve_recorded_demands(hooks);
+        let sublayers_loaded = self.resolve_recorded_demands(hooks, found);
         grew || resolved || newly_failed || newly_interned || sublayers_loaded
     }
 
@@ -1442,19 +1515,19 @@ impl StageComposition {
     /// nested inside an opened subtree surfaces next round, when the rewired
     /// stack re-derives the failing entry as its own demand.
     ///
-    /// Returns whether any layer joined the graph, and the cached prims the
-    /// joins dropped.
+    /// Returns whether any layer joined the graph. The cached prims the
+    /// joins drop or restale join `found`.
     fn resolve_sublayer_demands(
         &self,
         mut demands: Vec<pcp::SublayerDemand>,
         hooks: &dyn CompositionHooks,
-    ) -> (bool, Vec<sdf::Path>) {
+        found: &mut ResyncPaths,
+    ) -> bool {
         let _loading = self.begin_load();
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
         let mut attempted: HashSet<(String, pcp::LayerStackId)> = HashSet::new();
-        let mut dropped = Vec::new();
         let mut recomposed: HashSet<(pcp::LayerId, String)> = HashSet::new();
         let mut reported: HashSet<(String, pcp::LayerStackId, pcp::LayerId)> = HashSet::new();
         let mut loaded_any = false;
@@ -1511,7 +1584,7 @@ impl StageComposition {
                 let failure = match opened {
                     Ok(Some(layers)) => {
                         for layer in layers {
-                            self.intern_layer(layer, hooks);
+                            self.intern_layer(layer, hooks, found);
                         }
                         opened_parents.insert(demand.parent);
                         None
@@ -1542,11 +1615,13 @@ impl StageComposition {
             let mut graph = self.layers.borrow_mut();
             let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
             if !affected.is_empty() {
-                dropped.extend(self.cache.borrow_mut().invalidate_layers(&graph, &affected));
+                found
+                    .subtrees
+                    .extend(self.cache.borrow_mut().invalidate_layers(&graph, &affected));
             }
             demands = graph.take_sublayer_demands();
         }
-        (loaded_any, dropped)
+        loaded_any
     }
 
     /// A layer's identifier read without draining, for the reconciliation
@@ -1566,10 +1641,11 @@ impl StageComposition {
         // The passes build indices through the resolver, and the loads
         // between them run it too.
         let mut query = query;
-        self.guarded(Poisoned::Compose, || {
+        let mut found = ResyncPaths::default();
+        let result = self.guarded(Poisoned::Compose, || {
             loop {
                 let evictions = self.cache.borrow().evictions();
-                let result = match self.fixpoint(&mut query, Settled::Required, hooks) {
+                let result = match self.fixpoint(&mut query, Settled::Required, hooks, &mut found) {
                     Ok(result) => result,
                     Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
                 };
@@ -1581,14 +1657,18 @@ impl StageComposition {
                     return result;
                 }
                 let snapshots = self.snapshots.get();
-                self.settle_work(Settled::Required, hooks);
+                self.settle_work(Settled::Required, hooks, &mut found);
                 // Settling reconciled edits its loads committed, which can
                 // change the answer: the query runs again.
                 if self.snapshots.get() == snapshots {
                     return result;
                 }
             }
-        })
+        });
+        // What the read's loads found reaches the stage's sinks at the next
+        // delivery: a read delivers nothing.
+        self.discover(found, hooks);
+        result
     }
 
     /// Runs `pass` to a fixpoint over on-demand layer loading.
@@ -1618,6 +1698,7 @@ impl StageComposition {
         mut pass: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         settled: Settled,
         hooks: &dyn CompositionHooks,
+        found: &mut ResyncPaths,
     ) -> Result<Result<T, pcp::QueryError>, Interrupted> {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
@@ -1655,11 +1736,11 @@ impl StageComposition {
                 return Ok(Err(busy.into()));
             }
             scope.get_or_insert_with(ar::CacheScope::begin);
-            let loaded = self.load_demanded(&pending, hooks);
+            let loaded = self.load_demanded(&pending, hooks, found);
             if settled == Settled::Taken && !self.pending_is_empty() {
                 return Err(Interrupted::NewWork);
             }
-            let clipped = self.load_clips(&clips, hooks);
+            let clipped = self.load_clips(&clips, hooks, found);
             if !self.pending_is_empty() {
                 match settled {
                     Settled::Taken => return Err(Interrupted::NewWork),
@@ -1699,7 +1780,7 @@ impl StageComposition {
         &self,
         mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<pcp::MuteChange>,
         hooks: &dyn CompositionHooks,
-    ) -> Option<(String, Vec<sdf::Path>)> {
+    ) -> Option<(String, ResyncPaths)> {
         // A mute rebuilds and may load the stage's layers, which a read or an
         // edit of one of them holds.
         assert!(
@@ -1730,14 +1811,15 @@ impl StageComposition {
         // An unmuted sublayer that left the graph while muted has no fanout to
         // name the prims it reaches: it joins again here, and the prims its
         // join dropped are the resyncs it adds.
-        let joined = self.guarded(Poisoned::Compose, || {
-            let joined = self.resolve_sublayer_demands(demands, hooks).1;
+        let mut found = self.guarded(Poisoned::Compose, || {
+            let mut found = ResyncPaths::default();
+            self.resolve_sublayer_demands(demands, hooks, &mut found);
             // The prims the mute dropped settle before the stacks they held
             // are swept.
-            self.settle_work(Settled::Required, hooks);
-            joined
+            self.settle_work(Settled::Required, hooks, &mut found);
+            found
         });
-        resynced.extend(joined);
+        found.subtrees.append(&mut resynced);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
         // discards variable deltas, so the sweep is what reclaims it. Discarding
@@ -1745,7 +1827,7 @@ impl StageComposition {
         // argument.
         self.reclaim_stale_stacks();
         self.reclaim_unused_layers(hooks, pcp::Reclaim::Muted);
-        Some((changed, resynced))
+        Some((changed, found))
     }
 
     /// Resolves the layer stack an edit target authors into, loading whatever
@@ -1769,18 +1851,21 @@ impl StageComposition {
         hooks: &dyn CompositionHooks,
     ) -> Result<pcp::LayerStackId, String> {
         if let Some(identity) = authoring {
-            return self.guarded(Poisoned::Compose, || {
+            let mut found = ResyncPaths::default();
+            let resolved = self.guarded(Poisoned::Compose, || {
                 loop {
                     let demand = match self.layers.borrow().resolve_stack_identity(&identity) {
                         Ok(id) => return Ok(id),
                         Err(demand) => demand,
                     };
                     let layer = demand.asset_path.clone();
-                    if !self.load_demanded(&[demand], hooks) {
+                    if !self.load_demanded(&[demand], hooks, &mut found) {
                         return Err(layer);
                     }
                 }
             });
+            self.discover(found, hooks);
+            return resolved;
         }
         // A target without a captured authoring stack (a local or variant
         // target) is inferred from layer membership: the root stack when
@@ -1800,16 +1885,18 @@ impl StageComposition {
             let id = graph.intern_external(target_layer, pcp::LayerStackId::ROOT).0;
             (id, graph.take_sublayer_demands())
         };
-        self.resolve_sublayer_demands(demands, hooks);
+        let mut found = ResyncPaths::default();
+        self.resolve_sublayer_demands(demands, hooks, &mut found);
+        self.discover(found, hooks);
         Ok(id)
     }
 
     /// Opens whatever sublayers the graph has recorded as demanded, reporting
     /// whether any layer joined. The single seam between a graph mutation and
     /// the `${VAR}` selections it newly exposed.
-    fn resolve_recorded_demands(&self, hooks: &dyn CompositionHooks) -> bool {
+    fn resolve_recorded_demands(&self, hooks: &dyn CompositionHooks, found: &mut ResyncPaths) -> bool {
         let demands = self.layers.borrow_mut().take_sublayer_demands();
-        self.resolve_sublayer_demands(demands, hooks).0
+        self.resolve_sublayer_demands(demands, hooks, found)
     }
 
     /// Brings a freshly built stage's composition up: interns every collected
@@ -1837,8 +1924,10 @@ impl StageComposition {
         // stage's recorder to it.
         let mut root = None;
         let mut session_count = 0;
+        // A stage opening has no sink to tell what its loads find.
+        let mut found = ResyncPaths::default();
         for (i, layer) in layers.into_iter().enumerate() {
-            let (id, fresh) = self.intern_layer(layer, hooks);
+            let (id, fresh) = self.intern_layer(layer, hooks, &mut found);
             if i == session_layer_count {
                 root = Some(id);
             }
@@ -1871,7 +1960,7 @@ impl StageComposition {
         // stack can still name an unloaded layer — an eager target's sublayer
         // selected by its own variables, or a selection open-time muting
         // exposed; drain the demands the finalize recompose recorded.
-        self.resolve_recorded_demands(hooks);
+        self.resolve_recorded_demands(hooks, &mut found);
         // That drain re-derived the sublayer failures of every region — the
         // session region, the root region, and each target stack all re-resolve
         // per rebuild — as per-stack regenerable diagnostics; the loader's
@@ -1935,13 +2024,16 @@ impl StageComposition {
         // The prims the change dropped settle before the stacks they held are
         // swept: an unloaded payload's prims are retired, and a loaded one's
         // rebuilt.
-        self.guarded(Poisoned::Compose, || self.settle_work(Settled::Required, hooks));
+        let mut found = ResyncPaths::default();
+        self.guarded(Poisoned::Compose, || {
+            self.settle_work(Settled::Required, hooks, &mut found);
+        });
         self.reclaim_stale_stacks();
         self.reclaim_unused_layers(hooks, pcp::Reclaim::Unused);
-        match hooks.delivers() {
-            true => classify(victims, &payloads),
-            false => ResyncPaths::default(),
+        if !hooks.delivers() {
+            return ResyncPaths::default();
         }
+        classify(victims, &payloads, found)
     }
 
     /// The ancestors installing `rules` would flip the inclusion of, that

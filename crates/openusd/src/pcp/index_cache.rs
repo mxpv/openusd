@@ -2348,11 +2348,7 @@ impl IndexCache {
     /// remains. Drops exactly the cached indices whose composition reads an
     /// `affected` layer, leaving the rest warm.
     ///
-    /// Returns the paths whose indices it dropped. An unmute reports those of
-    /// the sublayers that join again with its resyncs; no other caller
-    /// publishes a notice for this path, which is the first half of the
-    /// deferred demand-notice work (see the `TODO` beside `Payload::finish` in
-    /// `usd::composition`).
+    /// Returns the paths whose indices it dropped, for the caller to report.
     pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
         self.retire_query_errors();
         self.invalidate_population();
