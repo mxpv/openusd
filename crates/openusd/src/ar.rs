@@ -1344,7 +1344,7 @@ pub fn join_package_relative_path(package_path: &str, packaged_path: &str) -> St
 /// The byte range of the innermost packaged path of `path`, or of the whole
 /// of `path` when it is not package-relative: the part a file extension or
 /// name is read from.
-fn innermost_span(path: &str) -> Range<usize> {
+pub(crate) fn innermost_span(path: &str) -> Range<usize> {
     if !is_package_relative_path(path) {
         return 0..path.len();
     }
