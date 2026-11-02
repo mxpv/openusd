@@ -187,6 +187,28 @@ pub(super) enum StageNotice {
     },
 }
 
+/// Whether a [`fixpoint`](StageComposition::fixpoint)'s caller drained the
+/// queue of recorded edits first, or runs inside the drain that took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Settled {
+    /// The queue was drained: a public read. Edits the fixpoint's own loads
+    /// queue are reconciled before its next pass.
+    Required,
+    /// A drain took the queue and is composing it. Edits the fixpoint's
+    /// loads queue go to that drain, which applies them in commit order.
+    Taken,
+}
+
+/// Why a [`fixpoint`](StageComposition::fixpoint) stopped before its pass
+/// settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Interrupted {
+    /// Its loads ran user code (a resolver, a file format) that committed to
+    /// a layer of the stage, queueing edits the drain it runs inside applies
+    /// first.
+    NewWork,
+}
+
 /// The stage's composed state: the loaded layers, the indices composed from
 /// them, and the edits recorded but not yet composed.
 ///
@@ -231,6 +253,16 @@ pub(super) struct StageComposition {
     outbox: RefCell<VecDeque<Notice>>,
     /// Whether a delivery is running.
     delivering: Cell<bool>,
+    /// Whether a drain is reconciling, so the composition is part-applied:
+    /// user code its loads run (a resolver, a file format) that reaches the
+    /// stage finds it busy.
+    reconciling: Cell<bool>,
+    /// Whether a layer load is running user code (a resolver, a file
+    /// format). An edit that code commits stays queued, since a drain
+    /// started from inside the load would apply it in the middle of the
+    /// caller's loading round: a read reconciles it before its next pass,
+    /// and any other caller leaves it to the next drain.
+    loading: Cell<bool>,
     /// How many times the recorded load failures were forgotten
     /// ([`retries`](Self::retries)).
     retries: Cell<u64>,
@@ -247,6 +279,8 @@ impl StageComposition {
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
             delivering: Cell::new(false),
+            reconciling: Cell::new(false),
+            loading: Cell::new(false),
             retries: Cell::new(0),
         }
     }
@@ -292,10 +326,12 @@ impl StageComposition {
 
     /// Deliver a stage commit's notifications through the layers' store, once
     /// the caller released the graph, and return whether it changed anything.
-    /// The commit reconciles first. An observer then reads the layers as it
-    /// left them, before a sink can commit again.
+    /// The commit reconciles first, unless something blocks the drain (see
+    /// [`reconcile`](Self::reconcile)), which leaves it queued for the next.
+    /// An observer then reads the layers as it left them, before a sink can
+    /// commit again.
     pub(super) fn deliver(&self, committed: sdf::Committed, hooks: &dyn CompositionHooks) -> bool {
-        self.reconcile(hooks);
+        self.reconcile(true, hooks);
         self.store.deliver(committed)
     }
 
@@ -349,7 +385,6 @@ impl StageComposition {
         demands: &mut Vec<pcp::Demand>,
         clips: &mut Vec<String>,
     ) -> Result<T, pcp::QueryError> {
-        self.assert_settled();
         let layers = self.layers.borrow();
         let view = layers.view()?;
         let mut cache = self.cache.borrow_mut();
@@ -415,6 +450,33 @@ impl StageComposition {
         self.pending.borrow().is_empty()
     }
 
+    /// Whether the composition answers for every recorded edit, and a read
+    /// can compose against it: none is queued, and neither a drain nor a
+    /// layer load is part-way through.
+    fn is_settled(&self) -> bool {
+        !self.reconciling.get() && !self.loading.get() && self.pending_is_empty()
+    }
+
+    /// [`process_pending`](Self::process_pending) for a fallible read. Fails
+    /// with [`sdf::LayerError::Busy`] from inside a read or an edit of one of
+    /// the stage's layers while edits of them are queued, which stay queued
+    /// for the next drain, and from user code a layer load runs (a resolver,
+    /// a file format), while the load or the drain it serves has the stage
+    /// part-composed.
+    pub(super) fn settle(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+        self.process_pending(hooks);
+        match self.is_settled() {
+            true => Ok(()),
+            false => Err(sdf::LayerError::Busy.into()),
+        }
+    }
+
+    /// Marks a layer load as running user code until the returned guard
+    /// drops, unless an enclosing load marked it already.
+    fn begin_load(&self) -> Option<sdf::StopRunning<'_>> {
+        (!self.loading.replace(true)).then(|| sdf::StopRunning(&self.loading))
+    }
+
     /// Takes the queued edits as an owned snapshot, leaving an empty queue.
     ///
     /// The snapshot is owned and the queue borrow is released before it
@@ -454,7 +516,7 @@ impl StageComposition {
         // once nothing is reconciling or delivering.
         let _hold = self.store.hold();
         loop {
-            let blocked = self.reconcile(hooks);
+            let blocked = self.reconcile(true, hooks);
             if blocked {
                 break;
             }
@@ -471,12 +533,27 @@ impl StageComposition {
 
     /// The reconciling half of [`process_pending`](Self::process_pending):
     /// compose every recorded outcome and queue its notice, in commit order,
-    /// running no user code. Returns whether the store blocked it.
-    pub(super) fn reconcile(&self, hooks: &dyn CompositionHooks) -> bool {
+    /// running no user code but the layer loads composition demands. Returns
+    /// whether it was blocked: by the store, by a drain or a layer load
+    /// already running, or by a borrow of the composition. The drain's or
+    /// the load's user code asked for this one, and what it queued waits for
+    /// that drain, after its own snapshot, or for the load's caller; a borrow
+    /// of the composition keeps it queued for the next drain.
+    ///
+    /// With `retry`, the edits it takes first forget the recorded load
+    /// failures. Those the drain's own loads commit later do not: such an
+    /// edit is committed before the failure its load records.
+    pub(super) fn reconcile(&self, retry: bool, hooks: &dyn CompositionHooks) -> bool {
+        if self.reconciling.get() || self.loading.get() || self.layers.is_borrowed() || self.cache.is_borrowed() {
+            return true;
+        }
         // No layer is freed, and so no sink of one runs, while transactions
         // are applied: a freed layer's sink could commit and be reconciled
         // ahead of the snapshot.
         let _hold = self.store.hold();
+        self.reconciling.set(true);
+        let _reconciling = sdf::StopRunning(&self.reconciling);
+        let mut retry = retry;
         while !self.pending_is_empty() {
             // A drain reads, and may load, the stage's layers. From inside a
             // read or an edit of one of them it would find the store held, so
@@ -498,7 +575,10 @@ impl StageComposition {
             // An edit changes the layers, so a target that previously failed to read
             // may now be readable: forget recorded load failures and drop the indices
             // that recorded one, so the next query re-demands and recomposes them.
-            let mut retried = if edited { self.forget_failed_loads() } else { None };
+            let mut retried = match edited && mem::take(&mut retry) {
+                true => self.forget_failed_loads(),
+                false => None,
+            };
             // Entries committed under one transaction id are contiguous — a
             // transaction's layers record together, and the id increases across
             // transactions — so grouping by adjacent equal id carves the queue into
@@ -951,6 +1031,7 @@ impl StageComposition {
     ///
     /// Returns whether a layer joined or a failure was newly marked.
     fn load_clips(&self, clips: &[String], hooks: &dyn CompositionHooks) -> bool {
+        let _loading = self.begin_load();
         let registry = self.layers.borrow().layer_registry().clone();
         let mut progress = false;
         // The clips that failed to open on an earlier read and open now.
@@ -1062,6 +1143,7 @@ impl StageComposition {
         if pending.is_empty() {
             return false;
         }
+        let _loading = self.begin_load();
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
@@ -1213,6 +1295,7 @@ impl StageComposition {
         mut demands: Vec<pcp::SublayerDemand>,
         hooks: &dyn CompositionHooks,
     ) -> (bool, Vec<sdf::Path>) {
+        let _loading = self.begin_load();
         // One cache scope spans the pass. Every probe and load of a package
         // within it shares one open of that package.
         let _scope = ar::CacheScope::begin();
@@ -1319,24 +1402,47 @@ impl StageComposition {
         self.layers.borrow().try_identifier(id).unwrap_or_default().to_string()
     }
 
-    /// Runs a composed query, driving on-demand layer loading to a fixpoint.
+    /// Runs a composed query on a settled stage, driving on-demand layer
+    /// loading to a fixpoint (see [`fixpoint`](Self::fixpoint)).
+    pub(super) fn query<T>(
+        &self,
+        query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        hooks: &dyn CompositionHooks,
+    ) -> Result<T, pcp::QueryError> {
+        match self.fixpoint(query, Settled::Required, hooks) {
+            Ok(result) => result,
+            Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
+        }
+    }
+
+    /// Runs `pass` to a fixpoint over on-demand layer loading.
     ///
     /// Each pass takes the graph shared and the cache mutably, mirroring how
     /// composition reads layer data while lazily building the index. A
     /// reference or payload arc to a not-yet-loaded layer records a demand
     /// instead of composing (the index is left uncached); after the pass the
-    /// borrows are released, the demanded layers are opened, and the query
+    /// borrows are released, the demanded layers are opened, and the pass
     /// re-runs. A value read naming a clip or manifest layer the graph does
     /// not hold reads nothing from it that pass, and the layer is opened
     /// before the next. The loop ends when a pass demands nothing, or when a
     /// demanded layer cannot be opened, so loading makes no progress.
     /// Composition thus drives layer loading: an un-visited subtree never
     /// loads.
-    pub(super) fn query<T>(
+    ///
+    /// Loading runs user code, which can commit to a layer of the stage.
+    /// Under [`Settled::Required`] the edits it queued are reconciled before
+    /// the next pass, so the answer never comes from stale composition; their
+    /// notices wait for the next delivery, since a read delivers nothing.
+    /// Under [`Settled::Taken`] the fixpoint stops with
+    /// [`Interrupted::NewWork`], for the drain it runs inside to apply them
+    /// in commit order. User code that commits on every load never lets a
+    /// [`Settled::Required`] fixpoint return.
+    pub(super) fn fixpoint<T>(
         &self,
-        mut query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        mut pass: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        settled: Settled,
         hooks: &dyn CompositionHooks,
-    ) -> Result<T, pcp::QueryError> {
+    ) -> Result<Result<T, pcp::QueryError>, Interrupted> {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
         let mut pending: Vec<pcp::Demand> = Vec::new();
@@ -1346,15 +1452,23 @@ impl StageComposition {
         // open of each package. A query that demands nothing, the usual one,
         // begins no scope.
         let mut scope = None;
+        // A load's edit is reconciled before the next pass, so the first
+        // pass is the one settledness is checked for.
+        if settled == Settled::Required {
+            self.assert_settled();
+        }
+        // No layer is freed, and so no sink of one runs, until the passes
+        // and the loads between them are over.
+        let _hold = self.store.hold();
         loop {
-            let result = self.query_pass(&mut query, &mut pending, &mut clips);
+            let result = self.query_pass(&mut pass, &mut pending, &mut clips);
             // The pass left a reference/payload arc uncomposed, or a clip unread,
             // pending these layers; open them and recompose. Each loader reports
             // false once a pass neither loads a layer nor newly marks one failed,
             // so the loop ends after an unopenable layer is marked failed and the
             // following pass recomposes without it.
             if pending.is_empty() && clips.is_empty() {
-                return result;
+                return Ok(result);
             }
             // Opening a layer adds it to the store, which a read or an edit of
             // any layer of the stage's registry holds. The demands go back to the
@@ -1362,13 +1476,35 @@ impl StageComposition {
             // again.
             if let Err(busy) = self.store.ensure_writable() {
                 self.cache.borrow_mut().swap_pending_loads(&mut pending);
-                return Err(busy.into());
+                return Ok(Err(busy.into()));
             }
             scope.get_or_insert_with(ar::CacheScope::begin);
             let loaded = self.load_demanded(&pending, hooks);
+            if settled == Settled::Taken && !self.pending_is_empty() {
+                return Err(Interrupted::NewWork);
+            }
             let clipped = self.load_clips(&clips, hooks);
-            if !(loaded || clipped) {
-                return result;
+            if !self.pending_is_empty() {
+                match settled {
+                    Settled::Taken => return Err(Interrupted::NewWork),
+                    Settled::Required => {
+                        // Reconciled without a delivery, which the next drain
+                        // makes, and with the demands the cache's, so a sweep
+                        // keeps the stacks this read's loads minted. A store a
+                        // read or an edit holds keeps the edits queued, and
+                        // the read fails as `settle` would.
+                        let mut cache = self.cache.borrow_mut();
+                        cache.swap_pending_loads(&mut pending);
+                        drop(cache);
+                        let blocked = self.reconcile(false, hooks);
+                        self.cache.borrow_mut().swap_pending_loads(&mut pending);
+                        if blocked {
+                            return Ok(Err(sdf::LayerError::Busy.into()));
+                        }
+                    }
+                }
+            } else if !(loaded || clipped) {
+                return Ok(result);
             }
             pending.clear();
             clips.clear();
@@ -1570,6 +1706,9 @@ impl StageComposition {
         // one muted by another spelling, its real path, was read, and leaves
         // the stage like one muted later.
         self.reclaim_unused_layers(hooks, pcp::Reclaim::Muted);
+        // The opened stage starts settled: an edit the loads' user code
+        // committed is reconciled.
+        self.process_pending(hooks);
     }
 
     /// Reads the load rules, applies `edit`, installs the result, and reclaims
@@ -1613,9 +1752,13 @@ impl StageComposition {
     /// Edits a drain left queued because a read or an edit held the stage's
     /// layers would make the access stale. That case panics in every build.
     fn assert_settled(&self) {
-        if self.pending.borrow().is_empty() {
+        if self.is_settled() {
             return;
         }
+        assert!(
+            !self.reconciling.get() && !self.loading.get(),
+            "the stage is read by user code a layer load runs (a resolver, a file format), while it is part-composed"
+        );
         assert!(
             self.store.ensure_writable().is_ok(),
             "the stage is read from inside a read or an edit of its registry's layers, with edits queued"

@@ -975,20 +975,30 @@ pub(crate) mod tests {
     /// has opened.
     pub(crate) fn counting_registry() -> (LayerRegistry, Rc<Cell<usize>>) {
         let opens = Rc::new(Cell::new(0));
-        let resolver = Counting {
-            inner: ar::DefaultResolver::new(),
-            opens: Rc::clone(&opens),
-        };
+        let count = Rc::clone(&opens);
+        let resolver = HookResolver::new(move |_| count.set(count.get() + 1));
         (LayerRegistry::new(Box::new(resolver)), opens)
     }
 
-    /// A filesystem resolver that counts the assets it opens.
-    struct Counting {
+    /// A filesystem resolver that calls its hook before opening each asset:
+    /// user code a layer load runs.
+    pub(crate) struct HookResolver {
         inner: ar::DefaultResolver,
-        opens: Rc<Cell<usize>>,
+        hook: Box<dyn Fn(&ar::ResolvedPath)>,
     }
 
-    impl ar::Resolver for Counting {
+    impl HookResolver {
+        /// A resolver calling `hook` with each asset's resolved path before
+        /// opening it.
+        pub(crate) fn new(hook: impl Fn(&ar::ResolvedPath) + 'static) -> Self {
+            Self {
+                inner: ar::DefaultResolver::new(),
+                hook: Box::new(hook),
+            }
+        }
+    }
+
+    impl ar::Resolver for HookResolver {
         fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
             self.inner.create_identifier(asset_path, anchor)
         }
@@ -1002,7 +1012,7 @@ pub(crate) mod tests {
         }
 
         fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-            self.opens.set(self.opens.get() + 1);
+            (self.hook)(resolved_path);
             self.inner.open_asset(resolved_path)
         }
     }

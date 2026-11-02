@@ -802,6 +802,11 @@ impl<T> HeldCell<T> {
             _hold: hold,
         }
     }
+
+    /// Whether the value is borrowed, shared or mutably.
+    pub(crate) fn is_borrowed(&self) -> bool {
+        self.cell.try_borrow_mut().is_err()
+    }
 }
 
 /// A shared borrow of a [`HeldCell`].

@@ -1181,17 +1181,10 @@ impl Stage {
         self.composition.process_pending(self);
     }
 
-    /// [`process_pending`](Self::process_pending) for a fallible read. Fails
-    /// with [`sdf::LayerError::Busy`] from inside a read or an edit of one of
-    /// the stage's layers while edits of them are queued, which stay queued
-    /// for the next drain.
+    /// [`process_pending`](Self::process_pending) for a fallible read (see
+    /// [`StageComposition::settle`]).
     pub(crate) fn settle(&self) -> Result<(), pcp::QueryError> {
-        self.process_pending();
-        if self.composition.pending_is_empty() {
-            Ok(())
-        } else {
-            Err(sdf::LayerError::Busy.into())
-        }
+        self.composition.settle(self)
     }
 }
 
@@ -9579,6 +9572,242 @@ def "P" (payload = @./clip.usda@</M>) {}
         let size = proto.append_path("Child")?.append_property("size")?;
         assert!(stage.has_spec(&size)?);
         assert_eq!(stage.spec_type(size)?, Some(sdf::SpecType::Attribute));
+        Ok(())
+    }
+    /// A hook a stage's resolver runs once, on opening one file.
+    type Hook = Rc<Cell<Option<Box<dyn FnOnce()>>>>;
+
+    /// The stage over `root` in `dir`, whose other files are `files`,
+    /// opened through a resolver that runs the returned hook on opening
+    /// `name`.
+    fn hooked_stage(dir: &FsPath, root: &str, files: &[(&str, &str)], name: &'static str) -> Result<(Stage, Hook)> {
+        fs::write(dir.join("root.usda"), root)?;
+        for (file, content) in files {
+            fs::write(dir.join(file), content)?;
+        }
+        let hook: Hook = Rc::default();
+        let run = Rc::clone(&hook);
+        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
+            if resolved.file_name().is_some_and(|file| file == name)
+                && let Some(hook) = run.take()
+            {
+                hook();
+            }
+        });
+        let stage = Stage::builder()
+            .resolver(resolver)
+            .open(&dir.join("root.usda").to_string_lossy())?;
+        Ok((stage, hook))
+    }
+
+    /// Defines `path` in `layer` through its handle, as user code outside the
+    /// stage would.
+    fn define_raw(layer: &sdf::LayerHandle, path: &str) {
+        layer
+            .edit(|e| {
+                sdf::PrimSpec::new(e.data_mut(), path, sdf::Specifier::Def, "")?;
+                Ok(())
+            })
+            .expect("the layer is free");
+    }
+
+    /// Sublayers `b.usda` under `layer` through its handle.
+    fn sublayer_raw(layer: &sdf::LayerHandle) {
+        layer
+            .edit(|e| {
+                e.pseudo_root_mut()
+                    .expect("a layer has a pseudo-root")
+                    .set_sublayers(["b.usda"]);
+                Ok(())
+            })
+            .expect("the layer is free");
+    }
+
+    /// The paths each committed change resyncs, in delivery order, recorded
+    /// by a sink added to `stage`.
+    fn record_resyncs(stage: &Stage) -> Rc<RefCell<Vec<Vec<String>>>> {
+        let resyncs = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&resyncs);
+        stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+            sink.borrow_mut()
+                .push(change.resynced.iter().map(ToString::to_string).collect());
+        });
+        resyncs
+    }
+
+    /// A root prim, and the sublayer the drain tests add.
+    const PLAIN: &str = "#usda 1.0\ndef \"P\" {}\n";
+    const SUBLAYER: (&str, &str) = ("b.usda", "#usda 1.0\ndef \"B\" {}\n");
+    const REFERENCED: &str = "#usda 1.0\ndef \"P\" (references = @a.usda@</A>) {}\n";
+    const TARGET: &str = "#usda 1.0\ndef \"A\" {\n    def \"Inner\" {}\n}\n";
+
+    /// A read whose layer load commits to a layer of the stage answers from
+    /// the composition that edit makes, and the edit's notice waits for the
+    /// next drain to deliver it.
+    #[test]
+    fn read_reconciles_load_commit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        hook.replace(Some(Box::new(move || define_raw(&root, "/Late"))));
+        let resyncs = record_resyncs(&stage);
+
+        assert!(stage.prim("/P/Inner")?.is_valid()?);
+        assert!(
+            stage.composition.pending_is_empty(),
+            "the read reconciled the load's edit"
+        );
+        assert!(resyncs.borrow().is_empty(), "a read delivers nothing");
+        assert!(stage.prim("/Late")?.is_valid()?);
+        stage.process_pending();
+        assert_eq!(*resyncs.borrow(), [vec!["/Late".to_owned()]]);
+        Ok(())
+    }
+
+    /// A pass the drain it runs inside settles stops when its loads commit
+    /// to a layer of the stage, leaving the edit queued for that drain.
+    #[test]
+    fn taken_fixpoint_interrupts() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        hook.replace(Some(Box::new(move || define_raw(&root, "/Late"))));
+
+        let inner = sdf::path("/P/Inner")?;
+        let stopped = stage.composition.fixpoint(
+            |view, cache| cache.is_populated(view, &inner),
+            composition::Settled::Taken,
+            &stage,
+        );
+        assert!(matches!(stopped, Err(composition::Interrupted::NewWork)));
+        assert!(!stage.composition.pending_is_empty(), "the edit waits for the drain");
+        stage.process_pending();
+        assert!(stage.prim("/Late")?.is_valid()?);
+        Ok(())
+    }
+
+    /// User code a drain's layer load runs finds the stage part-composed: a
+    /// fallible read fails with `Busy`, and an infallible accessor panics.
+    /// The drain then finishes.
+    #[test]
+    fn drain_reentry_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
+        let seen = Rc::new(Cell::new(None));
+        let reader = stage.clone();
+        let record = Rc::clone(&seen);
+        hook.replace(Some(Box::new(move || {
+            let read = reader.prim("/P").expect("a prim path").is_valid();
+            let busy = matches!(read, Err(crate::Error::Query(error)) if error.is_busy());
+            let panicked = panics_part_composed(|| {
+                reader.layer_count();
+            });
+            record.set(Some((busy, panicked)));
+        })));
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        sublayer_raw(&root);
+
+        stage.process_pending();
+        assert_eq!(seen.get(), Some((true, true)), "busy, then a panic");
+        assert!(stage.prim("/B")?.is_valid()?, "the drain finished");
+        Ok(())
+    }
+
+    /// An edit a drain's layer load commits is applied after the edits the
+    /// drain took, and its notice follows theirs.
+    #[test]
+    fn drain_load_commit_ordered() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let late = root.clone();
+        hook.replace(Some(Box::new(move || define_raw(&late, "/C"))));
+        let resyncs = record_resyncs(&stage);
+
+        // A: a sublayer whose load commits C. B: a prim, queued behind A.
+        // Both queue while the stage's layers are borrowed, and one drain
+        // takes them.
+        {
+            let _layers = stage.layers();
+            sublayer_raw(&root);
+            define_raw(&root, "/Q");
+        }
+        assert!(resyncs.borrow().is_empty(), "queued behind the borrow");
+        stage.process_pending();
+
+        let resyncs = resyncs.borrow();
+        assert_eq!(resyncs.len(), 3, "{resyncs:?}");
+        assert_eq!(resyncs[1], ["/Q"]);
+        assert_eq!(resyncs[2], ["/C"]);
+        Ok(())
+    }
+    /// Whether `read` panics with the message a part-composed stage gives.
+    fn panics_part_composed(read: impl FnOnce()) -> bool {
+        let payload = panic::catch_unwind(AssertUnwindSafe(read)).err();
+        payload
+            .and_then(|payload| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|message| message.contains("user code a layer load runs"))
+            })
+            .unwrap_or(false)
+    }
+
+    /// User code a read's layer load runs finds the stage part-composed, as
+    /// one a drain's load runs does.
+    #[test]
+    fn read_load_reentry_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
+        let seen = Rc::new(Cell::new(None));
+        let reader = stage.clone();
+        let record = Rc::clone(&seen);
+        hook.replace(Some(Box::new(move || {
+            let read = reader.prim("/P").expect("a prim path").is_valid();
+            let busy = matches!(read, Err(crate::Error::Query(error)) if error.is_busy());
+            record.set(Some((
+                busy,
+                panics_part_composed(|| {
+                    reader.layer_count();
+                }),
+            )));
+        })));
+
+        assert!(stage.prim("/P/Inner")?.is_valid()?);
+        assert_eq!(seen.get(), Some((true, true)), "busy, then a panic");
+        Ok(())
+    }
+
+    /// A resolver that commits on every open of an asset that cannot be read
+    /// does not keep a read retrying it: the edit was committed before the
+    /// failure it would clear.
+    #[test]
+    fn load_commit_keeps_failure() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"P\" (references = @broken.usda@</X>) {}\n",
+        )?;
+        fs::write(dir.path().join("broken.usda"), "not a layer")?;
+        let root: Rc<RefCell<Option<sdf::LayerHandle>>> = Rc::default();
+        let opens = Rc::new(Cell::new(0));
+        let (log, count) = (Rc::clone(&root), Rc::clone(&opens));
+        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
+            if resolved.file_name().is_some_and(|file| file == "broken.usda") {
+                count.set(count.get() + 1);
+                assert!(count.get() < 10, "the read keeps retrying the asset");
+                let layer = log.borrow().clone().expect("the stage is open");
+                define_raw(&layer, &format!("/Log{}", count.get()));
+            }
+        });
+        let stage = Stage::builder()
+            .resolver(resolver)
+            .open(&dir.path().join("root.usda").to_string_lossy())?;
+        root.replace(stage.layer_handle(stage.root_layer().identifier()));
+
+        assert!(stage.prim("/P")?.is_valid()?);
+        assert_eq!(opens.get(), 1);
+        assert!(stage.prim("/Log1")?.is_valid()?);
         Ok(())
     }
 }
