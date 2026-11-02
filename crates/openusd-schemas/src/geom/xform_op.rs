@@ -283,6 +283,11 @@ impl XformOp {
         self.query.attribute()
     }
 
+    /// The query the op reads its value through.
+    pub fn query(&self) -> &usd::AttributeQuery {
+        &self.query
+    }
+
     /// The op attribute's name, such as `xformOp:translate:pivot` (C++
     /// `GetName`).
     pub fn name(&self) -> &str {

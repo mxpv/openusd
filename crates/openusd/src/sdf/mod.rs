@@ -471,6 +471,14 @@ pub fn compare_sample_times(a: f64, b: f64) -> Ordering {
     zero_folded(a).total_cmp(&zero_folded(b))
 }
 
+/// Sorts `times` into the order [`compare_sample_times`] gives and keeps one
+/// entry per time. Of times that order calls equal, the first in `times`
+/// survives: of `[0.0, -0.0]`, `0.0`.
+pub fn normalize_sample_times(times: &mut Vec<f64>) {
+    times.sort_by(|a, b| compare_sample_times(*a, *b));
+    times.dedup_by(|a, b| compare_sample_times(*a, *b).is_eq());
+}
+
 /// Orders `samples` as a [`TimeSampleMap`] requires. A repeated time keeps
 /// the spelling it was first given and the sample it was last given, as
 /// assigning into C++'s `std::map` does, so the two zeros collapse the way
@@ -513,6 +521,17 @@ pub type LayerData = Box<dyn AbstractData>;
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn normalize_sample_times_order() {
+        let mut times = vec![10.0, 0.0, f64::NAN, -0.0, 10.0, f64::NAN];
+        normalize_sample_times(&mut times);
+        assert_eq!(times.len(), 3);
+        // Compared by bits: `-0.0 == 0.0` would accept either zero.
+        assert_eq!(times[0].to_bits(), 0.0_f64.to_bits(), "the first zero survives");
+        assert_eq!(times[1], 10.0);
+        assert!(times[2].is_nan(), "NaNs of the same bits are one time");
+    }
 
     #[test]
     fn normalize_time_samples_order() {

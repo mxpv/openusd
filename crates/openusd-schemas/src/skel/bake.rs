@@ -1082,8 +1082,7 @@ fn bake_times(mut times: Vec<f64>, playback: &[f64], interval: gf::Interval) -> 
                 .map(|(bound, _)| bound),
         );
     }
-    times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
-    times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
+    sdf::normalize_sample_times(&mut times);
     times.into_iter().map(|time| Some(TimeCode::new(time))).collect()
 }
 

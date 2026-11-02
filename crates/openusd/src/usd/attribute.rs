@@ -1217,21 +1217,23 @@ impl Attribute {
     /// These are the times a consumer sampling several attributes together
     /// steps through — the components of a joint transform, the ops of a
     /// transform stack. The attributes may belong to different stages.
-    pub fn unioned_time_samples(attributes: &[Attribute]) -> Result<Vec<f64>> {
+    pub fn unioned_time_samples<'a>(attributes: impl IntoIterator<Item = &'a Attribute>) -> Result<Vec<f64>> {
         Self::unioned_time_samples_in(attributes, f64::NEG_INFINITY..=f64::INFINITY)
     }
 
     /// The authored sample times of every attribute in `attributes` within
     /// `interval`, as one ascending list without repeats. Mirrors C++
     /// `UsdAttribute::GetUnionedTimeSamplesInInterval`.
-    pub fn unioned_time_samples_in(attributes: &[Attribute], interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+    pub fn unioned_time_samples_in<'a>(
+        attributes: impl IntoIterator<Item = &'a Attribute>,
+        interval: impl Into<gf::Interval>,
+    ) -> Result<Vec<f64>> {
         let interval = interval.into();
         let mut times = Vec::new();
         for attribute in attributes {
             times.extend(attribute.time_samples_in(interval)?);
         }
-        times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
-        times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
+        sdf::normalize_sample_times(&mut times);
         Ok(times)
     }
 
@@ -1528,13 +1530,56 @@ impl AttributeQuery {
 
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttributeQuery::GetTimeSamples`.
-    // TODO(perf): walks the attribute's sources again on every call. The
-    // cached source already knows where the samples are, so it could answer
-    // the times itself, as C++ `UsdAttributeQuery::GetTimeSamples` does from
-    // its resolve info; that is what would let a consumer holding a query per
-    // attribute enumerate sample times without a walk per attribute per call.
+    // TODO(perf): this and the query's other time reads walk the attribute's
+    // sources from the strongest on every call. C++ `UsdAttributeQuery` starts
+    // that walk at the node its cached resolve info names. The cached
+    // `pcp::AttributeValueSource` holds no times for two sources: a composing
+    // `default`, which it collapses into a static value, and the per-time
+    // sources (value clips, composing `timeSamples`). Answering from the
+    // cache needs both to keep their times, or a memo of the times under the
+    // same prim-revision stamp.
     pub fn time_sample_times(&self) -> Result<Vec<f64>> {
         self.attr.time_sample_times()
+    }
+
+    /// The authored sample times within `interval`, in ascending order. Mirrors
+    /// C++ `UsdAttributeQuery::GetTimeSamplesInInterval`.
+    ///
+    /// Each end of the interval is closed or open as the [`gf::Interval`]
+    /// says; [`Attribute::time_samples_in`] has examples.
+    pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
+        self.attr.time_samples_in(interval)
+    }
+
+    /// The authored sample times of every query in `queries`, as one ascending
+    /// list without repeats. Mirrors C++
+    /// `UsdAttributeQuery::GetUnionedTimeSamples`.
+    pub fn unioned_time_samples<'a>(queries: impl IntoIterator<Item = &'a AttributeQuery>) -> Result<Vec<f64>> {
+        Attribute::unioned_time_samples(queries.into_iter().map(AttributeQuery::attribute))
+    }
+
+    /// The authored sample times of every query in `queries` within
+    /// `interval`, as one ascending list without repeats. Mirrors C++
+    /// `UsdAttributeQuery::GetUnionedTimeSamplesInInterval`.
+    pub fn unioned_time_samples_in<'a>(
+        queries: impl IntoIterator<Item = &'a AttributeQuery>,
+        interval: impl Into<gf::Interval>,
+    ) -> Result<Vec<f64>> {
+        Attribute::unioned_time_samples_in(queries.into_iter().map(AttributeQuery::attribute), interval)
+    }
+
+    /// The number of authored time samples, zero when none. Mirrors C++
+    /// `UsdAttributeQuery::GetNumTimeSamples`.
+    pub fn num_time_samples(&self) -> Result<usize> {
+        self.attr.num_time_samples()
+    }
+
+    /// The pair of authored sample times bracketing `time`, or `None` when no
+    /// samples are authored. Mirrors C++
+    /// `UsdAttributeQuery::GetBracketingTimeSamples`; the pair collapses as
+    /// [`Attribute::bracketing_time_samples`] describes.
+    pub fn bracketing_time_samples(&self, time: impl Into<TimeCode>) -> Result<Option<(f64, f64)>> {
+        self.attr.bracketing_time_samples(time)
     }
 
     /// Resolves the value at stage `time` through the cached source, rebuilding
@@ -1738,6 +1783,14 @@ mod tests {
         assert!(Attribute::unioned_time_samples_in(&attributes, 5.0..5.0)?.is_empty());
         assert!(Attribute::unioned_time_samples_in(&attributes, 10.0..=0.0)?.is_empty());
         assert!(Attribute::unioned_time_samples(&[])?.is_empty());
+
+        // The queries over the same attributes read the same union.
+        let queries: Vec<_> = attributes.iter().map(Attribute::query).collect();
+        assert_eq!(
+            AttributeQuery::unioned_time_samples_in(&queries, 0.0..10.0)?,
+            vec![0.0, 5.0]
+        );
+        assert_eq!(AttributeQuery::unioned_time_samples(&queries)?, vec![0.0, 5.0, 10.0]);
         Ok(())
     }
 
@@ -2750,6 +2803,46 @@ class Marker "Marker"
         }
         assert_eq!(q.get_at::<f64>(TimeCode::new(10.0))?, Some(1.0));
         assert_eq!(q.get_at::<f64>(TimeCode::new(20.0))?, Some(3.0));
+        Ok(())
+    }
+
+    /// A query's interval, count and bracketing reads answer in stage time
+    /// through an arc offset, as the attribute's do.
+    #[test]
+    fn query_samples_in() -> Result<()> {
+        let stage = stage()?;
+        stage
+            .define_prim("/Source")?
+            .create_attribute("x", "double")?
+            .set_at(0.0_f64, TimeCode::new(0.0))?
+            .set_at(5.0_f64, TimeCode::new(5.0))?
+            .set_at(10.0_f64, TimeCode::new(10.0))?;
+        stage.define_prim("/Prim")?.set_metadata(
+            sdf::FieldKey::References.as_str(),
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                prim_path: sdf::path("/Source")?,
+                layer_offset: sdf::LayerOffset::new(10.0, 1.0),
+                ..Default::default()
+            }])),
+        )?;
+
+        let attr = stage.attribute("/Prim.x")?;
+        let q = attr.query();
+        assert_eq!(q.time_samples_in(12.0..=18.0)?, vec![15.0]);
+        assert_eq!(q.time_samples_in(10.0..=15.0)?, vec![10.0, 15.0]);
+        assert_eq!(q.time_samples_in(10.0..15.0)?, vec![10.0]);
+        assert_eq!(q.time_samples_in(12.0..=18.0)?, attr.time_samples_in(12.0..=18.0)?);
+        assert_eq!(q.num_time_samples()?, 3);
+
+        // Before, on, between and after the samples.
+        assert_eq!(q.bracketing_time_samples(0.0)?, Some((10.0, 10.0)));
+        assert_eq!(q.bracketing_time_samples(15.0)?, Some((15.0, 15.0)));
+        assert_eq!(q.bracketing_time_samples(17.0)?, Some((15.0, 20.0)));
+        assert_eq!(q.bracketing_time_samples(30.0)?, Some((20.0, 20.0)));
+
+        let unsampled = stage.create_attribute("/Prim.y", "double")?.set(1.0_f64)?.query();
+        assert_eq!(unsampled.num_time_samples()?, 0);
+        assert_eq!(unsampled.bracketing_time_samples(0.0)?, None);
         Ok(())
     }
 

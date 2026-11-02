@@ -529,8 +529,7 @@ impl XformQuery {
     /// The times within `interval` at which an op authors a sample, ascending
     /// (C++ `GetTimeSamplesInInterval`).
     pub fn time_samples_in(&self, interval: impl Into<gf::Interval>) -> Result<Vec<f64>> {
-        let attrs: Vec<usd::Attribute> = self.ops.iter().map(|op| op.attribute().clone()).collect();
-        usd::Attribute::unioned_time_samples_in(&attrs, interval)
+        usd::AttributeQuery::unioned_time_samples_in(self.ops.iter().map(XformOp::query), interval)
     }
 
     /// `true` when the attribute named `name` is one of the ops (C++

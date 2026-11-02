@@ -220,8 +220,7 @@ impl XformCache {
                 break;
             }
         }
-        times.sort_by(|a, b| sdf::compare_sample_times(*a, *b));
-        times.dedup_by(|a, b| sdf::compare_sample_times(*a, *b).is_eq());
+        sdf::normalize_sample_times(&mut times);
         Ok(times)
     }
 
