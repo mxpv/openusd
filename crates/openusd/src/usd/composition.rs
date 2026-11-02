@@ -28,7 +28,7 @@
 //! enforcement, since choosing the wrong operation stays a caller's mistake to
 //! make.
 
-use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::mem;
 use std::rc::Rc;
@@ -195,13 +195,13 @@ pub(super) enum StageNotice {
 /// appends to the queue as a commit lands, with the graph already borrowed.
 pub(super) struct StageComposition {
     /// The loaded layers and their sublayer DAG.
-    layers: RefCell<pcp::LayerGraph>,
+    layers: sdf::HeldCell<pcp::LayerGraph>,
     /// The store holding the graph's layers, kept beside the graph's cell so a
-    /// [`pcp::LayerView`] can borrow both for as long as it lives: a `Ref` of
+    /// [`pcp::LayerView`] can borrow both for as long as it lives: a borrow of
     /// the graph cannot lend the graph's own store for that long.
     store: Rc<sdf::LayerStore>,
     /// Lazily-built composition cache of per-prim indices and contexts.
-    cache: RefCell<pcp::IndexCache>,
+    cache: sdf::HeldCell<pcp::IndexCache>,
     /// Layer edits recorded by each layer's recorder (subscribed by
     /// [`intern_layer`](Self::intern_layer)) as their commits land, awaiting
     /// composed processing by [`process_pending`](Self::process_pending).
@@ -239,10 +239,11 @@ pub(super) struct StageComposition {
 impl StageComposition {
     /// Wraps a freshly built graph and cache.
     pub(super) fn new(layers: pcp::LayerGraph, cache: pcp::IndexCache) -> Self {
+        let store = Rc::clone(layers.store());
         Self {
-            store: Rc::clone(layers.store()),
-            layers: RefCell::new(layers),
-            cache: RefCell::new(cache),
+            layers: sdf::HeldCell::new(layers, Rc::clone(&store)),
+            cache: sdf::HeldCell::new(cache, Rc::clone(&store)),
+            store,
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
             delivering: Cell::new(false),
@@ -254,14 +255,14 @@ impl StageComposition {
     // a drain nor the index cache is involved.
 
     /// The registry every asset path resolves through.
-    pub(super) fn layer_registry(&self) -> Ref<'_, sdf::LayerRegistry> {
-        Ref::map(self.layers.borrow(), pcp::LayerGraph::layer_registry)
+    pub(super) fn layer_registry(&self) -> sdf::Held<'_, sdf::LayerRegistry> {
+        sdf::Held::map(self.layers.borrow(), pcp::LayerGraph::layer_registry)
     }
 
     // Settled operations: the caller has already drained.
 
     /// The layer graph, for a caller that has completed `process_pending`.
-    pub(super) fn settled_graph(&self) -> Ref<'_, pcp::LayerGraph> {
+    pub(super) fn settled_graph(&self) -> sdf::Held<'_, pcp::LayerGraph> {
         self.assert_settled();
         self.layers.borrow()
     }
@@ -299,7 +300,7 @@ impl StageComposition {
     }
 
     /// The composition cache, for a caller that has completed `process_pending`.
-    pub(super) fn settled_cache(&self) -> Ref<'_, pcp::IndexCache> {
+    pub(super) fn settled_cache(&self) -> sdf::Held<'_, pcp::IndexCache> {
         self.assert_settled();
         self.cache.borrow()
     }
@@ -317,7 +318,7 @@ impl StageComposition {
     /// 2. the cache's, in its own order — one-shot collection diagnostics,
     ///    then per-prim build diagnostics, then the transient query channel.
     ///
-    /// Both borrows are taken here, beside the two `RefCell`s, so no caller has
+    /// Both borrows are taken here, beside the two cells, so no caller has
     /// to hold one across the other. The caller still owes the other half of
     /// the settled protocol — pending edits drained first — which
     /// [`assert_settled`](Self::assert_settled) checks in debug builds.
@@ -330,7 +331,7 @@ impl StageComposition {
 
     /// The composition cache mutably, for a settled mutation that touches the
     /// cache alone (installing load rules).
-    fn settled_cache_mut(&self) -> RefMut<'_, pcp::IndexCache> {
+    fn settled_cache_mut(&self) -> sdf::HeldMut<'_, pcp::IndexCache> {
         self.assert_settled();
         self.cache.borrow_mut()
     }
@@ -379,7 +380,7 @@ impl StageComposition {
     /// queued work: a transaction resolving its target, or a sublayer-metadata
     /// edit whose own commit is what queues the next edit. A drain here would
     /// recompose against a half-applied edit.
-    pub(super) fn authoring_graph(&self) -> Ref<'_, pcp::LayerGraph> {
+    pub(super) fn authoring_graph(&self) -> sdf::Held<'_, pcp::LayerGraph> {
         self.layers.borrow()
     }
 
@@ -444,6 +445,9 @@ impl StageComposition {
         if self.pending_is_empty() && self.outbox.borrow().is_empty() {
             return;
         }
+        // A layer freed while the drain or a delivery runs drops at the end,
+        // once nothing is reconciling or delivering.
+        let _hold = self.store.hold();
         loop {
             let blocked = self.reconcile(hooks);
             if blocked {
@@ -464,6 +468,10 @@ impl StageComposition {
     /// compose every recorded outcome and queue its notice, in commit order,
     /// running no user code. Returns whether the store blocked it.
     pub(super) fn reconcile(&self, hooks: &dyn CompositionHooks) -> bool {
+        // No layer is freed, and so no sink of one runs, while transactions
+        // are applied: a freed layer's sink could commit and be reconciled
+        // ahead of the snapshot.
+        let _hold = self.store.hold();
         while !self.pending_is_empty() {
             // A drain reads, and may load, the stage's layers. From inside a
             // read or an edit of one of them it would find the store held, so
@@ -610,6 +618,10 @@ impl StageComposition {
         if self.delivering.replace(true) {
             return;
         }
+        // A sink can drop a layer's last handle; the layer is freed once the
+        // delivery is over. Declared before the running flag, so the flag is
+        // cleared first and a drain a freed layer's sink starts delivers.
+        let _hold = self.store.hold();
         let _running = sdf::StopRunning(&self.delivering);
         loop {
             let next = self.outbox.borrow_mut().pop_front();
@@ -1610,6 +1622,7 @@ impl StageComposition {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::panic::{self, AssertUnwindSafe};
 
     use super::*;
 
@@ -1785,8 +1798,13 @@ mod tests {
                 true
             }
             fn notify(&self, _notice: CompositionNotice) {
-                self.1
-                    .set(self.0.layers.try_borrow_mut().is_ok() && self.0.cache.try_borrow_mut().is_ok());
+                // A mutable borrow of each cell succeeds only while neither is
+                // borrowed.
+                let free = panic::catch_unwind(AssertUnwindSafe(|| {
+                    drop(self.0.layers.borrow_mut());
+                    drop(self.0.cache.borrow_mut());
+                }));
+                self.1.set(free.is_ok());
             }
         }
 

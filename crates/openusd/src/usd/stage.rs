@@ -38,7 +38,7 @@
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::borrow::Cow;
-use std::cell::{Cell, OnceCell, Ref, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -4109,7 +4109,7 @@ impl Stage {
 
     /// Borrows the stage's composition cache, first draining any pending layer
     /// edits so the cache reflects every commit before it is read.
-    pub(crate) fn cache(&self) -> Ref<'_, pcp::IndexCache> {
+    pub(crate) fn cache(&self) -> sdf::Held<'_, pcp::IndexCache> {
         self.process_pending();
         self.composition.settled_cache()
     }
@@ -4250,7 +4250,7 @@ impl Stage {
     /// (sublayers, offsets, relocates) leaves the topology stale until then. The
     /// drain is a no-op when nothing is pending. The graph's structure only:
     /// [`layer_view`](Self::layer_view) reads the layers' content too.
-    pub(crate) fn layers(&self) -> Ref<'_, pcp::LayerGraph> {
+    pub(crate) fn layers(&self) -> sdf::Held<'_, pcp::LayerGraph> {
         self.process_pending();
         self.composition.settled_graph()
     }
@@ -7984,6 +7984,87 @@ def "P" (payload = @./clip.usda@</M>) {}
         })?;
         assert!(stage.prim("/X")?.is_valid()?);
         assert_eq!(retried.get(), 0);
+        Ok(())
+    }
+
+    /// A layer whose last handle a sink drops while the stage delivers to it
+    /// is freed once the delivery is over, with no borrow of the stage held:
+    /// its own sink, which reads and authors the stage as it drops, gets an
+    /// answer, and the edit it makes is delivered.
+    #[test]
+    fn freed_after_delivery() -> Result<()> {
+        struct ReadOnDrop {
+            stage: Stage,
+            root: String,
+            read: Rc<Cell<Option<bool>>>,
+        }
+        impl sdf::LayerSink for ReadOnDrop {}
+        impl Drop for ReadOnDrop {
+            fn drop(&mut self) {
+                let read = self.stage.prim("/Child").is_ok();
+                let authored = self.stage.edit_layer(&self.root, |e| {
+                    sdf::PrimSpec::new(e.data_mut(), "/Late", sdf::Specifier::Def, "")?;
+                    Ok(())
+                });
+                self.read.set(Some(read && authored.is_ok()));
+            }
+        }
+        /// Drops the extra layer's handle when the edit target changes, then
+        /// reads the stage inside the delivery.
+        struct DropOnTarget {
+            handle: RefCell<Option<sdf::LayerHandle>>,
+            read: Rc<Cell<Option<bool>>>,
+            during: Rc<Cell<Option<(bool, bool)>>>,
+            late: Rc<Cell<bool>>,
+        }
+        impl StageSink for DropOnTarget {
+            fn after_commit(&self, _: &Stage, change: &usd::CommittedChange<'_>) {
+                self.late
+                    .set(self.late.get() || change.resynced.iter().any(|path| path.as_str() == "/Late"));
+            }
+            fn edit_target_changed(&self, stage: &Stage) {
+                drop(self.handle.borrow_mut().take());
+                // Each read releases a borrow of the layers, which sweeps
+                // when nothing holds the sweeps.
+                drop(stage.root_layer());
+                let answered = stage.prim("/Child").is_ok();
+                self.during.set(Some((answered, self.read.get().is_none())));
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"Child\" (references = @ref.usda@</R>) {}\n",
+        )?;
+        fs::write(dir.path().join("ref.usda"), "#usda 1.0\ndef \"R\" {}\n")?;
+        let registry = sdf::LayerRegistry::default();
+        let root = dir.path().join("root.usda");
+        let stage = Stage::builder()
+            .registry(registry.clone())
+            .open(&root.to_string_lossy())?;
+        let read = Rc::new(Cell::new(None));
+        let mut extra = sdf::Layer::new_anonymous("extra.usda");
+        extra.add_sink(ReadOnDrop {
+            stage: stage.clone(),
+            root: stage.root_layer().identifier().to_owned(),
+            read: Rc::clone(&read),
+        });
+        let during = Rc::new(Cell::new(None));
+        let late = Rc::new(Cell::new(false));
+        stage.add_sink(DropOnTarget {
+            handle: RefCell::new(registry.adopt(extra).ok()),
+            read: Rc::clone(&read),
+            during: Rc::clone(&during),
+            late: Rc::clone(&late),
+        });
+        let target = stage
+            .prim("/Child")?
+            .edit_target_for_arc(usd::EditTargetArc::Reference)?;
+        stage.set_edit_target(target)?;
+        assert_eq!(during.get(), Some((true, true)), "held through the delivery");
+        assert_eq!(read.get(), Some(true), "freed after the delivery, reading the stage");
+        assert!(late.get(), "the edit the freed sink made was delivered");
         Ok(())
     }
 

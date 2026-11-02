@@ -9,13 +9,15 @@
 //! next [`sweep`](LayerStore::sweep) and its epoch moves on. A key kept from
 //! before never names the layer the slot holds next.
 
-use std::cell::{BorrowMutError, Ref, RefCell, RefMut};
+use std::cell::{BorrowMutError, Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::mem;
+use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::rc::{Rc, Weak};
 use std::slice;
+use std::thread;
 
 use crate::ar;
 
@@ -124,6 +126,9 @@ pub(crate) struct LayerStore {
     /// The `after_commit` notifications of the registry's edits, in commit
     /// order.
     dispatch: Dispatch,
+    /// How many [`SweepHold`]s are live. While any is, a sweep frees
+    /// nothing.
+    holds: Cell<usize>,
 }
 
 /// The slot arena and its indexes.
@@ -402,7 +407,8 @@ impl Drop for Subscription {
 
 /// A shared borrow of a store's layers, through which a caller holding
 /// several handles reads them all under one borrow. Dropped, it releases the
-/// borrow and frees the slots whose last handle dropped while it was held.
+/// borrow and frees the slots whose last handle dropped while it was held,
+/// unless a [`SweepHold`] is live, whose last release frees them.
 pub(crate) struct StoreRead<'a> {
     /// The borrow, `None` only while the read drops.
     slots: Option<Ref<'a, Slots>>,
@@ -522,9 +528,16 @@ impl LayerStore {
         self.slots.try_borrow_mut().map(drop).map_err(|_| LayerError::Busy)
     }
 
+    /// Hold the store's sweeps until the returned guard drops (see
+    /// [`SweepHold`]).
+    pub(crate) fn hold(&self) -> SweepHold<'_> {
+        self.holds.set(self.holds.get() + 1);
+        SweepHold(self)
+    }
+
     /// [`sweep`](Self::sweep) when a handle dropped while the store was
-    /// borrowed left a slot to free. A no-op under an enclosing borrow, whose
-    /// own release sweeps.
+    /// borrowed left a slot to free. A no-op under an enclosing borrow or a
+    /// live hold, whose release sweeps.
     fn sweep_dead(&self) {
         if !self.dead.borrow().is_empty() {
             self.sweep();
@@ -533,8 +546,12 @@ impl LayerStore {
 
     /// Free every slot whose last handle has dropped, and apply the
     /// subscriptions that ended while the store was borrowed. A no-op while
-    /// the store is borrowed; the next sweep frees what this one skipped.
+    /// the store is borrowed or a [`SweepHold`] lives; the next sweep frees
+    /// what this one skipped.
     pub(crate) fn sweep(&self) {
+        if self.holds.get() > 0 {
+            return;
+        }
         let Ok(mut slots) = self.slots_mut() else {
             return;
         };
@@ -575,6 +592,9 @@ impl LayerStore {
     /// Deliver `committed`'s notifications through the store's queue, after
     /// those queued ahead of them, and return whether it changed anything.
     pub(crate) fn deliver(&self, committed: Committed) -> bool {
+        // A sink can drop a layer's last handle; the layer is freed once the
+        // notifications are delivered, not inside a later sink's callback.
+        let _hold = self.hold();
         committed.dispatch_via(&self.dispatch)
     }
 
@@ -720,6 +740,116 @@ impl Slots {
         unindex(&mut self.by_identifier, layer.identifier());
         unindex(&mut self.by_real_path, layer.real_path());
         Some(layer)
+    }
+}
+
+/// A hold on a [`LayerStore`]'s sweeps: while it lives, no slot is freed,
+/// so no layer drops (and no sink of one runs) under a borrow its holder
+/// keeps. Dropping the last hold frees what the holds kept.
+///
+/// While a panic unwinds, the last release frees nothing, so no sink's drop
+/// runs during the unwind; the next sweep frees what it kept.
+#[must_use = "a hold protects nothing once dropped"]
+pub(crate) struct SweepHold<'a>(&'a LayerStore);
+
+impl Drop for SweepHold<'_> {
+    fn drop(&mut self) {
+        let holds = self.0.holds.get() - 1;
+        self.0.holds.set(holds);
+        if holds == 0 && !thread::panicking() {
+            self.0.sweep_dead();
+        }
+    }
+}
+
+/// A `RefCell` whose every borrow holds a store's sweeps
+/// ([`SweepHold`]) for as long as it lives, so no layer of the store is
+/// freed, and no sink of one runs, while the cell is borrowed.
+pub(crate) struct HeldCell<T> {
+    /// The value.
+    cell: RefCell<T>,
+    /// The store whose sweeps the borrows hold.
+    store: Rc<LayerStore>,
+}
+
+impl<T> HeldCell<T> {
+    /// A cell holding `value`, whose borrows hold `store`'s sweeps.
+    pub(crate) fn new(value: T, store: Rc<LayerStore>) -> Self {
+        Self {
+            cell: RefCell::new(value),
+            store,
+        }
+    }
+
+    /// Borrow the value, holding the store's sweeps. Panics while it is
+    /// mutably borrowed, as [`RefCell::borrow`] does.
+    #[track_caller]
+    pub(crate) fn borrow(&self) -> Held<'_, T> {
+        let hold = self.store.hold();
+        Held {
+            value: self.cell.borrow(),
+            _hold: hold,
+        }
+    }
+
+    /// Borrow the value mutably, holding the store's sweeps. Panics while it
+    /// is borrowed, as [`RefCell::borrow_mut`] does.
+    #[track_caller]
+    pub(crate) fn borrow_mut(&self) -> HeldMut<'_, T> {
+        let hold = self.store.hold();
+        HeldMut {
+            value: self.cell.borrow_mut(),
+            _hold: hold,
+        }
+    }
+}
+
+/// A shared borrow of a [`HeldCell`].
+pub(crate) struct Held<'a, T: ?Sized> {
+    /// The borrow, declared first so it is released before the hold.
+    value: Ref<'a, T>,
+    /// The hold on the store's sweeps.
+    _hold: SweepHold<'a>,
+}
+
+impl<'a, T: ?Sized> Held<'a, T> {
+    /// A borrow of the part of the value `f` picks, keeping the hold
+    /// ([`Ref::map`]).
+    pub(crate) fn map<U: ?Sized>(this: Self, f: impl FnOnce(&T) -> &U) -> Held<'a, U> {
+        Held {
+            value: Ref::map(this.value, f),
+            _hold: this._hold,
+        }
+    }
+}
+
+impl<T: ?Sized> Deref for Held<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+/// A mutable borrow of a [`HeldCell`].
+pub(crate) struct HeldMut<'a, T: ?Sized> {
+    /// The borrow, declared first so it is released before the hold.
+    value: RefMut<'a, T>,
+    /// The hold on the store's sweeps.
+    _hold: SweepHold<'a>,
+}
+
+impl<T: ?Sized> Deref for HeldMut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T: ?Sized> DerefMut for HeldMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
     }
 }
 
@@ -1028,6 +1158,33 @@ mod tests {
         registry.sweep();
         assert_eq!(Rc::strong_count(&marker), 1, "the sweep freed the layer");
         assert_eq!(registry.find(&identifier).unwrap(), None);
+    }
+
+    /// A hold keeps every sweep from freeing a layer, and releasing the last
+    /// hold frees it.
+    #[test]
+    fn hold_defers_sweep() {
+        let registry = sdf::LayerRegistry::default();
+        let kept = registry.adopt(layer_with_prim("kept.usda")).unwrap();
+        let mut layer = layer_with_prim("freed.usda");
+        let marker = Rc::new(());
+        let held = Rc::clone(&marker);
+        layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+            let _ = &held;
+        });
+        let handle = registry.adopt(layer).unwrap();
+        let store = Rc::clone(&kept.store);
+        let hold = store.hold();
+        let nested = store.hold();
+        drop(handle);
+        registry.sweep();
+        drop(store.read().unwrap());
+        assert_eq!(Rc::strong_count(&marker), 2, "a hold defers every sweep");
+        drop(nested);
+        registry.sweep();
+        assert_eq!(Rc::strong_count(&marker), 2, "an outer hold still defers it");
+        drop(hold);
+        assert_eq!(Rc::strong_count(&marker), 1, "the last release frees it");
     }
 
     /// A slot refilled after a sweep is a new filling: a key from before

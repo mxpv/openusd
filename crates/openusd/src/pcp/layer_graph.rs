@@ -26,7 +26,6 @@
 //! save.
 
 use std::borrow::Cow;
-use std::cell::Ref;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem;
@@ -3371,13 +3370,13 @@ pub(crate) struct LayerView<'a> {
 }
 
 /// How a [`LayerView`] holds its graph: borrowed outright, or through the
-/// `RefCell` the stage keeps it in. The second lets a view outlive the call
-/// that borrowed the cell.
+/// cell the stage keeps it in. The second lets a view outlive the call that
+/// borrowed the cell.
 enum GraphBorrow<'a> {
     /// A plain borrow.
     Plain(&'a LayerGraph),
     /// A borrow of the cell holding the graph.
-    Cell(Ref<'a, LayerGraph>),
+    Cell(sdf::Held<'a, LayerGraph>),
 }
 
 impl Deref for LayerView<'_> {
@@ -3395,7 +3394,7 @@ impl<'a> LayerView<'a> {
     /// A view of the graph in `graph`, whose layers `store` holds: the
     /// graph's own store, kept by its owner beside the cell. Fails with
     /// [`LayerError::Busy`](sdf::LayerError::Busy) while an edit holds them.
-    pub(crate) fn of(graph: Ref<'a, LayerGraph>, store: &'a sdf::LayerStore) -> Result<Self, sdf::LayerError> {
+    pub(crate) fn of(graph: sdf::Held<'a, LayerGraph>, store: &'a sdf::LayerStore) -> Result<Self, sdf::LayerError> {
         debug_assert!(ptr::eq(&*graph.store, store), "the store is the graph's own");
         Ok(Self {
             store: store.read()?,

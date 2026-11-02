@@ -409,7 +409,9 @@ impl LayerRegistry {
     /// its layer in memory until a sweep, which [`find_or_open`](Self::find_or_open)
     /// and [`adopt`](Self::adopt) run before they add a layer, unless it was the
     /// last handle into the registry, which frees every layer it held. A no-op
-    /// while a read or an edit on this registry is in progress.
+    /// while a read or an edit on this registry is in progress, or while a
+    /// stage on it holds its composition borrowed or is delivering its
+    /// notifications, the end of which sweeps.
     pub fn sweep(&self) {
         if let Some(store) = self.held() {
             store.sweep();
