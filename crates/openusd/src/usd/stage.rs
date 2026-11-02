@@ -1079,6 +1079,14 @@ impl PrimTypeMemo {
 /// ([`Prim`](super::Prim) and friends) hold a clone, so they can be stored
 /// and outlive the call that produced them. Provides composed access to
 /// prims, properties, and metadata.
+///
+/// Composition runs user code: a resolver or a file format, reached while
+/// layers are read and while their composition is rebuilt. A panic out of it
+/// poisons the stage: the composition it left half-built cannot be finished.
+/// A later composed read fails with [`pcp::QueryError::Poisoned`] (one that
+/// folds a failure into a default returns the default), an accessor that
+/// cannot fail panics, and the stage records, reconciles and delivers nothing
+/// more: an edit of one of its layers still lands, unheard by it.
 #[derive(Clone)]
 pub struct Stage(Rc<StageInner>);
 
@@ -1107,15 +1115,11 @@ impl composition::CompositionHooks for Stage {
             notice.generation,
             notice.own,
         );
-        for sink in self.sinks.borrow().iter() {
-            sink.after_commit(self, &change);
-        }
+        self.each_sink(|sink| sink.after_commit(self, &change));
     }
 
     fn aborted(&self, generation: u64) {
-        for sink in self.sinks.borrow().iter() {
-            sink.aborted(self, generation);
-        }
+        self.each_sink(|sink| sink.aborted(self, generation));
     }
 
     fn observe(&self, notice: &composition::CompositionNotice) {
@@ -1135,16 +1139,14 @@ impl composition::CompositionHooks for Stage {
     }
 
     fn notify_stage(&self, notice: &composition::StageNotice) {
-        for sink in self.sinks.borrow().iter() {
-            match notice {
-                composition::StageNotice::EditTarget => sink.edit_target_changed(self),
-                composition::StageNotice::LoadRules(resynced) => sink.load_rules_changed(self, resynced),
-                composition::StageNotice::LoadsRetried(resynced) => sink.loads_retried(self, resynced),
-                composition::StageNotice::Muting { layer, muted, resynced } => {
-                    sink.layer_muting_changed(self, layer, *muted, resynced);
-                }
+        self.each_sink(|sink| match notice {
+            composition::StageNotice::EditTarget => sink.edit_target_changed(self),
+            composition::StageNotice::LoadRules(resynced) => sink.load_rules_changed(self, resynced),
+            composition::StageNotice::LoadsRetried(resynced) => sink.loads_retried(self, resynced),
+            composition::StageNotice::Muting { layer, muted, resynced } => {
+                sink.layer_muting_changed(self, layer, *muted, resynced);
             }
-        }
+        });
     }
 
     fn observe_abort(&self, generation: u64) {
@@ -1185,6 +1187,17 @@ impl Stage {
     /// [`StageComposition::settle`]).
     pub(crate) fn settle(&self) -> Result<(), pcp::QueryError> {
         self.composition.settle(self)
+    }
+
+    /// Calls `deliver` with each sink in turn, until one poisons the stage:
+    /// a poisoned stage delivers nothing more.
+    fn each_sink(&self, mut deliver: impl FnMut(&dyn StageSink)) {
+        for sink in self.sinks.borrow().iter() {
+            if self.composition.is_poisoned() {
+                return;
+            }
+            deliver(sink);
+        }
     }
 }
 
@@ -1315,6 +1328,11 @@ impl sdf::Subscriber for StageRecorder {
         // conservative fanout.
         let change = commit.change;
         let stage = self.stage.upgrade()?;
+        // A poisoned stage composes nothing more, so it neither records nor
+        // tells its sinks of an edit to one of its layers.
+        if stage.composition.is_poisoned() {
+            return None;
+        }
         let own = commit.txn.origin == Some(stage.editor);
         let prior_default_prim = change
             .overlay
@@ -2578,9 +2596,8 @@ impl Stage {
         for observer in observers {
             observer.capture(self, &pending, layer);
         }
-        for sink in sinks.iter() {
-            sink.before_commit(self, &pending);
-        }
+        drop(sinks);
+        self.each_sink(|sink| sink.before_commit(self, &pending));
     }
 
     /// Returns the number of layers the stage holds (including session layers).
@@ -3031,6 +3048,7 @@ impl Stage {
     // this, but is a larger change than this method currently needs.
     pub fn find_loadable(&self, root: impl sdf::IntoPath) -> Result<Vec<sdf::Path>> {
         let root = sdf::try_into_path(root)?.prim_path();
+        self.settle()?;
         let _guard = LoadRulesGuard {
             stage: self,
             original: self.load_rules(),
@@ -9581,22 +9599,16 @@ def "P" (payload = @./clip.usda@</M>) {}
     /// opened through a resolver that runs the returned hook on opening
     /// `name`.
     fn hooked_stage(dir: &FsPath, root: &str, files: &[(&str, &str)], name: &'static str) -> Result<(Stage, Hook)> {
-        fs::write(dir.join("root.usda"), root)?;
-        for (file, content) in files {
-            fs::write(dir.join(file), content)?;
-        }
         let hook: Hook = Rc::default();
         let run = Rc::clone(&hook);
-        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
-            if resolved.file_name().is_some_and(|file| file == name)
+        let open = move |file: &str| {
+            if file == name
                 && let Some(hook) = run.take()
             {
                 hook();
             }
-        });
-        let stage = Stage::builder()
-            .resolver(resolver)
-            .open(&dir.join("root.usda").to_string_lossy())?;
+        };
+        let stage = resolving_stage(dir, root, files, open, |_| {})?;
         Ok((stage, hook))
     }
 
@@ -9623,9 +9635,11 @@ def "P" (payload = @./clip.usda@</M>) {}
             .expect("the layer is free");
     }
 
-    /// The paths each committed change resyncs, in delivery order, recorded
-    /// by a sink added to `stage`.
-    fn record_resyncs(stage: &Stage) -> Rc<RefCell<Vec<Vec<String>>>> {
+    /// The paths each committed change resyncs, in delivery order.
+    type Resyncs = Rc<RefCell<Vec<Vec<String>>>>;
+
+    /// The [`Resyncs`] a sink added to `stage` records.
+    fn record_resyncs(stage: &Stage) -> Resyncs {
         let resyncs = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&resyncs);
         stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
@@ -9741,16 +9755,18 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(resyncs[2], ["/C"]);
         Ok(())
     }
+    /// The message `read` panics with, if it panics.
+    fn panic_message(read: impl FnOnce()) -> Option<String> {
+        let payload = panic::catch_unwind(AssertUnwindSafe(read)).err()?;
+        match payload.downcast::<String>() {
+            Ok(message) => Some(*message),
+            Err(payload) => payload.downcast_ref::<&str>().map(|message| (*message).to_owned()),
+        }
+    }
+
     /// Whether `read` panics with the message a part-composed stage gives.
     fn panics_part_composed(read: impl FnOnce()) -> bool {
-        let payload = panic::catch_unwind(AssertUnwindSafe(read)).err();
-        payload
-            .and_then(|payload| {
-                payload
-                    .downcast_ref::<&str>()
-                    .map(|message| message.contains("user code a layer load runs"))
-            })
-            .unwrap_or(false)
+        panic_message(read).is_some_and(|message| message.contains("user code a layer load runs"))
     }
 
     /// User code a read's layer load runs finds the stage part-composed, as
@@ -9808,6 +9824,392 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(stage.prim("/P")?.is_valid()?);
         assert_eq!(opens.get(), 1);
         assert!(stage.prim("/Log1")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A stage over `root` whose resolver runs `open` before opening each
+    /// asset, by file name, and `identify` before identifying each asset
+    /// path.
+    fn resolving_stage(
+        dir: &FsPath,
+        root: &str,
+        files: &[(&str, &str)],
+        open: impl Fn(&str) + 'static,
+        identify: impl Fn(&str) + 'static,
+    ) -> Result<Stage> {
+        fs::write(dir.join("root.usda"), root)?;
+        for (file, content) in files {
+            fs::write(dir.join(file), content)?;
+        }
+        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
+            if let Some(file) = resolved.file_name().and_then(|file| file.to_str()) {
+                open(file);
+            }
+        })
+        .on_identify(identify);
+        Stage::builder()
+            .resolver(resolver)
+            .open(&dir.join("root.usda").to_string_lossy())
+    }
+
+    /// A drain that runs while an unrelated panic unwinds, and finishes,
+    /// leaves the stage sound.
+    #[test]
+    fn unwind_drain_sound() -> Result<()> {
+        struct EditOnDrop(sdf::LayerHandle);
+        impl Drop for EditOnDrop {
+            fn drop(&mut self) {
+                define_raw(&self.0, "/Q");
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let (stage, _hook) = hooked_stage(dir.path(), PLAIN, &[], "none.usda")?;
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+
+        let message = panic_message(|| {
+            let _edit = EditOnDrop(root.clone());
+            panic!("an unrelated failure");
+        });
+        assert_eq!(message.as_deref(), Some("an unrelated failure"));
+        assert!(
+            stage.prim("/Q")?.is_valid()?,
+            "the drain applied the edit, and the stage is sound"
+        );
+        Ok(())
+    }
+
+    /// A read whose loads join one layer and then panic opening the next
+    /// poisons the stage: the joined layer is left unwired.
+    #[test]
+    fn read_load_panic_poisons() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = resolving_stage(
+            dir.path(),
+            "#usda 1.0\ndef \"P\" (references = [@a.usda@</A>, @c.usda@</C>]) {}\n",
+            &[
+                ("a.usda", "#usda 1.0\ndef \"A\" {}\n"),
+                ("c.usda", "#usda 1.0\ndef \"C\" {}\n"),
+            ],
+            |file| assert!(file != "c.usda", "the resolver failed"),
+            |_| {},
+        )?;
+
+        let message = panic_message(|| {
+            let _ = stage.prim("/P").expect("a prim path").is_valid();
+        });
+        assert!(message.is_some_and(|message| message.contains("resolver failed")));
+        let read = stage.prim("/P")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A stage over `PLAIN` with a sink recording its resyncs, and its root
+    /// layer's handle, poisoned by a resolver panic while a sublayer's change
+    /// is applied.
+    fn poisoned_stage(dir: &FsPath) -> Result<(Stage, Resyncs, sdf::LayerHandle)> {
+        let armed = Rc::new(Cell::new(false));
+        let trigger = Rc::clone(&armed);
+        let stage = resolving_stage(
+            dir,
+            PLAIN,
+            &[],
+            |_| {},
+            move |asset_path| {
+                if trigger.get() && asset_path == "poison.usda" {
+                    panic!("the resolver failed");
+                }
+            },
+        )?;
+        let resyncs = record_resyncs(&stage);
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        {
+            let _layers = stage.layers();
+            root.edit(|e| {
+                e.pseudo_root_mut()
+                    .expect("a layer has a pseudo-root")
+                    .set_sublayers(["poison.usda"]);
+                Ok(())
+            })?;
+        }
+        armed.set(true);
+        let message = panic_message(|| stage.process_pending());
+        assert_eq!(message.as_deref(), Some("the resolver failed"));
+        armed.set(false);
+        Ok((stage, resyncs, root))
+    }
+
+    /// A panic in user code that applying a change runs poisons the stage:
+    /// fallible calls fail naming the transaction, an infallible accessor
+    /// panics, and no sink hears of the change or a later one.
+    #[test]
+    fn apply_panic_poisons() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, resyncs, root) = poisoned_stage(dir.path())?;
+        let read = stage.prim("/P")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(Some(_))))),
+            "{read:?}"
+        );
+        let accessor = panic_message(|| {
+            stage.layer_count();
+        });
+        assert!(accessor.is_some_and(|message| message.contains("poisoned")));
+        define_raw(&root, "/Late");
+        assert!(resyncs.borrow().is_empty(), "no sink hears of a change");
+        Ok(())
+    }
+
+    /// A fallible call on a poisoned stage fails, and a mutation that cannot
+    /// fail panics, neither aborting.
+    #[test]
+    fn poisoned_calls_fail() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, ..) = poisoned_stage(dir.path())?;
+        let found = stage.find_loadable("/");
+        assert!(
+            matches!(found, Err(crate::Error::Query(pcp::QueryError::Poisoned(_)))),
+            "{found:?}"
+        );
+        let muted = panic_message(|| stage.mute_layer("other.usda"));
+        assert!(muted.is_some_and(|message| message.contains("poisoned")));
+        Ok(())
+    }
+
+    /// A panic while a drain loads a sublayer an edit demanded poisons the
+    /// stage, and the edits queued behind it are not applied.
+    #[test]
+    fn drain_load_panic_poisons() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
+        hook.replace(Some(Box::new(|| panic!("the resolver failed"))));
+        let resyncs = record_resyncs(&stage);
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        {
+            let _layers = stage.layers();
+            sublayer_raw(&root);
+            define_raw(&root, "/Q");
+        }
+
+        let message = panic_message(|| stage.process_pending());
+        assert_eq!(message.as_deref(), Some("the resolver failed"));
+        let read = stage.prim("/Q")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(Some(_))))),
+            "{read:?}"
+        );
+        assert!(resyncs.borrow().is_empty());
+        Ok(())
+    }
+
+    /// A panic while a drain retries the failed loads poisons the stage.
+    #[test]
+    fn retry_panic_poisons() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let armed = Rc::new(Cell::new(false));
+        let trigger = Rc::clone(&armed);
+        let stage = resolving_stage(
+            dir.path(),
+            "#usda 1.0\n(\n    subLayers = [@late.usda@]\n)\n",
+            &[],
+            move |file| {
+                if file == "late.usda" && trigger.get() {
+                    panic!("the resolver failed");
+                }
+            },
+            |_| {},
+        )?;
+        assert!(!stage.prim("/Late")?.is_valid()?, "the sublayer is missing");
+        fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"Late\" {}\n")?;
+        armed.set(true);
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        {
+            let _layers = stage.layers();
+            define_raw(&root, "/Q");
+        }
+
+        let message = panic_message(|| stage.process_pending());
+        assert_eq!(message.as_deref(), Some("the resolver failed"));
+        let read = stage.prim("/Q")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A panic while a read builds an index, anchoring a reference through
+    /// the resolver, poisons the stage.
+    #[test]
+    fn index_build_panic_poisons() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let armed = Rc::new(Cell::new(false));
+        let trigger = Rc::clone(&armed);
+        let stage = resolving_stage(
+            dir.path(),
+            REFERENCED,
+            &[("a.usda", TARGET)],
+            |_| {},
+            move |asset_path| {
+                if trigger.get() && asset_path == "a.usda" {
+                    panic!("the resolver failed");
+                }
+            },
+        )?;
+        armed.set(true);
+
+        let message = panic_message(|| {
+            let _ = stage.prim("/P/Inner").expect("a prim path").is_valid();
+        });
+        assert_eq!(message.as_deref(), Some("the resolver failed"));
+        armed.set(false);
+        let read = stage.prim("/P")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A panic while an unmute rejoins a sublayer poisons the stage.
+    #[test]
+    fn unmute_panic_poisons() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(
+            dir.path(),
+            "#usda 1.0\n(\n    subLayers = [@b.usda@]\n)\n",
+            &[SUBLAYER],
+            "b.usda",
+        )?;
+        let sublayer = dir.path().join("b.usda").to_string_lossy().into_owned();
+        stage.mute_layer(sublayer.as_str());
+        hook.replace(Some(Box::new(|| panic!("the resolver failed"))));
+
+        let message = panic_message(|| stage.unmute_layer(&sublayer));
+        assert_eq!(message.as_deref(), Some("the resolver failed"));
+        let read = stage.prim("/B")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A poisoned stage tells its sinks nothing of an edit to its layer, not
+    /// even before it commits, and the edit still lands.
+    #[test]
+    fn poisoned_edit_unheard() -> Result<()> {
+        struct Heard(Rc<Cell<usize>>);
+        impl StageSink for Heard {
+            fn before_commit(&self, _: &Stage, _: &usd::PendingChange<'_>) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let (stage, _, root) = poisoned_stage(dir.path())?;
+        let heard = Rc::new(Cell::new(0));
+        stage.add_sink(Heard(Rc::clone(&heard)));
+
+        define_raw(&root, "/Late");
+        assert_eq!(heard.get(), 0);
+        let late = sdf::path("/Late")?;
+        assert!(root.read(|layer| layer.data().has_spec(&late))?);
+        Ok(())
+    }
+
+    /// A panic that user code catches inside a drain, run while an unrelated
+    /// panic unwinds, still poisons the stage.
+    #[test]
+    fn caught_unwind_panic_poisons() -> Result<()> {
+        struct EditOnDrop(sdf::LayerHandle);
+        impl Drop for EditOnDrop {
+            fn drop(&mut self) {
+                let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+                    self.0
+                        .edit(|e| {
+                            e.pseudo_root_mut()
+                                .expect("a layer has a pseudo-root")
+                                .set_sublayers(["poison.usda"]);
+                            Ok(())
+                        })
+                        .expect("the layer is free");
+                }));
+                assert!(caught.is_err(), "the drain's resolver panicked");
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let stage = resolving_stage(
+            dir.path(),
+            PLAIN,
+            &[],
+            |_| {},
+            |asset_path| {
+                assert!(asset_path != "poison.usda", "the resolver failed");
+            },
+        )?;
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+
+        let message = panic_message(|| {
+            let _edit = EditOnDrop(root.clone());
+            panic!("an unrelated failure");
+        });
+        assert_eq!(message.as_deref(), Some("an unrelated failure"));
+        let read = stage.prim("/P")?.is_valid();
+        assert!(
+            matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(_)))),
+            "{read:?}"
+        );
+        Ok(())
+    }
+
+    /// A sink that poisons the stage, catching the panic, ends the delivery
+    /// it runs in: neither the sinks after it nor the notices queued after
+    /// its own are delivered to.
+    #[test]
+    fn delivery_stops_when_poisoned() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let armed = Rc::new(Cell::new(false));
+        let trigger = Rc::clone(&armed);
+        let stage = resolving_stage(
+            dir.path(),
+            REFERENCED,
+            &[("a.usda", TARGET)],
+            |_| {},
+            move |asset_path| {
+                if trigger.get() && asset_path == "a.usda" {
+                    panic!("the resolver failed");
+                }
+            },
+        )?;
+        let delivered = Rc::new(Cell::new(0));
+        let count = Rc::clone(&delivered);
+        stage.add_sink(move |stage: &Stage, _: &usd::CommittedChange<'_>| {
+            count.set(count.get() + 1);
+            armed.set(true);
+            let read = panic::catch_unwind(AssertUnwindSafe(|| {
+                let _ = stage.prim("/P/Inner").expect("a prim path").is_valid();
+            }));
+            assert!(read.is_err(), "the read's resolver panicked");
+        });
+        let after = Rc::new(Cell::new(0));
+        let later = Rc::clone(&after);
+        stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| later.set(later.get() + 1));
+        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        {
+            let _layers = stage.layers();
+            define_raw(&root, "/X");
+            define_raw(&root, "/Y");
+        }
+
+        stage.process_pending();
+        assert_eq!(delivered.get(), 1, "the second notice is not delivered");
+        assert_eq!(
+            after.get(),
+            0,
+            "nor is the first, to the sinks after the one that poisoned"
+        );
         Ok(())
     }
 }

@@ -500,9 +500,9 @@ pub enum ExpressionContext {
 /// collected on the side
 /// ([`Stage::composition_errors`](crate::usd::Stage::composition_errors));
 /// this type carries only operational failures, at most citing a diagnostic
-/// as context ([`IncompleteClipManifest`]). Every variant boxes its payload
-/// so the error arm stays pointer-sized on the query paths that return it
-/// constantly.
+/// as context ([`IncompleteClipManifest`]). A variant boxes any payload larger
+/// than a word, so the error stays within two words (asserted below) on the
+/// query paths that return it constantly.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum QueryError {
@@ -535,6 +535,15 @@ pub enum QueryError {
     /// them because a read or an edit of them was in progress.
     #[error(transparent)]
     Layer(Box<sdf::LayerError>),
+
+    /// The stage composes nothing more: a panic left its composition
+    /// half-built, which cannot be finished. Names the transaction whose
+    /// change was being applied, when one was.
+    #[error(
+        "the stage is poisoned: a panic interrupted {}",
+        .0.map_or_else(|| "composing it".to_owned(), |generation| format!("applying transaction {generation}'s change"))
+    )]
+    Poisoned(Option<u64>),
 }
 
 impl QueryError {

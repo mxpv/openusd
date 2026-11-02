@@ -15,10 +15,15 @@
 //! reconciliation drains it later, so a read taken before that drain sees
 //! stale composition.
 //! Settled access is access entered through a `Stage` method that has completed
-//! [`process_pending`](StageComposition::process_pending). The `debug_assert!`
-//! on an empty queue is a backstop, not the definition: reconciliation empties
-//! the queue before applying its snapshot, so during that window the queue is
-//! empty while the cache has yet to incorporate the changes.
+//! [`process_pending`](StageComposition::process_pending). The assertions
+//! behind it are a backstop, not the definition: reconciliation empties the
+//! queue before applying its snapshot, and the drain it runs is what marks
+//! that window.
+//!
+//! Composition runs user code (a resolver, a file format) while it reads
+//! layers and while it rebuilds their composition. A panic out of it leaves
+//! the composition half-built, so it poisons the stage
+//! ([`Poisoned`]), which composes nothing more.
 //!
 //! Authoring paths take the graph without a drain, through
 //! [`authoring_graph`](StageComposition::authoring_graph) and its `_mut` twin: a
@@ -33,6 +38,7 @@ use std::collections::{HashSet, VecDeque};
 use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::thread;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
@@ -209,6 +215,27 @@ pub(super) enum Interrupted {
     NewWork,
 }
 
+/// What a panic interrupted when it poisoned the stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Poisoned {
+    /// Applying the change of the transaction with this id, or loading what
+    /// it demanded.
+    Apply(u64),
+    /// Composing around a transaction: a drain, a read, a layer load, or a
+    /// mutation of the stage's composition.
+    Compose,
+}
+
+impl Poisoned {
+    /// The error a poisoned stage fails with.
+    fn error(self) -> pcp::QueryError {
+        pcp::QueryError::Poisoned(match self {
+            Self::Apply(generation) => Some(generation),
+            Self::Compose => None,
+        })
+    }
+}
+
 /// The stage's composed state: the loaded layers, the indices composed from
 /// them, and the edits recorded but not yet composed.
 ///
@@ -251,6 +278,9 @@ pub(super) struct StageComposition {
     /// delivery only reconciles: what it adds waits behind the notices already
     /// here.
     outbox: RefCell<VecDeque<Notice>>,
+    /// What a panic interrupted, when one left the composition half-built:
+    /// it cannot be finished, so the stage composes nothing more.
+    poisoned: Cell<Option<Poisoned>>,
     /// Whether a delivery is running.
     delivering: Cell<bool>,
     /// Whether a drain is reconciling, so the composition is part-applied:
@@ -278,6 +308,7 @@ impl StageComposition {
             store,
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
+            poisoned: Cell::new(None),
             delivering: Cell::new(false),
             reconciling: Cell::new(false),
             loading: Cell::new(false),
@@ -329,9 +360,11 @@ impl StageComposition {
     /// The commit reconciles first, unless something blocks the drain (see
     /// [`reconcile`](Self::reconcile)), which leaves it queued for the next.
     /// An observer then reads the layers as it left them, before a sink can
-    /// commit again.
+    /// commit again. A panic out of the drain poisons the stage, and the
+    /// commit's own layer notifications are not delivered.
     pub(super) fn deliver(&self, committed: sdf::Committed, hooks: &dyn CompositionHooks) -> bool {
-        self.reconcile(true, hooks);
+        // A blocked drain leaves the edits queued, which is all it can do.
+        let _ = self.reconcile(true, hooks);
         self.store.deliver(committed)
     }
 
@@ -426,22 +459,30 @@ impl StageComposition {
 
     // The pending-edit queue.
 
-    /// Appends a committed layer edit for the next drain.
+    /// Appends a committed layer edit for the next drain. A poisoned stage,
+    /// which drains nothing, records nothing.
     pub(super) fn record_pending(&self, edit: PendingEdit) {
-        self.pending.borrow_mut().push(Pending::Edit(edit));
+        self.record(Pending::Edit(edit));
     }
 
     /// Queue `notice` behind the transactions already committed, and deliver
     /// them all unless a delivery is running, which delivers them in turn.
     pub(super) fn announce(&self, notice: StageNotice, hooks: &dyn CompositionHooks) {
-        self.pending.borrow_mut().push(Pending::Stage(notice));
+        self.record(Pending::Stage(notice));
         self.process_pending(hooks);
     }
 
     /// Record that the transaction `generation` began committing to one of
     /// the stage's layers and did not land, for the next drain to report.
     pub(super) fn record_aborted(&self, generation: u64) {
-        self.pending.borrow_mut().push(Pending::Aborted(generation));
+        self.record(Pending::Aborted(generation));
+    }
+
+    /// Queues `pending` for the next drain, unless the stage is poisoned.
+    fn record(&self, pending: Pending) {
+        if self.poisoned.get().is_none() {
+            self.pending.borrow_mut().push(pending);
+        }
     }
 
     /// Whether the queue is empty, for the drain's fast path — the check a read
@@ -451,10 +492,10 @@ impl StageComposition {
     }
 
     /// Whether the composition answers for every recorded edit, and a read
-    /// can compose against it: none is queued, and neither a drain nor a
-    /// layer load is part-way through.
+    /// can compose against it: none is queued, neither a drain nor a layer
+    /// load is part-way through, and the stage is not poisoned.
     fn is_settled(&self) -> bool {
-        !self.reconciling.get() && !self.loading.get() && self.pending_is_empty()
+        !self.reconciling.get() && !self.loading.get() && self.pending_is_empty() && self.poisoned.get().is_none()
     }
 
     /// [`process_pending`](Self::process_pending) for a fallible read. Fails
@@ -462,9 +503,13 @@ impl StageComposition {
     /// the stage's layers while edits of them are queued, which stay queued
     /// for the next drain, and from user code a layer load runs (a resolver,
     /// a file format), while the load or the drain it serves has the stage
-    /// part-composed.
+    /// part-composed. Fails with [`pcp::QueryError::Poisoned`] on a poisoned
+    /// stage.
     pub(super) fn settle(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         self.process_pending(hooks);
+        if let Some(poisoned) = self.poisoned.get() {
+            return Err(poisoned.error());
+        }
         match self.is_settled() {
             true => Ok(()),
             false => Err(sdf::LayerError::Busy.into()),
@@ -475,6 +520,36 @@ impl StageComposition {
     /// drops, unless an enclosing load marked it already.
     fn begin_load(&self) -> Option<sdf::StopRunning<'_>> {
         (!self.loading.replace(true)).then(|| sdf::StopRunning(&self.loading))
+    }
+
+    /// Runs `step`, composition that runs user code (a resolver, a file
+    /// format), poisoning the stage with `cause` when a panic leaves it
+    /// before it returns. The innermost step a panic leaves names the cause.
+    fn guarded<T>(&self, cause: Poisoned, step: impl FnOnce() -> T) -> T {
+        let mut guard = Unwind {
+            poisoned: &self.poisoned,
+            cause,
+            armed: true,
+        };
+        let out = step();
+        guard.armed = false;
+        out
+    }
+
+    /// Whether the stage is not poisoned, for an operation that cannot fail:
+    /// it panics on a poisoned stage, unless a panic is unwinding already,
+    /// when the operation leaves the stage as it is.
+    fn sound(&self) -> bool {
+        let Some(poisoned) = self.poisoned.get() else {
+            return true;
+        };
+        assert!(thread::panicking(), "{}", poisoned.error());
+        false
+    }
+
+    /// Whether the stage is poisoned: it records no more edits of its layers.
+    pub(super) fn is_poisoned(&self) -> bool {
+        self.poisoned.get().is_some()
     }
 
     /// Takes the queued edits as an owned snapshot, leaving an empty queue.
@@ -508,7 +583,15 @@ impl StageComposition {
     /// sink sees transactions in commit order, and a read inside a sink still
     /// composes with every committed edit. C++ `UsdStage` delivers a
     /// listener's nested edit within the outer notice instead, depth-first.
+    ///
+    /// A poisoned stage reconciles and delivers nothing: it drops what is
+    /// queued.
     pub(super) fn process_pending(&self, hooks: &dyn CompositionHooks) {
+        if self.poisoned.get().is_some() {
+            self.pending.take();
+            self.outbox.take();
+            return;
+        }
         if self.pending_is_empty() && self.outbox.borrow().is_empty() {
             return;
         }
@@ -516,8 +599,7 @@ impl StageComposition {
         // once nothing is reconciling or delivering.
         let _hold = self.store.hold();
         loop {
-            let blocked = self.reconcile(true, hooks);
-            if blocked {
+            if self.reconcile(true, hooks).is_err() {
                 break;
             }
             self.deliver_notices(hooks);
@@ -533,19 +615,25 @@ impl StageComposition {
 
     /// The reconciling half of [`process_pending`](Self::process_pending):
     /// compose every recorded outcome and queue its notice, in commit order,
-    /// running no user code but the layer loads composition demands. Returns
-    /// whether it was blocked: by the store, by a drain or a layer load
-    /// already running, or by a borrow of the composition. The drain's or
-    /// the load's user code asked for this one, and what it queued waits for
-    /// that drain, after its own snapshot, or for the load's caller; a borrow
-    /// of the composition keeps it queued for the next drain.
+    /// running no user code but the layer loads composition demands.
+    ///
+    /// Fails with [`sdf::LayerError::Busy`] when blocked: by the store, by a
+    /// drain or a layer load already running, or by a borrow of the
+    /// composition. The drain's or the load's user code asked for this one,
+    /// and what it queued waits for that drain, after its own snapshot, or
+    /// for the load's caller; a borrow of the composition keeps it queued for
+    /// the next drain. Fails with [`pcp::QueryError::Poisoned`] on a poisoned
+    /// stage, which reconciles nothing; a panic out of the drain poisons it.
     ///
     /// With `retry`, the edits it takes first forget the recorded load
     /// failures. Those the drain's own loads commit later do not: such an
     /// edit is committed before the failure its load records.
-    pub(super) fn reconcile(&self, retry: bool, hooks: &dyn CompositionHooks) -> bool {
+    pub(super) fn reconcile(&self, retry: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+        if let Some(poisoned) = self.poisoned.get() {
+            return Err(poisoned.error());
+        }
         if self.reconciling.get() || self.loading.get() || self.layers.is_borrowed() || self.cache.is_borrowed() {
-            return true;
+            return Err(sdf::LayerError::Busy.into());
         }
         // No layer is freed, and so no sink of one runs, while transactions
         // are applied: a freed layer's sink could commit and be reconciled
@@ -553,6 +641,12 @@ impl StageComposition {
         let _hold = self.store.hold();
         self.reconciling.set(true);
         let _reconciling = sdf::StopRunning(&self.reconciling);
+        self.guarded(Poisoned::Compose, || self.drain(retry, hooks))
+    }
+
+    /// Reconciles snapshots of the queue until it stays empty, for
+    /// [`reconcile`](Self::reconcile).
+    fn drain(&self, retry: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         let mut retry = retry;
         while !self.pending_is_empty() {
             // A drain reads, and may load, the stage's layers. From inside a
@@ -560,10 +654,8 @@ impl StageComposition {
             // the edits stay queued for a later drain: a fallible read then
             // fails with `Busy` (`Stage::settle`), and a settled access panics
             // (`assert_settled`) before it answers from stale composition.
-            if self.store.ensure_writable().is_err() {
-                return true;
-            }
-            let drained = self.take_pending();
+            self.store.ensure_writable()?;
+            let mut drained: VecDeque<Pending> = self.take_pending().into();
             let edited = drained.iter().any(|pending| matches!(pending, Pending::Edit(_)));
             // A reload's retry is reported to the stage's sinks, as C++
             // `UsdStage::Reload` reports what `PcpCache::Reload` resyncs; the
@@ -571,63 +663,24 @@ impl StageComposition {
             let reloaded = drained
                 .iter()
                 .any(|pending| matches!(pending, Pending::Edit(edit) if edit.changes.did_reload_content()));
-            let mut drained = drained.into_iter().peekable();
             // An edit changes the layers, so a target that previously failed to read
             // may now be readable: forget recorded load failures and drop the indices
             // that recorded one, so the next query re-demands and recomposes them.
-            let mut retried = match edited && mem::take(&mut retry) {
+            let retried = match edited && mem::take(&mut retry) {
                 true => self.forget_failed_loads(),
                 false => None,
             };
-            // Entries committed under one transaction id are contiguous — a
-            // transaction's layers record together, and the id increases across
-            // transactions — so grouping by adjacent equal id carves the queue into
-            // per-transaction groups. Each group applies as its own composed change,
-            // so unrelated edits (a direct `layer_handle` commit sitting pending when the
-            // next stage edit lands) stay separate rather than merging into one event.
-            //
-            // An aborted transaction leaves one entry per layer it reached, and
-            // reports once, in its place among the commits.
-            while let Some(first) = drained.next() {
-                let mut group = match first {
-                    Pending::Aborted(generation) => {
-                        while drained
-                            .next_if(|next| matches!(next, Pending::Aborted(g) if *g == generation))
-                            .is_some()
-                        {}
+            while let Some(group) = next_group(&mut drained) {
+                match group {
+                    Group::Aborted(generation) => {
                         hooks.observe_abort(generation);
                         if hooks.delivers() {
                             self.outbox.borrow_mut().push_back(Notice::Aborted(generation));
                         }
-                        continue;
                     }
-                    Pending::Stage(notice) => {
-                        self.outbox.borrow_mut().push_back(Notice::Stage(notice));
-                        continue;
-                    }
-                    Pending::Edit(edit) => vec![edit],
-                };
-                let generation = group[0].generation;
-                while let Some(Pending::Edit(edit)) =
-                    drained.next_if(|next| matches!(next, Pending::Edit(edit) if edit.generation == generation))
-                {
-                    group.push(edit);
+                    Group::Stage(notice) => self.outbox.borrow_mut().push_back(Notice::Stage(notice)),
+                    Group::Edit(group) => self.apply_group(group, hooks),
                 }
-                let own = group[0].own;
-                let footprints = group
-                    .iter_mut()
-                    .filter_map(|edit| Some((edit.layer, edit.footprint.take()?)))
-                    .collect();
-                let provenance = self.resolve_group_provenance(&mut group);
-                let edits: Vec<pcp::LayerChanges<'_>> = group
-                    .iter()
-                    .map(|edit| pcp::LayerChanges {
-                        layer: edit.layer,
-                        changes: &edit.changes,
-                        prior_default_prim: edit.prior_default_prim.clone(),
-                    })
-                    .collect();
-                self.apply_change_sets(generation, own, &edits, footprints, provenance, hooks);
             }
             if !edited {
                 continue;
@@ -640,11 +693,34 @@ impl StageComposition {
             // rebuilt no stack: the failure diagnostics requeue as demands, so a
             // repaired asset loads and a still-broken one re-records the same
             // diagnostic.
-            if let Some(dropped) = retried.take() {
+            if let Some(dropped) = retried {
                 self.retry_sublayers(dropped, reloaded, hooks);
             }
         }
-        false
+        Ok(())
+    }
+
+    /// Applies one transaction's recorded edits, a group of the drain's
+    /// snapshot. A panic out of it poisons the stage, naming the transaction.
+    fn apply_group(&self, mut group: Vec<PendingEdit>, hooks: &dyn CompositionHooks) {
+        let generation = group[0].generation;
+        self.guarded(Poisoned::Apply(generation), || {
+            let own = group[0].own;
+            let footprints = group
+                .iter_mut()
+                .filter_map(|edit| Some((edit.layer, edit.footprint.take()?)))
+                .collect();
+            let provenance = self.resolve_group_provenance(&mut group);
+            let edits: Vec<pcp::LayerChanges<'_>> = group
+                .iter()
+                .map(|edit| pcp::LayerChanges {
+                    layer: edit.layer,
+                    changes: &edit.changes,
+                    prior_default_prim: edit.prior_default_prim.clone(),
+                })
+                .collect();
+            self.apply_change_sets(generation, own, &edits, footprints, provenance, hooks);
+        });
     }
 
     /// Forgets the recorded load failures (C++ `PcpChanges::DidMaybeFixAsset`
@@ -654,12 +730,15 @@ impl StageComposition {
     /// sinks hear what this resyncs ([`StageNotice::LoadsRetried`]) at the
     /// next delivery.
     pub(super) fn retry_failed_loads(&self, hooks: &dyn CompositionHooks) {
+        if !self.sound() {
+            return;
+        }
         if let Some(dropped) = self.forget_failed_loads() {
             // The sweep goes first, as in a drain: it retires a reclaimed
             // stack's failure diagnostics, so the requeue never demands a
             // sublayer for a stack nothing uses.
             self.reclaim_stale_stacks();
-            self.retry_sublayers(dropped, true, hooks);
+            self.guarded(Poisoned::Compose, || self.retry_sublayers(dropped, true, hooks));
         }
     }
 
@@ -709,6 +788,12 @@ impl StageComposition {
         let _hold = self.store.hold();
         let _running = sdf::StopRunning(&self.delivering);
         loop {
+            // A sink that poisons the stage, catching the panic, ends the
+            // delivery: a poisoned stage delivers nothing more.
+            if self.poisoned.get().is_some() {
+                self.outbox.take();
+                break;
+            }
             let next = self.outbox.borrow_mut().pop_front();
             match next {
                 Some(Notice::Committed(notice)) => hooks.notify(*notice),
@@ -937,12 +1022,15 @@ impl StageComposition {
         if !unused.is_empty() {
             hooks.departed(&unused);
         }
-        let departed = self.update_pair(|graph, cache| {
-            // A layer composition left that a clip still reads stays, for the
-            // clip alone.
-            let departed = graph.remove_layers(&unused, &demoted, retry);
-            cache.forget_layers(&unused, &departed.identifiers);
-            departed
+        // Removing the layers rebuilds the stacks that held them.
+        let departed = self.guarded(Poisoned::Compose, || {
+            self.update_pair(|graph, cache| {
+                // A layer composition left that a clip still reads stays, for the
+                // clip alone.
+                let departed = graph.remove_layers(&unused, &demoted, retry);
+                cache.forget_layers(&unused, &departed.identifiers);
+                departed
+            })
         });
         // Freed with every composition borrow released: a freed layer's sinks
         // drop with it, and they may reach the stage.
@@ -1409,10 +1497,14 @@ impl StageComposition {
         query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         hooks: &dyn CompositionHooks,
     ) -> Result<T, pcp::QueryError> {
-        match self.fixpoint(query, Settled::Required, hooks) {
-            Ok(result) => result,
-            Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
-        }
+        // The passes build indices through the resolver, and the loads
+        // between them run it too.
+        self.guarded(Poisoned::Compose, || {
+            match self.fixpoint(query, Settled::Required, hooks) {
+                Ok(result) => result,
+                Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
+            }
+        })
     }
 
     /// Runs `pass` to a fixpoint over on-demand layer loading.
@@ -1496,10 +1588,10 @@ impl StageComposition {
                         let mut cache = self.cache.borrow_mut();
                         cache.swap_pending_loads(&mut pending);
                         drop(cache);
-                        let blocked = self.reconcile(false, hooks);
+                        let reconciled = self.reconcile(false, hooks);
                         self.cache.borrow_mut().swap_pending_loads(&mut pending);
-                        if blocked {
-                            return Ok(Err(sdf::LayerError::Busy.into()));
+                        if let Err(blocked) = reconciled {
+                            return Ok(Err(blocked));
                         }
                     }
                 }
@@ -1531,22 +1623,30 @@ impl StageComposition {
             "a layer of the stage is muted from inside a read or an edit of its registry's layers"
         );
         self.process_pending(hooks);
-        let (changed, mut resynced, demands) = self.update_pair(|graph, cache| {
-            let change = mutate(graph)?;
-            // The mutation already rebuilt the graph's sublayer stacks, relocates, and
-            // cycle diagnostics; only the cache needs work. Removing a session variable
-            // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
-            // already-interned layer out of the stack. Dropping the affected indices by
-            // both the toggled layer's fanout and its canonical identifier reaches a
-            // referrer that skipped this target while it was muted-and-never-loaded, so
-            // unmuting recomposes it and the load barrier finally opens the target.
-            let resynced = cache.invalidate_muting(&change);
-            Some((change.changed, resynced, graph.take_sublayer_demands()))
+        if !self.sound() {
+            return None;
+        }
+        // From inside a load or a drain the composition is part-built.
+        self.assert_settled();
+        let (changed, mut resynced, demands) = self.guarded(Poisoned::Compose, || {
+            self.update_pair(|graph, cache| {
+                let change = mutate(graph)?;
+                // The mutation already rebuilt the graph's sublayer stacks, relocates, and
+                // cycle diagnostics; only the cache needs work. Removing a session variable
+                // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
+                // already-interned layer out of the stack. Dropping the affected indices by
+                // both the toggled layer's fanout and its canonical identifier reaches a
+                // referrer that skipped this target while it was muted-and-never-loaded, so
+                // unmuting recomposes it and the load barrier finally opens the target.
+                let resynced = cache.invalidate_muting(&change);
+                Some((change.changed, resynced, graph.take_sublayer_demands()))
+            })
         })?;
         // An unmuted sublayer that left the graph while muted has no fanout to
         // name the prims it reaches: it joins again here, and the prims its
         // join dropped are the resyncs it adds.
-        resynced.extend(self.resolve_sublayer_demands(demands, hooks).1);
+        let joined = self.guarded(Poisoned::Compose, || self.resolve_sublayer_demands(demands, hooks).1);
+        resynced.extend(joined);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
         // discards variable deltas, so the sweep is what reclaims it. Discarding
@@ -1578,16 +1678,18 @@ impl StageComposition {
         hooks: &dyn CompositionHooks,
     ) -> Result<pcp::LayerStackId, String> {
         if let Some(identity) = authoring {
-            loop {
-                let demand = match self.layers.borrow().resolve_stack_identity(&identity) {
-                    Ok(id) => return Ok(id),
-                    Err(demand) => demand,
-                };
-                let layer = demand.asset_path.clone();
-                if !self.load_demanded(&[demand], hooks) {
-                    return Err(layer);
+            return self.guarded(Poisoned::Compose, || {
+                loop {
+                    let demand = match self.layers.borrow().resolve_stack_identity(&identity) {
+                        Ok(id) => return Ok(id),
+                        Err(demand) => demand,
+                    };
+                    let layer = demand.asset_path.clone();
+                    if !self.load_demanded(&[demand], hooks) {
+                        return Err(layer);
+                    }
                 }
-            }
+            });
         }
         // A target without a captured authoring stack (a local or variant
         // target) is inferred from layer membership: the root stack when
@@ -1727,6 +1829,9 @@ impl StageComposition {
         // load rules, and `edit` is applied to whatever this read returns, so a
         // pre-drain snapshot would overwrite that change on the way back out.
         self.process_pending(hooks);
+        if !self.sound() {
+            return Vec::new();
+        }
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
         let victims = self.swap_load_rules(rules, hooks);
@@ -1744,6 +1849,9 @@ impl StageComposition {
     /// the payload-target stacks it composes untouched.
     pub(super) fn swap_load_rules(&self, rules: pcp::LoadRules, hooks: &dyn CompositionHooks) -> Vec<sdf::Path> {
         self.process_pending(hooks);
+        if !self.sound() {
+            return Vec::new();
+        }
         self.settled_cache_mut().set_load_rules(rules)
     }
 
@@ -1753,6 +1861,11 @@ impl StageComposition {
     /// layers would make the access stale. That case panics in every build.
     fn assert_settled(&self) {
         if self.is_settled() {
+            return;
+        }
+        // A poisoned stage reached while a panic unwinds is read as it was
+        // left: a second panic would abort.
+        if !self.sound() {
             return;
         }
         assert!(
@@ -1767,6 +1880,61 @@ impl StageComposition {
             false,
             "settled composition access with edits still queued: drain through Stage::process_pending first"
         );
+    }
+}
+
+/// One transaction's entries, the next a drain reconciles.
+enum Group {
+    /// A transaction that did not land, by id.
+    Aborted(u64),
+    /// A change to the stage that no layer edit made.
+    Stage(StageNotice),
+    /// A transaction's layer edits, one per layer it committed.
+    Edit(Vec<PendingEdit>),
+}
+
+/// Takes the next transaction's entries off a drain's snapshot. Entries
+/// committed under one transaction id are contiguous — a transaction's layers
+/// record together, and the id increases across transactions — so grouping by
+/// adjacent equal id carves the queue into per-transaction groups. Each group
+/// applies as its own composed change, so unrelated edits (a direct
+/// `layer_handle` commit sitting pending when the next stage edit lands) stay
+/// separate rather than merging into one event. An aborted transaction leaves
+/// one entry per layer it reached, and reports once, in its place among the
+/// commits.
+fn next_group(queue: &mut VecDeque<Pending>) -> Option<Group> {
+    Some(match queue.pop_front()? {
+        Pending::Aborted(generation) => {
+            let same = |next: &mut Pending| matches!(next, Pending::Aborted(g) if *g == generation);
+            while queue.pop_front_if(same).is_some() {}
+            Group::Aborted(generation)
+        }
+        Pending::Stage(notice) => Group::Stage(notice),
+        Pending::Edit(edit) => {
+            let generation = edit.generation;
+            let same = |next: &mut Pending| matches!(next, Pending::Edit(edit) if edit.generation == generation);
+            let mut group = vec![edit];
+            while let Some(Pending::Edit(edit)) = queue.pop_front_if(same) {
+                group.push(edit);
+            }
+            Group::Edit(group)
+        }
+    })
+}
+
+/// Poisons the stage when dropped armed: a panic left the step it guards
+/// ([`StageComposition::guarded`]).
+struct Unwind<'a> {
+    poisoned: &'a Cell<Option<Poisoned>>,
+    cause: Poisoned,
+    armed: bool,
+}
+
+impl Drop for Unwind<'_> {
+    fn drop(&mut self) {
+        if self.armed && self.poisoned.get().is_none() {
+            self.poisoned.set(Some(self.cause));
+        }
     }
 }
 

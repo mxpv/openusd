@@ -980,11 +980,13 @@ pub(crate) mod tests {
         (LayerRegistry::new(Box::new(resolver)), opens)
     }
 
-    /// A filesystem resolver that calls its hook before opening each asset:
-    /// user code a layer load runs.
+    /// A filesystem resolver that calls its hooks before opening each asset
+    /// and before identifying each asset path: user code a layer load, or a
+    /// sublayer's resolution, runs.
     pub(crate) struct HookResolver {
         inner: ar::DefaultResolver,
         hook: Box<dyn Fn(&ar::ResolvedPath)>,
+        identify: Box<dyn Fn(&str)>,
     }
 
     impl HookResolver {
@@ -994,12 +996,23 @@ pub(crate) mod tests {
             Self {
                 inner: ar::DefaultResolver::new(),
                 hook: Box::new(hook),
+                identify: Box::new(|_| {}),
+            }
+        }
+
+        /// The resolver calling `identify` with each asset path before
+        /// creating its identifier.
+        pub(crate) fn on_identify(self, identify: impl Fn(&str) + 'static) -> Self {
+            Self {
+                identify: Box::new(identify),
+                ..self
             }
         }
     }
 
     impl ar::Resolver for HookResolver {
         fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+            (self.identify)(asset_path);
             self.inner.create_identifier(asset_path, anchor)
         }
 
