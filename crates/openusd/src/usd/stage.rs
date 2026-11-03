@@ -1080,6 +1080,22 @@ impl PrimTypeMemo {
 /// and outlive the call that produced them. Provides composed access to
 /// prims, properties, and metadata.
 ///
+/// Edits of the stage's layers are reconciled in snapshots: the edits queued
+/// since the last drain are applied together, in commit order, and the prims
+/// they dropped are composed again, or retired when they no longer exist,
+/// before the next read or the end of the edit (C++ `UsdStage::_Recompose`).
+/// The stage's sinks hear each transaction, then what settling the snapshot
+/// found; what a read finds waits for the next drained edit, the next
+/// mutation or [`flush`](Self::flush), since a read delivers nothing. An edit
+/// made while a read or an edit of the stage's layers holds them leaves its
+/// prims to settle at the next drain, or as they are read.
+///
+/// A layer that no live layer stack, no prim still to settle and no cached
+/// clip set uses is released as an edit, a mute or a load-rules change
+/// ends, outside every read and delivery, unless it is the root or a
+/// session layer, holds unsaved edits, has no file to read it from again,
+/// or the edit target, an edit context or the undo history names it.
+///
 /// Composition runs user code: a resolver or a file format, reached while
 /// layers are read and while their composition is rebuilt. A panic out of it
 /// poisons the stage: the composition it left half-built cannot be finished.
@@ -2666,18 +2682,19 @@ impl Stage {
     }
 
     /// Returns `true` when the composition cache currently holds a prim
-    /// index at `path`. Useful for verifying surgical invalidation and
-    /// for callers that want to observe cache occupancy.
+    /// index at `path`, for callers that want to observe cache occupancy. To
+    /// tell whether an edit built it again, compare
+    /// [`index_revision`](Self::index_revision).
     pub fn is_indexed(&self, path: &sdf::Path) -> bool {
         self.cache().is_indexed(path)
     }
 
     /// The revision of the prim index cached at `path`, or `None` when none
-    /// is: a number that changes whenever the index is built again. With
-    /// [`is_indexed`](Self::is_indexed), useful for verifying surgical
-    /// invalidation, since a prim an edit invalidates is composed again
-    /// before the edit returns, unless its settling failed or a read or an
-    /// edit of the stage's layers held them.
+    /// is: a number that changes whenever the index is built again. Useful
+    /// for verifying surgical invalidation, since a prim an edit invalidates
+    /// is composed again before the edit returns, or retired (`None`) when it
+    /// no longer exists, unless its settling failed or a read or an edit of
+    /// the stage's layers held the layers.
     pub fn index_revision(&self, path: &sdf::Path) -> Option<u64> {
         self.cache().built_revision(path).map(pcp::PrimRevision::get)
     }
@@ -2985,8 +3002,8 @@ impl Stage {
     ///
     /// The stage's sinks hear [`StageSink::load_rules_changed`]: an observer
     /// re-reads `path`'s subtree, and an ancestor whose own payload this
-    /// loads, and re-reads alone an ancestor recomposed only for the rule
-    /// derived again.
+    /// loads, and re-reads alone an ancestor whose loaded state flipped
+    /// with no payload to recompose.
     ///
     /// A `path` that normalizes into a `/__Prototype_N` prototype's namespace
     /// is silently ignored: load rules are always authored in real-namespace
@@ -5350,8 +5367,9 @@ pub(crate) mod tests {
 
     /// A source flip strands a whole fan of contextual stacks at once, and
     /// the flip edit's own pending-drain seam — no bypassing sweep call —
-    /// reclaims them: dropping the referring indices releases every fan
-    /// member's last owner, which schedules the sweep directly.
+    /// reclaims them: settling the referring prims it drops releases every
+    /// fan member's last owner, and the sweep at the end of the edit takes
+    /// them.
     #[test]
     fn gated_seam_reclaims() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -5384,8 +5402,8 @@ pub(crate) mod tests {
         let before = stage.mapped_target_stack(t_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
-        // The flip drops every referring index, orphaning the whole fan; the
-        // drain seam of the next composed read sweeps it.
+        // The flip drops every referring index; settling them orphans the
+        // whole fan, and the sweep at the end of the edit reclaims it.
         let mid = identifier_by_leaf(&stage, "mid.usda");
         stage
             .layer_handle(&mid)
@@ -10667,6 +10685,8 @@ def "P" (payload = @./clip.usda@</M>) {}
         let dir = tempfile::tempdir()?;
         let (stage, opens) = payload_pair(dir.path())?;
         let root = stage.root_layer().identifier().to_owned();
+        let built = stage.index_revision(&sdf::path("/P")?);
+        assert!(built.is_some());
         stage.edit_layer(&root, |e| {
             let inherits = sdf::PathListOp::prepended([sdf::path("/Base")?]);
             e.data_mut().set_field(
@@ -10676,7 +10696,8 @@ def "P" (payload = @./clip.usda@</M>) {}
             );
             Ok(())
         })?;
-        assert!(stage.is_indexed(&sdf::path("/P")?), "composed again with the edit");
+        let rebuilt = stage.index_revision(&sdf::path("/P")?);
+        assert!(rebuilt.is_some() && rebuilt != built, "composed again with the edit");
         stage.unload("/Q")?;
         fs::write(
             dir.path().join("p.usda"),

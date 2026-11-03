@@ -104,12 +104,14 @@ fn author_keeps_sibling_indexed() {
     let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
     let _ = stage.prim("/Bar").unwrap().type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
-    assert!(stage.is_indexed(&sdf::path("/Bar").unwrap()));
+    let bar = revision(&stage, "/Bar");
+    assert!(bar.is_some());
 
     stage.override_prim("/Foo").unwrap().set_kind("component").unwrap();
 
-    assert!(
-        stage.is_indexed(&sdf::path("/Bar").unwrap()),
+    assert_eq!(
+        revision(&stage, "/Bar"),
+        bar,
         "/Bar's index must not be dropped when authoring at /Foo",
     );
 }
@@ -157,11 +159,13 @@ fn attribute_value_keeps_owner_indexed() {
         .unwrap();
 
     let _ = stage.prim("/A").unwrap().type_name().unwrap();
-    assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
+    let before = revision(&stage, "/A");
+    assert!(before.is_some());
 
     let attr = attr.set(vt::Value::Double(2.0)).unwrap();
-    assert!(
-        stage.is_indexed(&sdf::path("/A").unwrap()),
+    assert_eq!(
+        revision(&stage, "/A"),
+        before,
         "attribute value writes must not invalidate the prim graph",
     );
     assert_eq!(attr.get().unwrap(), Some(vt::Value::Double(2.0)));
@@ -268,12 +272,14 @@ fn kind_change_no_op_for_cache() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
     let _ = stage.prim("/A").unwrap().type_name().unwrap();
-    assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
+    let before = revision(&stage, "/A");
+    assert!(before.is_some());
 
     prim.set_kind("group").unwrap();
 
-    assert!(
-        stage.is_indexed(&sdf::path("/A").unwrap()),
+    assert_eq!(
+        revision(&stage, "/A"),
+        before,
         "spec-only field changes must not invalidate the prim graph",
     );
     assert_eq!(stage.prim("/A").unwrap().kind().unwrap().as_deref(), Some("group"));
@@ -290,15 +296,22 @@ fn default_prim_keeps_unrelated() {
 
     let _ = stage.prim("/World").unwrap().type_name().unwrap();
     let _ = stage.prim("/Other").unwrap().type_name().unwrap();
-    let pre = stage.indexed_count();
-    assert!(pre >= 2);
+    assert!(stage.indexed_count() >= 2);
+    let count = stage.indexed_count();
+    let builds = stage.tally().builds;
 
     stage.set_default_prim("World").unwrap();
 
     assert_eq!(
-        stage.indexed_count(),
-        pre,
+        stage.tally().builds - builds,
+        0,
         "no prim resolves an arc through the default, so none is evicted",
+    );
+
+    assert_eq!(
+        stage.indexed_count(),
+        count,
+        "no prim resolves an arc through the default, so none is evicted"
     );
     assert_eq!(stage.default_prim().as_deref(), Some("World"));
 }
@@ -354,13 +367,14 @@ fn idempotent_define_preserves_cache() {
     stage.define_prim("/Foo/Child").unwrap();
     let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
     let _ = stage.prim("/Foo/Child").unwrap().type_name().unwrap();
-    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
-    assert!(stage.is_indexed(&sdf::path("/Foo/Child").unwrap()));
+    let foo = revision(&stage, "/Foo");
+    let child = revision(&stage, "/Foo/Child");
+    assert!(foo.is_some() && child.is_some());
 
     stage.define_prim("/Foo").unwrap();
 
-    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
-    assert!(stage.is_indexed(&sdf::path("/Foo/Child").unwrap()));
+    assert_eq!(revision(&stage, "/Foo"), foo);
+    assert_eq!(revision(&stage, "/Foo/Child"), child);
 }
 
 /// A redundant `override_prim` on an existing spec is a no-op for the cache.
@@ -369,11 +383,12 @@ fn idempotent_override_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap();
     let _ = stage.prim("/Foo").unwrap().type_name().unwrap();
-    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
+    let before = revision(&stage, "/Foo");
+    assert!(before.is_some());
 
     stage.override_prim("/Foo").unwrap();
 
-    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
+    assert_eq!(revision(&stage, "/Foo"), before);
 }
 
 /// `add_applied_schema` writes `apiSchemas`, which is resolved off the cached
@@ -409,14 +424,21 @@ fn idempotent_default_prim_preserves_cache() {
     stage.define_prim("/World").unwrap();
     stage.set_default_prim("World").unwrap();
     let _ = stage.prim("/World").unwrap().type_name().unwrap();
-    let pre = stage.indexed_count();
-    assert!(pre > 0);
+    assert!(stage.indexed_count() > 0);
+    let count = stage.indexed_count();
+    let builds = stage.tally().builds;
 
     stage.set_default_prim("World").unwrap();
 
     assert_eq!(
+        stage.tally().builds - builds,
+        0,
+        "redundant set_default_prim must not clear cached indices"
+    );
+
+    assert_eq!(
         stage.indexed_count(),
-        pre,
+        count,
         "redundant set_default_prim must not clear cached indices"
     );
 }
@@ -590,14 +612,16 @@ def "Other" {
 fn respelling_info_only_notice() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_default_prim_fixture(&dir, Some("Source"))?;
-    let pre = stage.indexed_count();
+    let count = stage.indexed_count();
+    let builds = stage.tally().builds;
     let notices = capture_notices(&stage);
 
     set_target_default_prim(&stage, "/Source")?;
 
     // Read through the stage before borrowing the sink's slot: a composed read
     // drains any pending edit, which fires the sink.
-    assert_eq!(stage.indexed_count(), pre, "nothing is evicted");
+    assert_eq!(stage.tally().builds - builds, 0, "nothing is evicted");
+    assert_eq!(stage.indexed_count(), count, "nothing is evicted");
     let notices = notices.borrow();
     assert!(notices.resynced.is_empty(), "nothing resyncs: {:?}", notices.resynced);
     assert_eq!(notices.changed_info_only, paths(&["/"]));
@@ -646,6 +670,9 @@ fn unused_var_keeps_index() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_variant_fixture(&dir)?;
     let notices = capture_notices(&stage);
+    let user = revision(&stage, "/User");
+    let other = revision(&stage, "/Other");
+    assert!(user.is_some() && other.is_some());
 
     stage.set_expression_variables(HashMap::from([
         ("SEL".to_string(), vt::Value::String("x".to_string())),
@@ -666,12 +693,14 @@ fn unused_var_keeps_index() -> Result<()> {
         );
         assert_eq!(notices.changed_info_only, paths(&["/"]));
     }
-    assert!(
-        stage.is_indexed(&sdf::path("/User")?),
+    assert_eq!(
+        revision(&stage, "/User"),
+        user,
         "/User reads SEL, whose value is unchanged — its index survives"
     );
-    assert!(
-        stage.is_indexed(&sdf::path("/Other")?),
+    assert_eq!(
+        revision(&stage, "/Other"),
+        other,
         "/Other reads no variable — its index survives"
     );
     Ok(())
@@ -1071,16 +1100,15 @@ fn threshold_sweep_recomposes() -> Result<()> {
     // The mute drops /P0's index and runs the ripe sweep; every other target
     // stack stays referenced by its cached index and survives.
     let t0 = identifier_by_leaf(&stage, "t0.usda");
+    let p39 = revision(&stage, "/P39");
+    assert!(p39.is_some());
     stage.mute_layer(t0.clone());
     assert_eq!(
         stage.attribute("/P0.x")?.get::<f64>()?,
         None,
         "the muted target is gone"
     );
-    assert!(
-        stage.is_indexed(&sdf::path("/P39")?),
-        "unrelated indices survive the sweep"
-    );
+    assert_eq!(revision(&stage, "/P39"), p39, "unrelated indices survive the sweep");
 
     stage.unmute_layer(&t0);
     for i in 0..count {
@@ -1167,7 +1195,8 @@ fn clip_value(stage: &usd::Stage) -> Option<f64> {
 fn clip_edit_is_inert() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let stage = open_clip_fixture(&dir)?;
-    let pre = stage.indexed_count();
+    let count = stage.indexed_count();
+    let builds = stage.tally().builds;
     let notices = capture_notices(&stage);
 
     // Re-point the schedule at the other clip: the metadata is still there, so
@@ -1179,7 +1208,8 @@ fn clip_edit_is_inert() -> Result<()> {
     // Read through the stage before borrowing the sink's slot: a composed read
     // drains any pending edit, which fires the sink.
     assert_eq!(clip_value(&stage), Some(2.0), "the new schedule takes effect");
-    assert_eq!(stage.indexed_count(), pre, "nothing is evicted");
+    assert_eq!(stage.tally().builds - builds, 0, "nothing is evicted");
+    assert_eq!(stage.indexed_count(), count, "nothing is evicted");
     let notices = notices.borrow();
     assert!(notices.resynced.is_empty(), "nothing resyncs: {:?}", notices.resynced);
     Ok(())

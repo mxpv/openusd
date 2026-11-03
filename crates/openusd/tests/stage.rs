@@ -1492,7 +1492,8 @@ def "Other" {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(stage.attribute("/Other.o")?.get::<f64>()?, Some(1.0));
-    assert!(stage.is_indexed(&sdf::path("/Other")?));
+    let other = stage.index_revision(&sdf::path("/Other")?);
+    assert!(other.is_some());
 
     let notices = capture_notices(&stage);
     stage.set_expression_variables(HashMap::from([(
@@ -1518,8 +1519,9 @@ def "Other" {
             "the edit is an ordinary layer-metadata info change on the pseudo-root"
         );
     }
-    assert!(
-        stage.is_indexed(&sdf::path("/Other")?),
+    assert_eq!(
+        stage.index_revision(&sdf::path("/Other")?),
+        other,
         "no prim recorded the variable, so its index survives the edit"
     );
     Ok(())
@@ -1541,7 +1543,8 @@ fn sublayer_vars_no_notice() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert_eq!(stage.attribute("/P.x")?.get::<f64>()?, Some(1.0));
-    assert!(stage.is_indexed(&sdf::path("/P")?));
+    let before = stage.index_revision(&sdf::path("/P")?);
+    assert!(before.is_some());
 
     let notices = capture_notices(&stage);
     let sub_id = identifier_by_leaf(&stage, "sub.usda");
@@ -1551,8 +1554,9 @@ fn sublayer_vars_no_notice() -> Result<()> {
         .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".to_string()))])))?;
 
     // Reading drains the pending edit, delivering the composed change notice.
-    assert!(
-        stage.is_indexed(&sdf::path("/P")?),
+    assert_eq!(
+        stage.index_revision(&sdf::path("/P")?),
+        before,
         "no composed variable changed, so the index survives"
     );
     let notices = notices.borrow();
@@ -13056,7 +13060,8 @@ fn variant_edit_invalidates_stripped_path() -> Result<()> {
     )?)?;
     stage.define_prim("/Prim/child")?;
 
-    // The stripped composed key must be dropped so the next query rebuilds.
+    // The stripped composed key is dropped, and settlement retires it, since
+    // nothing composes there yet.
     assert!(!stage.is_indexed(&sdf::path("/Prim/child")?));
     Ok(())
 }
@@ -14603,7 +14608,7 @@ fn load_reports_element_alone() -> Result<()> {
         assert_eq!(notices.load_rules, slice::from_ref(&element));
         assert_eq!(notices.load_rules_prims, [sdf::path("/world")?]);
     }
-    *notices.borrow_mut() = Notices::default();
+    notices.take();
 
     stage.unload(element.clone())?;
     let notices = notices.borrow();

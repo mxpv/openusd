@@ -256,8 +256,10 @@ pub(crate) struct LayerGraph {
     /// demands together.
     diagnostics: GraphDiagnostics,
     /// Loads layers: the resolver that anchors relative asset paths (its
-    /// [`identity`](Resolver::identity) is the resolver component of the stack's
-    /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
+    /// [`identity`](crate::ar::Resolver::identity) is the resolver component
+    /// of a stack's
+    /// [`LayerStackIdentifier`](super::LayerStackIdentifier)) and the format
+    /// registry.
     /// Composition opens a reference/payload target on demand through it.
     registry: sdf::LayerRegistry,
     /// The registry's store, which holds every layer the graph's nodes name,

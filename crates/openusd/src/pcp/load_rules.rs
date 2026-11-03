@@ -349,9 +349,6 @@ impl LoadRules {
     }
 }
 
-/// Every path whose raw entry differs between `before` and `after` — added,
-/// removed, or changed value. The touched set
-/// [`IndexCache::set_load_rules`] uses to bound invalidation.
 /// `rules` as [`IndexCache::set_load_rules`] stores it: no entry inside a
 /// `/__Prototype_N` namespace, minimized.
 fn canonical(mut rules: LoadRules) -> LoadRules {
@@ -402,6 +399,9 @@ fn rule_ancestors(before: &LoadRules, after: &LoadRules, touched: &[Path]) -> Ve
         .collect()
 }
 
+/// Every path whose raw entry differs between `before` and `after` — added,
+/// removed, or changed value. The touched set
+/// [`IndexCache::set_load_rules`] uses to bound invalidation.
 fn diff_entries(before: &LoadRules, after: &LoadRules) -> Vec<Path> {
     let mut touched: Vec<Path> = Vec::new();
     for (p, r) in &before.rules {
@@ -470,11 +470,14 @@ impl IndexCache {
     /// [`drop_index_subtrees`](Self::drop_index_subtrees) covers every
     /// descendant whose effective rule could change because an entry inside
     /// that subtree moved; walking its strict ancestors while their current
-    /// effective rule is not [`Rule::All`] covers every ancestor
-    /// [`LoadRules::effective_rule`]'s descendant lookahead could also
-    /// affect — an ancestor already at [`Rule::All`] is provably unaffected
-    /// by anything below it, since that conclusion never consults
-    /// descendants.
+    /// effective rule is not [`Rule::All`] finds every ancestor whose
+    /// inclusion [`LoadRules::effective_rule`]'s descendant lookahead could
+    /// flip — an ancestor already at [`Rule::All`] is provably unaffected by
+    /// anything below it, since that conclusion never consults descendants.
+    /// Of the ones whose inclusion flipped, one that composes a payload
+    /// ([`PrimIndex::has_payloads`](super::PrimIndex::has_payloads)), or has
+    /// no index cached to tell, is dropped as a subtree; the rest are
+    /// reported as prims. One whose inclusion holds composes as it did.
     pub(crate) fn set_load_rules(&mut self, rules: LoadRules) -> RuleVictims {
         let before = mem::replace(&mut self.load_rules, canonical(rules));
         let touched = diff_entries(&before, &self.load_rules);
@@ -504,7 +507,9 @@ impl IndexCache {
     }
 
     /// Whether `path`'s composition may read its own load rule: its cached
-    /// index has a payload ([`PrimIndex::has_payloads`]), or it has none
+    /// index has a payload
+    /// ([`PrimIndex::has_payloads`](super::PrimIndex::has_payloads)), or it
+    /// has none
     /// cached to tell.
     fn reads_rule(&self, path: &Path) -> bool {
         self.store()

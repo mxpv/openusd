@@ -215,14 +215,16 @@ pub(super) enum Settled {
     Taken,
 }
 
-/// Why a [`fixpoint`](StageComposition::fixpoint) stopped before its pass
-/// settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a [`fixpoint`](StageComposition::fixpoint) stopped without an answer.
+#[derive(Debug)]
 pub(super) enum Interrupted {
     /// Its loads ran user code (a resolver, a file format) that committed to
     /// a layer of the stage, queueing edits the drain it runs inside applies
     /// first.
     NewWork,
+    /// The pass failed, the store or the composition was busy, or the stage
+    /// is poisoned.
+    Failed(pcp::QueryError),
 }
 
 /// What a panic interrupted when it poisoned the stage.
@@ -927,7 +929,12 @@ impl StageComposition {
         if settled == Settled::Required && !self.pending_is_empty() && self.reconcile(false, hooks).is_err() {
             return;
         }
-        let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks, found);
+        // Edits its loads committed come first: the drain applies them, and
+        // the snapshot after settles what is left.
+        let settled_once = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks, found);
+        if matches!(settled_once, Err(Interrupted::NewWork)) {
+            return;
+        }
         // The prims and anchors settling composed again retry what they
         // failed to load: their failures are forgotten, and the prims a
         // retry dropped again settle once more, now opening their targets.
@@ -1916,7 +1923,8 @@ impl StageComposition {
             loop {
                 let evictions = self.cache.borrow().evictions();
                 let result = match self.fixpoint(&mut query, Settled::Required, hooks, &mut found) {
-                    Ok(result) => result,
+                    Ok(answer) => Ok(answer),
+                    Err(Interrupted::Failed(error)) => Err(error),
                     Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
                 };
                 // The prims the read's own loads dropped (a joined layer that
@@ -1962,14 +1970,16 @@ impl StageComposition {
     /// Under [`Settled::Taken`] the fixpoint stops with
     /// [`Interrupted::NewWork`], for the drain it runs inside to apply them
     /// in commit order. User code that commits on every load never lets a
-    /// [`Settled::Required`] fixpoint return.
+    /// [`Settled::Required`] fixpoint return. A pass that fails, a store a
+    /// read or an edit holds, or a reconcile that is blocked or finds the
+    /// stage poisoned stops it with [`Interrupted::Failed`].
     pub(super) fn fixpoint<T>(
         &self,
         mut pass: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         settled: Settled,
         hooks: &dyn CompositionHooks,
         found: &mut Vec<sdf::Path>,
-    ) -> Result<Result<T, pcp::QueryError>, Interrupted> {
+    ) -> Result<T, Interrupted> {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
         let mut pending: Vec<pcp::Demand> = Vec::new();
@@ -1995,7 +2005,7 @@ impl StageComposition {
             // so the loop ends after an unopenable layer is marked failed and the
             // following pass recomposes without it.
             if pending.is_empty() && clips.is_empty() {
-                return Ok(result);
+                return result.map_err(Interrupted::Failed);
             }
             // Opening a layer adds it to the store, which a read or an edit of
             // any layer of the stage's registry holds. The demands go back to the
@@ -2003,7 +2013,7 @@ impl StageComposition {
             // again.
             if let Err(busy) = self.store.ensure_writable() {
                 self.cache.borrow_mut().swap_pending_loads(&mut pending);
-                return Ok(Err(busy.into()));
+                return Err(Interrupted::Failed(busy.into()));
             }
             scope.get_or_insert_with(ar::CacheScope::begin);
             let loaded = self.load_demanded(&pending, hooks, found);
@@ -2026,12 +2036,12 @@ impl StageComposition {
                         let reconciled = self.reconcile(false, hooks);
                         self.cache.borrow_mut().swap_pending_loads(&mut pending);
                         if let Err(blocked) = reconciled {
-                            return Ok(Err(blocked));
+                            return Err(Interrupted::Failed(blocked));
                         }
                     }
                 }
             } else if !(loaded || clipped) {
-                return Ok(result);
+                return result.map_err(Interrupted::Failed);
             }
             pending.clear();
             clips.clear();
@@ -2528,8 +2538,11 @@ fn next_group(queue: &mut VecDeque<Pending>) -> Option<Group> {
 /// Poisons the stage when dropped armed: a panic left the step it guards
 /// ([`StageComposition::guarded`]).
 struct Unwind<'a> {
+    /// The composition's poison, set as the guard drops armed.
     poisoned: &'a Cell<Option<Poisoned>>,
+    /// What the guarded step was, named by the poison.
     cause: Poisoned,
+    /// Whether the step is still running: disarmed once it returns.
     armed: bool,
 }
 

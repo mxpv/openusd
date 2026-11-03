@@ -150,7 +150,10 @@
 //!    parity notes below.
 //!
 //! 3. `Changes::apply` surgically removes the affected entries from the
-//!    cache. Indices rebuild lazily on next access.
+//!    cache into its work set, and the stage settles each, rebuilding or
+//!    retiring it, before the edit returns (`IndexCache::settle_pass`). One
+//!    a held store or a suspended settlement leaves settles at the next
+//!    drain, and an index missing from the cache is built as it is read.
 //!
 //! A reverse `(LayerId, site_path) → prim_index_paths` map (the
 //! `Dependencies` table internal to the cache) makes step 2 cheap: every
@@ -327,9 +330,10 @@
 //!   reference/payload target stacks. Like all lazily composed state, the
 //!   reported set reflects the composition performed so far: a stack's members
 //!   and diagnostics retire together when a sweep reclaims the unreferenced
-//!   instance — losing the last owning prim index schedules that sweep at the
-//!   same edit seam, so a target severed from composition (its only arc muted,
-//!   unloaded, or deleted) stops reporting promptly — and recomposition
+//!   instance — once settlement retires or rebuilds the last prim that owned
+//!   it, the sweep at the end of that edit reclaims it, so a target severed
+//!   from composition (its only arc muted, unloaded, or deleted) stops
+//!   reporting promptly — and recomposition
 //!   re-derives them if the problem still exists.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>

@@ -55,8 +55,9 @@ pub(super) struct IndexStore {
     stack_owners: HashMap<LayerStackId, usize>,
     /// Whether some stack lost its last cache owner since the last sweep —
     /// the signal that schedules a reclamation pass at the next edit seam,
-    /// deliberately unthresholded: a single deletion, mute, or unload that
-    /// orphans a stack must retire it (and its diagnostics) promptly.
+    /// deliberately unthresholded: a work-set entry that settles or retires,
+    /// releasing a stack's last owner, lets the sweep retire it (and its
+    /// diagnostics) promptly.
     ownership_lost: bool,
     /// Source of every [`PrimRevision`] this store hands out. Monotonic and
     /// never reset, so a value it minted is never minted again.

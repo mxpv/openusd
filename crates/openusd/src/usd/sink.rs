@@ -32,6 +32,15 @@ pub type StageSinkId = sdf::sink::Id<dyn StageSink>;
 /// invalidated and all stage borrows are released — so a sink may read (or
 /// further author) the `stage`, but must not add or remove sinks from within a
 /// callback (the pool is borrowed for the duration of a fan-out).
+///
+/// Notices arrive in commit order: each transaction's
+/// [`after_commit`](Self::after_commit), then what settling its snapshot
+/// found ([`recomposed`](Self::recomposed)). A mutation's own notice (load
+/// rules, muting, retried loads) comes ahead of the edits its settling
+/// reconciled. Nothing is delivered while a read, an edit of a layer or a
+/// mutation runs: what reads find waits for the next drained edit, the
+/// next mutation (ahead of its own notice) or [`Stage::flush`], and an edit
+/// a sink makes is heard after the notices being delivered.
 pub trait StageSink {
     /// Observe a committed edit in composed (stage) namespace, after composition
     /// has been invalidated and the stage's borrows released — so the callback
@@ -115,10 +124,11 @@ pub trait StageSink {
     /// [`Stage::set_load_rules`] changed, with an ancestor whose own payload
     /// it includes or leaves out, the prototype roots retired with them and
     /// their instances;
-    /// and, as prims, the ancestors only recomposed for the rule derived
-    /// again. Loading `/world/element_0` on a stage that loads nothing names
-    /// `/world/element_0` as a subtree and, when `/world` has no payload of
-    /// its own, `/world` as a prim, leaving `/world/element_1` out. What the
+    /// and, as prims, the ancestors whose loaded state flipped with no
+    /// payload to recompose. Loading `/world/element_0` on a stage that loads
+    /// nothing names `/world/element_0` as a subtree and, when `/world` has
+    /// no payload of its own, `/world` as a prim, leaving `/world/element_1`
+    /// out. What the
     /// loads settling the change ran dropped joins the subtrees, with the
     /// anchors whose value clips read a layer they joined.
     /// Never empty, since a no-op edit fires no notification at all.
@@ -455,7 +465,9 @@ pub struct Resynced<'a> {
 /// The owned paths behind a [`Resynced`], normalized once they are all in.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ResyncPaths {
+    /// Subtree resyncs ([`Resynced::subtrees`]).
     pub(super) subtrees: Vec<sdf::Path>,
+    /// Prims recomposed in place ([`Resynced::prims`]).
     pub(super) prims: Vec<sdf::Path>,
 }
 

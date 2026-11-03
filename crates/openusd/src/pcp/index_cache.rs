@@ -91,8 +91,8 @@ pub struct IndexCache {
     pub(super) population_mask: PopulationMask,
     /// Value-clip resolution and its layer cache ([`ClipCache`], spec 12.3.4) —
     /// an independently-owned entity that the clip orchestration methods
-    /// ([`resolve_clip_value`](Self::resolve_clip_value) and friends) delegate
-    /// per-anchor clip work to once they have ensured the relevant indices.
+    /// delegate per-anchor clip work to once they have ensured the relevant
+    /// indices.
     clip_cache: ClipCache,
     /// What composing and settling have cost so far ([`tally`](Self::tally)).
     pub(super) tally: Tally,
@@ -1378,8 +1378,9 @@ impl IndexCache {
 
     /// Whether some stack lost its last cache owner since the last sweep —
     /// the signal that schedules reclamation at the stage's next edit seam.
-    /// Unthresholded: a single deletion, mute, or unload that orphans a stack
-    /// must retire it (and its diagnostics) promptly.
+    /// Unthresholded: a work-set entry that settles or retires, releasing a
+    /// stack's last owner, lets the sweep retire it (and its diagnostics)
+    /// promptly.
     pub(crate) fn ownership_lost(&self) -> bool {
         self.store.ownership_lost()
     }
@@ -2281,10 +2282,9 @@ impl IndexCache {
     /// Drop the cached entry (index, child context, and build errors) of each
     /// of `paths`, along with its dependency registrations. Descendants stay.
     ///
-    /// The transient query errors are left alone: dropping an index is not by
-    /// itself an invalidation — a lazy prototype materialization drops one
-    /// mid-query — and [`Self::retire_query_errors`] is what retires them, at every
-    /// edit seam.
+    /// The transient query errors are left alone:
+    /// [`Self::retire_query_errors`] retires them at every edit seam. The
+    /// dropped prims join the work set for settlement.
     pub(super) fn drop_indices<'p>(&mut self, paths: impl IntoIterator<Item = &'p Path>) {
         self.store.remove_all(paths);
     }

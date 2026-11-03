@@ -448,8 +448,6 @@ fn copy_to_temp(root: &Path) -> Result<PathBuf> {
     Ok(copy)
 }
 
-/// One timed phase: the instant it began, and the heap and the process
-/// counters it began with.
 /// Prints what composing and settling have cost over the whole run.
 fn print_tally(tally: pcp::Tally) {
     eprintln!(
@@ -468,6 +466,8 @@ fn tally_delta(before: pcp::Tally, after: pcp::Tally) -> String {
     )
 }
 
+/// One timed phase: the instant it began, and the heap and the process
+/// counters it began with.
 struct Phase {
     name: &'static str,
     start: Instant,
