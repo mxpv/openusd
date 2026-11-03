@@ -2137,29 +2137,51 @@ impl Stage {
     /// stage through a reference cycle). To observe a single layer's edits
     /// regardless of composition, install an [`sdf::LayerSink`] on the layer
     /// instead.
-    pub fn add_sink<S: StageSink + 'static>(&self, sink: S) -> StageSinkId {
-        // Deliver any edit already committed (e.g. a direct `layer_handle` commit
-        // awaiting drain), and what reads found, to the current set before this
-        // sink joins, so a sink only ever observes what happened after it was
-        // installed. Inside a read or a layer edit what is not reconciled yet
-        // waits for a later drain.
-        let _ = self.composition.flush(self);
-        self.sinks.borrow_mut().add(Rc::new(sink))
+    ///
+    /// Fails with [`sdf::LayerError::Busy`], installing nothing, where what
+    /// is pending cannot be delivered to the sinks already installed first
+    /// ([`flush`](Self::flush)): inside a read or an edit of a layer on the
+    /// stage's registry, a [`LayerRef`] held included, or from user code
+    /// composition runs.
+    pub fn add_sink<S: StageSink + 'static>(&self, sink: S) -> Result<StageSinkId> {
+        // Any edit already committed (e.g. a direct `layer_handle` commit
+        // awaiting drain), and what reads found, go to the current set before
+        // this sink joins, so a sink only ever observes what happened after
+        // it was installed.
+        self.flush_sinks()?;
+        Ok(self.sinks.borrow_mut().add(Rc::new(sink)))
     }
 
     /// Remove the sink with the given [`StageSinkId`]; the inverse of
     /// [`add_sink`](Self::add_sink). A no-op if it was already removed.
-    pub fn remove_sink(&self, id: StageSinkId) {
-        // Deliver any already-committed edit, and what reads found, to the full
-        // set, including this sink, before it leaves — so it sees everything
-        // that happened while it was installed. Inside a read or a layer edit
-        // what is not reconciled yet waits for a later drain.
-        let _ = self.composition.flush(self);
+    ///
+    /// Fails with [`sdf::LayerError::Busy`], removing nothing, where what is
+    /// pending cannot be delivered to the sink first, as
+    /// [`add_sink`](Self::add_sink) does.
+    pub fn remove_sink(&self, id: StageSinkId) -> Result<()> {
+        if !self.sinks.borrow().contains(id) {
+            return Ok(());
+        }
+        // Any already-committed edit, and what reads found, go to the full
+        // set, including this sink, before it leaves, so it sees everything
+        // that happened while it was installed.
+        self.flush_sinks()?;
         let mut sinks = self.sinks.borrow_mut();
         sinks.remove(id);
         if sinks.is_empty() {
             self.composition.forget_discovered();
         }
+        Ok(())
+    }
+
+    /// Delivers what is pending to the installed sinks before the set
+    /// changes ([`flush`](Self::flush)). A poisoned stage delivers nothing,
+    /// so its set changes freely.
+    fn flush_sinks(&self) -> Result<()> {
+        if self.composition.is_poisoned() {
+            return Ok(());
+        }
+        Ok(self.composition.flush(self)?)
     }
 
     /// Delivers to the stage's sinks what reads found since the last drain
@@ -2167,9 +2189,10 @@ impl Stage {
     /// loads a layer recomposes prims, and tells the sinks no earlier than
     /// the next drain of an edit, or this call.
     ///
-    /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
-    /// a layer on the stage's registry, delivering only the notices of edits
-    /// reconciled already, and with [`pcp::QueryError::Poisoned`] on a
+    /// Fails with [`sdf::LayerError::Busy`], delivering nothing, where it
+    /// could not deliver everything: inside a read or an edit of a layer on
+    /// the stage's registry, a [`LayerRef`] held included, or from user code
+    /// composition runs. Fails with [`pcp::QueryError::Poisoned`] on a
     /// poisoned stage. Called from a sink, the notice follows the ones being
     /// delivered.
     pub fn flush(&self) -> Result<()> {
@@ -2186,15 +2209,20 @@ impl Stage {
     /// Install `observer` to hear each transaction outcome as it is
     /// reconciled.
     pub(super) fn add_observer(&self, observer: Rc<dyn TxnObserver>) -> sdf::sink::Id<dyn TxnObserver> {
-        // As `add_sink` does: the observer hears only of later edits.
+        // The observer hears only of later edits, unless a read or an edit
+        // of the stage's layers holds them: what it keeps queued then
+        // reconciles after the observer joins.
+        // TODO: refuse with `Busy` there, as `add_sink` does, once
+        // `UndoStage` and `ReplayStage` construct fallibly.
         self.process_pending();
         self.observers.borrow_mut().add(observer)
     }
 
     /// Remove the observer with `id`.
     pub(super) fn remove_observer(&self, id: sdf::sink::Id<dyn TxnObserver>) {
-        // As `remove_sink` does: the observer hears of every edit made while
-        // it was installed.
+        // The observer hears of every edit made while it was installed,
+        // unless a read or an edit of the stage's layers holds them; it is
+        // removed regardless, since a wrapper's drop removes it.
         self.process_pending();
         self.observers.borrow_mut().remove(id);
     }
@@ -7076,7 +7104,7 @@ def \"Sub\" {}
         let during = Rc::new(Cell::new(None));
         stage.add_sink(Unloader {
             during: Rc::clone(&during),
-        });
+        })?;
 
         stage.define_prim("/T")?;
         assert_eq!(during.get(), Some(2), "the layer stays through the delivery");
@@ -7103,7 +7131,7 @@ def \"Sub\" {}
         let registry = sdf::LayerRegistry::default();
         let stage = Stage::builder().registry(registry.clone()).open(&root)?;
         assert!(stage.prim("/P/C")?.is_valid()?);
-        stage.add_sink(Unloader);
+        stage.add_sink(Unloader)?;
 
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| stage.define_prim("/T")));
         assert!(unwound.is_err());
@@ -7440,12 +7468,12 @@ def "M" (
         let payload = layer_named(&stage, "payload.usda");
         let root_layer = stage.root_layer().identifier().to_string();
         stage.set_edit_target(EditTarget::for_layer(payload.clone()))?;
-        let sink = stage.add_sink(Unloads);
+        let sink = stage.add_sink(Unloads)?;
         {
             let _context = stage.edit_context(EditTarget::for_layer(root_layer))?;
             assert_eq!(stage.layer_count(), 2, "the target the context restores stays");
         }
-        stage.remove_sink(sink);
+        stage.remove_sink(sink)?;
         stage.edit_layer(&payload, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/M/After", sdf::Specifier::Def, "")?;
             Ok(())
@@ -7821,7 +7849,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn clip_missing(dir: &FsPath) -> Result<(Stage, Heard)> {
         let stage = Stage::open(&clip_fixture(dir, "late.usda")?)?;
         let heard = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Recomposed(Rc::clone(&heard)));
+        stage.add_sink(Recomposed(Rc::clone(&heard)))?;
         assert_eq!(clip_x(&stage)?, None);
         fs::copy(dir.join("clip.usda"), dir.join("late.usda"))?;
         Ok((stage, heard))
@@ -7860,7 +7888,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let stage = Stage::open(&root)?;
         assert!(stage.prim("/P")?.is_valid()?);
         let heard = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Order(Rc::clone(&heard)));
+        stage.add_sink(Order(Rc::clone(&heard)))?;
         assert_eq!(clip_x(&stage)?, None);
         fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
         assert_eq!(clip_x(&stage)?, Some(5.0));
@@ -7895,6 +7923,53 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
+    /// Whether `result` failed with [`sdf::LayerError::Busy`].
+    fn is_busy<T>(result: &Result<T>) -> bool {
+        matches!(result, Err(crate::Error::Query(pcp::QueryError::Layer(error))) if matches!(**error, sdf::LayerError::Busy))
+    }
+
+    /// Where what reads found cannot be delivered — inside a read or an edit
+    /// of the stage's layers, or with a layer reference held — neither
+    /// adding nor removing a sink changes the set: a new sink would hear
+    /// what predates it, and a leaving one would miss what it was installed
+    /// for.
+    #[test]
+    fn sink_busy_in_read() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, first) = clip_missing(dir.path())?;
+        let second: Heard = Rc::default();
+        let id = stage.add_sink(Recomposed(Rc::clone(&second)))?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        let handle = stage
+            .layer_handle(stage.root_layer().identifier())
+            .expect("the root layer");
+
+        let third: Heard = Rc::default();
+        let added = handle.read(|_| stage.add_sink(Recomposed(Rc::clone(&third))))?;
+        assert!(is_busy(&added), "{added:?}");
+        let removed = handle.read(|_| stage.remove_sink(id))?;
+        assert!(is_busy(&removed), "{removed:?}");
+        let in_edit = Cell::new(false);
+        handle.edit(|_| {
+            in_edit.set(is_busy(&stage.add_sink(Recomposed(Rc::clone(&third)))));
+            Ok(())
+        })?;
+        assert!(in_edit.get(), "an edit holds the layers too");
+        let root = stage.root_layer();
+        assert!(is_busy(&stage.add_sink(Recomposed(Rc::clone(&third)))));
+        drop(root);
+
+        stage.flush()?;
+        let heard = [vec![sdf::path("/A")?]];
+        assert_eq!(*first.borrow(), heard);
+        assert_eq!(*second.borrow(), heard, "the sink stayed installed");
+        assert!(third.borrow().is_empty(), "the sink was never installed");
+        stage.remove_sink(id)?;
+        stage.remove_sink(id)?;
+        handle.read(|_| stage.remove_sink(id))??;
+        Ok(())
+    }
+
     /// Adding a sink delivers what reads found to the sinks already there,
     /// and the new one hears none of it.
     #[test]
@@ -7904,7 +7979,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(clip_x(&stage)?, Some(5.0));
 
         let second = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Recomposed(Rc::clone(&second)));
+        stage.add_sink(Recomposed(Rc::clone(&second)))?;
         assert_eq!(*first.borrow(), [vec![sdf::path("/A")?]], "adding a sink flushes");
         assert!(second.borrow().is_empty(), "the new sink hears nothing older");
         stage.flush()?;
@@ -7958,7 +8033,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(clip_x(&stage)?, None);
         fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
         let heard = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Commits(Rc::clone(&heard)));
+        stage.add_sink(Commits(Rc::clone(&heard)))?;
 
         stage.edit_layer(&layer_named(&stage, "ref.usda"), |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["./late.usda"]);
@@ -8245,7 +8320,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let sink = Rc::clone(&resynced);
         b.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
             sink.borrow_mut().extend(change.resynced.iter().cloned());
-        });
+        })?;
         sdf::layer::tests::append(FsPath::new(&root), "def \"Added\" {}\n")?;
         let handle = a.layer_handle(a.root_layer().identifier()).expect("A holds its root");
         assert!(handle.reload(false)?);
@@ -8334,7 +8409,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             let direct = matches!(change.provenance, usd::Provenance::DirectLayerEdit);
             let added = change.resynced.iter().any(|path| path.as_str() == "/X");
             sink.borrow_mut().push((direct, added));
-        });
+        })?;
         sdf::layer::tests::append(FsPath::new(&payload), "def \"Y\" {}\n")?;
         sdf::layer::tests::append(&sub, "def \"Z\" {}\n")?;
         stage.reload()?;
@@ -8391,7 +8466,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let stage = Stage::open(&root)?;
         assert!(!stage.prim("/Sub")?.is_valid()?);
         let retried = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Retried(Rc::clone(&retried)));
+        stage.add_sink(Retried(Rc::clone(&retried)))?;
         fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
         stage.reload()?;
         assert!(
@@ -8474,7 +8549,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             read: Rc::clone(&read),
             during: Rc::clone(&during),
             late: Rc::clone(&late),
-        });
+        })?;
         let target = stage
             .prim("/Child")?
             .edit_target_for_arc(usd::EditTargetArc::Reference)?;
@@ -8542,7 +8617,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let stage = Stage::open(&root)?;
         let weak = layer_named(&stage, "sub.usda");
         let log = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Log(Rc::clone(&log)));
+        stage.add_sink(Log(Rc::clone(&log)))?;
         stage.mute_layer(weak.as_str());
         assert!(!stage.prim("/Sub")?.is_valid()?, "composed while muted");
         assert_eq!(stage.layer_count(), 1);
@@ -8763,8 +8838,8 @@ def "P" (payload = @./clip.usda@</M>) {}
         let a = Stage::builder().registry(registry.clone()).open(&path)?;
         let b = Stage::builder().registry(registry).open(&path)?;
         let (seen_a, seen_b) = (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(Vec::new())));
-        a.add_sink(Own(Rc::clone(&seen_a)));
-        b.add_sink(Own(Rc::clone(&seen_b)));
+        a.add_sink(Own(Rc::clone(&seen_a)))?;
+        b.add_sink(Own(Rc::clone(&seen_b)))?;
         assert!(!b.prim("/A/B")?.is_valid()?);
 
         a.define_prim("/A/B")?;
@@ -9450,7 +9525,7 @@ def "P" (payload = @./clip.usda@</M>) {}
                     Provenance::EditTarget(_) => "target",
                     Provenance::DirectLayerEdit => "direct",
                 }));
-            });
+            })?;
         }
 
         stage.define_prim("/Q")?;
@@ -9538,7 +9613,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         stage.add_sink(Log {
             seen: Cell::new(0),
             aborted: Rc::clone(&aborted),
-        });
+        })?;
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
             stage.batch_edit(&["root.usda", "weak.usda"], |edits| {
                 sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;
@@ -9584,10 +9659,10 @@ def "P" (payload = @./clip.usda@</M>) {}
                     nested.define_prim("/A").expect("the nested edit");
                     nested.mute_layer("weak.usda");
                 }
-            });
+            })?;
         }
         let log = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Log(Rc::clone(&log)));
+        stage.add_sink(Log(Rc::clone(&log)))?;
         stage.define_prim("/World")?;
         assert_eq!(*log.borrow(), ["commit /World", "commit /A", "mute weak.usda"]);
         Ok(())
@@ -9610,7 +9685,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let events = Rc::new(Cell::new(0));
         {
             let events = events.clone();
-            stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1));
+            stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1))?;
         }
         let seen = Rc::new(Cell::new(None));
         let layer = stage.layer_handle("root.usda").expect("root layer");
@@ -9846,7 +9921,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let events = Rc::new(Cell::new(0));
         {
             let events = events.clone();
-            stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1));
+            stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1))?;
         }
         let layer = stage.layer_handle("root.usda").expect("root layer");
         let nested = layer.clone();
@@ -10056,10 +10131,12 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn record_resyncs(stage: &Stage) -> Resyncs {
         let resyncs = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&resyncs);
-        stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
-            sink.borrow_mut()
-                .push(change.resynced.iter().map(ToString::to_string).collect());
-        });
+        stage
+            .add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+                sink.borrow_mut()
+                    .push(change.resynced.iter().map(ToString::to_string).collect());
+            })
+            .unwrap();
         resyncs
     }
 
@@ -10555,7 +10632,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let dir = tempfile::tempdir()?;
         let (stage, _, root) = poisoned_stage(dir.path())?;
         let heard = Rc::new(Cell::new(0));
-        stage.add_sink(Heard(Rc::clone(&heard)));
+        stage.add_sink(Heard(Rc::clone(&heard)))?;
 
         define_raw(&root, "/Late");
         assert_eq!(heard.get(), 0);
@@ -10637,10 +10714,10 @@ def "P" (payload = @./clip.usda@</M>) {}
                 let _ = stage.prim("/P/Inner").expect("a prim path").is_valid();
             }));
             assert!(read.is_err(), "the read's resolver panicked");
-        });
+        })?;
         let after = Rc::new(Cell::new(0));
         let later = Rc::clone(&after);
-        stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| later.set(later.get() + 1));
+        stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| later.set(later.get() + 1))?;
         let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
         {
             let _layers = stage.layers();

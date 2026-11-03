@@ -840,7 +840,9 @@ pub(crate) mod tests {
     pub(crate) fn commits(stage: &Stage) -> Rc<Cell<usize>> {
         let commits = Rc::new(Cell::new(0));
         let counted = commits.clone();
-        stage.add_sink(move |_stage: &Stage, _change: &usd::CommittedChange<'_>| counted.set(counted.get() + 1));
+        stage
+            .add_sink(move |_stage: &Stage, _change: &usd::CommittedChange<'_>| counted.set(counted.get() + 1))
+            .unwrap();
         commits
     }
 

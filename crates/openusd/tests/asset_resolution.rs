@@ -1205,11 +1205,13 @@ fn clip_expression_reevaluated() {
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let _token = {
         let resynced = resynced.clone();
-        stage.add_sink(move |_stage: &Stage, change: &usd::CommittedChange<'_>| {
-            resynced
-                .borrow_mut()
-                .extend(change.asset_paths_resynced.iter().cloned());
-        })
+        stage
+            .add_sink(move |_stage: &Stage, change: &usd::CommittedChange<'_>| {
+                resynced
+                    .borrow_mut()
+                    .extend(change.asset_paths_resynced.iter().cloned());
+            })
+            .unwrap()
     };
 
     let root = stage.root_layer().identifier().to_string();

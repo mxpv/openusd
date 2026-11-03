@@ -70,13 +70,15 @@ struct Notices {
 fn capture_notices(stage: &usd::Stage) -> Rc<RefCell<Notices>> {
     let notices = Rc::new(RefCell::new(Notices::default()));
     let sink = notices.clone();
-    stage.add_sink(move |_stage: &usd::Stage, change: &usd::CommittedChange<'_>| {
-        let mut n = sink.borrow_mut();
-        n.resynced.extend(change.resynced.iter().cloned());
-        n.changed_info_only.extend(change.changed_info_only.iter().cloned());
-        n.asset_paths_resynced
-            .extend(change.asset_paths_resynced.iter().cloned());
-    });
+    stage
+        .add_sink(move |_stage: &usd::Stage, change: &usd::CommittedChange<'_>| {
+            let mut n = sink.borrow_mut();
+            n.resynced.extend(change.resynced.iter().cloned());
+            n.changed_info_only.extend(change.changed_info_only.iter().cloned());
+            n.asset_paths_resynced
+                .extend(change.asset_paths_resynced.iter().cloned());
+        })
+        .unwrap();
     notices
 }
 

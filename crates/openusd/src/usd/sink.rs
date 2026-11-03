@@ -10,8 +10,10 @@
 //! costs nothing extra.
 //!
 //! Install with [`Stage::add_sink`](super::Stage::add_sink), which returns a
-//! [`StageSinkId`] to later [`Stage::remove_sink`](super::Stage::remove_sink). A
-//! plain `Fn(&Stage, &CommittedChange)` closure is itself a `StageSink`, so
+//! [`StageSinkId`] to later [`Stage::remove_sink`](super::Stage::remove_sink).
+//! Both fail with `Busy`, changing nothing, where what is pending cannot be
+//! delivered first: inside a read or an edit of the stage's layers. A plain
+//! `Fn(&Stage, &CommittedChange)` closure is itself a `StageSink`, so
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
 use std::collections::HashSet;

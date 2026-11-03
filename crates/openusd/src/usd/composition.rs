@@ -960,22 +960,30 @@ impl StageComposition {
     /// ([`discover`](Self::discover)) as a [`StageNotice::Recomposed`], ahead
     /// of the notices of the edits pending, which were committed after it:
     /// a boundary the stage's caller chooses. Inside a delivery the notice
-    /// waits behind the ones being delivered. While a read or an edit holds
-    /// the layers' store, what was found waits, and this fails with
-    /// [`sdf::LayerError::Busy`] once it has delivered what was reconciled
-    /// already. Fails with [`pcp::QueryError::Poisoned`] on a poisoned stage,
-    /// which delivers nothing.
+    /// waits behind the ones being delivered.
+    ///
+    /// Fails with [`sdf::LayerError::Busy`], doing nothing, where it could
+    /// not deliver everything: while a read or an edit holds the layers'
+    /// store, a mutation, a drain or a layer load runs, or the composition is
+    /// borrowed. Fails with [`pcp::QueryError::Poisoned`] on a poisoned
+    /// stage, which delivers nothing.
     pub(super) fn flush(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         if let Some(poisoned) = self.poisoned.get() {
             return Err(poisoned.error());
         }
-        let writable = self.store.ensure_writable();
-        if writable.is_ok() {
-            let found = self.discovered.take();
-            self.report(None, StageNotice::Recomposed, found, hooks);
+        self.store.ensure_writable()?;
+        if self.quiet.get()
+            || self.reconciling.get()
+            || self.loading.get()
+            || self.layers.is_borrowed()
+            || self.cache.is_borrowed()
+        {
+            return Err(sdf::LayerError::Busy.into());
         }
+        let found = self.discovered.take();
+        self.report(None, StageNotice::Recomposed, found, hooks);
         self.process_pending(hooks);
-        Ok(writable?)
+        Ok(())
     }
 
     /// Drops what operations found for no sink to hear: the last sink left.

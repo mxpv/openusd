@@ -801,7 +801,7 @@ mod tests {
                     }
                     _ => None,
                 }));
-            })
+            })?
         };
         attr.set(2.0_f64)?;
         assert_eq!(*value.borrow(), Some(2.0));
@@ -831,7 +831,7 @@ mod tests {
                         Edit::EraseField { path, field } if *path == size => Some(field.as_str().to_string()),
                         _ => None,
                     }));
-            })
+            })?
         };
         attr.clear_connections()?;
         assert!(erased.borrow().iter().any(|f| f == "connectionPaths"));
@@ -846,11 +846,13 @@ mod tests {
         let diffs: Rc<RefCell<Vec<Diff>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let diffs = diffs.clone();
-            stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
-                diffs
-                    .borrow_mut()
-                    .extend(forward_diff(stage, change).expect("forward diff"));
-            });
+            stage
+                .add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+                    diffs
+                        .borrow_mut()
+                        .extend(forward_diff(stage, change).expect("forward diff"));
+                })
+                .unwrap();
         }
         diffs
     }
@@ -1542,7 +1544,7 @@ mod tests {
             let resynced = resynced.clone();
             b.add_sink(move |_: &Stage, change: &CommittedChange<'_>| {
                 resynced.borrow_mut().extend(change.resynced.iter().cloned());
-            })
+            })?
         };
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::ExactLayer(&root_b))?;

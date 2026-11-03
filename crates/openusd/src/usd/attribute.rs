@@ -3025,7 +3025,9 @@ class Marker "Marker"
         let commits = Rc::new(Cell::new(0));
         let token = {
             let commits = commits.clone();
-            stage.add_sink(move |_stage: &Stage, _change: &CommittedChange<'_>| commits.set(commits.get() + 1))
+            stage
+                .add_sink(move |_stage: &Stage, _change: &CommittedChange<'_>| commits.set(commits.get() + 1))
+                .expect("a stage no read holds takes a sink")
         };
         (commits, token)
     }

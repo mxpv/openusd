@@ -151,7 +151,7 @@ def "Model" (
         let resynced = resynced.clone();
         stage.add_sink(move |_stage: &Stage, change: &usd::CommittedChange<'_>| {
             resynced.borrow_mut().extend(change.resynced.iter().cloned());
-        })
+        })?
     };
 
     // Author into the clip layer through the stage. The clip cache and the graph
@@ -513,7 +513,7 @@ fn unculled_dependent_resyncs() -> Result<()> {
         let resynced = resynced.clone();
         stage.add_sink(move |_stage: &Stage, change: &usd::CommittedChange<'_>| {
             resynced.borrow_mut().extend(change.resynced.iter().cloned());
-        })
+        })?
     };
 
     // An `over` in the referenced layer: inert, so the spec tier handles it. The

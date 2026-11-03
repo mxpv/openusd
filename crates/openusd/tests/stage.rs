@@ -179,26 +179,28 @@ struct Notices {
 fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
     let notices = Rc::new(RefCell::new(Notices::default()));
     let (commit, muting, load_rules) = (notices.clone(), notices.clone(), notices.clone());
-    stage.add_sink(RecordingSink {
-        after: Some(Box::new(move |_stage: &Stage, change: &CommittedChange<'_>| {
-            let mut n = commit.borrow_mut();
-            n.resynced.extend(change.resynced.iter().cloned());
-            n.changed_info_only.extend(change.changed_info_only.iter().cloned());
-            n.asset_paths_resynced
-                .extend(change.asset_paths_resynced.iter().cloned());
-        })),
-        muting: Some(Box::new(
-            move |_stage: &Stage, _layer: &str, _muted, resynced: Resynced<'_>| {
-                muting.borrow_mut().muting.extend(resynced.subtrees.iter().cloned());
-            },
-        )),
-        load_rules: Some(Box::new(move |_stage: &Stage, resynced: Resynced<'_>| {
-            let mut notices = load_rules.borrow_mut();
-            notices.load_rules.extend(resynced.subtrees.iter().cloned());
-            notices.load_rules_prims.extend(resynced.prims.iter().cloned());
-        })),
-        ..Default::default()
-    });
+    stage
+        .add_sink(RecordingSink {
+            after: Some(Box::new(move |_stage: &Stage, change: &CommittedChange<'_>| {
+                let mut n = commit.borrow_mut();
+                n.resynced.extend(change.resynced.iter().cloned());
+                n.changed_info_only.extend(change.changed_info_only.iter().cloned());
+                n.asset_paths_resynced
+                    .extend(change.asset_paths_resynced.iter().cloned());
+            })),
+            muting: Some(Box::new(
+                move |_stage: &Stage, _layer: &str, _muted, resynced: Resynced<'_>| {
+                    muting.borrow_mut().muting.extend(resynced.subtrees.iter().cloned());
+                },
+            )),
+            load_rules: Some(Box::new(move |_stage: &Stage, resynced: Resynced<'_>| {
+                let mut notices = load_rules.borrow_mut();
+                notices.load_rules.extend(resynced.subtrees.iter().cloned());
+                notices.load_rules_prims.extend(resynced.prims.iter().cloned());
+            })),
+            ..Default::default()
+        })
+        .unwrap();
     notices
 }
 
@@ -761,7 +763,7 @@ fn open_broken_targets(dir: &FsPath, targets: &[&str]) -> Result<(Stage, Heard)>
             recomposed.borrow_mut().push(("recomposed", resynced.subtrees.to_vec()));
         })),
         ..Default::default()
-    });
+    })?;
     Ok((stage, heard))
 }
 
@@ -833,7 +835,7 @@ fn mute_names_other_referrers() -> Result<()> {
             recomposed.borrow_mut().push(("recomposed", resynced.subtrees.to_vec()));
         })),
         ..Default::default()
-    });
+    })?;
     let sub = stage
         .layer_identifiers()
         .into_iter()
@@ -2729,7 +2731,7 @@ fn mute_alternate_spelling() -> Result<()> {
                 }
             })),
             ..Default::default()
-        })
+        })?
     };
 
     assert_eq!(
@@ -4115,7 +4117,7 @@ fn load_noop_fires_no_notification() -> Result<()> {
                 *calls.borrow_mut() += 1;
             })),
             ..Default::default()
-        })
+        })?
     };
 
     // Already loaded with the default (empty) rules -- a true no-op.
@@ -12392,7 +12394,7 @@ fn target_edit_is_info_only_not_resync() -> Result<()> {
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
-        })
+        })?
     };
     stage.relationship("/A.r")?.set_targets(["/C"])?;
 
@@ -12423,7 +12425,7 @@ fn attr_removal_not_info_only() -> Result<()> {
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
+        })?
     };
     assert!(stage.remove_property("/P.size")?);
 
@@ -12454,7 +12456,7 @@ fn rel_removal_not_info_only() -> Result<()> {
         let info = info.clone();
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
-        })
+        })?
     };
     assert!(stage.remove_property("/A.r")?);
 
@@ -13133,7 +13135,7 @@ fn listener_fires_on_define() -> Result<()> {
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             count.set(count.get() + 1);
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
+        })?
     };
     stage.define_prim("/World")?;
     assert_eq!(count.get(), 1);
@@ -13160,7 +13162,7 @@ fn listener_info_only() -> Result<()> {
             if oc.changed_fields(&size).any(|t| t.as_str() == "default") {
                 has_default.set(true);
             }
-        })
+        })?
     };
     attr.set(2.0_f64)?;
     assert!(info.borrow().contains(&sdf::Path::new("/World.size")?));
@@ -13210,7 +13212,7 @@ fn listener_info_under_variant_target() -> Result<()> {
             if oc.changed_fields(&size).any(|t| t.as_str() == "default") {
                 has_default.set(true);
             }
-        })
+        })?
     };
     attr.set(2.0_f64)?;
 
@@ -13238,7 +13240,7 @@ fn listener_resync_under_variant_target() -> Result<()> {
         let resynced = resynced.clone();
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
+        })?
     };
     stage.define_prim("/Prim/child")?;
 
@@ -13299,7 +13301,7 @@ def \"MyPrim\" (
         let resynced = resynced.clone();
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
+        })?
     };
     stage.define_prim("/MyPrim/New")?;
 
@@ -13349,7 +13351,7 @@ fn listener_edit_target_changed() -> Result<()> {
         stage.add_sink(RecordingSink {
             edit_target: Some(Box::new(move |_stage| count.set(count.get() + 1))),
             ..Default::default()
-        })
+        })?
     };
     stage.set_edit_target(EditTarget::for_layer(sub_id.clone()))?;
     assert_eq!(count.get(), 1);
@@ -13373,7 +13375,7 @@ fn listener_edit_context_restore() -> Result<()> {
         stage.add_sink(RecordingSink {
             edit_target: Some(Box::new(move |_stage| count.set(count.get() + 1))),
             ..Default::default()
-        })
+        })?
     };
     {
         let _ctx = stage.edit_context(EditTarget::for_layer(sub_id))?;
@@ -13407,7 +13409,7 @@ fn listener_layer_muting() -> Result<()> {
                 }
             })),
             ..Default::default()
-        })
+        })?
     };
     stage.mute_layer("weak.usda");
     stage.mute_layer("weak.usda"); // already muted — no notice
@@ -13546,11 +13548,11 @@ fn unset_stops_delivery() -> Result<()> {
     let count = Rc::new(Cell::new(0u32));
     let id = {
         let count = count.clone();
-        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))?
     };
     stage.define_prim("/A")?;
     assert_eq!(count.get(), 1);
-    stage.remove_sink(id);
+    stage.remove_sink(id)?;
     stage.define_prim("/B")?;
     assert_eq!(count.get(), 1);
     Ok(())
@@ -13621,7 +13623,7 @@ fn namespace_edit_fires_sink() -> Result<()> {
     let after = Rc::new(Cell::new(0u32));
     {
         let after = after.clone();
-        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| after.set(after.get() + 1));
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| after.set(after.get() + 1))?;
     }
     let mut editor = usd::NamespaceEditor::new(&stage);
     editor.delete_prim("/A/B").unwrap();
@@ -13691,7 +13693,7 @@ fn sink_handle_edit_fires() -> Result<()> {
     let count = Rc::new(Cell::new(0u32));
     {
         let count = count.clone();
-        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1));
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))?;
     }
     prim.set_type_name("Xform")?;
     assert_eq!(count.get(), 1, "a handle edit reaches the stage's sink");
@@ -13707,7 +13709,7 @@ fn sink_only_sees_edits_after_install() -> Result<()> {
     let count = Rc::new(Cell::new(0u32));
     {
         let count = count.clone();
-        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1));
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))?;
     }
     stage.define_prim("/After")?;
     assert_eq!(count.get(), 1, "only the post-install edit is observed");
@@ -13726,7 +13728,7 @@ fn listener_layer_stack_resync() -> Result<()> {
         let resynced = resynced.clone();
         stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
             resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-        })
+        })?
     };
     stage.set_time_codes_per_second(48.0)?;
     assert!(resynced.borrow().contains(&sdf::Path::abs_root()));
@@ -13746,7 +13748,7 @@ fn listener_reentrant_author() -> Result<()> {
             if !done.replace(true) {
                 stage.define_prim("/Nested").unwrap();
             }
-        })
+        })?
     };
     stage.define_prim("/World")?;
     assert!(stage.prim("/Nested")?.is_valid()?);
@@ -13780,11 +13782,11 @@ fn two_sink_reentrant_order() -> Result<()> {
             if !done.replace(true) {
                 stage.define_prim("/Nested").unwrap();
             }
-        })
+        })?
     };
     let _second = {
         let log = log.clone();
-        stage.add_sink(move |_: &Stage, change: &CommittedChange<'_>| record("s2", &log, change))
+        stage.add_sink(move |_: &Stage, change: &CommittedChange<'_>| record("s2", &log, change))?
     };
     stage.define_prim("/World")?;
     assert_eq!(
@@ -13812,11 +13814,11 @@ fn two_sink_reentrant_order() -> Result<()> {
                     })
                     .unwrap();
             }
-        })
+        })?
     };
     let _second = {
         let log = log.clone();
-        stage.add_sink(move |_: &Stage, change: &CommittedChange<'_>| record("s2", &log, change))
+        stage.add_sink(move |_: &Stage, change: &CommittedChange<'_>| record("s2", &log, change))?
     };
     stage.define_prim("/World")?;
     assert_eq!(
@@ -13929,7 +13931,7 @@ fn empty_edit_no_fire() -> Result<()> {
     let count = Rc::new(Cell::new(0u32));
     let _token = {
         let count = count.clone();
-        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))?
     };
     stage.define_prim("/A")?;
     assert_eq!(count.get(), 0);
@@ -14266,7 +14268,7 @@ fn quiet_save(stage: Stage, root: &str) -> Result<()> {
             move |_, _| fired.set(fired.get() + 1)
         })),
         ..Default::default()
-    });
+    })?;
     let layer_fired = Rc::new(Cell::new(0));
     let identifier = stage.root_layer().identifier().to_owned();
     {

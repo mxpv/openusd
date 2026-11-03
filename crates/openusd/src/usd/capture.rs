@@ -880,7 +880,7 @@ mod tests {
         }
 
         let stage = UndoStage::from(in_memory_stage()?);
-        stage.add_sink(Panics(Cell::new(false)));
+        stage.add_sink(Panics(Cell::new(false)))?;
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| stage.define_prim("/Lost")));
         assert!(unwound.is_err());
         assert!(!stage.prim("/Lost")?.is_valid()?, "the transaction rolled back");
@@ -1021,7 +1021,7 @@ mod tests {
         stage.add_sink(Log {
             panicked: Cell::new(false),
             events: Rc::clone(&events),
-        });
+        })?;
         let root = stage.root_layer().identifier().to_string();
         let layer = stage.layer_handle(&root).expect("root layer");
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| layer.edit(|l| author_prim(l, "/Lost"))));
@@ -1058,7 +1058,7 @@ mod tests {
                 Err(Error::UnresolvedAsset("/Inner".to_owned()))
             });
             reported.set(result.is_err());
-        });
+        })?;
         undo.define_prim("/Outer")?;
         assert!(failed.get(), "the group failed");
         assert!(undo.prim("/Outer")?.is_valid()?);
@@ -1365,7 +1365,7 @@ mod tests {
             let x = stage.attribute("/A.x").expect("a valid path");
             let x = x.set(1.0_f64).expect("the first set");
             x.set(2.0_f64).expect("the second set");
-        });
+        })?;
         source.define_prim("/Trigger")?;
 
         let mirror = in_memory_stage()?;
@@ -1547,11 +1547,11 @@ mod tests {
             a: Rc::clone(&slot),
             b: b.clone(),
             seen: Rc::clone(&seen),
-        });
+        })?;
         let stage = Stage::clone(&a);
         slot.replace(Some(a));
         stage.attribute("/P.x")?.set(1.0)?;
-        stage.remove_sink(sink);
+        stage.remove_sink(sink)?;
         assert_eq!(*seen.borrow(), [(false, false)]);
         assert_eq!(x(&stage)?, Some(2.0), "B's value stays");
         slot.take();
@@ -1634,10 +1634,10 @@ mod tests {
         let sink = a.add_sink(Arm {
             armed: Rc::clone(&armed),
             b: b.clone(),
-        });
+        })?;
         armed.set(true);
         assert!(a.undo()?);
-        a.remove_sink(sink);
+        a.remove_sink(sink)?;
         assert!(!a.prim("/G")?.is_valid()?, "the newest transaction reverted");
         assert_eq!(x(&a)?, Some(2.0), "the stale one was not replayed");
         assert!(!a.can_undo());
@@ -1691,13 +1691,13 @@ mod tests {
         let sink = undo.add_sink(Reset {
             undo: Rc::clone(&slot),
             armed: Rc::clone(&armed),
-        });
+        })?;
         let stage = Stage::clone(&undo);
         slot.replace(Some(undo));
         armed.set(true);
         let undone = slot.borrow().as_ref().expect("the wrapper is set").undo()?;
         assert!(undone);
-        stage.remove_sink(sink);
+        stage.remove_sink(sink)?;
         assert!(!stage.prim("/A")?.is_valid()?, "the whole step reverted");
         assert!(!stage.prim("/B")?.is_valid()?);
         slot.take();

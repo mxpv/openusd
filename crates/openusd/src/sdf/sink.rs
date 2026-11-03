@@ -97,6 +97,11 @@ impl<T: ?Sized> Set<T> {
         self.sinks.retain(|(sid, _)| *sid != id);
     }
 
+    /// Whether the sink with `id` is installed.
+    pub fn contains(&self, id: Id<T>) -> bool {
+        self.sinks.iter().any(|(sid, _)| *sid == id)
+    }
+
     /// Whether no sink is installed — each tier's no-sink fast path.
     pub fn is_empty(&self) -> bool {
         self.sinks.is_empty()

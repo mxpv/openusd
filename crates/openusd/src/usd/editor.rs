@@ -1728,12 +1728,14 @@ fn check_editable(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::HashSet;
+    use std::rc::Rc;
 
     use super::*;
     use crate::sdf::{self, FieldKey, LayerOffset, Specifier, Variability, path};
     use crate::usd::stage::tests::MakeStage;
-    use crate::usd::{EditTarget, EditTargetArc, Stage};
+    use crate::usd::{self, EditTarget, EditTargetArc, Stage};
 
     /// Author into `layer` and commit, for building a test layer before it joins a
     /// stage.
@@ -2859,16 +2861,18 @@ mod tests {
             .unwrap();
         stage.set_edit_target(target).unwrap();
 
-        let seen: std::rc::Rc<std::cell::Cell<Option<&'static str>>> = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen: Rc<Cell<Option<&'static str>>> = Rc::new(Cell::new(None));
         {
             let seen = seen.clone();
-            stage.add_sink(move |_: &Stage, change: &crate::usd::CommittedChange<'_>| {
-                seen.set(Some(match change.provenance {
-                    crate::usd::Provenance::LocalStack => "local",
-                    crate::usd::Provenance::EditTarget(_) => "target",
-                    crate::usd::Provenance::DirectLayerEdit => "direct",
-                }));
-            });
+            stage
+                .add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+                    seen.set(Some(match change.provenance {
+                        usd::Provenance::LocalStack => "local",
+                        usd::Provenance::EditTarget(_) => "target",
+                        usd::Provenance::DirectLayerEdit => "direct",
+                    }));
+                })
+                .unwrap();
         }
 
         NamespaceEditor::new(&stage)
