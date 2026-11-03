@@ -942,6 +942,54 @@ fn stepped_clip_returns() -> openusd::Result<()> {
     Ok(())
 }
 
+/// Deleting a clip anchor frees the clip layers its sets read.
+#[test]
+fn deleted_anchor_frees_clips() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@./s020.usda@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+
+    assert!(stage.remove_prim("/P")?);
+    let held = stage.layer_identifiers();
+    assert!(!held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
+    Ok(())
+}
+
+/// An edit that composes a clip anchor again, its clips unchanged, keeps the
+/// clip layers it reads.
+#[test]
+fn rebuilt_anchor_keeps_clips() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@./s020.usda@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+    stage.define_prim("/Empty")?;
+
+    stage.prim("/P")?.references().add(sdf::Reference {
+        prim_path: sdf::Path::new("/Empty")?,
+        ..Default::default()
+    })?;
+    let held = stage.layer_identifiers();
+    assert!(held.iter().any(|id| id.ends_with("s020.usda")), "{held:?}");
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+    Ok(())
+}
+
 /// An edit to a clip set's schedule that leaves its clips keeps the clip
 /// layer it reads.
 #[test]

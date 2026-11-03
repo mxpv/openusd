@@ -1167,6 +1167,14 @@ impl composition::CompositionHooks for Stage {
         identifiers.push(self.edit_target.borrow().layer_identifier().to_owned());
         identifiers
     }
+
+    fn held_layers(&self) -> HashSet<pcp::LayerId> {
+        let mut layers = HashSet::new();
+        for observer in self.observers.borrow().snapshot() {
+            observer.held_layers(&mut layers);
+        }
+        layers
+    }
 }
 
 impl Stage {
@@ -1182,6 +1190,13 @@ impl Stage {
     /// [`StageComposition`].
     pub(crate) fn process_pending(&self) {
         self.composition.process_pending(self);
+    }
+
+    /// Ends an edit of the stage at a boundary
+    /// ([`StageComposition::end_edit`]): for a change outside the layers
+    /// that leaves layers unused, the recorded history letting one go.
+    pub(super) fn end_edit(&self) {
+        self.composition.end_edit(self);
     }
 
     /// Runs `replay`, edits that undo one step, holding layer reclaims until
@@ -7046,10 +7061,10 @@ def \"Sub\" {}
         Ok(())
     }
 
-    /// A payload layer leaving the stage drops the undo history touching it,
-    /// and history touching only other layers stays.
+    /// An unloaded payload layer an undo step names stays until the history
+    /// lets it go.
     #[test]
-    fn unload_departs_undo() -> Result<()> {
+    fn unload_keeps_undo() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (root, _) = payload_fixture(dir.path())?;
         let stage = usd::UndoStage::from(Stage::open(&root)?);
@@ -7063,14 +7078,39 @@ def \"Sub\" {}
         stage.define_prim("/Newer")?;
         assert_eq!(stage.undo_depth(), 2);
         stage.unload("/P")?;
-        assert_eq!(stage.layer_count(), 1);
-        assert_eq!(
-            stage.undo_depth(),
-            1,
-            "the step on the departed layer went with the older ones"
-        );
+        assert_eq!(stage.layer_count(), 2, "the undo step keeps the layer");
+        assert_eq!(stage.undo_depth(), 2);
+        stage.reset();
+        assert_eq!(stage.layer_count(), 1, "released by the history, it leaves");
+        Ok(())
+    }
+
+    /// An edit that leaves a saved layer unused keeps it while an undo step
+    /// names it, so both steps undo.
+    #[test]
+    fn edit_keeps_undo_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = usd::UndoStage::from(Stage::open(&root)?);
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        let identifier = layer_named(&stage, "payload.usda");
+        stage.edit_layer(&identifier, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/M/Saved", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.layer_handle(&identifier).expect("loaded").save()?;
+        let root_layer = stage.root_layer().identifier().to_owned();
+        stage.edit_layer(&root_layer, |e| {
+            e.remove_spec(&sdf::path("/P")?)?;
+            Ok(())
+        })?;
+        assert_eq!(stage.layer_count(), 2, "the undo step keeps the payload layer");
+        assert_eq!(stage.undo_depth(), 2);
+
         assert!(stage.undo()?);
-        assert!(!stage.prim("/Newer")?.is_valid()?);
+        assert!(stage.prim("/P/Saved")?.is_valid()?);
+        assert!(stage.undo()?);
+        assert!(!stage.prim("/P/Saved")?.is_valid()?);
         Ok(())
     }
 
@@ -7808,9 +7848,9 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// A muted layer leaving the stage drops the undo history touching it.
+    /// A muted layer an undo step names stays until the history lets it go.
     #[test]
-    fn mute_departs_undo() -> Result<()> {
+    fn mute_keeps_undo() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = shared_fixture(dir.path())?;
         let stage = usd::UndoStage::from(Stage::open(&root)?);
@@ -7822,8 +7862,10 @@ def "P" (payload = @./clip.usda@</M>) {}
         stage.layer_handle(&weak).expect("loaded").save()?;
         assert!(stage.can_undo());
         stage.mute_layer(weak.as_str());
-        assert_eq!(stage.layer_count(), 1);
-        assert!(!stage.can_undo(), "the step on the muted layer went with it");
+        assert_eq!(stage.layer_count(), 2, "the undo step keeps the muted layer");
+        assert!(stage.can_undo());
+        stage.reset();
+        assert_eq!(stage.layer_count(), 1, "released by the history, it leaves");
         stage.unmute_layer(&weak);
         assert!(stage.prim("/Saved")?.is_valid()?, "the saved edit reads back");
         Ok(())

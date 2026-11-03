@@ -419,6 +419,12 @@ pub(crate) trait TxnObserver {
     fn departed(&self, layers: &HashSet<pcp::LayerId>) {
         let _ = layers;
     }
+
+    /// Adds to `layers` the layers what the observer recorded still names,
+    /// which the reclaim an edit ends with keeps (an undo step's layers).
+    fn held_layers(&self, layers: &mut HashSet<pcp::LayerId>) {
+        let _ = layers;
+    }
 }
 
 /// A bare closure is a [`StageSink`] that only observes committed edits — the

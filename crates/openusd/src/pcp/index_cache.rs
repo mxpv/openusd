@@ -1390,8 +1390,8 @@ impl IndexCache {
         self.store.retired_instances(roots)
     }
 
-    /// Whether the work set holds a prim to settle, or a restaled clip
-    /// anchor waits for its sets to be refreshed
+    /// Whether the work set holds a prim to settle, or a clip anchor waits
+    /// for its sets to be refreshed
     /// ([`settle_pass`](Self::settle_pass)).
     pub(crate) fn has_work(&self) -> bool {
         self.store.has_work() || self.clip_cache.has_stale()
@@ -2258,9 +2258,11 @@ impl IndexCache {
         errors: Diagnostics,
         expr_var_deps: ExprVarDeps,
     ) {
-        // A prim the work set held composes afresh, its clip sets with it.
+        // A prim the work set held composes afresh. Its clip sets keep the
+        // layers they read until settling refreshes them against the new
+        // index (C++ `Usd_ClipCache::Lifeboat`).
         if self.store.insert(graph, path, index, context, errors, expr_var_deps) {
-            self.clip_cache.forget_prim(path);
+            self.clip_cache.mark_rebuilt(path);
         }
     }
 
@@ -3998,7 +4000,7 @@ impl IndexCache {
     /// Settles what the work set holds, parents first, in the current
     /// settlement round ([`begin_round`](Self::begin_round)).
     ///
-    /// The restaled clip anchors' sets are refreshed first
+    /// The restaled and rebuilt clip anchors' sets are refreshed last
     /// ([`refresh_clip_sources`](Self::refresh_clip_sources)).
     /// A retired prototype's descendants first move under the groups its
     /// surviving instances settle into. Then each prim is decided by
@@ -4008,15 +4010,15 @@ impl IndexCache {
     /// layers its last composition used, and records the failure, which a
     /// later round tries again; one that failed in this round is not tried
     /// again in it. A busy store stops the pass, every prim it had not
-    /// reached kept. A prim that leaves the work set forgets its clip sets,
-    /// which resolve afresh when it next composes.
+    /// reached kept. A prim retired, or served from elsewhere, forgets its
+    /// clip sets, which resolve afresh when it next composes; a rebuilt one
+    /// keeps them until the refresh.
     ///
     /// Each prim it settles whose drop no notice named
     /// ([`unreport`](Self::unreport)) joins `recovered` when it retired, or
     /// when its rebuilt index records other failed layers than the dropped
     /// one did ([`drop_load_failed_indices`](Self::drop_load_failed_indices)).
     pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>, recovered: &mut Vec<Path>) -> Result<(), QueryError> {
-        self.refresh_clip_sources(graph)?;
         self.transfer_prototypes(graph)?;
         // TODO(rayon): siblings settle independently once their parent has,
         // so each level of the work set could be decided in parallel.
@@ -4051,21 +4053,26 @@ impl IndexCache {
                 Err(error) => self.store.fail(&path, error.to_string()),
             }
         }
-        Ok(())
+        // The anchors this pass rebuilt refresh against their new indices.
+        self.refresh_clip_sources(graph)
     }
 
-    /// Registers each restaled anchor's clip sets again as they resolve now
-    /// ([`ClipCache::refresh`]). An anchor no index is cached for keeps its
-    /// registrations, which name nothing to keep, until settling it forgets
-    /// them; one whose sets fail to resolve reads no clip, and keeps none. A
-    /// busy store stops the pass, every anchor it had not reached kept.
+    /// Registers each marked anchor's clip sets again as they resolve now
+    /// ([`ClipCache::refresh`]). An anchor the work set holds keeps its
+    /// registrations until it settles; one with no index that left the work
+    /// set (retired) forgets them; one whose sets fail to resolve reads no
+    /// clip, and keeps none. A busy store stops the pass, every anchor it had
+    /// not reached kept.
     fn refresh_clip_sources(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
         // TODO(perf): a variable change marks every anchor its stack reaches,
         // whether or not a set there evaluates an expression.
         // TODO(rayon): each anchor's sets resolve independently.
         for anchor in self.clip_cache.stale() {
             if !self.store.is_indexed(&anchor) {
-                self.clip_cache.unmark(&anchor);
+                match self.store.is_unsettled(&anchor) {
+                    true => self.clip_cache.unmark(&anchor),
+                    false => self.clip_cache.forget_prim(&anchor),
+                }
                 continue;
             }
             // The read that registers a set reports what resolving it found.

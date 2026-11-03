@@ -130,18 +130,21 @@ impl UndoStage {
                 .last_mut()
                 .expect("a group is open until its guard drops"),
         );
-        // What could not be reverted stays in the group, still undoable.
-        if let Err((revert, unreverted)) = self.revert(committed) {
-            self.capture
-                .log()
-                .borrow_mut()
-                .groups
-                .last_mut()
-                .expect("a group is open until its guard drops")
-                .extend(unreverted);
-            return Err(revert.into());
-        }
-        Err(error)
+        // What could not be reverted stays in the group, still undoable, and
+        // keeps the layers it names.
+        self.capture.holding_reclaims(|| {
+            if let Err((revert, unreverted)) = self.revert(committed) {
+                self.capture
+                    .log()
+                    .borrow_mut()
+                    .groups
+                    .last_mut()
+                    .expect("a group is open until its guard drops")
+                    .extend(unreverted);
+                return Err(revert.into());
+            }
+            Err(error)
+        })
     }
 
     /// Revert the most recent step, replaying the inverse of each of its
@@ -178,13 +181,16 @@ impl UndoStage {
         let Some(step) = step else {
             return Ok(false);
         };
-        match self.revert(step) {
+        // A replay takes its transaction out of the history before it runs,
+        // so the hold keeps that transaction's layers through the replays'
+        // reclaims, until what is not reverted is back on the stack.
+        self.capture.holding_reclaims(|| match self.revert(step) {
             Ok(()) => Ok(true),
             Err((error, unreverted)) => {
                 self.capture.log().borrow_mut().stack.push_back(unreverted);
                 Err(error)
             }
-        }
+        })
     }
 
     /// Discard the recorded undo stack, keeping the current scene. Cheap — the
@@ -193,6 +199,8 @@ impl UndoStage {
     /// progress replays to its end.
     pub fn reset(&self) {
         self.capture.log().borrow_mut().discard();
+        // The layers only the history held may leave.
+        self.capture.end_edit();
     }
 
     /// Whether [`undo`](Self::undo) would revert a step: one is recorded and no
@@ -214,7 +222,10 @@ impl UndoStage {
     /// Stop recording and return the wrapped [`Stage`], removing the
     /// recorder.
     pub fn into_inner(self) -> Stage {
-        self.capture.into_inner()
+        let stage = self.capture.into_inner();
+        // The layers only the history held may leave.
+        stage.end_edit();
+        stage
     }
 
     /// Replay the inverse of each of `transactions`, newest first, with
@@ -226,29 +237,25 @@ impl UndoStage {
     /// the revert ends there.
     fn revert(&self, transactions: Vec<Transaction>) -> Result<(), (StageAuthoringError, Vec<Transaction>)> {
         let journal = self.capture.log();
-        // A layer the replays leave unused departs after the last of them:
-        // departing mid-revert would drop the rest of the step.
-        self.capture.holding_reclaims(|| {
-            // Ends the revert even if a replay panics (a user sink could panic
-            // mid-commit), so a panic can never leave capture suspended.
-            let _reverting = Reverting::begin(journal, transactions);
-            loop {
-                let next = journal.borrow_mut().reverting.last_mut().and_then(Vec::pop);
-                let Some(transaction) = next else {
-                    return Ok(());
-                };
-                // A single-mapping replay is atomic, so a failure applied nothing.
-                if let Err(error) = self.replay(&transaction) {
-                    let mut journal = journal.borrow_mut();
-                    let rest = journal
-                        .reverting
-                        .last_mut()
-                        .expect("a revert holds its list until it ends");
-                    rest.push(transaction);
-                    return Err((error, mem::take(rest)));
-                }
+        // Ends the revert even if a replay panics (a user sink could panic
+        // mid-commit), so a panic can never leave capture suspended.
+        let _reverting = Reverting::begin(journal, transactions);
+        loop {
+            let next = journal.borrow_mut().reverting.last_mut().and_then(Vec::pop);
+            let Some(transaction) = next else {
+                return Ok(());
+            };
+            // A single-mapping replay is atomic, so a failure applied nothing.
+            if let Err(error) = self.replay(&transaction) {
+                let mut journal = journal.borrow_mut();
+                let rest = journal
+                    .reverting
+                    .last_mut()
+                    .expect("a revert holds its list until it ends");
+                rest.push(transaction);
+                return Err((error, mem::take(rest)));
             }
-        })
+        }
     }
 
     /// Replay `transaction`'s per-layer inverse edits as one atomic
@@ -348,6 +355,19 @@ impl Journal {
     /// Whether a revert is replaying inverses, which capture skips.
     fn suspended(&self) -> bool {
         !self.reverting.is_empty()
+    }
+
+    /// The layers the recorded transactions name: the steps, the open
+    /// groups, the reverts in progress and the captures awaiting their
+    /// reconciliation.
+    fn layers(&self) -> impl Iterator<Item = pcp::LayerId> + '_ {
+        let steps = self.stack.iter().chain(&self.groups).chain(&self.reverting);
+        let transactions = steps
+            .flatten()
+            .chain(self.in_flight.iter().map(|flight| &flight.transaction));
+        transactions
+            .flat_map(|transaction| &transaction.layers)
+            .map(|inverse| inverse.layer)
     }
 
     /// Drop every recorded step and capture, the open groups' included. A
@@ -508,6 +528,10 @@ struct UndoRecorder {
 }
 
 impl TxnObserver for UndoRecorder {
+    fn held_layers(&self, layers: &mut HashSet<pcp::LayerId>) {
+        layers.extend(self.journal.borrow().layers());
+    }
+
     fn capture(&self, _stage: &Stage, change: &PendingChange<'_>, layer: pcp::LayerId) {
         // Only the stage's own edits are undoable: another editor's edit to a
         // layer the stage holds, or one made through a layer handle, is not

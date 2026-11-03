@@ -761,9 +761,10 @@ pub(crate) struct ClipCache {
     /// clips its set already names, and only for a set that authors no manifest
     /// of its own, so its sources are exactly that set's.
     dependents: HashMap<String, HashSet<ClipSetKey>>,
-    /// The anchors whose sets a restale may have pointed at other clips
-    /// while their index stayed cached, for settlement to register again as
-    /// they resolve now ([`refresh`](Self::refresh)).
+    /// The anchors whose sets may resolve to other clips now: a restale
+    /// reached them while their index stayed cached, or they were composed
+    /// again. Settlement registers their sets again as they resolve
+    /// ([`refresh`](Self::refresh)).
     stale: sdf::PathSet,
     /// Whether a layer some set read lost its last registration, for the
     /// stage to reclaim.
@@ -1438,9 +1439,10 @@ impl ClipCache {
         !self.dependents.is_empty()
     }
 
-    /// Forgets the clip sets anchored at `anchor`, a prim whose dropped index
-    /// was composed again or shown to be gone: they resolve afresh when it
-    /// next composes, and until then name no layer to keep.
+    /// Forgets the clip sets anchored at `anchor`, a prim that left the work
+    /// set without an index of its own (retired, served from elsewhere, or
+    /// moved with a prototype's work): they resolve afresh when it next
+    /// composes, and until then name no layer to keep.
     pub(super) fn forget_prim(&mut self, anchor: &Path) {
         self.stale.remove(anchor);
         let Some(sets) = self.set_sources.remove(anchor) else {
@@ -1478,22 +1480,32 @@ impl ClipCache {
         self.stale.extend(reached.cloned());
     }
 
-    /// Whether a restaled anchor waits for [`refresh`](Self::refresh).
+    /// Whether an anchor waits for [`refresh`](Self::refresh).
     pub(super) fn has_stale(&self) -> bool {
         !self.stale.is_empty()
     }
 
-    /// The restaled anchors ([`mark_stale`](Self::mark_stale)).
+    /// Records that `anchor` was composed again: its registered sets keep
+    /// the layers they read until [`refresh`](Self::refresh) checks them
+    /// against the new index.
+    pub(super) fn mark_rebuilt(&mut self, anchor: &Path) {
+        if self.set_sources.contains_key(anchor) {
+            self.stale.insert(anchor.clone());
+        }
+    }
+
+    /// The restaled and rebuilt anchors ([`mark_stale`](Self::mark_stale),
+    /// [`mark_rebuilt`](Self::mark_rebuilt)).
     pub(super) fn stale(&self) -> Vec<Path> {
         self.stale.iter().cloned().collect()
     }
 
-    /// Settles the restaled `anchor` with nothing to refresh.
+    /// Settles the marked `anchor` with nothing to refresh.
     pub(super) fn unmark(&mut self, anchor: &Path) {
         self.stale.remove(anchor);
     }
 
-    /// Settles the restaled `anchor` against `current`, the sets it resolves
+    /// Settles the marked `anchor` against `current`, the sets it resolves
     /// now: each set registered at it is registered again as the set of its
     /// name resolves ([`register_set_sources`](Self::register_set_sources)),
     /// its generated manifest dropped when that moved, and one no longer

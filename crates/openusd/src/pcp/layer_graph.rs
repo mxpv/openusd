@@ -1459,11 +1459,11 @@ impl LayerGraph {
     /// Whether a layer the last reclaim kept only for a pin is neither in
     /// `pins` nor has unsaved edits any more, so a reclaim may free it. The
     /// pins are asked for only when such a layer exists.
-    pub(crate) fn lapsed(&self, pins: impl FnOnce() -> HashSet<LayerId>) -> bool {
+    pub(crate) fn lapsed(&self, pins: &impl Deref<Target = HashSet<LayerId>>) -> bool {
         if self.lapsing.is_empty() {
             return false;
         }
-        let (pins, view) = (pins(), self.read_view());
+        let (pins, view) = (&**pins, self.read_view());
         let lapsed = |id: &LayerId| self.nodes.contains_key(id) && !pins.contains(id) && !view.layer(*id).is_dirty();
         self.lapsing.iter().any(lapsed)
     }

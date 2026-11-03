@@ -33,7 +33,7 @@
 //! enforcement, since choosing the wrong operation stays a caller's mistake to
 //! make.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, LazyCell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::mem;
 use std::rc::Rc;
@@ -163,6 +163,13 @@ pub(super) trait CompositionHooks {
     /// reclamation keeps.
     fn edit_target_identifiers(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// The layers the stage's observers' recorded history names
+    /// ([`TxnObserver::held_layers`](super::sink::TxnObserver::held_layers)),
+    /// which the reclaim an edit ends with keeps.
+    fn held_layers(&self) -> HashSet<pcp::LayerId> {
+        HashSet::new()
     }
 }
 
@@ -899,11 +906,6 @@ impl StageComposition {
         let pass = |view: &pcp::LayerView<'_>, cache: &mut pcp::IndexCache| cache.settle_pass(view, &mut recovered);
         let _ = self.fixpoint(pass, settled, hooks, found);
         found.subtrees.extend(recovered);
-        // A clip set no anchor resolves any more leaves its layers to the
-        // next reclaim.
-        if self.cache.borrow_mut().take_clips_released() {
-            self.layers.borrow_mut().mark_reclaim_due();
-        }
     }
 
     /// Settles the work set on a settled stage, for a caller whose own
@@ -1245,8 +1247,12 @@ impl StageComposition {
     /// read it from again, anonymous or built in memory.
     ///
     /// Kept besides are a layer with unsaved edits and the edit target's
-    /// layer, the layers open edit contexts restore included. C++ frees a
-    /// dirty layer nothing holds and holds the edit target's weakly. A prim an
+    /// layer, the layers open edit contexts restore included, and a layer
+    /// the stage's recorded history names
+    /// ([`held_layers`](CompositionHooks::held_layers)), so a reclaim never
+    /// costs an undo step. C++ frees a dirty layer nothing holds, holds the
+    /// edit target's weakly, and leaves an undo step on a freed layer
+    /// without effect. A prim an
     /// edit dropped and settlement has not decided (its settling failed, or a
     /// store a read or an edit held stopped it) keeps the stacks it used, and
     /// with them their layers.
@@ -1269,26 +1275,37 @@ impl StageComposition {
         // A layer leaves only once its last stack has. One a pin kept (a save
         // not yet made, an edit target) leaves at the first boundary after the
         // pin lapses.
-        let pins = || -> HashSet<pcp::LayerId> {
+        // TODO(perf): the pins walk the recorded history; a count of the
+        // layers it names, kept as steps come and go, would not.
+        let pins = LazyCell::new(|| -> HashSet<pcp::LayerId> {
             let graph = self.layers.borrow();
             let targets = hooks.edit_target_identifiers();
-            targets.iter().filter_map(|target| graph.id_of(target)).collect()
-        };
+            let mut pins: HashSet<pcp::LayerId> = targets.iter().filter_map(|target| graph.id_of(target)).collect();
+            pins.extend(hooks.held_layers());
+            pins
+        });
+        // A clip or manifest layer that lost its last clip set, whoever
+        // released it, may now leave.
+        if self.cache.borrow_mut().take_clips_released() {
+            self.layers.borrow_mut().mark_reclaim_due();
+        }
         let due = {
             let graph = self.layers.borrow();
-            graph.reclaim_due(reclaim) || (reclaim == pcp::Reclaim::Unused && graph.lapsed(pins))
+            graph.reclaim_due(reclaim) || (reclaim == pcp::Reclaim::Unused && graph.lapsed(&pins))
         };
         if !due {
             return;
         }
-        let pins = pins();
+        // The pins borrow the graph, so they are taken before `update_pair`
+        // borrows it mutably.
+        let pins = LazyCell::force(&pins);
         // TODO(perf): every reclaim walks every stack's members and every
         // graph layer. `LayerStackRegistry::sweep` returning the layers whose
         // `using` entry emptied would make those the only candidates.
         let reclaimable = self.update_pair(|graph, cache| {
             let (mut kept, mut clips) = (HashSet::new(), HashSet::new());
             cache.mark_live_layers(graph, &mut kept, &mut clips);
-            graph.unused_layers(kept, &clips, &pins, reclaim)
+            graph.unused_layers(kept, &clips, pins, reclaim)
         });
         let unused = &reclaimable.unused;
         if !unused.is_empty() {
