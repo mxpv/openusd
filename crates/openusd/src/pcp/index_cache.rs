@@ -2218,6 +2218,24 @@ impl IndexCache {
         self.store.len()
     }
 
+    /// Retries the targets the prims composed again since the last call
+    /// failed to load, as C++ opens a layer afresh at every index rebuild:
+    /// the assets the dropped indices recorded
+    /// ([`drop_load_failed_indices`](Self::drop_load_failed_indices)'
+    /// excepted), and the clips a marked anchor's sets name. Their failures
+    /// are forgotten in `graph`, and every other cached index that recorded
+    /// one drops too, so no prim keeps composing without an asset another
+    /// loads. Returns the paths of those indices.
+    pub(crate) fn retry_dropped_failures(&mut self, graph: &mut LayerGraph) -> Vec<Path> {
+        let mut assets: HashSet<String> = self.store.take_dropped_failures().into_iter().collect();
+        assets.extend(self.clip_cache.take_retried());
+        if assets.is_empty() {
+            return Vec::new();
+        }
+        graph.forget_load_failures(assets.iter().cloned());
+        self.drop_load_failed_indices(|asset| assets.contains(asset))
+    }
+
     /// What composing and settling have cost so far.
     pub fn tally(&self) -> Tally {
         self.tally
@@ -2283,17 +2301,23 @@ impl IndexCache {
     /// recomposes and demands the target afresh. The arc to a failed target
     /// was dropped, so these indices carry no dependency on it and an
     /// ordinary layer-stack invalidation misses them; the stage calls this
-    /// when a target may have become loadable: an edit cleared the graph's
-    /// recorded load failures, or an asset that did not resolve now does.
+    /// when a target may have become loadable: a retry or a reload cleared
+    /// the graph's recorded load failures, or an asset that did not resolve
+    /// now does. Only a failure whose asset `failed` accepts counts: an edit
+    /// that forgets some assets' failures drops the indices that recorded
+    /// those.
     /// Returns the paths of the indices it drops.
-    pub(crate) fn drop_load_failed_indices(&mut self) -> Vec<Path> {
-        let failed = self.store.paths_with_failed_layer();
+    pub(crate) fn drop_load_failed_indices(&mut self, failed: impl Fn(&str) -> bool) -> Vec<Path> {
+        let failed = self.store.paths_with_failed_layer(failed);
         if failed.is_empty() {
             return failed;
         }
         // The prims beneath one composed without the target too, and
         // recompose with it.
         self.store.remove_subtrees(&failed);
+        // The drop is the failure's own bookkeeping, not a recomposition
+        // that tries it again.
+        self.store.take_dropped_failures();
         // A target that now loads changes what those prims compose.
         self.bump_edit_epoch();
         self.retire_query_errors();
@@ -2302,12 +2326,6 @@ impl IndexCache {
         // saw.
         self.invalidate_population();
         failed
-    }
-
-    /// Marks the work-set prims at `paths` as dropped with no notice naming
-    /// them: [`settle_pass`](Self::settle_pass) returns each it settles.
-    pub(crate) fn unreport(&mut self, paths: &[Path]) {
-        self.store.unreport(paths);
     }
 
     /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) for one change round's
@@ -4013,12 +4031,7 @@ impl IndexCache {
     /// reached kept. A prim retired, or served from elsewhere, forgets its
     /// clip sets, which resolve afresh when it next composes; a rebuilt one
     /// keeps them until the refresh.
-    ///
-    /// Each prim it settles whose drop no notice named
-    /// ([`unreport`](Self::unreport)) joins `recovered` when it retired, or
-    /// when its rebuilt index records other failed layers than the dropped
-    /// one did ([`drop_load_failed_indices`](Self::drop_load_failed_indices)).
-    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>, recovered: &mut Vec<Path>) -> Result<(), QueryError> {
+    pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
         self.transfer_prototypes(graph)?;
         // TODO(rayon): siblings settle independently once their parent has,
         // so each level of the work set could be decided in parallel.
@@ -4028,7 +4041,7 @@ impl IndexCache {
                 continue;
             }
             self.tally.visits += 1;
-            let unreported = self.store.unreported(&path);
+            let retried = self.store.is_retried(&path);
             match self.settle_prim(graph, &path) {
                 // A prim served from elsewhere (an instance proxy reads its
                 // prototype's index) settles here, its build not at its path.
@@ -4036,16 +4049,17 @@ impl IndexCache {
                     if self.store.settle(&path) {
                         self.clip_cache.forget_prim(&path);
                     }
-                    if unreported.is_some_and(|failed| failed != self.store.failed_layers(&path)) {
-                        recovered.push(path);
+                    // A prim composed again tries the targets it names, as
+                    // C++ opens a layer afresh at every index rebuild: one
+                    // whose rebuild read a recorded failure drops again, once,
+                    // for the stage to forget the failure and settle it anew.
+                    if !retried {
+                        self.store.retry_failed(&path);
                     }
                 }
                 Ok(Settlement::Excluded | Settlement::Absent) => {
                     for anchor in self.store.retire(&path) {
                         self.clip_cache.forget_prim(&anchor);
-                    }
-                    if unreported.is_some() {
-                        recovered.push(path);
                     }
                 }
                 Ok(Settlement::Pending) => {}
@@ -8472,7 +8486,7 @@ def "B" (
         compose(&graph, &mut cache, &["/Ref", "/Ref/Inner"])?;
         edit_field(&mut graph, &mut cache, "/Ref", FieldKey::References)?;
         assert_eq!(evicted(&cache), ["/Ref", "/Ref/Inner"]);
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(cache.is_indexed(&sdf::path("/Ref")?) && cache.is_indexed(&sdf::path("/Ref/Inner")?));
         Ok(())
@@ -8490,7 +8504,7 @@ def "B" (
             Ok(())
         })?;
         assert_eq!(evicted(&cache), ["/P", "/P/C"]);
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(cache.is_indexed(&sdf::path("/P")?), "the inactive prim is rebuilt");
         assert!(
@@ -8511,7 +8525,7 @@ def "B" (
             Ok(())
         })?;
         assert!(evicted(&cache).contains(&"/P/C".to_owned()));
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(!cache.is_indexed(&sdf::path("/P/C")?));
         Ok(())
@@ -8546,15 +8560,15 @@ def "B" (
         compose(&graph, &mut cache, &["/P", "/P/C"])?;
         // `/P/C`'s population reads `/P`'s `active`, which no longer decodes.
         set_active(&mut graph, &mut cache, "/P", Value::String("yes".to_owned()))?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert_eq!(evicted(&cache), ["/P/C"]);
         assert_eq!(settlement_failures(&cache), ["/P/C"]);
 
         set_active(&mut graph, &mut cache, "/P", Value::Bool(true))?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert_eq!(evicted(&cache), ["/P/C"], "not tried again in the round it failed in");
         cache.begin_round();
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty());
         assert!(settlement_failures(&cache).is_empty());
         Ok(())
@@ -8602,7 +8616,7 @@ def "G"
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
 
         set_active(&mut graph, &mut cache, "/G", Value::String("yes".to_owned()))?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         let part = root.append_path("Part")?.to_string();
         assert!(
             settlement_failures(&cache).contains(&part),
@@ -8611,13 +8625,13 @@ def "G"
         );
 
         set_active(&mut graph, &mut cache, "/G", Value::Bool(true))?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(
             evicted(&cache).contains(&part),
             "not tried again in the round it failed in"
         );
         cache.begin_round();
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/G/A")?)?
             .expect("an instance");
@@ -8678,7 +8692,7 @@ def "B" (
         let (graph, mut cache) = in_memory_stack(INSTANCED);
         shared_part(&graph, &mut cache)?;
         cache.invalidate_prototypes(&[sdf::path("/A")?]);
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
             .expect("an instance");
@@ -8704,7 +8718,7 @@ def "B" (
             e.remove_spec(&sdf::path("/A")?)?;
             Ok(())
         })?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         let group = cache
             .prototype_of(&graph.read_view(), &sdf::path("/B")?)?
             .expect("an instance");
@@ -8731,7 +8745,7 @@ def "B" (
             );
             Ok(())
         })?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         let a = cache
             .prototype_of(&graph.read_view(), &sdf::path("/A")?)?
             .expect("an instance");
@@ -8747,7 +8761,7 @@ def "B" (
     /// Settles the work set once, returning what that cost.
     fn settle_cost(graph: &LayerGraph, cache: &mut IndexCache) -> Result<Tally> {
         cache.tally = Tally::default();
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         Ok(cache.tally)
     }
 
@@ -8895,7 +8909,7 @@ def "B" (
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
 
         set_active(&mut graph, &mut cache, "/G", Value::Bool(false))?;
-        cache.settle_pass(&graph.read_view(), &mut Vec::new())?;
+        cache.settle_pass(&graph.read_view())?;
         assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
         assert!(!cache.is_indexed(&sdf::path("/G/A")?), "the instance is not composed");
         Ok(())
@@ -8952,7 +8966,7 @@ def "B" (
 
         let retired = cache.invalidate_prototypes(&[sdf::path("/A")?]);
         assert_eq!(retired, [outer.clone(), inner.clone()], "the cascade retires both");
-        cache.settle_pass(&view, &mut Vec::new())?;
+        cache.settle_pass(&view)?;
 
         let outer = cache.prototype_of(&view, &sdf::path("/A")?)?.expect("an instance");
         let inner = cache

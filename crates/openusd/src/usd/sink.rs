@@ -124,10 +124,11 @@ pub trait StageSink {
         let _ = (stage, resynced);
     }
 
-    /// Observe the loads the stage tried again once a reload reached its
-    /// layers, through [`Stage::reload`] or a layer handle (C++
-    /// `UsdNotice::ObjectsChanged` fired by `Reload` for an asset that may
-    /// now load, treating every reported path as a full resync).
+    /// Observe the loads the stage tried again: at [`Stage::retry_loads`],
+    /// or once a reload reached its layers, through [`Stage::reload`] or a
+    /// layer handle (C++ `UsdNotice::ObjectsChanged` fired by `Reload` for an
+    /// asset that may now load, treating every reported path as a full
+    /// resync).
     ///
     /// `resynced` names, as subtrees, the prims that recompose with a
     /// reference, payload or sublayer that failed to load, with what the
@@ -141,9 +142,8 @@ pub trait StageSink {
     /// Observe what composition found that no other notice carries: as
     /// subtrees, the prims dropped by the layer loads a read, an authoring
     /// call or a drain's settling ran (a joined layer that relocates, a
-    /// failed load recorded), and the prims an edit's retry of the failed
-    /// loads recomposed otherwise (a repaired reference); as prims, the
-    /// anchors whose value clips now read a layer they found missing before.
+    /// failed load recorded); as prims, the anchors whose value clips now
+    /// read a layer they found missing before.
     /// A drain of edits to the stage's layers reports what its snapshot
     /// found, with what was found outside a drain since the last one, after
     /// the snapshot's transaction notices and less what those resynced: a
@@ -708,6 +708,7 @@ impl Payload {
             resynced: mut stage_resynced,
             resynced_prims,
             mut asset_paths_resynced,
+            ..
         } = outcome;
 
         // What the demand resolution found counts as the outcome's own.
@@ -900,6 +901,7 @@ mod tests {
             resynced_prims: Vec::new(),
             resynced: Vec::new(),
             asset_paths_resynced: paths(&["/A/B", "/B", "/B/C"]),
+            retries_sublayers: false,
         };
         let payload = shaped(Provenance::LocalStack, &["/A"], &[], &[], outcome);
         assert_eq!(payload.asset_paths_resynced, paths(&["/B"]));
@@ -908,6 +910,7 @@ mod tests {
             resynced_prims: Vec::new(),
             resynced: paths(&["/"]),
             asset_paths_resynced: paths(&["/A", "/B"]),
+            retries_sublayers: false,
         };
         let payload = shaped(Provenance::LocalStack, &[], &[], &[], outcome);
         assert!(payload.asset_paths_resynced.is_empty());
@@ -959,6 +962,7 @@ mod tests {
             resynced_prims: Vec::new(),
             resynced: paths(&["/A"]),
             asset_paths_resynced: paths(&["/A/B", "/C"]),
+            retries_sublayers: false,
         };
         let payload = shaped(
             Provenance::DirectLayerEdit,

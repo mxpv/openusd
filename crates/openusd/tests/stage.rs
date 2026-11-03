@@ -31,6 +31,7 @@ struct RecordingSink {
     edit_target: Option<Box<dyn Fn(&Stage)>>,
     muting: Option<Box<dyn Fn(&Stage, &str, bool, Resynced<'_>)>>,
     load_rules: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
+    loads_retried: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
     recomposed: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
 }
 
@@ -52,6 +53,11 @@ impl StageSink for RecordingSink {
     }
     fn load_rules_changed(&self, stage: &Stage, resynced: Resynced<'_>) {
         if let Some(f) = &self.load_rules {
+            f(stage, resynced);
+        }
+    }
+    fn loads_retried(&self, stage: &Stage, resynced: Resynced<'_>) {
+        if let Some(f) = &self.loads_retried {
             f(stage, resynced);
         }
     }
@@ -681,10 +687,10 @@ fn lazy_ref_unreadable_target() -> Result<()> {
     Ok(())
 }
 
-/// A reference target that failed to read on first demand is retried after an
-/// edit clears the recorded failure, so a repaired asset composes.
+/// A reference target that failed to read stays failed through an unrelated
+/// edit, and an explicit retry loads it once repaired.
 #[test]
-fn failed_load_retried_after_edit() -> Result<()> {
+fn failed_load_retried_explicitly() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let target = dir.path().join("target.usda");
@@ -693,44 +699,47 @@ fn failed_load_retried_after_edit() -> Result<()> {
 
     let stage = Stage::open(root.to_str().unwrap())?;
     assert!(stage.prim("/P")?.is_valid()?);
-    assert!(
-        stage.composition_errors().iter().any(|e| matches!(
-            e,
-            pcp::CompositionDiagnostic::MalformedLayer { asset_path, .. } if asset_path.contains("target.usda")
-        )),
-        "the unreadable target is reported malformed"
-    );
+    let malformed = |stage: &Stage| {
+        stage.composition_errors().iter().any(|e| {
+            matches!(
+                e,
+                pcp::CompositionDiagnostic::MalformedLayer { asset_path, .. } if asset_path.contains("target.usda")
+            )
+        })
+    };
+    assert!(malformed(&stage), "the unreadable target is reported malformed");
 
-    // Repair the file, then author an unrelated prim: the edit clears the recorded
-    // failure so the next query re-demands the now-readable target.
     fs::write(
         &target,
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 7\n}\n",
     )?;
     stage.define_prim("/Trigger")?;
+    assert!(malformed(&stage), "an unrelated edit leaves the failure");
 
+    stage.retry_loads()?;
     assert_eq!(
         stage.attribute("/P.x")?.get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
         Some(vt::Value::Double(7.0)),
-        "the repaired reference composes once the failure is cleared"
+        "the repaired reference composes once retried"
     );
+    assert!(!malformed(&stage));
     Ok(())
 }
 
 /// What the stage's sinks heard, in order: each transaction's resyncs as
-/// `("commit", paths)` and each recomposed notice's subtrees as
-/// `("recomposed", paths)`.
+/// `("commit", paths)`, each retry's as `("retried", paths)` and each
+/// recomposed notice's subtrees as `("recomposed", paths)`.
 type Heard = Rc<RefCell<Vec<(&'static str, Vec<sdf::Path>)>>>;
 
 /// Opens `root.usda` in `dir`, whose `/P` references each of the unreadable
-/// `targets` and whose `/O` holds the attribute `x`, composes `/P` so the
-/// failures are recorded, and installs a sink recording what it hears.
+/// `targets`, composes `/P` so the failures are recorded, and installs a
+/// sink recording what it hears.
 fn open_broken_targets(dir: &FsPath, targets: &[&str]) -> Result<(Stage, Heard)> {
     let references: Vec<String> = targets.iter().map(|target| format!("@{target}@")).collect();
     fs::write(
         dir.join("root.usda"),
         format!(
-            "#usda 1.0\ndef \"P\" (\n    references = [{}]\n) {{}}\ndef \"O\" {{\n    double x = 1\n}}\n",
+            "#usda 1.0\ndef \"P\" (\n    references = [{}]\n) {{}}\n",
             references.join(", ")
         ),
     )?;
@@ -740,10 +749,13 @@ fn open_broken_targets(dir: &FsPath, targets: &[&str]) -> Result<(Stage, Heard)>
     let stage = Stage::open(dir.join("root.usda").to_str().unwrap())?;
     assert!(stage.prim("/P")?.is_valid()?);
     let heard: Heard = Rc::new(RefCell::new(Vec::new()));
-    let (commits, recomposed) = (Rc::clone(&heard), Rc::clone(&heard));
+    let (commits, retried, recomposed) = (Rc::clone(&heard), Rc::clone(&heard), Rc::clone(&heard));
     stage.add_sink(RecordingSink {
         after: Some(Box::new(move |_, change| {
             commits.borrow_mut().push(("commit", change.resynced.to_vec()));
+        })),
+        loads_retried: Some(Box::new(move |_, resynced| {
+            retried.borrow_mut().push(("retried", resynced.subtrees.to_vec()));
         })),
         recomposed: Some(Box::new(move |_, resynced| {
             recomposed.borrow_mut().push(("recomposed", resynced.subtrees.to_vec()));
@@ -762,64 +774,278 @@ fn repair(dir: &FsPath, target: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// An unrelated edit that retries a failed load reports the prim the
-/// repaired target recomposes, after the edit's own notice.
+/// An unrelated edit leaves a repaired target unloaded and reports
+/// nothing for it.
 #[test]
-fn repaired_target_reported() -> Result<()> {
+fn unrelated_edit_skips_retry() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
     repair(dir.path(), "target.usda", "Child")?;
 
     stage.define_prim("/Trigger")?;
-    assert_eq!(
-        *heard.borrow(),
-        [("commit", paths(&["/Trigger"])), ("recomposed", paths(&["/P"]))]
-    );
-    assert!(stage.prim("/P/Child")?.is_valid()?);
+    assert_eq!(*heard.borrow(), [("commit", paths(&["/Trigger"]))]);
+    assert!(!stage.prim("/P/Child")?.is_valid()?);
     Ok(())
 }
 
-/// A value edit, which drops no index of its own, reports a repair too.
+/// An explicit retry reports the prims it recomposes, one whose targets are
+/// only partly repaired included.
 #[test]
-fn repair_after_value_edit() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
-    repair(dir.path(), "target.usda", "Child")?;
-
-    stage.attribute("/O.x")?.set(2.0)?;
-    assert_eq!(
-        *heard.borrow(),
-        [("commit", Vec::new()), ("recomposed", paths(&["/P"]))]
-    );
-    Ok(())
-}
-
-/// Repairing one of two failed targets reports the prim, which recomposes
-/// with the repaired one while the other still fails.
-#[test]
-fn partial_repair_reported() -> Result<()> {
+fn retry_reports_recovery() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let (stage, heard) = open_broken_targets(dir.path(), &["a.usda", "b.usda"])?;
     repair(dir.path(), "a.usda", "Child")?;
 
-    stage.define_prim("/Trigger")?;
-    assert_eq!(
-        *heard.borrow(),
-        [("commit", paths(&["/Trigger"])), ("recomposed", paths(&["/P"]))]
-    );
+    stage.retry_loads()?;
+    assert_eq!(*heard.borrow(), [("retried", paths(&["/P"]))]);
     assert!(stage.prim("/P/Child")?.is_valid()?);
     Ok(())
 }
 
-/// A retry whose target still fails reports nothing for it: the prim
-/// composes as it did.
+/// A retry from inside a read of the registry's layers fails with `Busy`
+/// and keeps the failures, so a later retry loads the repaired sublayer.
 #[test]
-fn broken_target_silent() -> Result<()> {
+fn busy_retry_keeps_failures() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@late.usda@]\n)\n")?;
+    fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(!stage.prim("/L")?.is_valid()?);
+    fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"L\" {}\n")?;
+
+    let handle = stage
+        .layer_handle(stage.root_layer().identifier())
+        .expect("the root layer");
+    let inside = handle.read(|_| stage.retry_loads())?;
+    assert!(
+        matches!(inside, Err(openusd::Error::Layer(sdf::LayerError::Busy))),
+        "{inside:?}"
+    );
+    stage.retry_loads()?;
+    assert!(stage.prim("/L")?.is_valid()?, "the repaired sublayer loads");
+    Ok(())
+}
+
+/// A retry whose target still fails composes the prim as before, with the
+/// failure reported again.
+#[test]
+fn retry_still_broken() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
+    let errors = stage.composition_errors();
 
-    stage.define_prim("/Trigger")?;
-    assert_eq!(*heard.borrow(), [("commit", paths(&["/Trigger"]))]);
+    stage.retry_loads()?;
+    assert_eq!(*heard.borrow(), [("retried", paths(&["/P"]))]);
+    assert!(stage.prim("/P")?.is_valid()?);
+    assert_eq!(stage.composition_errors(), errors);
+    Ok(())
+}
+
+/// A reference an edit authors to an asset that failed before resolves it
+/// afresh: a repaired asset loads with no retry, for the prim that recorded
+/// the failure too, which the drain reports after the edit.
+#[test]
+fn new_reference_escapes_failure() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (stage, heard) = open_broken_targets(dir.path(), &["target.usda"])?;
+    repair(dir.path(), "target.usda", "Child")?;
+    let q = stage.define_prim("/Q")?;
+    heard.borrow_mut().clear();
+
+    q.references().add(sdf::Reference {
+        asset_path: "target.usda".into(),
+        ..Default::default()
+    })?;
+    assert!(stage.prim("/Q/Child")?.is_valid()?);
+    assert!(stage.prim("/P/Child")?.is_valid()?, "the prim that failed recovers");
+    assert_eq!(
+        *heard.borrow(),
+        [("commit", paths(&["/Q"])), ("recomposed", paths(&["/P"]))]
+    );
+    Ok(())
+}
+
+/// An expression reference an edit authors to an asset that failed before
+/// resolves it afresh, as a literal one does.
+#[test]
+fn expression_reference_escapes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    expressionVariables = { string T = \"target\" }\n)\ndef \"P\" (references = \
+         @target.usda@) {}\ndef \"Q\" {}\n",
+    )?;
+    fs::write(dir.path().join("target.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()? && stage.prim("/Q")?.is_valid()?);
+    repair(dir.path(), "target.usda", "Child")?;
+
+    stage.prim("/Q")?.references().add(sdf::Reference {
+        asset_path: "`\"./${T}.usda\"`".into(),
+        ..Default::default()
+    })?;
+    assert!(stage.prim("/Q/Child")?.is_valid()?);
+    assert!(stage.prim("/P/Child")?.is_valid()?);
+    Ok(())
+}
+
+/// A variable edit that selects an asset again, after it failed and was
+/// repaired, resolves it afresh.
+#[test]
+fn variable_escapes_failure() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    expressionVariables = { string V = \"a\" }\n)\ndef \"P\" (\n    references = \
+         @`\"./${V}.usda\"`@\n) {}\n",
+    )?;
+    fs::write(dir.path().join("a.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    repair(dir.path(), "b.usda", "B")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()?);
+    let select = |value: &str| HashMap::from([("V".to_string(), vt::Value::String(value.to_string()))]);
+
+    stage.set_expression_variables(select("b"))?;
+    assert!(stage.prim("/P/B")?.is_valid()?);
+    repair(dir.path(), "a.usda", "A")?;
+    stage.set_expression_variables(select("a"))?;
+    assert!(stage.prim("/P/A")?.is_valid()?, "the repaired asset loads");
+    Ok(())
+}
+
+/// A variant switched away from a broken reference and back, once the
+/// asset is repaired, composes it: the prim composed again tries it again.
+#[test]
+fn variant_back_retries() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (\n    variants = { string v = \"a\" }\n    prepend variantSets = \"v\"\n)\n{\n    \
+         variantSet \"v\" = {\n        \"a\" (references = @a.usda@) {}\n        \"b\" {}\n    }\n}\n",
+    )?;
+    fs::write(dir.path().join("a.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()?);
+
+    stage.prim("/P")?.variant_sets().set_selection("v", "b")?;
+    repair(dir.path(), "a.usda", "A")?;
+    stage.prim("/P")?.variant_sets().set_selection("v", "a")?;
+    assert!(stage.prim("/P/A")?.is_valid()?);
+    Ok(())
+}
+
+/// An edit that composes one prim with a repaired target again recomposes
+/// every other prim that recorded the same failure.
+#[test]
+fn other_referrer_recovers() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (references = @t.usda@) {}\ndef \"Q\" (references = @t.usda@) {}\ndef \"E\" {}\n",
+    )?;
+    fs::write(dir.path().join("t.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()? && stage.prim("/Q")?.is_valid()?);
+    repair(dir.path(), "t.usda", "Child")?;
+
+    stage.prim("/P")?.set_instanceable(true)?;
+    assert!(stage.prim("/Q/Child")?.is_valid()?, "the other referrer recovers");
+    Ok(())
+}
+
+/// A variant switched back to a repaired target composes it, though
+/// another prim recorded the target's failure again in between.
+#[test]
+fn variant_back_past_referrer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (\n    variants = { string v = \"a\" }\n    prepend variantSets = \"v\"\n)\n{\n    \
+         variantSet \"v\" = {\n        \"a\" (references = @a.usda@) {}\n        \"b\" {}\n    }\n}\ndef \"Q\" \
+         (references = @a.usda@) {}\n",
+    )?;
+    fs::write(dir.path().join("a.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()? && stage.prim("/Q")?.is_valid()?);
+
+    stage.prim("/P")?.variant_sets().set_selection("v", "b")?;
+    assert!(stage.prim("/Q")?.is_valid()?);
+    repair(dir.path(), "a.usda", "A")?;
+    stage.prim("/P")?.variant_sets().set_selection("v", "a")?;
+    assert!(stage.prim("/P/A")?.is_valid()?);
+    assert!(stage.prim("/Q/A")?.is_valid()?);
+    Ok(())
+}
+
+/// A sublayer edit that loads a repaired asset recomposes a prim whose
+/// reference to the same asset recorded its failure.
+#[test]
+fn sublayer_retry_recomposes_referrer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (references = @t.usda@) {}\ndef \"Q\" (references = @e.usda@) {}\n",
+    )?;
+    fs::write(
+        dir.path().join("e.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"E\"\n    subLayers = [@t.usda@]\n)\ndef \"E\" {}\n",
+    )?;
+    fs::write(dir.path().join("t.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()? && stage.prim("/Q")?.is_valid()?);
+    repair(dir.path(), "t.usda", "Child")?;
+
+    let e = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|id| id.ends_with("e.usda"))
+        .expect("e.usda is loaded");
+    stage.layer_handle(&e).expect("loaded").edit(|e| {
+        e.pseudo_root_mut().unwrap().set_sublayers(["./t.usda"]);
+        Ok(())
+    })?;
+    assert!(stage.prim("/P/Child")?.is_valid()?, "the reference recovers");
+    Ok(())
+}
+
+/// A broken payload unloaded, repaired and loaded again composes.
+#[test]
+fn reloaded_payload_retries() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (payload = @p.usda@) {}\n",
+    )?;
+    fs::write(dir.path().join("p.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()?);
+
+    stage.unload("/P")?;
+    repair(dir.path(), "p.usda", "C")?;
+    stage.load("/P", LoadPolicy::WithDescendants)?;
+    assert!(stage.prim("/P/C")?.is_valid()?);
+    Ok(())
+}
+
+/// A variable edit that selects a repaired sublayer again loads it.
+#[test]
+fn variable_reselects_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    expressionVariables = { string V = \"a\" }\n    subLayers = [@`\"./${V}.usda\"`@]\n)\n",
+    )?;
+    fs::write(dir.path().join("a.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    fs::write(dir.path().join("b.usda"), "#usda 1.0\ndef \"B\" {}\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    let select = |value: &str| HashMap::from([("V".to_string(), vt::Value::String(value.to_string()))]);
+
+    stage.set_expression_variables(select("b"))?;
+    assert!(stage.prim("/B")?.is_valid()?);
+    fs::write(dir.path().join("a.usda"), "#usda 1.0\ndef \"A\" {}\n")?;
+    stage.set_expression_variables(select("a"))?;
+    assert!(stage.prim("/A")?.is_valid()?, "the repaired sublayer loads");
     Ok(())
 }
 
@@ -1545,7 +1771,7 @@ fn session_insert_layer() -> Result<()> {
 
 /// A session sublayer missing at open reports once and heals: the session
 /// region re-derives the diagnostic per rebuild, so once the file appears and
-/// an edit clears the failure memo, the layer loads and the report stops.
+/// a retry clears the failure memo, the layer loads and the report stops.
 #[test]
 fn session_missing_heals() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1572,8 +1798,8 @@ fn session_missing_heals() -> Result<()> {
         dir.path().join("late.usda"),
         "#usda 1.0\ndef \"L\" {\n    custom double x = 4\n}\n",
     )?;
-    // Any edit clears the failure memo, requeueing the entry for the barrier.
-    stage.define_prim("/Poke")?;
+    // A retry clears the failure memo, requeueing the entry for the barrier.
+    stage.retry_loads()?;
     assert_eq!(
         stage.attribute("/L.x")?.get::<f64>()?,
         Some(4.0),
@@ -1926,10 +2152,10 @@ fn sublayer_failure_keeps_arc_loadable() -> Result<()> {
     Ok(())
 }
 
-/// Repairing a missing sublayer on disk and then making an unrelated edit —
-/// one that rebuilds no layer stack — still loads it: clearing the failure
-/// memo requeues the failure diagnostics as demands, so the repaired layer
-/// joins and its obsolete diagnostic drops.
+/// Repairing a missing sublayer on disk and then retrying the loads, which
+/// rebuilds no layer stack, loads it: clearing the failure memo requeues
+/// the failure diagnostics as demands, so the repaired layer joins and its
+/// obsolete diagnostic drops.
 #[test]
 fn repaired_sublayer_reloads() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1948,12 +2174,12 @@ fn repaired_sublayer_reloads() -> Result<()> {
         dir.path().join("late.usda"),
         "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
     )?;
-    // A prim edit touches no layer stack, so only the requeue can retry.
-    stage.define_prim("/X")?;
+    // A retry rebuilds no layer stack, so only the requeue loads it.
+    stage.retry_loads()?;
     assert_eq!(
         stage.attribute("/L.z")?.get::<f64>()?,
         Some(5.0),
-        "the repaired sublayer loads on the next edit"
+        "the repaired sublayer loads on the retry"
     );
     let errors = stage.composition_errors();
     assert!(
@@ -2027,9 +2253,9 @@ fn dual_spelling_reports_once() -> Result<()> {
     };
     assert_eq!(count(&stage), 1, "one canonical failure, one diagnostic at open");
 
-    // An edit clears and requeues the failure; the retry still fails and must
-    // still report once.
-    stage.define_prim("/X")?;
+    // A retry clears and requeues the failure; it still fails and must still
+    // report once.
+    stage.retry_loads()?;
     assert_eq!(count(&stage), 1, "one diagnostic after the runtime retry");
     Ok(())
 }
@@ -2064,7 +2290,7 @@ fn search_and_file_relative_spellings_differ() -> Result<()> {
         dir.path().join("missing.usda"),
         "#usda 1.0\ndef \"L\" {\n    custom double z = 5\n}\n",
     )?;
-    stage.define_prim("/X")?;
+    stage.retry_loads()?;
     assert_eq!(
         stage.attribute("/L.z")?.get::<f64>()?,
         Some(5.0),
@@ -4660,8 +4886,8 @@ def Broken {{{ not valid
         "the unreadable target hides the instance"
     );
 
-    // The repaired target makes `/P` instanceable. An unrelated edit clears the
-    // recorded failure; nothing queries `/P`.
+    // The repaired target makes `/P` instanceable. A retry clears the recorded
+    // failure; nothing queries `/P`.
     fs::write(
         &target,
         "#usda 1.0
@@ -4678,7 +4904,7 @@ def \"P\" (
 }
 ",
     )?;
-    stage.define_prim("/Trigger")?;
+    stage.retry_loads()?;
 
     let roots = stage.prototypes()?;
     assert_eq!(roots.len(), 1, "the newly revealed prototype is found: {roots:?}");

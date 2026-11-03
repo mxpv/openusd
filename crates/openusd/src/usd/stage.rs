@@ -2836,6 +2836,28 @@ impl Stage {
         graph.identifiers_of(graph.sublayer_stack(parent_id).iter().map(|&(id, _)| id))
     }
 
+    /// Tries the loads that failed again (C++ `PcpChanges::DidMaybeFixAsset`
+    /// on every recorded failure): a reference, payload or sublayer whose
+    /// asset is missing or unreadable is opened again, the prims that
+    /// recorded a failure compose again, and the stage's sinks hear them
+    /// through [`StageSink::loads_retried`]. An edit retries only what the
+    /// prims it composes again name, and a `subLayers` or
+    /// `expressionVariables` edit the failed sublayers; a missing or broken
+    /// asset fixed on disk otherwise loads here, or at
+    /// [`reload`](Self::reload).
+    ///
+    /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
+    /// a layer on the stage's registry, retrying nothing.
+    pub fn retry_loads(&self) -> Result<()> {
+        // A retry loads, so it cannot run inside a read of the registry's
+        // layers.
+        self.settle()?;
+        self.composition.ensure_writable()?;
+        self.composition.retry_failed_loads(self);
+        self.composition.end_edit(self);
+        Ok(())
+    }
+
     /// Reloads every layer the stage uses from its asset (C++
     /// `UsdStage::Reload`), clip layers included, leaving out the session
     /// layers and the sublayers beneath them, and muted layers. Each layer
@@ -5304,11 +5326,10 @@ pub(crate) mod tests {
             "the successor stack's own unresolved selection reports"
         );
 
-        // An edit clears the load-failure memo and requeues failures from the
+        // A retry clears the load-failure memo and requeues failures from the
         // surviving buckets; the reclaimed bucket is gone, so no demand
         // derives against the dead stack and the survivor keeps reporting.
-        stage.set_edit_target(stage.edit_target_root())?;
-        stage.define_prim("/Zed")?;
+        stage.retry_loads()?;
         assert!(!mentions(&stage, "missing.usda"));
         assert!(mentions(&stage, "V.usda"));
         Ok(())
@@ -7085,6 +7106,30 @@ def \"Sub\" {}
         Ok(())
     }
 
+    /// An unrelated edit tries no failed load again; an explicit retry does.
+    #[test]
+    fn edit_skips_failed_loads() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("root.usda"),
+            "#usda 1.0\ndef \"P\" (references = @broken.usda@) {}\n",
+        )?;
+        fs::write(dir.path().join("broken.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+        let (registry, opens) = sdf::layer_registry::tests::counting_registry();
+        let stage = Stage::builder()
+            .registry(registry)
+            .open(&dir.path().join("root.usda").to_string_lossy())?;
+        assert!(stage.prim("/P")?.is_valid()?);
+        let tried = opens.get();
+
+        stage.define_prim("/Q")?;
+        assert!(stage.prim("/P")?.is_valid()?);
+        assert_eq!(opens.get(), tried, "the edit opens nothing");
+        stage.retry_loads()?;
+        assert!(opens.get() > tried, "the retry opens the asset again");
+        Ok(())
+    }
+
     /// An edit that leaves a saved layer unused keeps it while an undo step
     /// names it, so both steps undo.
     #[test]
@@ -8186,34 +8231,6 @@ def "P" (payload = @./clip.usda@</M>) {}
         let retried = retried.borrow();
         assert_eq!(retried.len(), 1, "{retried:?}");
         assert!(!retried[0].is_empty());
-        Ok(())
-    }
-
-    /// An edit other than a reload tries the failed loads again without
-    /// reporting it.
-    #[test]
-    fn edit_retry_unreported() -> Result<()> {
-        struct Retried(Rc<Cell<usize>>);
-        impl StageSink for Retried {
-            fn loads_retried(&self, _: &Stage, _: usd::Resynced<'_>) {
-                self.0.set(self.0.get() + 1);
-            }
-        }
-
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().join("root.usda");
-        fs::write(&root, "#usda 1.0\ndef \"P\" (references = @./missing.usda@) {}\n")?;
-        let stage = Stage::open(&root.to_string_lossy())?;
-        assert!(stage.prim("/P")?.is_valid()?, "the prim composes without its target");
-        let retried = Rc::new(Cell::new(0));
-        stage.add_sink(Retried(Rc::clone(&retried)));
-        let root_id = stage.root_layer().identifier().to_owned();
-        stage.edit_layer(&root_id, |e| {
-            sdf::PrimSpec::new(e.data_mut(), "/X", sdf::Specifier::Def, "")?;
-            Ok(())
-        })?;
-        assert!(stage.prim("/X")?.is_valid()?);
-        assert_eq!(retried.get(), 0);
         Ok(())
     }
 
@@ -10232,7 +10249,8 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// A panic while a drain retries the failed loads poisons the stage.
+    /// A panic while an explicit retry opens a failed load again poisons the
+    /// stage.
     #[test]
     fn retry_panic_poisons() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -10252,15 +10270,10 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(!stage.prim("/Late")?.is_valid()?, "the sublayer is missing");
         fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"Late\" {}\n")?;
         armed.set(true);
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
-        {
-            let _layers = stage.layers();
-            define_raw(&root, "/Q");
-        }
 
-        let message = panic_message(|| stage.process_pending());
+        let message = panic_message(|| drop(stage.retry_loads()));
         assert_eq!(message.as_deref(), Some("the resolver failed"));
-        let read = stage.prim("/Q")?.is_valid();
+        let read = stage.prim("/Late")?.is_valid();
         assert!(
             matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
             "{read:?}"

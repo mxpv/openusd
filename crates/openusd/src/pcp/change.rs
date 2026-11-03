@@ -124,6 +124,10 @@ pub(crate) struct Changes {
     /// Whether this round touched a prim's schema identity — `typeName`,
     /// `apiSchemas`, or the root's `fallbackPrimTypes`.
     type_opinions: bool,
+    /// Whether this round authored `subLayers` or `expressionVariables`,
+    /// which can select a repaired sublayer again
+    /// ([`ApplyOutcome::retries_sublayers`]).
+    retries_sublayers: bool,
     /// Whether to collect the reporting sets. Invalidation is never gated on
     /// this; the paths a notice needs are, since deriving them costs a
     /// dependency lookup per entry that a stage with no observer would throw
@@ -458,6 +462,11 @@ bitflags! {
 /// (`usd::sink::Payload::finish`).
 #[derive(Debug, Default)]
 pub(crate) struct ApplyOutcome {
+    /// Whether the round authored `expressionVariables`, which can select a
+    /// repaired sublayer again: the stage retries the failed sublayer entries
+    /// once the stacks the round stranded are swept
+    /// ([`LayerGraph::retry_failed_sublayers`]).
+    pub retries_sublayers: bool,
     /// Composed prim paths this apply resynced for a layer-stack reason: the
     /// indices a `subLayers`/offset/`timeCodesPerSecond` change or an
     /// `expressionVariables` delta dropped (C++ `DidChangeSignificantly` from
@@ -523,6 +532,9 @@ impl Changes {
         for edit in changes {
             self.edited_layers.insert(edit.layer);
             for (path, entry) in edit.changes.entries() {
+                self.retries_sublayers |= [FieldKey::SubLayers, FieldKey::ExpressionVariables]
+                    .iter()
+                    .any(|key| entry.changed(key.as_str()));
                 self.apply_effects(cache, graph, edit, path, Self::effects_of(path, entry));
             }
         }
@@ -1101,10 +1113,15 @@ impl Changes {
             resynced.extend(cache.invalidate_clip_sources(graph.spellings(&self.edited_layers)));
         }
 
+        // The prims this round composes again try what they failed to load,
+        // and the others that recorded the same failures compose again too.
+        drop(view);
+        resynced.extend(cache.retry_dropped_failures(graph));
         ApplyOutcome {
             resynced,
             resynced_prims,
             asset_paths_resynced,
+            retries_sublayers: self.retries_sublayers,
         }
     }
 }

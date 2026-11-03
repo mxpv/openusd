@@ -769,6 +769,9 @@ pub(crate) struct ClipCache {
     /// Whether a layer some set read lost its last registration, for the
     /// stage to reclaim.
     released: bool,
+    /// The clip and manifest identifiers the sets of a marked anchor named
+    /// ([`take_retried`](Self::take_retried)).
+    retried: Vec<String>,
 }
 
 /// Where a clip or manifest layer a read names stands
@@ -1473,11 +1476,32 @@ impl ClipCache {
         }
         // TODO(perf): every anchor is tested against every root; a
         // prefix-ordered map would visit only the roots' subtrees.
-        let reached = self
+        let reached: Vec<Path> = self
             .set_sources
             .keys()
-            .filter(|anchor| roots.iter().any(|root| anchor.has_prefix(root)));
-        self.stale.extend(reached.cloned());
+            .filter(|anchor| roots.iter().any(|root| anchor.has_prefix(root)))
+            .cloned()
+            .collect();
+        for anchor in reached {
+            self.mark(anchor);
+        }
+    }
+
+    /// Marks `anchor` for [`refresh`](Self::refresh), and its sets' clips
+    /// for a retry: an anchor whose sets may point elsewhere tries the clips
+    /// it names again.
+    fn mark(&mut self, anchor: Path) {
+        if let Some(sets) = self.set_sources.get(&anchor) {
+            self.retried
+                .extend(sets.values().flat_map(|sources| sources.identifiers.iter().cloned()));
+        }
+        self.stale.insert(anchor);
+    }
+
+    /// Takes the clip identifiers a marked anchor's sets named, whose
+    /// failures a retry forgets.
+    pub(super) fn take_retried(&mut self) -> Vec<String> {
+        mem::take(&mut self.retried)
     }
 
     /// Whether an anchor waits for [`refresh`](Self::refresh).
@@ -1490,7 +1514,7 @@ impl ClipCache {
     /// against the new index.
     pub(super) fn mark_rebuilt(&mut self, anchor: &Path) {
         if self.set_sources.contains_key(anchor) {
-            self.stale.insert(anchor.clone());
+            self.mark(anchor.clone());
         }
     }
 
@@ -1657,9 +1681,10 @@ impl ClipCache {
     /// authored the clip metadata).
     ///
     /// A layer that resolved and could not be read fails with
-    /// [`QueryError::ClipLoad`] until an edit clears the graph's record of the
-    /// failure, and one that did not resolve is asked for again once the
-    /// resolver finds it.
+    /// [`QueryError::ClipLoad`] until a retry, a reload, or an edit composing
+    /// its anchor again clears the graph's record of the failure, and one
+    /// that did not resolve is asked for
+    /// again once the resolver finds it.
     fn ensure_clip_layer(
         &mut self,
         graph: &LayerView<'_>,

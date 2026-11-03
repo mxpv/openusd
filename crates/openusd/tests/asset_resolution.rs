@@ -942,6 +942,30 @@ fn stepped_clip_returns() -> openusd::Result<()> {
     Ok(())
 }
 
+/// An edit to an anchor's clip metadata tries a clip that failed to read
+/// again, so a repaired clip sources the value.
+#[test]
+fn clip_edit_retries_clip() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(dir.path().join("s020.usda"), "#usda 1.0\ndef Broken {{{ not valid\n").expect("write clip");
+    let stage = clip_scene(
+        &dir,
+        "s020",
+        concat!(
+            "            asset[] assetPaths = [@./s020.usda@]\n",
+            "            double2[] active = [(1, 0)]\n",
+        ),
+    );
+    // The read records the clip's failure.
+    let unread = stage.attribute("/P.v")?.get_at::<f64>(usd::TimeCode::from(1.0));
+    assert!(!matches!(unread, Ok(Some(_))), "{unread:?}");
+    write_clip(&dir, "s020.usda", &[(1.0, 20.0)]);
+
+    usd::ClipsAPI::from_prim_unchecked(stage.prim("/P")?).set_clip_active("default", vec![gf::vec2d(0.0, 0.0)])?;
+    assert_eq!(value_at(&stage, "/P.v", 1.0), Some(20.0));
+    Ok(())
+}
+
 /// Deleting a clip anchor frees the clip layers its sets read.
 #[test]
 fn deleted_anchor_frees_clips() -> openusd::Result<()> {

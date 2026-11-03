@@ -590,9 +590,11 @@ pub(crate) struct SublayerRecompute {
 /// Why a prior on-demand open of an asset failed, memoized in
 /// [`failed_loads`](LayerGraph::failed_loads) so composition stops retrying
 /// the asset and every referrer's diagnostic can be re-derived from it. An
-/// [`Unreadable`](Self::Unreadable) failure is terminal until an edit clears
-/// the memo; an [`Unresolved`](Self::Unresolved) one blocks nothing once the
-/// asset resolves again (the file has since appeared).
+/// [`Unreadable`](Self::Unreadable) failure is terminal until a retry, a
+/// reload, or an edit that composes a prim naming the asset again clears
+/// it; an
+/// [`Unresolved`](Self::Unresolved) one blocks nothing once the asset
+/// resolves again (the file has since appeared).
 #[derive(Debug, Clone)]
 pub(crate) enum LoadFailure {
     /// The asset path did not resolve to a physical location.
@@ -1289,8 +1291,10 @@ impl LayerGraph {
     /// indexer's muted-arc-target check; an unmute rebuilds the stack, which
     /// re-derives the entry), a regenerated per-referrer
     /// diagnostic when its identifier already failed to open (the barrier
-    /// would refuse it; an edit clears the failure and the next rebuild
-    /// demands again), or a demand. A resolve failure holds only while the
+    /// would refuse it; a retry, or a `subLayers` or `expressionVariables`
+    /// edit, clears the
+    /// failure and the next rebuild demands again), or a demand. A resolve
+    /// failure holds only while the
     /// asset stays unresolvable: once the resolver finds it again, the entry
     /// demands rather than reporting — the sublayer analog of the arc demand
     /// gate's retry.
@@ -1368,8 +1372,9 @@ impl LayerGraph {
     }
 
     /// The sublayer load-failure diagnostics re-derived as fresh
-    /// [`SublayerDemand`]s, for the stage's load barrier after an edit clears
-    /// the failure memo ([`clear_failed_loads`](Self::clear_failed_loads)): a
+    /// [`SublayerDemand`]s, for the stage's load barrier after a retry
+    /// clears the failure memo ([`clear_failed_loads`](Self::clear_failed_loads),
+    /// [`retry_failed_sublayers`](Self::retry_failed_sublayers)): a
     /// bucket's unresolved or malformed sublayer entry carries exactly its
     /// demand's ingredients, so a repaired asset reloads even when the edit
     /// itself rebuilds no stack. A retry that fails re-records the identical
@@ -1889,13 +1894,19 @@ impl LayerGraph {
 
     /// Forgets each recorded resolve failure whose asset the resolver now
     /// finds, returning whether there was one.
-    pub(crate) fn forget_resolvable_failures(&mut self) -> bool {
-        let before = self.failed_loads.len();
+    pub(crate) fn forget_resolvable_failures(&mut self) -> HashSet<String> {
         let registry = &self.registry;
-        self.failed_loads.retain(|asset_path, failure| {
-            !matches!(failure, LoadFailure::Unresolved) || registry.resolve(asset_path).is_none()
-        });
-        self.failed_loads.len() != before
+        let resolvable: HashSet<String> = self
+            .failed_loads
+            .iter()
+            .filter(|(asset_path, failure)| {
+                matches!(failure, LoadFailure::Unresolved) && registry.resolve(asset_path).is_some()
+            })
+            .map(|(asset_path, _)| asset_path.clone())
+            .collect();
+        self.failed_loads
+            .retain(|asset_path, _| !resolvable.contains(asset_path));
+        resolvable
     }
 
     /// The layer stack a reference/payload arc to external `root` should compose
@@ -2352,7 +2363,8 @@ impl LayerGraph {
     }
 
     /// The recorded failure that still keeps `asset_path` from being opened
-    /// again: an unreadable one until an edit clears it, and an unresolved one
+    /// again: an unreadable one until a retry, or a rebuild of a prim that
+    /// recorded it, clears it, and an unresolved one
     /// while the asset neither resolves nor names a layer the registry holds
     /// (an adopted or anonymous one is found without resolving).
     ///
@@ -2369,9 +2381,38 @@ impl LayerGraph {
         })
     }
 
+    /// Forgets the recorded failures of `assets`, the targets a prim composed
+    /// again names, so its rebuild opens them again.
+    pub(crate) fn forget_load_failures(&mut self, assets: impl IntoIterator<Item = String>) {
+        for asset in assets {
+            self.failed_loads.remove(&asset);
+        }
+    }
+
+    /// Forgets the recorded failure of every failed sublayer entry and demands
+    /// each again, for the stage's load barrier: a `subLayers` or
+    /// `expressionVariables` edit can select a repaired asset again, and no
+    /// prim index records a sublayer's failure for its rebuild to retry.
+    /// Called once the stacks the edit
+    /// stranded are swept, so no entry is demanded for a stack nothing uses.
+    ///
+    /// Returns the demands with the assets whose failures it forgot, which
+    /// a prim index may have recorded too.
+    pub(crate) fn retry_failed_sublayers(&mut self) -> (Vec<SublayerDemand>, HashSet<String>) {
+        let demands = self.requeue_failed_sublayers();
+        let mut forgotten = HashSet::new();
+        for demand in &demands {
+            let asset = self.absolute_path(demand.parent, &demand.evaluated);
+            if self.failed_loads.remove(&asset).is_some() {
+                forgotten.insert(asset);
+            }
+        }
+        (demands, forgotten)
+    }
+
     /// Forgets every recorded load failure so a now-readable asset is demanded
-    /// again, returning whether any were recorded. Called when an edit changes
-    /// the layers.
+    /// again, returning whether any were recorded. Called by a retry of the
+    /// failed loads, explicit or a reload's.
     pub(crate) fn clear_failed_loads(&mut self) -> bool {
         if self.failed_loads.is_empty() {
             return false;

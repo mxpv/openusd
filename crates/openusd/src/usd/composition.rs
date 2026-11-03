@@ -512,7 +512,14 @@ impl StageComposition {
     fn update_pair<T>(&self, f: impl FnOnce(&mut pcp::LayerGraph, &mut pcp::IndexCache) -> T) -> T {
         let mut layers = self.layers.borrow_mut();
         let mut cache = self.cache.borrow_mut();
-        f(&mut layers, &mut cache)
+        let out = f(&mut layers, &mut cache);
+        // A prim composed again tries the targets its dropped index failed
+        // to load, as C++ opens a layer afresh at every index rebuild; the
+        // other prims that recorded those failures, which compose again too,
+        // reach the stage's sinks with the next drain.
+        let others = cache.retry_dropped_failures(&mut layers);
+        self.discovered.borrow_mut().subtrees.extend(others);
+        out
     }
 
     /// The layer graph for an authoring path that intentionally tolerates
@@ -752,10 +759,11 @@ impl StageComposition {
     /// the next drain. Fails with [`pcp::QueryError::Poisoned`] on a poisoned
     /// stage, which reconciles nothing; a panic out of the drain poisons it.
     ///
-    /// With `retry`, the edits it takes first forget the recorded load
-    /// failures. Those the drain's own loads commit later do not: such an
+    /// With `outer`, a drain the stage's caller starts, it settles what it
+    /// drops, and a reload among the edits it takes first retries the failed
+    /// loads. A reload the drain's own loads commit later does not: such an
     /// edit is committed before the failure its load records.
-    pub(super) fn reconcile(&self, retry: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+    pub(super) fn reconcile(&self, outer: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         if let Some(poisoned) = self.poisoned.get() {
             return Err(poisoned.error());
         }
@@ -768,22 +776,22 @@ impl StageComposition {
         let _hold = self.store.hold();
         self.reconciling.set(true);
         let _reconciling = sdf::StopRunning(&self.reconciling);
-        // A drain the stage's caller starts, which retries the failed loads,
-        // starts a settlement round; one a read's loads need does not.
-        if retry {
+        // A drain the stage's caller starts a settlement round; one a read's
+        // loads need does not.
+        if outer {
             self.begin_round();
         }
-        self.guarded(Poisoned::Compose, || self.drain(retry, hooks))
+        self.guarded(Poisoned::Compose, || self.drain(outer, hooks))
     }
 
     /// Reconciles snapshots of the queue until it stays empty, for
     /// [`reconcile`](Self::reconcile).
-    fn drain(&self, retry: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+    fn drain(&self, outer: bool, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         // A drain the stage's caller starts settles what it drops. One a
         // read's loads need leaves that to the read, which settles after its
         // passes, so its parked demands stay the cache's through this drain.
-        let settles = retry;
-        let mut retry = retry;
+        let settles = outer;
+        let mut retry = outer;
         while !self.pending_is_empty() {
             // A drain reads, and may load, the stage's layers. From inside a
             // read or an edit of one of them it would find the store held, so
@@ -794,25 +802,24 @@ impl StageComposition {
             let mut drained: VecDeque<Pending> = self.take_pending().into();
             self.snapshots.set(self.snapshots.get() + 1);
             let edited = drained.iter().any(|pending| matches!(pending, Pending::Edit(_)));
-            // A reload's retry is reported to the stage's sinks whole, as C++
-            // `UsdStage::Reload` reports what `PcpCache::Reload` resyncs; the
-            // retry any other edit makes reports the prims that recover, as
-            // settling finds them.
+            // A reload reconsiders the recorded load failures, after its
+            // transactions are applied (C++ `PcpCache::Reload`, its
+            // `DidMaybeFixAsset`); another edit retries only what the prims
+            // it composes again name ([`pcp::IndexCache::retry_dropped_failures`]),
+            // and the failed sublayers after a `subLayers` or
+            // `expressionVariables` edit (below).
+            // Only the first snapshot of a drain the caller starts retries:
+            // edits the drain's own loads commit do not.
             let reloaded = drained
                 .iter()
                 .any(|pending| matches!(pending, Pending::Edit(edit) if edit.changes.did_reload_content()));
-            // An edit changes the layers, so a target that previously failed to read
-            // may now be readable: forget recorded load failures and drop the indices
-            // that recorded one, so settlement re-demands and recomposes them.
-            let retried = match edited && mem::take(&mut retry) {
-                true => self.forget_failed_loads(reloaded),
-                false => None,
-            };
+            let retries = mem::take(&mut retry) && reloaded;
             // What operations found since the last drain is reported with
             // what this snapshot finds, after its transactions, less what
             // their notices cover.
             let mut found = self.discovered.take();
             let mut covered = Vec::new();
+            let mut retries_sublayers = false;
             while let Some(group) = next_group(&mut drained) {
                 match group {
                     Group::Aborted(generation) => {
@@ -827,7 +834,7 @@ impl StageComposition {
                     Group::Edit(mut group) => {
                         let generation = group[0].generation;
                         let apply = || self.apply_change_sets(&mut group, &mut covered, hooks);
-                        self.guarded(Poisoned::Apply(generation), apply);
+                        retries_sublayers |= self.guarded(Poisoned::Apply(generation), apply);
                     }
                 }
             }
@@ -839,34 +846,29 @@ impl StageComposition {
             if settles {
                 self.settle_work(Settled::Taken, hooks, &mut found);
             }
-            if edited {
-                // Sweep before the requeue below: a sweep retires a reclaimed stack's
-                // failure diagnostics, so requeueing never re-derives a demand whose
-                // barrier would read a reclaimed stack's variables.
+            // A retry sweeps first itself.
+            if retries {
+                self.retry(Settled::Taken, hooks);
+            } else if edited {
                 self.reclaim_stale_stacks();
-                // A cleared sublayer failure retries even when this round's edits
-                // rebuilt no stack: the failure diagnostics requeue as demands, so a
-                // repaired asset loads and a still-broken one re-records the same
-                // diagnostic.
-                if let Some(dropped) = retried {
-                    // A reload reports its whole retry, its settling
-                    // included, as `retry_failed_loads` does. Any other
-                    // retry reports the prims that recover.
-                    let mut again = ResyncPaths::default();
-                    let into = if reloaded {
-                        again.subtrees = dropped;
-                        &mut again
-                    } else {
-                        &mut found
-                    };
-                    let requeued = self.layers.borrow().requeue_failed_sublayers();
-                    self.resolve_sublayer_demands(requeued, hooks, into);
-                    // A failed load the retry opens settles the prims it
-                    // dropped, and the stacks they released are swept: only
-                    // a drain the caller starts retries.
-                    self.settle_work(Settled::Taken, hooks, into);
-                    self.reclaim_stale_stacks();
-                    self.report(StageNotice::LoadsRetried, again, hooks);
+                // Once the stacks the edits stranded are swept, a variable
+                // edit tries the failed sublayer entries of those that
+                // remain: it can select a repaired asset again.
+                if retries_sublayers {
+                    let (demands, forgotten) = self.layers.borrow_mut().retry_failed_sublayers();
+                    // A prim whose arc to the same asset recorded its failure
+                    // composes again too.
+                    if !forgotten.is_empty() {
+                        let dropped = self
+                            .cache
+                            .borrow_mut()
+                            .drop_load_failed_indices(|asset| forgotten.contains(asset));
+                        found.subtrees.extend(dropped);
+                    }
+                    self.resolve_sublayer_demands(demands, hooks, &mut found);
+                    if settles {
+                        self.settle_work(Settled::Taken, hooks, &mut found);
+                    }
                 }
             }
             // What settling the snapshot's work found follows its notices.
@@ -900,12 +902,15 @@ impl StageComposition {
         if settled == Settled::Required && !self.pending_is_empty() && self.reconcile(false, hooks).is_err() {
             return;
         }
-        // The prims whose drop no notice named, and which settled composing
-        // otherwise, are reported here.
-        let mut recovered = Vec::new();
-        let pass = |view: &pcp::LayerView<'_>, cache: &mut pcp::IndexCache| cache.settle_pass(view, &mut recovered);
-        let _ = self.fixpoint(pass, settled, hooks, found);
-        found.subtrees.extend(recovered);
+        let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks, found);
+        // The prims and anchors settling composed again retry what they
+        // failed to load: their failures are forgotten, and the prims a
+        // retry dropped again settle once more, now opening their targets.
+        let others = self.update_pair(|graph, cache| cache.retry_dropped_failures(graph));
+        found.subtrees.extend(others);
+        if self.cache.borrow().has_work() {
+            let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks, found);
+        }
     }
 
     /// Settles the work set on a settled stage, for a caller whose own
@@ -964,58 +969,54 @@ impl StageComposition {
         (!self.suspended.replace(true)).then(|| sdf::StopRunning(&self.suspended))
     }
 
-    /// Forgets the recorded load failures (C++ `PcpChanges::DidMaybeFixAsset`
-    /// and `DidMaybeFixSublayer`), so a target or sublayer that failed to load
-    /// may load now: the prims whose indices reported one compose again, and
-    /// each failed sublayer entry is demanded again. The stage's
-    /// sinks hear what this resyncs ([`StageNotice::LoadsRetried`]) at the
-    /// next delivery.
+    /// Retries the failed loads ([`retry`](Self::retry)) as a mutation of
+    /// its own: an explicit retry, or a reload no edit reached.
     pub(super) fn retry_failed_loads(&self, hooks: &dyn CompositionHooks) {
         if !self.sound() {
             return;
         }
         self.begin_round();
-        if let Some(dropped) = self.forget_failed_loads(true) {
-            // The sweep goes first, as in a drain: it retires a reclaimed
-            // stack's failure diagnostics, so the requeue never demands a
-            // sublayer for a stack nothing uses.
-            self.reclaim_stale_stacks();
-            self.guarded(Poisoned::Compose, || {
-                let mut again = ResyncPaths {
-                    subtrees: dropped,
-                    ..ResyncPaths::default()
-                };
-                let requeued = self.layers.borrow().requeue_failed_sublayers();
-                self.resolve_sublayer_demands(requeued, hooks, &mut again);
-                self.settle_work(Settled::Required, hooks, &mut again);
-                self.report(StageNotice::LoadsRetried, again, hooks);
-            });
-            // The stacks the settled prims released are swept too.
-            self.reclaim_stale_stacks();
-        }
+        self.guarded(Poisoned::Compose, || self.retry(Settled::Required, hooks));
     }
 
-    /// How many times the recorded load failures were forgotten, so a caller
-    /// can tell whether a drain retried them.
+    /// Forgets the recorded load failures (C++ `PcpChanges::DidMaybeFixAsset`
+    /// and `DidMaybeFixSublayer`), so a target or sublayer that failed to load
+    /// may load now: the prims whose indices reported one compose again, and
+    /// each failed sublayer entry is demanded again, a repaired one loading
+    /// and a still-broken one recording the same diagnostic. The stage's
+    /// sinks hear what this resyncs, its settling included
+    /// ([`StageNotice::LoadsRetried`]), at the next delivery.
+    fn retry(&self, settled: Settled, hooks: &dyn CompositionHooks) {
+        // A held store could open nothing, and the failures cleared here
+        // would be retried no more.
+        if self.store.ensure_writable().is_err() {
+            return;
+        }
+        // The prims a retry drops are reported even when the memo was empty:
+        // an edit the retry rides on may have forgotten their failures.
+        self.layers.borrow_mut().clear_failed_loads();
+        self.retries.set(self.retries.get() + 1);
+        let mut again = ResyncPaths {
+            subtrees: self.cache.borrow_mut().drop_load_failed_indices(|_| true),
+            ..ResyncPaths::default()
+        };
+        // The sweep goes first: it retires a reclaimed stack's failure
+        // diagnostics, so the requeue never demands a sublayer for a stack
+        // nothing uses.
+        self.reclaim_stale_stacks();
+        let requeued = self.layers.borrow().requeue_failed_sublayers();
+        self.resolve_sublayer_demands(requeued, hooks, &mut again);
+        self.settle_work(settled, hooks, &mut again);
+        // The stacks the settled prims released are swept too.
+        self.reclaim_stale_stacks();
+        self.report(StageNotice::LoadsRetried, again, hooks);
+    }
+
+    /// How many times the failed loads were retried
+    /// ([`retry`](Self::retry)), so a caller can tell whether a drain
+    /// retried them.
     pub(super) fn retries(&self) -> u64 {
         self.retries.get()
-    }
-
-    /// Forgets the recorded load failures and drops the indices that reported
-    /// one, returning their paths, or `None` when no failure was recorded.
-    /// Unless `reported`, the caller names none of them, and settling reports
-    /// those that recover.
-    fn forget_failed_loads(&self, reported: bool) -> Option<Vec<sdf::Path>> {
-        if !self.layers.borrow_mut().clear_failed_loads() {
-            return None;
-        }
-        self.retries.set(self.retries.get() + 1);
-        let mut cache = self.cache.borrow_mut();
-        let dropped = cache.drop_load_failed_indices();
-        if !reported {
-            cache.unreport(&dropped);
-        }
-        Some(dropped)
     }
 
     /// The delivering half of [`process_pending`](Self::process_pending): hand
@@ -1059,7 +1060,12 @@ impl StageComposition {
     /// classification is layer-relative; the event instead reports the merged
     /// record, attributed to the strongest edited layer. The group's provenance
     /// says how the records' layer-namespace paths reach stage namespace.
-    fn apply_change_sets(&self, group: &mut [PendingEdit], covered: &mut Vec<sdf::Path>, hooks: &dyn CompositionHooks) {
+    fn apply_change_sets(
+        &self,
+        group: &mut [PendingEdit],
+        covered: &mut Vec<sdf::Path>,
+        hooks: &dyn CompositionHooks,
+    ) -> bool {
         let generation = group[0].generation;
         let own = group[0].own;
         let footprints = group
@@ -1121,6 +1127,7 @@ impl StageComposition {
             let is_local = |layer| layers.in_root_stack(layer);
             Payload::new(&pcp_changes, &merged, layer_changes, &provenance, &is_local)
         });
+
         let outcome = self.update_pair(|graph, cache| pcp_changes.apply(cache, graph));
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
@@ -1133,12 +1140,13 @@ impl StageComposition {
         // asset values may re-resolve, exactly when the rebuild changed some
         // stack's composed variables — so they land on the payload here rather
         // than at the snapshot above.
+        let retries_sublayers = outcome.retries_sublayers;
         if let Some(payload) = payload.as_mut() {
             payload.finish(outcome, found);
         }
 
         let Some(payload) = payload else {
-            return;
+            return retries_sublayers;
         };
         if hooks.delivers() {
             covered.extend_from_slice(payload.covering());
@@ -1159,6 +1167,7 @@ impl StageComposition {
         if hooks.delivers() {
             self.outbox.borrow_mut().push_back(Notice::Committed(notice));
         }
+        retries_sublayers
     }
 
     /// The [`Provenance`] for one transaction's group of recorded edits. A staged
@@ -1474,10 +1483,13 @@ impl StageComposition {
         // The failure is looked up by the identifier it was recorded under,
         // which an asset that did not exist then need not share with the
         // one it has now.
-        if graph.forget_resolvable_failures() {
-            found
-                .subtrees
-                .extend(self.cache.borrow_mut().drop_load_failed_indices());
+        let resolvable = graph.forget_resolvable_failures();
+        if !resolvable.is_empty() {
+            let dropped = self
+                .cache
+                .borrow_mut()
+                .drop_load_failed_indices(|asset| resolvable.contains(asset));
+            found.subtrees.extend(dropped);
         }
         let relocated = graph.wire_joined(joined);
         // A joined layer that introduces relocates restructures prims composed
@@ -1505,9 +1517,11 @@ impl StageComposition {
         // The indices built since the earlier failure reported it; they
         // recompose to report this one.
         if changed && prior.is_some() {
-            found
-                .subtrees
-                .extend(self.cache.borrow_mut().drop_load_failed_indices());
+            let dropped = self
+                .cache
+                .borrow_mut()
+                .drop_load_failed_indices(|asset| asset == asset_path);
+            found.subtrees.extend(dropped);
         }
         changed
     }
@@ -1668,7 +1682,7 @@ impl StageComposition {
     /// this round schedules its own stack's recompose instead of an open; one
     /// whose `(identifier, stack)` pair was already attempted this call is
     /// skipped, and the attempted set grows monotonically while a failure is
-    /// terminal until an edit clears the recorded load failures, so the loop
+    /// terminal until a retry clears the recorded load failures, so the loop
     /// terminates.
     ///
     /// A failed open is framed as this referrer's diagnostic and recorded in
