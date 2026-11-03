@@ -59,7 +59,7 @@ pub(crate) use layer::{absolute_path_at, dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub(crate) use layer_registry::{LoadedLayer, PreparedLayer, Presence};
 pub use layer_store::{AdoptError, LayerError, LayerHandle};
-pub(crate) use layer_store::{Held, HeldCell, HeldMut, LayerStore, StoreRead, Subscription};
+pub(crate) use layer_store::{Held, HeldCell, HeldMut, LayerStore, StoreRead, Subscription, SweepHold};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{
     IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,

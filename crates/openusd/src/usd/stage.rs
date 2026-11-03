@@ -2493,8 +2493,10 @@ impl Stage {
         result
     }
 
-    /// The handle for the layer stack the mapped edit `target_layer` writes
-    /// into — the stack a relocate synthesized for that target must land in. An
+    /// The layer stack the mapped edit `target_layer` writes into, pinned
+    /// while the returned guard lives: a read can sweep a stack no cached
+    /// index owns yet. It is the stack a relocate synthesized for that
+    /// target must land in. An
     /// arc target carries its authoring stack's value identity from
     /// construction, so it resolves exactly (the referenced asset's stack even
     /// when that asset is also a root sublayer); a target without one (a local
@@ -2509,10 +2511,10 @@ impl Stage {
     /// layer in the captured identity's source chain cannot be loaded here —
     /// authoring into a substitute stack would seed the relocate plan from the
     /// wrong members and expression variables.
-    pub(super) fn mapped_target_stack_id(
+    pub(super) fn mapped_target_stack(
         &self,
         target_layer: pcp::LayerId,
-    ) -> Result<pcp::LayerStackId, StageAuthoringError> {
+    ) -> Result<composition::StackPin<'_>, StageAuthoringError> {
         // Resolving the stack may load one of its layers.
         self.composition.ensure_writable()?;
         let authoring = self.edit_target.borrow().authoring_stack.clone();
@@ -3136,6 +3138,8 @@ impl Stage {
     pub fn find_loadable(&self, root: impl sdf::IntoPath) -> Result<Vec<sdf::Path>> {
         let root = sdf::try_into_path(root)?.prim_path();
         self.settle()?;
+        // A sink delivered to during the walk would see the transient rules.
+        let quiet = self.composition.quiet(self);
         let walked = {
             // Declared first, so it drops after the restore.
             let _suspended = self.composition.suspend_settling();
@@ -3149,6 +3153,8 @@ impl Stage {
         };
         // The prims the swaps dropped settle under the rules restored.
         self.composition.settle_now(self);
+        // What the walk's loads reconciled reaches the sinks now.
+        drop(quiet);
         let mut found = walked?;
         found.sort();
         found.dedup();
@@ -4239,7 +4245,16 @@ impl Stage {
                     identifier,
                 });
             }
-            let joined = sdf::LoadedLayer::from(layers.layer_registry().adopt(layer).map_err(|refused| refused.error)?);
+            let adopted = layers.layer_registry().adopt(layer);
+            let joined = match adopted {
+                Ok(handle) => sdf::LoadedLayer::from(handle),
+                Err(refused) => {
+                    // The refused layer drops, running its sinks, once the
+                    // borrow is released.
+                    drop(layers);
+                    return Err(refused.error.into());
+                }
+            };
             self.commit_layer(&layers, parent_id, None, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
@@ -5071,14 +5086,14 @@ pub(crate) mod tests {
 
         // Stage B's own view of the two contextual stacks, as the reference.
         stage_b.set_edit_target(own_m1)?;
-        let b_m1_stack = stage_b.mapped_target_stack_id(t_layer)?;
+        let b_m1_stack = stage_b.mapped_target_stack(t_layer)?.id();
         stage_b.set_edit_target(own_m2)?;
-        let b_m2_stack = stage_b.mapped_target_stack_id(t_layer)?;
+        let b_m2_stack = stage_b.mapped_target_stack(t_layer)?.id();
         assert_ne!(b_m1_stack, b_m2_stack, "the two variable contexts are distinct stacks");
 
         stage_b.set_edit_target(transferred)?;
         assert_eq!(
-            stage_b.mapped_target_stack_id(t_layer)?,
+            stage_b.mapped_target_stack(t_layer)?.id(),
             b_m1_stack,
             "the transferred /M1 target resolves B's own /M1 contextual stack"
         );
@@ -5110,7 +5125,7 @@ pub(crate) mod tests {
         );
 
         stage_b.set_edit_target(transferred)?;
-        let stack = stage_b.mapped_target_stack_id(t_layer)?;
+        let stack = stage_b.mapped_target_stack(t_layer)?.id();
 
         let layers = stage_b.layers();
         assert!(layers.find_by_leaf("mid1.usda").is_some(), "the chain layer loaded");
@@ -5150,7 +5165,7 @@ pub(crate) mod tests {
         stage_b.set_edit_target(transferred)?;
         assert!(
             matches!(
-                stage_b.mapped_target_stack_id(t_layer),
+                stage_b.mapped_target_stack(t_layer),
                 Err(StageAuthoringError::EditTargetStackUnavailable { layer }) if layer.ends_with("mid1.usda")
             ),
             "the unopenable chain layer fails the resolution"
@@ -5178,7 +5193,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t.usda is loaded");
         stage.set_edit_target(target)?;
-        let before = stage.mapped_target_stack_id(t_layer)?;
+        let before = stage.mapped_target_stack(t_layer)?.id();
 
         let mid1 = identifier_by_leaf(stage, "mid1.usda");
         stage
@@ -5192,6 +5207,29 @@ pub(crate) mod tests {
             "losing the last owner reclaims the stack at the edit seam"
         );
         Ok((t_layer, before))
+    }
+
+    /// A pinned stack survives the sweep that reclaims it unpinned.
+    #[test]
+    fn pinned_stack_survives() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = Stage::open(&write_cross_stage_fixture(dir.path())?)?;
+        let target = stage.edit_target_for_node(&sdf::Path::new("/M1")?, EditTargetArc::Reference)?;
+        let t_layer = stage
+            .layers()
+            .id_of(target.layer_identifier())
+            .expect("t.usda is loaded");
+        stage.set_edit_target(target)?;
+        let pin = stage.mapped_target_stack(t_layer)?;
+        let stack = pin.id();
+
+        let mid1 = identifier_by_leaf(&stage, "mid1.usda");
+        stage
+            .layer_handle(&mid1)
+            .expect("mid1 is live")
+            .edit(|e| e.set_expression_variables(HashMap::new()))?;
+        assert!(stage.layers().stack_is_live(stack), "the pin keeps the stack");
+        Ok(())
     }
 
     /// A source flip strands the old contextual stack and reclamation removes
@@ -5217,7 +5255,7 @@ pub(crate) mod tests {
             None,
             "the flipped context no longer selects a.usda's opinion"
         );
-        let after = stage.mapped_target_stack_id(t_layer)?;
+        let after = stage.mapped_target_stack(t_layer)?.id();
         assert_ne!(after, before, "the successor mints under a fresh id");
         assert!(stage.layers().stack_is_live(after));
         Ok(())
@@ -5236,7 +5274,7 @@ pub(crate) mod tests {
 
         // Resolve the dormant target first — no query has recomposed /M1, so
         // the demand loop itself must recompose the reclaimed chain.
-        let after = stage.mapped_target_stack_id(t_layer)?;
+        let after = stage.mapped_target_stack(t_layer)?.id();
         assert_ne!(after, before, "the dormant identity resolves a fresh successor");
         assert!(stage.layers().stack_is_live(after));
 
@@ -5343,7 +5381,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t0.usda is loaded");
         stage.set_edit_target(target)?;
-        let before = stage.mapped_target_stack_id(t_layer)?;
+        let before = stage.mapped_target_stack(t_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
         // The flip drops every referring index, orphaning the whole fan; the
@@ -5393,7 +5431,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t.usda is loaded");
         stage.set_edit_target(target)?;
-        let stack = stage.mapped_target_stack_id(t_layer)?;
+        let stack = stage.mapped_target_stack(t_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
         assert!(stage.remove_prim("/D")?, "the prim spec is removed");
@@ -5476,7 +5514,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("p.usda is loaded");
         stage.set_edit_target(target)?;
-        let stack = stage.mapped_target_stack_id(p_layer)?;
+        let stack = stage.mapped_target_stack(p_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
         stage.unload("/L")?;
@@ -5524,7 +5562,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t.usda is loaded");
         stage.set_edit_target(target)?;
-        let stack = stage.mapped_target_stack_id(t_layer)?;
+        let stack = stage.mapped_target_stack(t_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
         let t_id = identifier_by_leaf(&stage, "t.usda");
@@ -5563,7 +5601,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t.usda is loaded");
         stage.set_edit_target(target)?;
-        let stack = stage.mapped_target_stack_id(t_layer)?;
+        let stack = stage.mapped_target_stack(t_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
         assert!(stage.remove_prim("/A")?);
@@ -5601,7 +5639,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t.usda is loaded");
         stage.set_edit_target(target)?;
-        let stack = stage.mapped_target_stack_id(t_layer)?;
+        let stack = stage.mapped_target_stack(t_layer)?.id();
         stage.set_edit_target(stage.edit_target_root())?;
 
         let root_id = identifier_by_leaf(&stage, "root.usda");
@@ -5634,7 +5672,7 @@ pub(crate) mod tests {
             .id_of(target.layer_identifier())
             .expect("t.usda is loaded");
         stage.set_edit_target(target)?;
-        let before = stage.mapped_target_stack_id(t_layer)?;
+        let before = stage.mapped_target_stack(t_layer)?.id();
         let node = index
             .nodes()
             .find(|node| node.layer_stack_id() == before)
@@ -6953,6 +6991,45 @@ def \"Sub\" {}
         assert!(registry.find(&payload)?.is_none(), "and the registry");
         stage.load("/P", LoadPolicy::WithDescendants)?;
         assert!(stage.prim("/P/C")?.is_valid()?, "loading it again reads it again");
+        Ok(())
+    }
+
+    /// A layer sink that reads the stage as an unload frees its layer reads
+    /// it settled, and leaves the stage sound.
+    #[test]
+    fn freed_sink_reads_stage() -> Result<()> {
+        struct Reader {
+            stage: WeakStage,
+            read: Rc<Cell<Option<bool>>>,
+        }
+        impl sdf::LayerSink for Reader {}
+        impl Drop for Reader {
+            fn drop(&mut self) {
+                if let Some(stage) = self.stage.upgrade() {
+                    let valid = stage
+                        .prim("/P")
+                        .map_err(crate::Error::from)
+                        .and_then(|prim| prim.is_valid());
+                    self.read.set(Some(valid.is_ok()));
+                }
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let (root, _) = payload_fixture(dir.path())?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P/C")?.is_valid()?);
+        let read = Rc::new(Cell::new(None));
+        stage
+            .layer_handle(&identifier_by_leaf(&stage, "payload.usda"))
+            .expect("the payload layer")
+            .add_sink(Reader {
+                stage: stage.downgrade(),
+                read: Rc::clone(&read),
+            })?;
+
+        stage.unload("/P")?;
+        assert_eq!(read.get(), Some(true), "the read as the layer is freed settles");
+        assert!(stage.prim("/P")?.is_valid()?, "the stage is sound");
         Ok(())
     }
 
@@ -10386,6 +10463,40 @@ def "P" (payload = @./clip.usda@</M>) {}
             matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
             "{read:?}"
         );
+        Ok(())
+    }
+
+    /// A resolver that reads the stage while an index build borrows the
+    /// composition gets `Busy`, and the stage stays sound.
+    #[test]
+    fn build_read_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let weak: Rc<RefCell<Option<WeakStage>>> = Rc::default();
+        let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+        let (handle, log) = (Rc::clone(&weak), Rc::clone(&seen));
+        let stage = resolving_stage(
+            dir.path(),
+            REFERENCED,
+            &[("a.usda", TARGET)],
+            |_| {},
+            move |asset_path| {
+                let stage = handle.borrow().as_ref().and_then(WeakStage::upgrade);
+                if let Some(stage) = stage.filter(|_| asset_path == "a.usda") {
+                    let read = stage
+                        .prim("/P")
+                        .map_err(crate::Error::from)
+                        .and_then(|prim| prim.is_valid());
+                    log.borrow_mut().push(format!("{read:?}"));
+                }
+            },
+        )?;
+        weak.replace(Some(stage.downgrade()));
+
+        stage.prim("/P/Inner")?.is_valid()?;
+        let reads = seen.borrow().clone();
+        assert!(!reads.is_empty(), "the resolver read the stage");
+        assert!(reads.iter().all(|read| read.contains("Busy")), "{reads:?}");
+        assert!(stage.prim("/P")?.is_valid()?, "the stage is sound");
         Ok(())
     }
 

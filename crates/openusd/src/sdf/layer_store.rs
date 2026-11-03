@@ -440,7 +440,11 @@ impl StoreRead<'_> {
 impl Drop for StoreRead<'_> {
     fn drop(&mut self) {
         self.slots.take();
-        self.store.sweep_dead();
+        // As at a hold's release, a panic unwinding frees nothing: a freed
+        // layer's sink that panicked too would abort. The next sweep frees it.
+        if !thread::panicking() {
+            self.store.sweep_dead();
+        }
     }
 }
 
@@ -806,6 +810,11 @@ impl<T> HeldCell<T> {
     /// Whether the value is borrowed, shared or mutably.
     pub(crate) fn is_borrowed(&self) -> bool {
         self.cell.try_borrow_mut().is_err()
+    }
+
+    /// Whether the value is borrowed mutably.
+    pub(crate) fn is_borrowed_mut(&self) -> bool {
+        self.cell.try_borrow().is_err()
     }
 }
 
@@ -1190,6 +1199,31 @@ mod tests {
         assert_eq!(Rc::strong_count(&marker), 2, "an outer hold still defers it");
         drop(hold);
         assert_eq!(Rc::strong_count(&marker), 1, "the last release frees it");
+    }
+
+    /// A read a panic unwinds through frees nothing; the next sweep frees
+    /// what it would have.
+    #[test]
+    fn unwind_defers_sweep() {
+        let registry = sdf::LayerRegistry::default();
+        let kept = registry.adopt(layer_with_prim("kept.usda")).unwrap();
+        let mut layer = layer_with_prim("freed.usda");
+        let marker = Rc::new(());
+        let held = Rc::clone(&marker);
+        layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+            let _ = &held;
+        });
+        let handle = registry.adopt(layer).unwrap();
+        let store = Rc::clone(&kept.store);
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _read = store.read().unwrap();
+            drop(handle);
+            panic!("unwinding through a read");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(Rc::strong_count(&marker), 2, "the unwinding read freed nothing");
+        registry.sweep();
+        assert_eq!(Rc::strong_count(&marker), 1, "the next sweep frees it");
     }
 
     /// A slot refilled after a sweep is a new filling: a key from before

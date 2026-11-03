@@ -535,10 +535,12 @@ impl NamespaceEditor {
         };
         // The target authors into its own layer stack; seed the relocate plan
         // from that stack's existing pairs, under one graph borrow.
-        let stack_id = self
+        // Pinned while the plan reads the stage, which may sweep stacks.
+        let pin = self
             .stage
-            .mapped_target_stack_id(layer_id)
+            .mapped_target_stack(layer_id)
             .map_err(NamespaceEditError::Stage)?;
+        let stack_id = pin.id();
         let (stack_layer_ids, seeds) = {
             let layers = self.stage.layer_view();
             let ids: Vec<pcp::LayerId> = layers.layer_stack(stack_id).iter().map(|&(id, _)| id).collect();

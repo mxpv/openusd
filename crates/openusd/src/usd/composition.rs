@@ -352,6 +352,12 @@ pub(super) struct StageComposition {
     suspended: Cell<bool>,
     /// Whether a delivery is running.
     delivering: Cell<bool>,
+    /// Whether a mutation is running ([`quiet`](Self::quiet)), which
+    /// delivers nothing until it ends.
+    quiet: Cell<bool>,
+    /// The layer stacks callers keep from the stack sweep
+    /// ([`pin_stack`](Self::pin_stack)), once per pin.
+    pinned: RefCell<Vec<pcp::LayerStackId>>,
     /// Whether a drain is reconciling, so the composition is part-applied:
     /// user code its loads run (a resolver, a file format) that reaches the
     /// stage finds it busy.
@@ -384,6 +390,8 @@ impl StageComposition {
             suspended: Cell::new(false),
             reclaims_held: Cell::new(false),
             delivering: Cell::new(false),
+            quiet: Cell::new(false),
+            pinned: RefCell::default(),
             reconciling: Cell::new(false),
             loading: Cell::new(false),
             retries: Cell::new(0),
@@ -444,7 +452,7 @@ impl StageComposition {
 
     /// The composition cache, for a caller that has completed `process_pending`.
     pub(super) fn settled_cache(&self) -> sdf::Held<'_, pcp::IndexCache> {
-        self.assert_settled();
+        self.assert_cache_settled(false);
         self.cache.borrow()
     }
 
@@ -465,7 +473,7 @@ impl StageComposition {
     /// Both borrows are taken here, beside the two cells, so no caller has
     /// to hold one across the other. The caller still owes the other half of
     /// the settled protocol — pending edits drained first — which
-    /// [`assert_settled`](Self::assert_settled) checks in debug builds.
+    /// [`assert_settled`](Self::assert_settled) checks.
     pub(super) fn settled_errors(&self) -> Vec<pcp::CompositionDiagnostic> {
         let graph = self.settled_graph();
         let mut held = graph.errors();
@@ -476,7 +484,7 @@ impl StageComposition {
     /// The composition cache mutably, for a settled mutation that touches the
     /// cache alone (installing load rules).
     fn settled_cache_mut(&self) -> sdf::HeldMut<'_, pcp::IndexCache> {
-        self.assert_settled();
+        self.assert_cache_settled(true);
         self.cache.borrow_mut()
     }
 
@@ -570,9 +578,17 @@ impl StageComposition {
 
     /// Whether the composition answers for every recorded edit, and a read
     /// can compose against it: none is queued, neither a drain nor a layer
-    /// load is part-way through, and the stage is not poisoned.
+    /// load is part-way through, nothing borrows the composition for a build
+    /// or a mute (user code one runs, a resolver resolving an anchor, reads
+    /// it; a shared borrow of the layers is a reader holding a layer), and
+    /// the stage is not poisoned.
     fn is_settled(&self) -> bool {
-        !self.reconciling.get() && !self.loading.get() && self.pending_is_empty() && self.poisoned.get().is_none()
+        !self.reconciling.get()
+            && !self.loading.get()
+            && !self.layers.is_borrowed_mut()
+            && !self.cache.is_borrowed()
+            && self.pending_is_empty()
+            && self.poisoned.get().is_none()
     }
 
     /// [`process_pending`](Self::process_pending) for a fallible read. Fails
@@ -580,8 +596,9 @@ impl StageComposition {
     /// the stage's layers while edits of them are queued, which stay queued
     /// for the next drain, and from user code a layer load runs (a resolver,
     /// a file format), while the load or the drain it serves has the stage
-    /// part-composed. Fails with [`pcp::QueryError::Poisoned`] on a poisoned
-    /// stage.
+    /// part-composed, or user code an index build or a mute runs (a
+    /// resolver), while it borrows the composition. Fails with
+    /// [`pcp::QueryError::Poisoned`] on a poisoned stage.
     pub(super) fn settle(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         self.process_pending(hooks);
         if let Some(poisoned) = self.poisoned.get() {
@@ -602,7 +619,10 @@ impl StageComposition {
     /// Runs `step`, composition that runs user code (a resolver, a file
     /// format), poisoning the stage with `cause` when a panic leaves it
     /// before it returns. The innermost step a panic leaves names the cause.
+    /// A layer the step frees drops once it has returned: a sink of the
+    /// layer that panics then leaves the stage sound.
     fn guarded<T>(&self, cause: Poisoned, step: impl FnOnce() -> T) -> T {
+        let _hold = self.store.hold();
         let mut guard = Unwind {
             poisoned: &self.poisoned,
             cause,
@@ -671,7 +691,9 @@ impl StageComposition {
             self.deferred.take();
             return;
         }
-        if self.pending_is_empty() && self.outbox.borrow().is_empty() {
+        // A mutation's scope delivers nothing, so a read inside it with
+        // notices queued has nothing to drain either.
+        if self.pending_is_empty() && (self.quiet.get() || self.outbox.borrow().is_empty()) {
             // Reclamation a panic kept a delivery's drain from finishing
             // finishes at the next call.
             self.reclaim_deferred(hooks);
@@ -729,6 +751,25 @@ impl StageComposition {
     /// hold nested in another leaves it to the outer one to end.
     pub(super) fn hold_reclaims(&self) -> Option<sdf::StopRunning<'_>> {
         (!self.reclaims_held.replace(true)).then(|| sdf::StopRunning(&self.reclaims_held))
+    }
+
+    /// Opens a mutation's scope, until the returned guard drops: no notice
+    /// is delivered in it, since a sink would see the mutation half-done,
+    /// its load rules read but not yet installed, or a notice queued behind
+    /// an edit committed after it. The layers it frees drop once it ends,
+    /// outside every borrow it took, and the drop then delivers what the
+    /// mutation queued ([`process_pending`](Self::process_pending)), on
+    /// every way out of it.
+    // TODO(perf): the hold keeps `LayerStore::insert`'s sweep from reusing
+    // the slots of layers freed within the scope.
+    pub(super) fn quiet<'a>(&'a self, hooks: &'a dyn CompositionHooks) -> Quiet<'a> {
+        let hold = self.store.hold();
+        Quiet {
+            composition: self,
+            hooks,
+            quiet: (!self.quiet.replace(true)).then(|| sdf::StopRunning(&self.quiet)),
+            hold: Some(hold),
+        }
     }
 
     /// Whether layers may be reclaimed now: stacks may be swept
@@ -925,7 +966,9 @@ impl StageComposition {
     /// the settling's loads find.
     pub(super) fn settle_now(&self, hooks: &dyn CompositionHooks) {
         let mut found = Vec::new();
-        self.settle_work(Settled::Required, hooks, &mut found);
+        self.guarded(Poisoned::Compose, || {
+            self.settle_work(Settled::Required, hooks, &mut found);
+        });
         self.discover(found, hooks);
     }
 
@@ -1027,6 +1070,7 @@ impl StageComposition {
             return;
         }
         self.begin_round();
+        let _quiet = self.quiet(hooks);
         self.guarded(Poisoned::Compose, || self.retry(Settled::Required, hooks));
     }
 
@@ -1074,7 +1118,7 @@ impl StageComposition {
     /// running, which picks up what was added. A sink that panics leaves the
     /// notices after it for the next delivery.
     fn deliver_notices(&self, hooks: &dyn CompositionHooks) {
-        if self.delivering.replace(true) {
+        if self.quiet.get() || self.delivering.replace(true) {
             return;
         }
         // A sink can drop a layer's last handle; the layer is freed once the
@@ -1248,7 +1292,8 @@ impl StageComposition {
 
     /// Reclaims layer-stack instances nothing live references — no cached
     /// prim index, no pending demand, no eager graph root, no live
-    /// descendant's variable-source ancestry — see `LayerGraph::sweep_stacks`.
+    /// descendant's variable-source ancestry, no [pin](Self::pin_stack) —
+    /// see `LayerGraph::sweep_stacks`.
     /// The sweep runs when a stack lost its last cache owner
     /// (`IndexCache::ownership_lost`, unthresholded: a work-set entry that
     /// settles or retires stops owning its stacks, and the next edit seam
@@ -1263,10 +1308,11 @@ impl StageComposition {
     /// only when [sweepable](Self::sweepable), leaving the sweep to the next
     /// call otherwise. An edit
     /// strands an instance by re-keying its source or by dropping its last
-    /// owning index, while [`load_demanded`](Self::load_demanded) and
-    /// [`resolve_authoring_stack`](Self::resolve_authoring_stack) hold
+    /// owning index, while [`load_demanded`](Self::load_demanded) holds
     /// freshly resolved handles that no cached index references yet, which a
-    /// sweep there would reclaim out from under them.
+    /// sweep there would reclaim out from under it;
+    /// [`resolve_authoring_stack`](Self::resolve_authoring_stack) pins the
+    /// stack it resolves.
     fn reclaim_stale_stacks(&self) {
         let skipped = !self.sweepable();
         self.deferred.set(Deferred {
@@ -1280,11 +1326,31 @@ impl StageComposition {
             if !cache.ownership_lost() && !graph.sweep_ripe() {
                 return;
             }
-            cache.reset_ownership_lost();
+            let pinned = self.pinned.borrow();
+            // A stack a pin keeps may have lost its last owner: the trigger
+            // stays armed, so the first sweep after the pins end takes it.
+            if pinned.is_empty() {
+                cache.reset_ownership_lost();
+            }
             let mut marks = pcp::StackMarks::default();
             cache.mark_live_stacks(&mut marks);
+            for &stack in pinned.iter() {
+                marks.mark(stack);
+            }
             graph.sweep_stacks(marks);
         });
+    }
+
+    /// Keeps `stack` from the stack sweep until the returned guard drops, for
+    /// a caller composing against a stack no cached index owns yet (one
+    /// [`resolve_authoring_stack`](Self::resolve_authoring_stack) minted):
+    /// a read it makes can sweep stacks.
+    fn pin_stack(&self, stack: pcp::LayerStackId) -> StackPin<'_> {
+        self.pinned.borrow_mut().push(stack);
+        StackPin {
+            pinned: &self.pinned,
+            stack,
+        }
     }
 
     /// Ends a mutation of the stage's composition: sweeps the stacks it
@@ -1937,7 +2003,7 @@ impl StageComposition {
         // A load's edit is reconciled before the next pass, so the first
         // pass is the one settledness is checked for.
         if settled == Settled::Required {
-            self.assert_settled();
+            self.assert_cache_settled(true);
         }
         // No layer is freed, and so no sink of one runs, until the passes
         // and the loads between them are over.
@@ -2020,6 +2086,7 @@ impl StageComposition {
         }
         // From inside a load or a drain the composition is part-built.
         self.assert_settled();
+        let _quiet = self.quiet(hooks);
         self.begin_round();
         // The toggle's notice goes ahead of the edits its settling reconciles.
         let mark = self.mark(hooks);
@@ -2069,7 +2136,6 @@ impl StageComposition {
             };
             self.queue_at(mark, notice, hooks);
         }
-        self.process_pending(hooks);
     }
 
     /// Queues `notice` for the stage's sinks at `mark`, the outbox's length
@@ -2077,10 +2143,15 @@ impl StageComposition {
     /// the operation itself reconciled. Nothing is queued with no sink to
     /// tell.
     fn queue_at(&self, mark: usize, notice: StageNotice, hooks: &dyn CompositionHooks) {
-        if !hooks.delivers() {
+        // A poisoned stage dropped its outbox, and delivers nothing more.
+        if !hooks.delivers() || self.poisoned.get().is_some() {
             return;
         }
+        // Nothing is delivered while the operation runs, a mutation
+        // ([`quiet`](Self::quiet)) or a retry inside a drain, which
+        // delivers once it has reconciled, so the outbox only grew since.
         let mut outbox = self.outbox.borrow_mut();
+        debug_assert!(mark <= outbox.len(), "the outbox was delivered past the mark");
         let at = mark.min(outbox.len());
         outbox.insert(at, Notice::Stage(notice));
     }
@@ -2104,7 +2175,7 @@ impl StageComposition {
         target_layer: pcp::LayerId,
         authoring: Option<Box<pcp::StackIdentity>>,
         hooks: &dyn CompositionHooks,
-    ) -> Result<pcp::LayerStackId, String> {
+    ) -> Result<StackPin<'_>, String> {
         if let Some(identity) = authoring {
             let mut found = Vec::new();
             let resolved = self.guarded(Poisoned::Compose, || {
@@ -2120,7 +2191,7 @@ impl StageComposition {
                 }
             });
             self.discover(found, hooks);
-            return resolved;
+            return resolved.map(|id| self.pin_stack(id));
         }
         // A target without a captured authoring stack (a local or variant
         // target) is inferred from layer membership: the root stack when
@@ -2132,7 +2203,7 @@ impl StageComposition {
         {
             let layers = self.settled_graph();
             if layers.in_root_stack(target_layer) {
-                return Ok(pcp::LayerStackId::ROOT);
+                return Ok(self.pin_stack(pcp::LayerStackId::ROOT));
             }
         }
         let (id, demands) = {
@@ -2140,10 +2211,14 @@ impl StageComposition {
             let id = graph.intern_external(target_layer, pcp::LayerStackId::ROOT).0;
             (id, graph.take_sublayer_demands())
         };
+        // Pinned as it is minted: no cached index owns it yet.
+        let pin = self.pin_stack(id);
         let mut found = Vec::new();
-        self.resolve_sublayer_demands(demands, hooks, &mut found);
+        self.guarded(Poisoned::Compose, || {
+            self.resolve_sublayer_demands(demands, hooks, &mut found)
+        });
         self.discover(found, hooks);
-        Ok(id)
+        Ok(pin)
     }
 
     /// Opens whatever sublayers the graph has recorded as demanded, reporting
@@ -2265,6 +2340,9 @@ impl StageComposition {
         if !self.sound() {
             return;
         }
+        // A sink that changed the load rules from here on would see its
+        // change overwritten by the install.
+        let _quiet = self.quiet(hooks);
         self.begin_round();
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
@@ -2290,7 +2368,6 @@ impl StageComposition {
             let paths = classify(victims, &payloads, found);
             self.queue_at(mark, StageNotice::LoadRules(paths), hooks);
         }
-        self.process_pending(hooks);
     }
 
     /// The ancestors installing `rules` would flip the inclusion of, that
@@ -2341,12 +2418,11 @@ impl StageComposition {
 
     /// Backstop for the settled operations: the queue being empty is necessary
     /// for settledness, not sufficient (see the module doc).
-    /// Edits a drain left queued because a read or an edit held the stage's
-    /// layers would make the access stale. That case panics in every build.
+    /// Every case panics in every build: an access while a drain, a layer
+    /// load or a mutable borrow of the graph has the composition part-built,
+    /// or with edits queued, which would make the access stale. A shared
+    /// borrow is one settled read nested in another.
     fn assert_settled(&self) {
-        if self.is_settled() {
-            return;
-        }
         // A poisoned stage reached while a panic unwinds is read as it was
         // left: a second panic would abort.
         if !self.sound() {
@@ -2357,13 +2433,89 @@ impl StageComposition {
             "the stage is read by user code a layer load runs (a resolver, a file format), while it is part-composed"
         );
         assert!(
+            !self.layers.is_borrowed_mut(),
+            "the stage is read by user code its composition runs (a resolver), while it is part-composed"
+        );
+        if self.pending_is_empty() {
+            return;
+        }
+        assert!(
             self.store.ensure_writable().is_ok(),
             "the stage is read from inside a read or an edit of its registry's layers, with edits queued"
         );
-        debug_assert!(
-            false,
-            "settled composition access with edits still queued: drain through Stage::process_pending first"
+        panic!("settled composition access with edits still queued: drain through Stage::process_pending first");
+    }
+
+    /// [`assert_settled`](Self::assert_settled) for an access to the cache,
+    /// shared or (with `write`) mutable: an index build holds it mutably,
+    /// and a read of it shares it.
+    fn assert_cache_settled(&self, write: bool) {
+        self.assert_settled();
+        // Reached while a panic unwinds, the poisoned stage is read as left.
+        if self.poisoned.get().is_some() {
+            return;
+        }
+        let held = match write {
+            true => self.cache.is_borrowed(),
+            false => self.cache.is_borrowed_mut(),
+        };
+        assert!(
+            !held,
+            "the stage is composed by user code its composition runs (a resolver), while it is part-composed"
         );
+    }
+}
+
+/// A mutation's scope ([`StageComposition::quiet`]).
+#[must_use = "a mutation's scope delivers once it drops"]
+pub(super) struct Quiet<'a> {
+    /// The composition the scope is on.
+    composition: &'a StageComposition,
+    /// What delivers the notices the mutation queued, once it ends.
+    hooks: &'a dyn CompositionHooks,
+    /// Clears the composition's quiet flag, unless an enclosing scope set
+    /// it.
+    quiet: Option<sdf::StopRunning<'a>>,
+    /// Defers the frees of layers the mutation leaves to its end.
+    hold: Option<sdf::SweepHold<'a>>,
+}
+
+impl Drop for Quiet<'_> {
+    fn drop(&mut self) {
+        // The flag clears before the hold releases, so a sink of a freed
+        // layer that reads the stage delivers.
+        self.quiet.take();
+        self.hold.take();
+        // A panic unwinding runs no sink.
+        if !thread::panicking() {
+            self.composition.process_pending(self.hooks);
+        }
+    }
+}
+
+/// A layer stack kept from the stack sweep while it lives
+/// ([`StageComposition::pin_stack`]).
+#[must_use = "a stack is kept only while its pin lives"]
+pub(super) struct StackPin<'a> {
+    /// The composition's pins, which this one leaves as it drops.
+    pinned: &'a RefCell<Vec<pcp::LayerStackId>>,
+    /// The stack pinned.
+    stack: pcp::LayerStackId,
+}
+
+impl StackPin<'_> {
+    /// The stack pinned.
+    pub(super) fn id(&self) -> pcp::LayerStackId {
+        self.stack
+    }
+}
+
+impl Drop for StackPin<'_> {
+    fn drop(&mut self) {
+        let mut pinned = self.pinned.borrow_mut();
+        if let Some(at) = pinned.iter().position(|&stack| stack == self.stack) {
+            pinned.swap_remove(at);
+        }
     }
 }
 
