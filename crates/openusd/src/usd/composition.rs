@@ -42,7 +42,7 @@ use std::thread;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
-use super::sink::{Payload, Provenance, ResyncPaths, is_covered};
+use super::sink::{Payload, Provenance, ResyncPaths};
 
 /// One transaction outcome awaiting reconciliation, in commit order.
 pub(super) enum Pending {
@@ -223,28 +223,6 @@ pub(super) enum Interrupted {
     /// a layer of the stage, queueing edits the drain it runs inside applies
     /// first.
     NewWork,
-}
-
-/// What a load-rules change's `victims` mean to an observer. An ancestor
-/// whose effective rule the change only derived again recomposes in place.
-/// One whose inclusion flipped changed its subtree when it has a payload of
-/// its own (in `payloads`), which the flip includes or leaves out.
-/// They join `found`'s subtree resyncs, and come back normalized.
-fn classify(victims: pcp::RuleVictims, payloads: &HashSet<sdf::Path>, found: Vec<sdf::Path>) -> ResyncPaths {
-    let mut paths = ResyncPaths {
-        subtrees: found,
-        prims: Vec::new(),
-    };
-    paths.subtrees.extend(victims.subtrees);
-    for (ancestor, flipped) in victims.ancestors {
-        if flipped && payloads.contains(&ancestor) {
-            paths.subtrees.push(ancestor);
-        } else {
-            paths.prims.push(ancestor);
-        }
-    }
-    paths.normalize();
-    paths
 }
 
 /// What a panic interrupted when it poisoned the stage.
@@ -863,7 +841,7 @@ impl StageComposition {
             // what this snapshot finds, after its transactions, less what
             // their notices cover.
             let mut found = self.discovered.take();
-            let mut covered = Vec::new();
+            let mut covered = sdf::Covering::default();
             let mut retries_sublayers = false;
             while let Some(group) = next_group(&mut drained) {
                 match group {
@@ -919,8 +897,7 @@ impl StageComposition {
             // What settling the snapshot's work found follows its notices,
             // with what its own composition found, less what they reported.
             found.extend(self.discovered.take());
-            // TODO(perf): a sorted `covered` could be searched by prefix.
-            found.retain(|path| !is_covered(&covered, path));
+            found.retain(|path| !covered.covers(path));
             self.report(None, StageNotice::Recomposed, found, hooks);
         }
         Ok(())
@@ -1157,7 +1134,7 @@ impl StageComposition {
     fn apply_change_sets(
         &self,
         group: &mut [PendingEdit],
-        covered: &mut Vec<sdf::Path>,
+        covered: &mut sdf::Covering,
         hooks: &dyn CompositionHooks,
     ) -> bool {
         let generation = group[0].generation;
@@ -1243,7 +1220,9 @@ impl StageComposition {
             return retries_sublayers;
         };
         if hooks.delivers() {
-            covered.extend_from_slice(payload.covering());
+            for path in payload.covering() {
+                covered.insert(path.clone());
+            }
         }
         let layer_identifier = edits
             .first()
@@ -2126,9 +2105,6 @@ impl StageComposition {
         self.reclaim(hooks, pcp::Reclaim::Muted);
         found.extend(self.discovered.take());
         if hooks.delivers() {
-            // TODO(perf): a mute that reaches the root layer hands over every
-            // cached index, so this reduction is `keep_ancestors` at its worst
-            // case — see the `sdf::PathTable` covering set noted there.
             let notice = StageNotice::Muting {
                 layer: changed,
                 muted,
@@ -2346,10 +2322,7 @@ impl StageComposition {
         self.begin_round();
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
-        let payloads = match hooks.delivers() {
-            true => self.flipped_payloads(&rules, hooks),
-            false => HashSet::new(),
-        };
+        self.compose_flipped(&rules, hooks);
         let victims = self.swap_load_rules(rules, hooks);
         // The change's notice goes ahead of the edits its settling reconciles.
         let mark = self.mark(hooks);
@@ -2362,43 +2335,37 @@ impl StageComposition {
         });
         self.reclaim(hooks, pcp::Reclaim::Unused);
         found.extend(self.discovered.take());
-        if victims.subtrees.is_empty() && victims.ancestors.is_empty() {
+        if victims.subtrees.is_empty() && victims.prims.is_empty() {
             self.discover(found, hooks);
         } else if hooks.delivers() {
-            let paths = classify(victims, &payloads, found);
+            let mut paths = ResyncPaths {
+                subtrees: found,
+                prims: victims.prims,
+            };
+            paths.subtrees.extend(victims.subtrees);
+            paths.normalize();
             self.queue_at(mark, StageNotice::LoadRules(paths), hooks);
         }
     }
 
-    /// The ancestors installing `rules` would flip the inclusion of, that
-    /// have a payload of their own, asked under the rules in force, so
-    /// composing one to ask loads nothing beneath it. One whose payload the
-    /// stage cannot read is taken to have one.
-    fn flipped_payloads(&self, rules: &pcp::LoadRules, hooks: &dyn CompositionHooks) -> HashSet<sdf::Path> {
-        let flipped: Vec<sdf::Path> = self
-            .settled_cache()
-            .rule_ancestors(rules)
-            .into_iter()
-            .filter_map(|(ancestor, flipped)| flipped.then_some(ancestor))
-            .collect();
+    /// Composes the ancestors whose inclusion installing `rules` would flip,
+    /// under the rules in force, so composing one loads nothing beneath it:
+    /// the install then tells from its index whether a payload it composes
+    /// reads the rule. One that fails to compose is taken to read it.
+    fn compose_flipped(&self, rules: &pcp::LoadRules, hooks: &dyn CompositionHooks) {
+        let flipped = self.settled_cache().flipped_ancestors(rules);
         if flipped.is_empty() {
-            return HashSet::new();
+            return;
         }
-        let answers = self.query(
+        let _ = self.query(
             |view, cache| {
-                let has = |path: &sdf::Path| cache.has_payload(view, path).unwrap_or(true);
-                Ok(flipped.iter().map(has).collect::<Vec<bool>>())
+                for path in &flipped {
+                    let _ = cache.index(view, path);
+                }
+                Ok(())
             },
             hooks,
         );
-        match answers {
-            Ok(answers) => flipped
-                .into_iter()
-                .zip(answers)
-                .filter_map(|(path, has)| has.then_some(path))
-                .collect(),
-            Err(_) => flipped.into_iter().collect(),
-        }
     }
 
     /// Installs `rules` in place of the current table, returning what it

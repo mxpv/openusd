@@ -389,6 +389,10 @@ pub(crate) struct BuildOutput {
     /// Whether the build dropped a cycle-closing arc, so a sub-root reference
     /// that grafted nothing can tell an unresolvable target from a cyclic one.
     pub(crate) hit_cycle: bool,
+    /// Whether a node of the build authors a payload, included or not
+    /// ([`PrimIndex::has_payloads`](super::PrimIndex::has_payloads)). Merged up
+    /// from nested sub-builds.
+    pub(crate) has_payloads: bool,
     /// [`Demand`]s raised by a reference/payload arc whose target layer is not
     /// yet loaded. Non-empty means the build is incomplete and its `graph` must
     /// not be cached; the cache loads these and recomposes.
@@ -501,6 +505,9 @@ pub(crate) struct Indexer<'a, 'f> {
     /// unresolved only when this is set, so it is composition state rather than
     /// a property of the diagnostics the build happened to record.
     hit_cycle: bool,
+    /// Whether a node of this build authors a payload (see
+    /// [`BuildOutput::has_payloads`]), set where its tasks are enqueued.
+    has_payloads: bool,
     /// [`Demand`]s a reference/payload arc raised for a target layer that is not
     /// yet loaded. Returned in [`BuildOutput`] (like [`errors`](Self::errors)) —
     /// a non-empty list means the build is incomplete and its graph must not be
@@ -552,6 +559,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             root_contributes: true,
             errors: Diagnostics::default(),
             hit_cycle: false,
+            has_payloads: false,
             pending_loads: Vec::new(),
             expr_var_deps: ExprVarDeps::default(),
             seed: None,
@@ -572,6 +580,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             graph,
             errors: self.errors,
             hit_cycle: self.hit_cycle,
+            has_payloads: self.has_payloads,
             pending_loads: self.pending_loads,
             expr_var_deps: self.expr_var_deps,
             nodes_copied,
@@ -862,6 +871,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A cycle a nested build hit is one this build hit: the arc it dropped
         // is missing from the graph being merged in here.
         self.hit_cycle |= out.hit_cycle;
+        // A payload a nested build met is decided by this prim's load rule.
+        self.has_payloads |= out.has_payloads;
         // A layer demanded only inside the sub-build is still needed to compose
         // this prim, so carry the demand up even when the sub-build's graph is
         // `None` (the sub-build was itself left incomplete by the missing layer).
@@ -1111,6 +1122,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn add_expressed_arc_tasks(&mut self, node: NodeId) {
         let authored = self.authored_arc_fields(node);
         for (bit, &(kind, _)) in EXPRESSED_ARCS.iter().enumerate() {
+            let authors = authored & (1 << bit) != 0;
+            self.has_payloads |= authors && kind == TaskKind::EvalNodePayloads;
             let runs = match kind {
                 TaskKind::EvalNodePayloads => self.inputs.load_payloads,
                 // The node's own (local) variant sets. A recursive sub-build
@@ -1122,7 +1135,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 TaskKind::EvalNodeVariantSets => self.frame.is_none(),
                 _ => true,
             };
-            if runs && authored & (1 << bit) != 0 {
+            if runs && authors {
                 self.tasks.push(Task::new(kind, node));
             }
         }

@@ -62,6 +62,9 @@ pub struct PrimIndex {
     /// path. Computed alongside [`spec_stack`](Self::spec_stack), whose walk
     /// visits exactly the sites a clip opinion can live at.
     authors_clips: bool,
+    /// Whether a node of the build authors a payload, included or not
+    /// ([`has_payloads`](Self::has_payloads)).
+    has_payloads: bool,
     /// The sites of the culled nodes [`cull`](Self::cull) erased from the
     /// graph (C++ `PcpCulledDependency`). A spec authored at one of them can
     /// bring the node back, so change processing still reaches this prim
@@ -834,6 +837,16 @@ impl PrimIndex {
         self.authors_clips
     }
 
+    /// Whether a node of the index authors a payload, included or not: only
+    /// then does the prim's load rule decide what it composes. C++
+    /// `PcpPrimIndex::HasAnyPayloads` counts the payload arcs a node
+    /// composes; an authored field that composes none (`delete payload`)
+    /// counts here too, so such a prim is composed again as if it read the
+    /// rule.
+    pub(crate) fn has_payloads(&self) -> bool {
+        self.has_payloads
+    }
+
     /// Classifies each node as instance-local (`true`) or shared (`false`) for an
     /// enclosing instance at `instance_depth` (spec 11.3.3), indexed by
     /// [`NodeId`] arena position. The shared nodes are the prototype subtree; the
@@ -1158,6 +1171,7 @@ impl PrimIndex {
             // A cycle only steers the sub-build that hit it; at the top level
             // the dropped arc is already recorded in `errors`.
             hit_cycle: _,
+            has_payloads,
         } = indexer.build(path)?;
         let mut graph = graph.unwrap_or_default();
         graph.shrink_to_fit();
@@ -1165,6 +1179,7 @@ impl PrimIndex {
             graph,
             spec_stack: Vec::new(),
             authors_clips: false,
+            has_payloads,
             culled: Vec::new(),
         };
         // A stage prim drops the subtrees that contribute nothing, as C++

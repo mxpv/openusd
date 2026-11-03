@@ -2567,8 +2567,8 @@ impl IndexCache {
             .transpose()?)
     }
 
-    /// Whether a non-empty `payload` opinion composes at `path` (C++
-    /// `PcpPrimIndex::HasAnyPayloads`).
+    /// Whether a non-empty `payload` opinion composes at `path`'s own sites;
+    /// a payload an ancestor's arc brings in is not one.
     pub(crate) fn has_payload(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
         let path = &self.effective_path(graph, path)?;
         self.has_payload_at(graph, path)
@@ -8996,6 +8996,40 @@ def "B" (
             "the part follows the nested group"
         );
         assert!(evicted(&cache).is_empty() && cache.store.take_retired().is_empty());
+        Ok(())
+    }
+
+    /// A load-rules change drops a flipped ancestor only when a payload it
+    /// composes reads the rule: one without keeps its index and its other
+    /// children's, and is named a prim; one with is dropped as a subtree.
+    #[test]
+    fn rule_flip_reads_payload() -> Result<()> {
+        let (graph, mut cache) = in_memory_stack(
+            "#usda 1.0
+def \"World\" {
+    def \"A\" {}
+    def \"B\" {}
+}
+\n             def \"Group\" (payload = @missing.usda@</X>) {
+    def \"C\" {}
+}
+",
+        );
+        cache.set_load_rules(LoadRules::none());
+        compose(&graph, &mut cache, &["/World/A", "/World/B", "/Group/C"])?;
+
+        let mut rules = cache.load_rules().clone();
+        rules.load_with_descendants(sdf::path("/World/A")?);
+        rules.load_with_descendants(sdf::path("/Group/C")?);
+        let victims = cache.set_load_rules(rules);
+        assert_eq!(victims.prims, [sdf::path("/World")?]);
+        assert!(
+            victims.subtrees.contains(&sdf::path("/Group")?),
+            "{:?}",
+            victims.subtrees
+        );
+        assert!(cache.is_indexed(&sdf::path("/World")?) && cache.is_indexed(&sdf::path("/World/B")?));
+        assert!(!cache.is_indexed(&sdf::path("/Group/C")?));
         Ok(())
     }
 }

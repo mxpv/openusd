@@ -14640,10 +14640,10 @@ fn load_reports_parent_payload() -> Result<()> {
     Ok(())
 }
 
-/// Loading an element beside an instanced sibling resyncs the sibling: the
-/// change retires its prototype, so it composes under another.
+/// Loading an element beside an instanced sibling leaves the sibling's
+/// prototype in place, and reports nothing for it.
 #[test]
-fn load_reports_instanced_sibling() -> Result<()> {
+fn load_keeps_instanced_sibling() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(
         dir.path().join("root.usda"),
@@ -14665,8 +14665,71 @@ fn load_reports_instanced_sibling() -> Result<()> {
     stage.load("/world/element_0", LoadPolicy::WithDescendants)?;
     let after = stage.prim(sibling.clone())?.prototype()?.expect("an instance");
     let notices = notices.borrow();
-    assert_ne!(after, before, "the change retired the sibling's prototype");
-    assert!(notices.load_rules.contains(&sibling), "{:?}", notices.load_rules);
+    assert_eq!(after, before, "the sibling keeps its prototype");
+    assert!(!notices.load_rules.contains(&sibling), "{:?}", notices.load_rules);
     assert_eq!(notices.load_rules_prims, [sdf::path("/world")?]);
+    Ok(())
+}
+
+/// Loading a child whose parent composes a payload through a reference, an
+/// ancestral payload of the referenced prim, includes that payload: the
+/// parent is reported as a subtree resync, covering what it brings.
+#[test]
+fn load_reports_ancestral_payload() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"world\" (references = @r.usda@</R/Inner>) {\n    def \"Child\" {}\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("r.usda"),
+        "#usda 1.0\ndef \"R\" (payload = @p.usda@</P>) {\n    def \"Inner\" {}\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("p.usda"),
+        "#usda 1.0\ndef \"P\" {\n    def \"Inner\" {\n        def \"Extra\" {}\n    }\n}\n",
+    )?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(&dir.path().join("root.usda").to_string_lossy())?;
+    assert!(!stage.prim("/world/Extra")?.is_valid()?);
+    let notices = capture_notices(&stage);
+
+    stage.load("/world/Child", LoadPolicy::WithDescendants)?;
+    assert!(stage.prim("/world/Extra")?.is_valid()?, "the payload is included");
+    let notices = notices.borrow();
+    assert_eq!(notices.load_rules, [sdf::path("/world")?]);
+    assert!(notices.load_rules_prims.is_empty());
+    Ok(())
+}
+
+/// Loading one element of a group rebuilds none of its siblings: the parent
+/// has no payload of its own, so it and they compose as they did.
+#[test]
+fn load_skips_siblings() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let elements: String = (0..20)
+        .map(|i| format!("    def \"element_{i}\" (payload = @e.usda@</E>) {{}}\n"))
+        .collect();
+    fs::write(
+        dir.path().join("root.usda"),
+        format!("#usda 1.0\ndef \"world\" {{\n{elements}}}\n"),
+    )?;
+    fs::write(
+        dir.path().join("e.usda"),
+        "#usda 1.0\ndef \"E\" {\n    def \"Child\" {}\n}\n",
+    )?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(&dir.path().join("root.usda").to_string_lossy())?;
+    for i in 0..20 {
+        assert!(stage.prim(format!("/world/element_{i}").as_str())?.is_valid()?);
+    }
+    let before = stage.tally().builds;
+
+    stage.load("/world/element_0", LoadPolicy::WithDescendants)?;
+    let builds = stage.tally().builds - before;
+    assert!(builds <= 2, "the load rebuilt {builds} indices");
+    assert!(stage.prim("/world/element_0/Child")?.is_valid()?);
     Ok(())
 }

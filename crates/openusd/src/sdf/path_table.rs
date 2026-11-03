@@ -278,6 +278,55 @@ impl<V> PathTable<V> {
     }
 }
 
+/// Paths standing for their whole subtrees, which answer whether a path lies
+/// at or beneath one ([`Path::has_prefix`]). Every path must be in the same
+/// namespace for the answer to mean anything, and be a prim, property or
+/// variant-selection path, whose prefixes are its parents: past a few
+/// covering paths, a test walks the tested path's parents.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Covering(crate::sdf::PathSet);
+
+impl Covering {
+    /// Up to this many paths are scanned in turn; past it, a test walks the
+    /// tested path's ancestors, in O(depth).
+    const SCAN: usize = 8;
+
+    /// Adds `path`, which covers its subtree.
+    pub(crate) fn insert(&mut self, path: Path) {
+        self.0.insert(path);
+    }
+
+    /// Whether `path` lies at or beneath one of the covering paths.
+    pub(crate) fn covers(&self, path: &Path) -> bool {
+        if self.0.len() <= Self::SCAN {
+            return self.0.iter().any(|prefix| path.has_prefix(prefix));
+        }
+        path.ancestors().any(|prefix| self.is_prefix(&prefix, path))
+    }
+
+    /// Whether `path` lies strictly beneath one of the covering paths — the
+    /// form for reducing a set that holds its own covering entries, where an
+    /// entry must not retire itself.
+    pub(crate) fn covers_below(&self, path: &Path) -> bool {
+        if self.0.len() <= Self::SCAN {
+            return self.0.iter().any(|prefix| prefix != path && path.has_prefix(prefix));
+        }
+        path.strict_ancestors().any(|prefix| self.is_prefix(&prefix, path))
+    }
+
+    /// Whether `prefix`, an ancestor of `path`, is a covering path that
+    /// prefixes it: a target path's parent is not its prefix.
+    fn is_prefix(&self, prefix: &Path, path: &Path) -> bool {
+        self.0.contains(prefix) && path.has_prefix(prefix)
+    }
+}
+
+impl FromIterator<Path> for Covering {
+    fn from_iter<I: IntoIterator<Item = Path>>(paths: I) -> Self {
+        Self(paths.into_iter().collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +470,35 @@ mod tests {
         assert_eq!(removed.len(), 2);
         assert!(t.is_empty());
         assert_eq!(t.nodes.len(), 0);
+    }
+    /// A covering answers alike scanned and hashed: a descendant, a property
+    /// and a variant child are covered; a sibling sharing the text prefix and
+    /// the prim owning a covered property, or a target path under it, are not.
+    #[test]
+    fn covering_scan_and_hash() -> crate::Result<()> {
+        let roots = ["/A", "/R.rel"];
+        let fillers = (0..Covering::SCAN).map(|i| format!("/F{i}"));
+        for covering in [
+            roots
+                .iter()
+                .map(|root| Path::new(root))
+                .collect::<Result<Covering, _>>()?,
+            roots
+                .iter()
+                .map(|root| root.to_string())
+                .chain(fillers)
+                .map(|root| Path::new(&root))
+                .collect::<Result<Covering, _>>()?,
+        ] {
+            for covered in ["/A", "/A/B", "/A.x", "/A{v=s}B"] {
+                assert!(covering.covers(&Path::new(covered)?), "{covered}");
+            }
+            for outside in ["/A0", "/AB", "/R", "/R.rel[/T]"] {
+                assert!(!covering.covers(&Path::new(outside)?), "{outside}");
+            }
+            assert!(!covering.covers_below(&Path::new("/A")?));
+            assert!(covering.covers_below(&Path::new("/A/B")?));
+        }
+        Ok(())
     }
 }

@@ -1474,12 +1474,13 @@ impl ClipCache {
         if roots.is_empty() || self.set_sources.is_empty() {
             return;
         }
-        // TODO(perf): every anchor is tested against every root; a
-        // prefix-ordered map would visit only the roots' subtrees.
+        // TODO(perf): every anchor is visited; a prefix-ordered map would visit
+        // only the roots' subtrees.
+        let roots: sdf::Covering = roots.iter().cloned().collect();
         let reached: Vec<Path> = self
             .set_sources
             .keys()
-            .filter(|anchor| roots.iter().any(|root| anchor.has_prefix(root)))
+            .filter(|anchor| roots.covers(anchor))
             .cloned()
             .collect();
         for anchor in reached {

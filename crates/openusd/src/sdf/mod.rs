@@ -65,6 +65,7 @@ pub use path::{
     IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,
 };
 pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
+pub(crate) use path_table::Covering;
 pub use path_table::PathTable;
 pub use schema::{
     ANY_TYPE, ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, layer_field_type,

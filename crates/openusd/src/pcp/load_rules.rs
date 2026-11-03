@@ -485,31 +485,43 @@ impl IndexCache {
         self.retire_query_errors();
         // A rule change can expose or hide a payload's whole subtree.
         self.invalidate_population();
-        let ancestors = rule_ancestors(&before, &self.load_rules, &touched);
-        let victims: Vec<Path> = touched
-            .iter()
-            .chain(ancestors.iter().map(|(ancestor, _)| ancestor))
-            .cloned()
-            .collect();
-        // TODO(perf): an ancestor whose own payload contribution is unchanged
-        // composes as it did, so dropping its own index would do; dropping its
-        // subtree rebuilds every sibling of the entry the change touched.
-        // Needs the population memo and the instance keys shown not to read
-        // its children's rules.
+        // An ancestor composes as it did unless its inclusion flipped and a
+        // payload it composes reads it (C++ recomposes only the prims whose
+        // payload inclusion changes). The population memo was cleared above,
+        // and an instance among the ancestors keys its prototype on the rules
+        // below it, which the touched paths retire.
+        let (dropped, prims): (Vec<Path>, Vec<Path>) = rule_ancestors(&before, &self.load_rules, &touched)
+            .into_iter()
+            .filter_map(|(ancestor, flipped)| flipped.then_some(ancestor))
+            .partition(|ancestor| self.reads_rule(ancestor));
+        let mut subtrees = touched;
+        subtrees.extend(dropped);
         // An instance whose prototype retired composes under another, so it
         // is a subtree resync even beneath an ancestor recomposed in place.
-        let mut subtrees = touched;
-        subtrees.extend(self.drop_retiring(&victims));
-        RuleVictims { subtrees, ancestors }
+        let retired = self.drop_retiring(&subtrees);
+        subtrees.extend(retired);
+        RuleVictims { subtrees, prims }
     }
 
-    /// The ancestors installing `rules` would derive again
-    /// ([`set_load_rules`](Self::set_load_rules)), each with whether its
-    /// inclusion would flip. Changes nothing.
-    pub(crate) fn rule_ancestors(&self, rules: &LoadRules) -> Vec<(Path, bool)> {
+    /// Whether `path`'s composition may read its own load rule: its cached
+    /// index has a payload ([`PrimIndex::has_payloads`]), or it has none
+    /// cached to tell.
+    fn reads_rule(&self, path: &Path) -> bool {
+        self.store()
+            .entries()
+            .get(path)
+            .is_none_or(|entry| entry.index.has_payloads())
+    }
+
+    /// The ancestors whose inclusion installing `rules` would flip
+    /// ([`set_load_rules`](Self::set_load_rules)). Changes nothing.
+    pub(crate) fn flipped_ancestors(&self, rules: &LoadRules) -> Vec<Path> {
         let after = canonical(rules.clone());
         let touched = diff_entries(&self.load_rules, &after);
         rule_ancestors(&self.load_rules, &after, &touched)
+            .into_iter()
+            .filter_map(|(ancestor, flipped)| flipped.then_some(ancestor))
+            .collect()
     }
 
     /// The load rules governing `path`, in `path`'s scope — see
@@ -523,15 +535,14 @@ impl IndexCache {
 /// ([`IndexCache::set_load_rules`]), apart by what it means to an observer.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct RuleVictims {
-    /// The entries the change touched, the prototype roots retired with the
+    /// The entries the change touched, the ancestors whose flipped inclusion
+    /// a payload they compose reads, the prototype roots retired with the
     /// prims it dropped, and those prototypes' instances: each a subtree
     /// whose composition changed.
     pub(crate) subtrees: Vec<Path>,
-    /// The ancestors whose effective rule the change derives again, each with
-    /// whether the rule's inclusion flipped. One whose own payload the flip
-    /// includes or leaves out changed its subtree; any other recomposes in
-    /// place.
-    pub(crate) ancestors: Vec<(Path, bool)>,
+    /// The ancestors whose inclusion flipped with no payload to read it:
+    /// they compose as they did, and only their loaded state changed.
+    pub(crate) prims: Vec<Path>,
 }
 
 #[cfg(test)]
@@ -874,7 +885,7 @@ mod tests {
         rules.unload(p("/A"));
         let victims = RuleVictims {
             subtrees: vec![p("/A")],
-            ancestors: Vec::new(),
+            prims: Vec::new(),
         };
         assert_eq!(cache.set_load_rules(rules), victims);
     }
@@ -928,7 +939,7 @@ mod tests {
             vec![p("/World/Deep/Nested")],
             "an ancestor already at All is unaffected by a change below it"
         );
-        assert!(victims.ancestors.is_empty());
+        assert!(victims.prims.is_empty());
     }
 
     /// A self-authored `Only` ancestor (reached via `effective_rule`'s step 3,
@@ -949,13 +960,13 @@ mod tests {
         cache.set_load_rules(rules.clone());
         rules.load_with_descendants(p("/World/A/Deep"));
         let victims = cache.set_load_rules(rules);
-        assert_eq!(victims.subtrees, vec![p("/World/A/Deep")]);
         assert_eq!(
-            victims.ancestors,
-            vec![(p("/World/A"), true)],
-            "/World's own self-authored Only is unaffected by a change under an unrelated child, and /World/A \
-             comes to be loaded"
+            victims.subtrees,
+            vec![p("/World/A/Deep"), p("/World/A")],
+            "/World's own self-authored Only is unaffected by a change under an unrelated child, and /World/A, \
+             with no index cached to tell whether a payload reads it, comes to be loaded"
         );
+        assert!(victims.prims.is_empty());
     }
 
     /// Loading a second child under an ancestor already loaded through the
@@ -972,16 +983,15 @@ mod tests {
         let mut rules = cache.load_rules().clone();
         rules.load_with_descendants(p("/World/A"));
         let first = cache.set_load_rules(rules.clone());
-        assert_eq!(first.subtrees, vec![p("/World/A")]);
         assert_eq!(
-            first.ancestors,
-            vec![(p("/World"), true)],
+            first.subtrees,
+            vec![p("/World/A"), p("/World")],
             "loading a child loads its parent"
         );
 
         rules.load_with_descendants(p("/World/B"));
         let second = cache.set_load_rules(rules);
         assert_eq!(second.subtrees, vec![p("/World/B")]);
-        assert_eq!(second.ancestors, vec![(p("/World"), false)], "already loaded");
+        assert!(second.prims.is_empty(), "already loaded");
     }
 }

@@ -462,7 +462,7 @@ pub(super) struct ResyncPaths {
 impl ResyncPaths {
     /// The subtree resyncs `paths` name, normalized.
     pub(super) fn from_subtrees(mut paths: Vec<sdf::Path>) -> Self {
-        keep_ancestors(&mut paths);
+        let _ = keep_ancestors(&mut paths);
         Self {
             subtrees: paths,
             prims: Vec::new(),
@@ -472,10 +472,10 @@ impl ResyncPaths {
     /// Keeps [`subtrees`](Self::subtrees) minimal in ancestors and drops a
     /// prim a subtree covers.
     pub(super) fn normalize(&mut self) {
-        keep_ancestors(&mut self.subtrees);
+        let covering = keep_ancestors(&mut self.subtrees);
         self.prims.sort();
         self.prims.dedup();
-        self.prims.retain(|prim| !is_covered(&self.subtrees, prim));
+        self.prims.retain(|prim| !covering.covers(prim));
     }
 
     /// Borrows the paths for a sink.
@@ -542,6 +542,9 @@ struct NamespacedPaths {
     /// attribute authored at `/A/B.x`. Not reported — it is a projection of
     /// `resynced`.
     subtree: Vec<sdf::Path>,
+    /// [`subtree`](Self::subtree) as an [`sdf::Covering`], which
+    /// [`normalize`](Self::normalize) builds; empty until it runs.
+    covering: sdf::Covering,
 }
 
 impl NamespacedPaths {
@@ -550,15 +553,15 @@ impl NamespacedPaths {
     fn normalize(&mut self) {
         self.resynced.sort();
         self.resynced.dedup();
-        keep_ancestors(&mut self.subtree);
-        self.resynced.retain(|p| !is_covered_below(&self.subtree, p));
+        self.covering = keep_ancestors(&mut self.subtree);
+        self.resynced.retain(|p| !self.covering.covers_below(p));
     }
 
     /// Whether these resyncs already report `path` — covering its subtree, or
     /// naming it exactly. Reads the ordering [`normalize`](Self::normalize)
     /// establishes, so it answers only after that has run.
     fn reports(&self, path: &sdf::Path) -> bool {
-        is_covered(&self.subtree, path) || self.resynced.binary_search(path).is_ok()
+        self.covering.covers(path) || self.resynced.binary_search(path).is_ok()
     }
 
     /// Folds `other`'s resyncs in, restoring the ordering
@@ -644,6 +647,7 @@ impl Payload {
         let mut stage = NamespacedPaths {
             resynced: changes.cache.stage_resynced_paths().cloned().collect(),
             subtree: changes.cache.stage_subtree_paths().cloned().collect(),
+            ..NamespacedPaths::default()
         };
         let mut authored = NamespacedPaths::default();
         for path in changes.cache.authored_resynced_paths() {
@@ -732,8 +736,8 @@ impl Payload {
             .retain(|p| !self.stage.reports(p) && self.recomposed.binary_search(p).is_err());
         self.authored_info.retain(|p| !self.authored.reports(p));
 
-        keep_ancestors(&mut asset_paths_resynced);
-        asset_paths_resynced.retain(|p| !is_covered(&self.stage.subtree, p));
+        let _ = keep_ancestors(&mut asset_paths_resynced);
+        asset_paths_resynced.retain(|p| !self.stage.covering.covers(p));
         self.asset_paths_resynced = asset_paths_resynced;
 
         // Every comparison is done, so the two namespaces can share one reported
@@ -779,44 +783,21 @@ impl Payload {
 
 /// Orders a path set and reduces it to its ancestors, dropping every entry a
 /// shallower entry already stands for (C++ `_RemoveDescendentEntries`).
-/// Duplicates fall out with them, since a path covers its own copy. The kept
-/// entries hold their relative order, so the result is sorted.
-///
-/// A path that prefixes another sorts before it, so one forward pass over the
-/// ordered set, testing each candidate against what has been kept so far,
-/// settles the whole thing. The scan cannot stop at the last kept entry:
-/// lexicographic order is not subtree-contiguous, because a sibling name can
-/// sort between an ancestor and a variant-selection descendant (`/A`, `/A0`,
-/// `/A{v=s}B`).
-///
-/// TODO(perf): the kept set is normally a handful of paths, but a stack-wide
-/// asset-path set is siblings all the way down, making this quadratic. An
-/// [`sdf::PathTable`] covering set would answer each test in O(depth); the same
-/// structure would bound [`is_covered`]'s scans.
-fn keep_ancestors(paths: &mut Vec<sdf::Path>) {
+/// Duplicates fall out with them, since a path covers its own copy. The
+/// result is sorted, and returned as an [`sdf::Covering`] too.
+fn keep_ancestors(paths: &mut Vec<sdf::Path>) -> sdf::Covering {
+    // A path sorts before every path it prefixes, so each ancestor is kept
+    // before any of its descendants is tested.
     paths.sort();
-    let mut kept = 0;
-    for i in 0..paths.len() {
-        if !is_covered(&paths[..kept], &paths[i]) {
-            paths.swap(kept, i);
-            kept += 1;
+    let mut kept = sdf::Covering::default();
+    paths.retain(|path| {
+        let covered = kept.covers(path);
+        if !covered {
+            kept.insert(path.clone());
         }
-    }
-    paths.truncate(kept);
-}
-
-/// Whether `path` lies at or beneath one of `covering`'s entries, which report
-/// their whole subtree. Both must be in the same namespace for the answer to
-/// mean anything.
-pub(super) fn is_covered(covering: &[sdf::Path], path: &sdf::Path) -> bool {
-    covering.iter().any(|prefix| path.has_prefix(prefix))
-}
-
-/// Whether `path` lies strictly *beneath* one of `covering`'s entries — the form
-/// for reducing a set that contains its own covering entries, where an entry
-/// must not retire itself.
-fn is_covered_below(covering: &[sdf::Path], path: &sdf::Path) -> bool {
-    covering.iter().any(|prefix| prefix != path && path.has_prefix(prefix))
+        !covered
+    });
+    kept
 }
 
 #[cfg(test)]
