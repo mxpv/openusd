@@ -146,6 +146,48 @@ struct Loader<'a> {
 /// stops one from pointing at itself; C++ keeps the same set for the same
 /// reason (`_LocalUnpackRecursionGuard`). A value that nests nothing never
 /// touches it.
+/// Whether a value of type `ty`, array or not, decodes to plain data
+/// ([`AbstractData::holds_plain_data`](crate::sdf::AbstractData::holds_plain_data)).
+/// A wrapped `Value` is not: its type is the wrapped value's.
+fn is_plain_type(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::Bool
+            | Type::Uchar
+            | Type::Int
+            | Type::Uint
+            | Type::Int64
+            | Type::Uint64
+            | Type::Half
+            | Type::Float
+            | Type::Double
+            | Type::DoubleVector
+            | Type::Quatd
+            | Type::Quatf
+            | Type::Quath
+            | Type::Vec2d
+            | Type::Vec2f
+            | Type::Vec2h
+            | Type::Vec2i
+            | Type::Vec3d
+            | Type::Vec3f
+            | Type::Vec3h
+            | Type::Vec3i
+            | Type::Vec4d
+            | Type::Vec4f
+            | Type::Vec4h
+            | Type::Vec4i
+            | Type::Matrix2d
+            | Type::Matrix3d
+            | Type::Matrix4d
+            | Type::Specifier
+            | Type::Permission
+            | Type::Variability
+            | Type::ValueBlock
+            | Type::TimeCode
+    )
+}
+
 struct Decoder<'a> {
     file: &'a CrateFile,
     stream: Stream<'a>,
@@ -204,6 +246,15 @@ impl CrateFile {
     /// Decode the value `rep` describes from the file's bytes.
     pub fn value(&self, rep: ValueRep) -> Result<vt::Value, ReadError> {
         Decoder::new(self).decode(rep)
+    }
+
+    /// Whether `rep` encodes plain data
+    /// ([`AbstractData::holds_plain_data`](crate::sdf::AbstractData::holds_plain_data)),
+    /// told from its type and, for time samples, from each sample's type,
+    /// without decoding a payload. `false` when the encoding cannot be read:
+    /// decoding the value reports why.
+    pub fn holds_plain_data(&self, rep: ValueRep) -> bool {
+        Decoder::new(self).holds_plain_data(rep).unwrap_or(false)
     }
 
     /// Sanity check of structural validity.
@@ -984,6 +1035,30 @@ impl<'a> Decoder<'a> {
             .checked_sub(8)
             .ok_or_else(|| ReadError::corrupt(format!("recursive offset {offset} overflows")))?;
         self.stream.skip(delta)
+    }
+
+    /// [`CrateFile::holds_plain_data`]. A time samples value is walked as
+    /// [`decode`](Self::decode) walks it, reading the sample reps but not
+    /// the times or the samples they point at.
+    fn holds_plain_data(&mut self, rep: ValueRep) -> Result<bool, ReadError> {
+        let ty = rep.ty()?;
+        if ty != Type::TimeSamples {
+            return Ok(is_plain_type(ty));
+        }
+        if rep.is_inlined() || rep.is_compressed() {
+            return Ok(false);
+        }
+        self.stream.seek(rep.payload())?;
+        self.apply_recursive_offset()?;
+        self.stream.read_pod::<ValueRep>()?;
+        self.apply_recursive_offset()?;
+        let count = self.stream.read_count()?;
+        for sample in self.stream.read_vec::<ValueRep>(count)? {
+            if !is_plain_type(sample.ty()?) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Reads a crate dictionary value (`customData`, `assetInfo`, and nested

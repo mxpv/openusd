@@ -159,10 +159,12 @@ pub(super) fn visit_asset_paths(
         let mut fields = data.list_fields(&path).unwrap_or_default();
         fields.sort();
         for field in fields {
+            // Plain data holds no path: a crate layer tells so from the
+            // value's type, without decoding its arrays and time samples.
+            if data.holds_plain_data(&path, &field)? {
+                continue;
+            }
             let value = data.field(&path, &field)?;
-            // TODO(perf): a crate layer decodes a value to tell its variant,
-            // bulk arrays included; a type probe on `AbstractData` would let
-            // the walk skip every field that cannot hold an asset path.
             let holds_paths = match &*value {
                 Value::StringVec(_) => field == FieldKey::SubLayers.as_str(),
                 Value::AssetPath(_)
