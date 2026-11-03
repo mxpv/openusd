@@ -270,6 +270,21 @@ impl sdf::AbstractData for CrateData {
         self.data.get(path).map(|spec| spec.ty)
     }
 
+    fn holds_plain_data(&self, path: &sdf::Path, field: &str) -> Result<bool, sdf::DataError> {
+        let Some(spec) = self.data.get(path) else {
+            return Ok(false);
+        };
+        if let Some(authored) = spec.authored(field) {
+            return Ok(authored.as_ref().is_some_and(sdf::is_plain_data));
+        }
+        let Some(start) = spec.fieldset else {
+            return Ok(false);
+        };
+        Ok(crate_fields(&self.file, start)
+            .find(|(name, _)| *name == field)
+            .is_some_and(|(_, rep)| self.file.holds_plain_data(rep)))
+    }
+
     fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, vt::Value>>, sdf::DataError> {
         let Some(spec) = self.data.get(path) else {
             return Ok(None);
@@ -483,6 +498,72 @@ mod tests {
         assert_eq!(Arc::strong_count(&bytes), 3);
         drop(data);
         assert_eq!(Arc::strong_count(&bytes), 2);
+        Ok(())
+    }
+
+    /// The crate's plain data probe, told from types alone, gives the
+    /// answer decoding each value gives, on every field of the fixtures.
+    #[test]
+    fn plain_data_probe_matches_decoding() -> Result<()> {
+        let mut plain = 0;
+        for name in [
+            "fields",
+            "sdf_types",
+            "timesamples",
+            "payload",
+            "reference",
+            "connection",
+            "expressions",
+            "ints",
+            "int64",
+            "integer_compressed_floats",
+        ] {
+            let data = read_file(format!("fixtures/{name}.usdc"))?;
+            for path in data.spec_paths() {
+                for field in data.list_fields(&path).unwrap_or_default() {
+                    let decoded = sdf::is_plain_data(&*data.field(&path, &field)?);
+                    assert_eq!(data.holds_plain_data(&path, &field)?, decoded, "{name} {path} {field}");
+                    plain += usize::from(decoded);
+                }
+            }
+        }
+        assert!(plain > 0);
+        Ok(())
+    }
+
+    /// Time samples are plain data when every sample is: samples of asset
+    /// paths are not, whatever the rest hold.
+    #[test]
+    fn time_samples_plain_by_their_samples() -> Result<()> {
+        let attribute = |name: &str| sdf::Path::new(&format!("/a.{name}"));
+        let mut layer = sdf::Data::rooted();
+        layer.create_spec(sdf::Path::new("/a")?, sdf::SpecType::Prim);
+        let samples = [
+            (
+                "points",
+                vec![
+                    (1.0, vt::Value::Vec3fVec(vec![crate::gf::vec3f(1.0, 2.0, 3.0)])),
+                    (2.0, vt::Value::ValueBlock),
+                ],
+            ),
+            (
+                "texture",
+                vec![
+                    (1.0, vt::Value::Float(1.0)),
+                    (2.0, vt::Value::AssetPath("tex.png".into())),
+                ],
+            ),
+        ];
+        for (name, samples) in &samples {
+            let path = attribute(name)?;
+            layer.create_spec(path.clone(), sdf::SpecType::Attribute);
+            layer.set_field(&path, "timeSamples", vt::Value::TimeSamples(samples.clone()));
+        }
+        let file = CrateWriter::write_file(&layer)?;
+        let data = CrateData::open(file.bytes().clone(), true)?;
+        assert!(data.holds_plain_data(&attribute("points")?, "timeSamples")?);
+        assert!(!data.holds_plain_data(&attribute("texture")?, "timeSamples")?);
+        assert!(!data.holds_plain_data(&attribute("missing")?, "timeSamples")?);
         Ok(())
     }
 

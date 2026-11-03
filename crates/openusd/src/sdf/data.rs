@@ -51,6 +51,20 @@ pub trait AbstractData {
         })
     }
 
+    /// Whether the value of `field` at `path` is plain data: numbers,
+    /// vectors, quaternions, matrices, time codes, specifiers and the like,
+    /// or time samples of only those (blocks included). Plain data holds no
+    /// path, asset path, string, dictionary or list op, so a walk looking for
+    /// those passes it by. `false` when the field is not authored.
+    ///
+    /// A backend that can tell from its encoding answers without decoding
+    /// the value, as the crate reader does from a value's type; the default
+    /// decodes it. The answer may be `false` for a value that is plain, never
+    /// `true` for one that is not.
+    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
+        Ok(self.try_field(path, field)?.is_some_and(|value| is_plain_data(&value)))
+    }
+
     /// Returns the field names for a given path in authored order.
     fn list_fields(&self, path: &Path) -> Option<Vec<String>>;
 
@@ -140,6 +154,75 @@ pub enum DataError {
         /// The path with no spec behind it.
         path: Path,
     },
+}
+
+/// Whether `value` is plain data, as [`AbstractData::holds_plain_data`]
+/// defines it.
+pub(crate) fn is_plain_data(value: &Value) -> bool {
+    match value {
+        Value::TimeSamples(samples) => samples.iter().all(|(_, sample)| is_plain_data(sample)),
+        Value::Bool(_)
+        | Value::BoolVec(_)
+        | Value::Uchar(_)
+        | Value::UcharVec(_)
+        | Value::Int(_)
+        | Value::IntVec(_)
+        | Value::Uint(_)
+        | Value::UintVec(_)
+        | Value::Int64(_)
+        | Value::Int64Vec(_)
+        | Value::Uint64(_)
+        | Value::Uint64Vec(_)
+        | Value::Half(_)
+        | Value::HalfVec(_)
+        | Value::Float(_)
+        | Value::FloatVec(_)
+        | Value::Double(_)
+        | Value::DoubleVec(_)
+        | Value::Quath(_)
+        | Value::Quatf(_)
+        | Value::Quatd(_)
+        | Value::QuathVec(_)
+        | Value::QuatfVec(_)
+        | Value::QuatdVec(_)
+        | Value::Vec2h(_)
+        | Value::Vec2f(_)
+        | Value::Vec2d(_)
+        | Value::Vec2i(_)
+        | Value::Vec2hVec(_)
+        | Value::Vec2fVec(_)
+        | Value::Vec2dVec(_)
+        | Value::Vec2iVec(_)
+        | Value::Vec3h(_)
+        | Value::Vec3f(_)
+        | Value::Vec3d(_)
+        | Value::Vec3i(_)
+        | Value::Vec3hVec(_)
+        | Value::Vec3fVec(_)
+        | Value::Vec3dVec(_)
+        | Value::Vec3iVec(_)
+        | Value::Vec4h(_)
+        | Value::Vec4f(_)
+        | Value::Vec4d(_)
+        | Value::Vec4i(_)
+        | Value::Vec4hVec(_)
+        | Value::Vec4fVec(_)
+        | Value::Vec4dVec(_)
+        | Value::Vec4iVec(_)
+        | Value::Matrix2d(_)
+        | Value::Matrix3d(_)
+        | Value::Matrix4d(_)
+        | Value::Matrix2dVec(_)
+        | Value::Matrix3dVec(_)
+        | Value::Matrix4dVec(_)
+        | Value::Specifier(_)
+        | Value::Permission(_)
+        | Value::Variability(_)
+        | Value::ValueBlock
+        | Value::TimeCode(_)
+        | Value::TimeCodeVec(_) => true,
+        _ => false,
+    }
 }
 
 /// In-memory mutable layer data.
@@ -307,6 +390,10 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
         (**self).try_field(path, field)
     }
 
+    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
+        (**self).holds_plain_data(path, field)
+    }
+
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
         (**self).list_fields(path)
     }
@@ -358,6 +445,10 @@ impl<T: AbstractData + Clone> AbstractData for Arc<T> {
 
     fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
         (**self).try_field(path, field)
+    }
+
+    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
+        (**self).holds_plain_data(path, field)
     }
 
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
@@ -589,6 +680,14 @@ impl<T: AbstractData> AbstractData for CowData<T> {
                 }
             }
             None => self.base.try_field(path, field),
+        }
+    }
+
+    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
+        match self.staged(path) {
+            // A staged spec or field answers from the value it stages.
+            Some(_) => Ok(self.try_field(path, field)?.is_some_and(|value| is_plain_data(&value))),
+            None => self.base.holds_plain_data(path, field),
         }
     }
 
