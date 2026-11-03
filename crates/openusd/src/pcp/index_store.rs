@@ -862,12 +862,6 @@ impl IndexStore {
         self.retired.extend(records);
     }
 
-    /// The instances that shared the retired prototypes rooted at `roots`.
-    pub(super) fn retired_instances(&self, roots: &[Path]) -> Vec<Path> {
-        let shared = self.retired.iter().filter(|record| roots.contains(&record.root));
-        shared.flat_map(|record| record.instances.iter().cloned()).collect()
-    }
-
     /// Takes the retired-prototype records out for settlement to transfer.
     pub(super) fn take_retired(&mut self) -> Vec<RetiredPrototype> {
         mem::take(&mut self.retired)

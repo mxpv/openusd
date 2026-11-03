@@ -57,7 +57,7 @@ use super::composition::{self, PendingEdit, StageComposition};
 
 use super::authoring::{Operation, PlanStamp, PlanState, PrimOp};
 use super::interp::{self, InterpolationType};
-use super::sink::{PendingChange, Provenance, ResyncPaths, StageSink, StageSinkId, TxnObserver};
+use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, TxnObserver};
 use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics, StagePopulationMask};
 
 bitflags! {
@@ -2123,19 +2123,41 @@ impl Stage {
     /// instead.
     pub fn add_sink<S: StageSink + 'static>(&self, sink: S) -> StageSinkId {
         // Deliver any edit already committed (e.g. a direct `layer_handle` commit
-        // awaiting drain) to the current set before this sink joins, so a sink
-        // only ever observes edits committed after it was installed.
-        self.process_pending();
+        // awaiting drain), and what reads found, to the current set before this
+        // sink joins, so a sink only ever observes what happened after it was
+        // installed. Inside a read or a layer edit what is not reconciled yet
+        // waits for a later drain.
+        let _ = self.composition.flush(self);
         self.sinks.borrow_mut().add(Rc::new(sink))
     }
 
     /// Remove the sink with the given [`StageSinkId`]; the inverse of
     /// [`add_sink`](Self::add_sink). A no-op if it was already removed.
     pub fn remove_sink(&self, id: StageSinkId) {
-        // Deliver any already-committed edit to the full set, including this sink,
-        // before it leaves — so it sees every edit committed while it was installed.
-        self.process_pending();
-        self.sinks.borrow_mut().remove(id);
+        // Deliver any already-committed edit, and what reads found, to the full
+        // set, including this sink, before it leaves — so it sees everything
+        // that happened while it was installed. Inside a read or a layer edit
+        // what is not reconciled yet waits for a later drain.
+        let _ = self.composition.flush(self);
+        let mut sinks = self.sinks.borrow_mut();
+        sinks.remove(id);
+        if sinks.is_empty() {
+            self.composition.forget_discovered();
+        }
+    }
+
+    /// Delivers to the stage's sinks what reads found since the last drain
+    /// ([`StageSink::recomposed`]), with every edit pending: a read that
+    /// loads a layer recomposes prims, and tells the sinks no earlier than
+    /// the next drain of an edit, or this call.
+    ///
+    /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
+    /// a layer on the stage's registry, delivering only the notices of edits
+    /// reconciled already, and with [`pcp::QueryError::Poisoned`] on a
+    /// poisoned stage. Called from a sink, the notice follows the ones being
+    /// delivered.
+    pub fn flush(&self) -> Result<()> {
+        Ok(self.composition.flush(self)?)
     }
 
     /// The layers with their content as they stand, read without draining:
@@ -2939,12 +2961,8 @@ impl Stage {
     /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
     /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
-        if let Some((changed, resynced)) = self
-            .composition
-            .apply_mute(|graph| graph.mute_layer(identifier.into()), self)
-        {
-            self.notify_muting_changed(&changed, true, resynced);
-        }
+        self.composition
+            .apply_mute(|graph| graph.mute_layer(identifier.into()), true, self);
     }
 
     /// Unmutes the layer with the given identifier, restoring its opinions to
@@ -2953,12 +2971,8 @@ impl Stage {
     /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
     /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry.
     pub fn unmute_layer(&self, identifier: &str) {
-        if let Some((changed, resynced)) = self
-            .composition
-            .apply_mute(|graph| graph.unmute_layer(identifier), self)
-        {
-            self.notify_muting_changed(&changed, false, resynced);
-        }
+        self.composition
+            .apply_mute(|graph| graph.unmute_layer(identifier), false, self);
     }
 
     /// Loads `path`'s payload — and its ancestors', if not already loaded —
@@ -2989,14 +3003,13 @@ impl Stage {
         let Some(path) = Self::normalize_load_target(path) else {
             return;
         };
-        let victims = self.composition.install_load_rules(
+        self.composition.install_load_rules(
             move |rules| match policy {
                 LoadPolicy::WithDescendants => rules.load_with_descendants(path),
                 LoadPolicy::WithoutDescendants => rules.load_without_descendants(path),
             },
             self,
         );
-        self.notify_load_rules_changed(victims);
     }
 
     /// Unloads `path`'s payload and everything beneath it (C++
@@ -3024,10 +3037,8 @@ impl Stage {
         let Some(path) = Self::normalize_load_target(path) else {
             return;
         };
-        let victims = self
-            .composition
+        self.composition
             .install_load_rules(move |rules| rules.unload(path), self);
-        self.notify_load_rules_changed(victims);
     }
 
     /// Loads every path in `to_load` (with `policy`) and unloads every path
@@ -3059,7 +3070,7 @@ impl Stage {
             )
             .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
-        let victims = self.composition.install_load_rules(
+        self.composition.install_load_rules(
             |rules| {
                 for path in to_unload {
                     rules.unload(path);
@@ -3073,7 +3084,6 @@ impl Stage {
             },
             self,
         );
-        self.notify_load_rules_changed(victims);
         Ok(())
     }
 
@@ -3089,8 +3099,7 @@ impl Stage {
     /// use, not a blunt whole-stage drop, since the affected set is already
     /// provably sufficient (see [`pcp::LoadRules`]'s module documentation).
     pub fn set_load_rules(&self, rules: pcp::LoadRules) {
-        let victims = self.composition.install_load_rules(|current| *current = rules, self);
-        self.notify_load_rules_changed(victims);
+        self.composition.install_load_rules(|current| *current = rules, self);
     }
 
     /// Every prim below `root` (inclusive) that carries a payload arc, loaded
@@ -3201,44 +3210,10 @@ impl Stage {
         (!pcp::is_prototype_namespace(&path)).then_some(path)
     }
 
-    /// Fires [`StageSink::load_rules_changed`] with what the edit changed:
-    /// the subtrees whose composition changed and the ancestors recomposed
-    /// in place, normalized. A no-op edit invalidates nothing and reports
-    /// nothing.
-    fn notify_load_rules_changed(&self, resynced: ResyncPaths) {
-        if resynced.is_empty() || self.sinks.borrow().is_empty() {
-            return;
-        }
-        self.composition
-            .announce(composition::StageNotice::LoadRules(resynced), self);
-    }
-
     /// `true` if `path`'s own payload is included by the stage's load rules —
     /// the per-ancestor check behind [`Prim::is_loaded`](super::Prim::is_loaded).
     pub(crate) fn is_path_loaded(&self, path: &sdf::Path) -> bool {
         self.cache().is_loaded(path)
-    }
-
-    /// Fires [`StageSink::layer_muting_changed`] for the toggled identifier and
-    /// the paths the toggle invalidated, reduced the same way, after the graph
-    /// and cache borrows are released. Unlike the load-rules notice an empty set
-    /// still fires: the muted set changed whether or not anything was cached
-    /// against the layer.
-    ///
-    /// TODO(perf): a mute that reaches the root layer hands over every cached
-    /// index, so this reduction is `keep_ancestors` at its worst case — see the
-    /// `sdf::PathTable` covering set noted there.
-    fn notify_muting_changed(&self, changed: &str, muted: bool, mut resynced: ResyncPaths) {
-        if self.sinks.borrow().is_empty() {
-            return;
-        }
-        resynced.normalize();
-        let notice = composition::StageNotice::Muting {
-            layer: changed.to_owned(),
-            muted,
-            resynced,
-        };
-        self.composition.announce(notice, self);
     }
 
     /// Whether the layer with the given identifier is currently muted.
@@ -7733,25 +7708,67 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
+    /// The subtrees of each [`StageSink::recomposed`] notice, in order.
+    type Heard = Rc<RefCell<Vec<Vec<sdf::Path>>>>;
+
+    /// Records the subtrees of each [`StageSink::recomposed`] notice.
+    struct Recomposed(Heard);
+
+    impl StageSink for Recomposed {
+        fn recomposed(&self, _: &Stage, resynced: usd::Resynced<'_>) {
+            self.0.borrow_mut().push(resynced.subtrees.to_vec());
+        }
+    }
+
+    /// A stage over [`clip_fixture`] in `dir` whose clip a read found
+    /// missing, with a [`Recomposed`] sink installed, after the clip's file
+    /// appears; returns the stage and what the sink heard.
+    fn clip_missing(dir: &FsPath) -> Result<(Stage, Heard)> {
+        let stage = Stage::open(&clip_fixture(dir, "late.usda")?)?;
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Recomposed(Rc::clone(&heard)));
+        assert_eq!(clip_x(&stage)?, None);
+        fs::copy(dir.join("clip.usda"), dir.join("late.usda"))?;
+        Ok((stage, heard))
+    }
+
+    /// A flush delivers what a read found, with no edit to drain.
+    #[test]
+    fn flush_delivers_discovery() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, heard) = clip_missing(dir.path())?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        assert!(heard.borrow().is_empty());
+
+        stage.flush()?;
+        assert_eq!(*heard.borrow(), [vec![sdf::path("/A")?]]);
+        Ok(())
+    }
+
+    /// Adding a sink delivers what reads found to the sinks already there,
+    /// and the new one hears none of it.
+    #[test]
+    fn add_sink_flushes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, first) = clip_missing(dir.path())?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+
+        let second = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Recomposed(Rc::clone(&second)));
+        assert_eq!(*first.borrow(), [vec![sdf::path("/A")?]], "adding a sink flushes");
+        assert!(second.borrow().is_empty(), "the new sink hears nothing older");
+        stage.flush()?;
+        assert_eq!(first.borrow().len(), 1, "nothing is left to deliver");
+        Ok(())
+    }
+
     /// A read that recovers a clip it found missing earlier tells the
     /// stage's sinks at the next drain of an edit, not during the read: the
     /// clip's anchor is recomposed.
     #[test]
     fn clip_recovery_reported() -> Result<()> {
-        struct Recomposed(Rc<RefCell<Vec<Vec<sdf::Path>>>>);
-        impl StageSink for Recomposed {
-            fn recomposed(&self, _: &Stage, resynced: usd::Resynced<'_>) {
-                self.0.borrow_mut().push(resynced.prims.to_vec());
-            }
-        }
         let dir = tempfile::tempdir()?;
-        let root = clip_fixture(dir.path(), "late.usda")?;
-        let stage = Stage::open(&root)?;
-        let heard = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Recomposed(Rc::clone(&heard)));
-        assert_eq!(clip_x(&stage)?, None);
-        fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
-
+        let (stage, heard) = clip_missing(dir.path())?;
         assert_eq!(clip_x(&stage)?, Some(5.0));
         assert!(heard.borrow().is_empty(), "a read delivers nothing");
         stage.process_pending();
@@ -7767,9 +7784,9 @@ def "P" (payload = @./clip.usda@</M>) {}
     /// referenced stack's change resyncs the prim that uses it.
     #[test]
     fn demand_join_in_commit() -> Result<()> {
-        type Heard = Vec<(Vec<sdf::Path>, Vec<sdf::Path>)>;
-        struct Recomposed(Rc<RefCell<Heard>>);
-        impl StageSink for Recomposed {
+        type Notices = Vec<(Vec<sdf::Path>, Vec<sdf::Path>)>;
+        struct Commits(Rc<RefCell<Notices>>);
+        impl StageSink for Commits {
             fn after_commit(&self, _: &Stage, change: &usd::CommittedChange<'_>) {
                 self.0
                     .borrow_mut()
@@ -7791,13 +7808,16 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(clip_x(&stage)?, None);
         fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
         let heard = Rc::new(RefCell::new(Vec::new()));
-        stage.add_sink(Recomposed(Rc::clone(&heard)));
+        stage.add_sink(Commits(Rc::clone(&heard)));
 
         stage.edit_layer(&layer_named(&stage, "ref.usda"), |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["./late.usda"]);
             Ok(())
         })?;
-        assert_eq!(*heard.borrow(), [(vec![sdf::path("/B")?], vec![sdf::path("/A")?])]);
+        assert_eq!(
+            *heard.borrow(),
+            [(vec![sdf::path("/A")?, sdf::path("/B")?], Vec::new())]
+        );
         assert_eq!(clip_x(&stage)?, Some(5.0));
         Ok(())
     }
@@ -9936,7 +9956,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             |view, cache| cache.is_populated(view, &inner),
             composition::Settled::Taken,
             &stage,
-            &mut ResyncPaths::default(),
+            &mut Vec::new(),
         );
         assert!(matches!(stopped, Err(composition::Interrupted::NewWork)));
         assert!(!stage.composition.pending_is_empty(), "the edit waits for the drain");

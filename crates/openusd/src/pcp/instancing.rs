@@ -472,11 +472,13 @@ impl IndexCache {
     /// edit instead drops the affected prototypes through
     /// [`Self::invalidate_layers`].
     ///
-    /// Returns the roots it retired, sorted. A caller reporting what an edit
-    /// invalidated must name them in their own right: the retirement cascades
-    /// through a worklist, so a nested root goes without any `changed` path
-    /// covering it, and a `/__Prototype_N` root stands in its own namespace where
-    /// no instance path could subsume it.
+    /// Returns the roots it retired, sorted, then the instances that shared
+    /// them. A caller reporting what an edit invalidated must name the roots
+    /// in their own right: the retirement cascades through a worklist, so a
+    /// nested root goes without any `changed` path covering it, and a
+    /// `/__Prototype_N` root stands in its own namespace where no instance
+    /// path could subsume it. An instance composes under another prototype,
+    /// though its own index read nothing the change touched.
     pub(crate) fn invalidate_prototypes(&mut self, changed: &[Path]) -> Vec<Path> {
         // A prototype's whole namespace composes in place now (the root from its
         // materialized index, descendants by deepening it; see
@@ -486,9 +488,11 @@ impl IndexCache {
         // own, so those memos go with them.
         self.clear_population_memos();
         let retired = self.prototypes.remove_affected(changed);
-        let roots: Vec<Path> = retired.iter().map(|prototype| prototype.root.clone()).collect();
+        let mut invalidated: Vec<Path> = retired.iter().map(|prototype| prototype.root.clone()).collect();
+        let instances = retired.iter().flat_map(|prototype| prototype.instances.iter().cloned());
+        invalidated.extend(instances);
         self.drop_prototypes(retired);
-        roots
+        invalidated
     }
 
     /// Whether the stage's population admits `path` — the mask exposes it, it

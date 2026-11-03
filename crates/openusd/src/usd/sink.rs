@@ -95,10 +95,11 @@ pub trait StageSink {
     /// Observe a layer mute/unmute (C++ `UsdNotice::LayerMutingChanged`, which
     /// C++ pairs with the `ObjectsChanged` its recompose sends).
     ///
-    /// `resynced` names what the toggle invalidated: as subtrees, the cached
-    /// indices dropped, the prototype roots retired with them and what the
-    /// loads settling them ran dropped; as prims, the anchors whose value
-    /// clips read a layer those loads joined. Unlike
+    /// `resynced` names what the toggle invalidated, as subtrees: the cached
+    /// indices dropped, the prototype roots retired with them and their
+    /// instances, what the
+    /// loads settling them ran dropped, and the anchors whose value clips
+    /// read a layer those loads joined. Unlike
     /// [`load_rules_changed`](Self::load_rules_changed) it may be empty, since
     /// muting an identifier that resolves to nothing loaded still toggles the
     /// muted set, and the toggle is reported either way.
@@ -112,13 +113,14 @@ pub trait StageSink {
     /// `resynced` names, as subtrees, the paths whose own payload inclusion
     /// [`Stage::load`]/[`Stage::unload`]/[`Stage::load_and_unload`]/
     /// [`Stage::set_load_rules`] changed, with an ancestor whose own payload
-    /// it includes or leaves out and the prototype roots retired with them;
+    /// it includes or leaves out, the prototype roots retired with them and
+    /// their instances;
     /// and, as prims, the ancestors only recomposed for the rule derived
     /// again. Loading `/world/element_0` on a stage that loads nothing names
     /// `/world/element_0` as a subtree and, when `/world` has no payload of
     /// its own, `/world` as a prim, leaving `/world/element_1` out. What the
-    /// loads settling the change ran dropped joins the subtrees, and the
-    /// anchors whose value clips read a layer they joined join the prims.
+    /// loads settling the change ran dropped joins the subtrees, with the
+    /// anchors whose value clips read a layer they joined.
     /// Never empty, since a no-op edit fires no notification at all.
     fn load_rules_changed(&self, stage: &Stage, resynced: Resynced<'_>) {
         let _ = (stage, resynced);
@@ -132,8 +134,8 @@ pub trait StageSink {
     ///
     /// `resynced` names, as subtrees, the prims that recompose with a
     /// reference, payload or sublayer that failed to load, with what the
-    /// loads settling them ran dropped; as prims, the anchors whose value
-    /// clips read a layer the retry joined. Never empty, since a retry that
+    /// loads settling them ran dropped and the anchors whose value clips
+    /// read a layer the retry joined. Never empty, since a retry that
     /// resyncs nothing fires no notification.
     fn loads_retried(&self, stage: &Stage, resynced: Resynced<'_>) {
         let _ = (stage, resynced);
@@ -142,8 +144,9 @@ pub trait StageSink {
     /// Observe what composition found that no other notice carries: as
     /// subtrees, the prims dropped by the layer loads a read, an authoring
     /// call or a drain's settling ran (a joined layer that relocates, a
-    /// failed load recorded); as prims, the anchors whose value clips now
-    /// read a layer they found missing before.
+    /// failed load recorded), and the anchors whose value clips now read a
+    /// layer they found missing before, for the values they source below
+    /// them. A [`flush`](Stage::flush) delivers it too.
     /// A drain of edits to the stage's layers reports what its snapshot
     /// found, with what was found outside a drain since the last one, after
     /// the snapshot's transaction notices and less what those resynced: a
@@ -457,9 +460,13 @@ pub(super) struct ResyncPaths {
 }
 
 impl ResyncPaths {
-    /// Whether it names nothing.
-    pub(super) fn is_empty(&self) -> bool {
-        self.subtrees.is_empty() && self.prims.is_empty()
+    /// The subtree resyncs `paths` name, normalized.
+    pub(super) fn from_subtrees(mut paths: Vec<sdf::Path>) -> Self {
+        keep_ancestors(&mut paths);
+        Self {
+            subtrees: paths,
+            prims: Vec::new(),
+        }
     }
 
     /// Keeps [`subtrees`](Self::subtrees) minimal in ancestors and drops a
@@ -469,14 +476,6 @@ impl ResyncPaths {
         self.prims.sort();
         self.prims.dedup();
         self.prims.retain(|prim| !is_covered(&self.subtrees, prim));
-    }
-
-    /// Drops every path `covering`'s subtrees reach, which a notice already
-    /// reported.
-    pub(super) fn uncover(&mut self, covering: &[sdf::Path]) {
-        // TODO(perf): a sorted `covering` could be searched by prefix.
-        self.subtrees.retain(|path| !is_covered(covering, path));
-        self.prims.retain(|path| !is_covered(covering, path));
     }
 
     /// Borrows the paths for a sink.
@@ -701,9 +700,8 @@ impl Payload {
     /// is done.
     ///
     /// `found` is what resolving the sublayers the recompose demanded
-    /// discovered: its subtrees join the resyncs, its prims the prims
-    /// recomposed in place.
-    pub(super) fn finish(&mut self, outcome: pcp::ApplyOutcome, found: ResyncPaths) {
+    /// discovered: it joins the subtree resyncs.
+    pub(super) fn finish(&mut self, outcome: pcp::ApplyOutcome, found: Vec<sdf::Path>) {
         let pcp::ApplyOutcome {
             resynced: mut stage_resynced,
             resynced_prims,
@@ -712,9 +710,7 @@ impl Payload {
         } = outcome;
 
         // What the demand resolution found counts as the outcome's own.
-        let ResyncPaths { subtrees, prims } = found;
-        stage_resynced.extend(subtrees);
-        self.recomposed.extend(prims);
+        stage_resynced.extend(found);
         // The outcome's victims are subtree drops in stage namespace, so they
         // join both the reported set and the covering projection. Its single-prim
         // resyncs join only the reported set: they cover nothing below them.
@@ -812,7 +808,7 @@ fn keep_ancestors(paths: &mut Vec<sdf::Path>) {
 /// Whether `path` lies at or beneath one of `covering`'s entries, which report
 /// their whole subtree. Both must be in the same namespace for the answer to
 /// mean anything.
-fn is_covered(covering: &[sdf::Path], path: &sdf::Path) -> bool {
+pub(super) fn is_covered(covering: &[sdf::Path], path: &sdf::Path) -> bool {
     covering.iter().any(|prefix| path.has_prefix(prefix))
 }
 
@@ -867,7 +863,7 @@ mod tests {
         }
         let is_local = |layer| layer == local;
         let mut payload = Payload::new(&changes, &sdf::ChangeList::new(), Vec::new(), &provenance, &is_local);
-        payload.finish(outcome, ResyncPaths::default());
+        payload.finish(outcome, Vec::new());
         payload
     }
 
@@ -937,18 +933,6 @@ mod tests {
         );
         assert_eq!(payload.stage.resynced, paths(&["/A/B"]));
         assert_eq!(payload.authored.resynced, paths(&["/S{v=x}T"]));
-    }
-
-    /// What a notice's subtrees reach leaves both sets; a sibling stays.
-    #[test]
-    fn uncover_drops_reached() {
-        let mut found = ResyncPaths {
-            subtrees: paths(&["/A/B", "/C"]),
-            prims: paths(&["/A", "/A/D", "/E"]),
-        };
-        found.uncover(&paths(&["/A"]));
-        assert_eq!(found.subtrees, paths(&["/C"]));
-        assert_eq!(found.prims, paths(&["/E"]));
     }
 
     /// A direct edit to a non-local layer reports two namespaces at once, so an

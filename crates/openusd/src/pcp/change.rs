@@ -1238,15 +1238,15 @@ fn apply_default_prim_edits(
     }
     // One drop for the round, as the expression-variable path batches for the
     // same reason: each pays a prototype scan per victim. It hands back the
-    // prototype roots it retired alongside the prims it evicted, and both
-    // resynced, so both are reported.
+    // prototype roots it retired, and their instances, alongside the prims it
+    // evicted, and all resynced, so all are reported.
     reported.extend(cache.drop_index_victims(victims.into_iter().collect()));
     reported.into_iter().collect()
 }
 
 /// Consumes an `expressionVariables` rebuild's per-stack deltas, dropping their
 /// recorded dependents and returning them, with the prototype roots retired
-/// alongside, as the resynced paths — the C++
+/// alongside and their instances, as the resynced paths — the C++
 /// five-step `_DidChangeLayerStackExpressionVariables` diff, whose every victim
 /// is a `DidChangeSignificantly`. Step 1 (composed variables and source
 /// unchanged) emits no delta, so an identical re-authoring costs only the

@@ -496,14 +496,10 @@ impl IndexCache {
         // subtree rebuilds every sibling of the entry the change touched.
         // Needs the population memo and the instance keys shown not to read
         // its children's rules.
-        let retired = self.invalidate_prototypes(&victims);
-        self.drop_index_subtrees(&victims);
         // An instance whose prototype retired composes under another, so it
         // is a subtree resync even beneath an ancestor recomposed in place.
-        let instances = self.retired_instances(&retired);
         let mut subtrees = touched;
-        subtrees.extend(retired);
-        subtrees.extend(instances);
+        subtrees.extend(self.drop_retiring(&victims));
         RuleVictims { subtrees, ancestors }
     }
 

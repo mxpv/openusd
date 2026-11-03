@@ -42,7 +42,7 @@ use std::thread;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
-use super::sink::{Payload, Provenance, ResyncPaths};
+use super::sink::{Payload, Provenance, ResyncPaths, is_covered};
 
 /// One transaction outcome awaiting reconciliation, in commit order.
 pub(super) enum Pending {
@@ -229,8 +229,12 @@ pub(super) enum Interrupted {
 /// whose effective rule the change only derived again recomposes in place.
 /// One whose inclusion flipped changed its subtree when it has a payload of
 /// its own (in `payloads`), which the flip includes or leaves out.
-/// They join `paths`, which comes back normalized.
-fn classify(victims: pcp::RuleVictims, payloads: &HashSet<sdf::Path>, mut paths: ResyncPaths) -> ResyncPaths {
+/// They join `found`'s subtree resyncs, and come back normalized.
+fn classify(victims: pcp::RuleVictims, payloads: &HashSet<sdf::Path>, found: Vec<sdf::Path>) -> ResyncPaths {
+    let mut paths = ResyncPaths {
+        subtrees: found,
+        prims: Vec::new(),
+    };
     paths.subtrees.extend(victims.subtrees);
     for (ancestor, flipped) in victims.ancestors {
         if flipped && payloads.contains(&ancestor) {
@@ -331,7 +335,7 @@ pub(super) struct StageComposition {
     /// What reads and other operations outside a drain found that no notice
     /// carries ([`discover`](Self::discover)): the next drain's snapshot
     /// reports it with its own findings.
-    discovered: RefCell<ResyncPaths>,
+    discovered: RefCell<Vec<sdf::Path>>,
     /// The stack sweeps and layer reclaims skipped away from a boundary
     /// ([`at_boundary`](Self::at_boundary)).
     deferred: Cell<Deferred>,
@@ -518,7 +522,7 @@ impl StageComposition {
         // other prims that recorded those failures, which compose again too,
         // reach the stage's sinks with the next drain.
         let others = cache.retry_dropped_failures(&mut layers);
-        self.discovered.borrow_mut().subtrees.extend(others);
+        self.discovered.borrow_mut().extend(others);
         out
     }
 
@@ -863,7 +867,7 @@ impl StageComposition {
                             .cache
                             .borrow_mut()
                             .drop_load_failed_indices(|asset| forgotten.contains(asset));
-                        found.subtrees.extend(dropped);
+                        found.extend(dropped);
                     }
                     self.resolve_sublayer_demands(demands, hooks, &mut found);
                     if settles {
@@ -871,9 +875,12 @@ impl StageComposition {
                     }
                 }
             }
-            // What settling the snapshot's work found follows its notices.
-            found.uncover(&covered);
-            self.report(StageNotice::Recomposed, found, hooks);
+            // What settling the snapshot's work found follows its notices,
+            // with what its own composition found, less what they reported.
+            found.extend(self.discovered.take());
+            // TODO(perf): a sorted `covered` could be searched by prefix.
+            found.retain(|path| !is_covered(&covered, path));
+            self.report(None, StageNotice::Recomposed, found, hooks);
         }
         Ok(())
     }
@@ -895,7 +902,7 @@ impl StageComposition {
     /// ([`Interrupted::NewWork`]), which the drain it runs inside applies
     /// first. Under [`Settled::Required`] edits loads the caller ran before
     /// it committed are reconciled first. What its loads drop joins `found`.
-    fn settle_work(&self, settled: Settled, hooks: &dyn CompositionHooks, found: &mut ResyncPaths) {
+    fn settle_work(&self, settled: Settled, hooks: &dyn CompositionHooks, found: &mut Vec<sdf::Path>) {
         if self.suspended.get() || !self.cache.borrow().has_work() {
             return;
         }
@@ -907,7 +914,7 @@ impl StageComposition {
         // failed to load: their failures are forgotten, and the prims a
         // retry dropped again settle once more, now opening their targets.
         let others = self.update_pair(|graph, cache| cache.retry_dropped_failures(graph));
-        found.subtrees.extend(others);
+        found.extend(others);
         if self.cache.borrow().has_work() {
             let _ = self.fixpoint(|view, cache| cache.settle_pass(view), settled, hooks, found);
         }
@@ -917,32 +924,76 @@ impl StageComposition {
     /// change dropped prims (a walk under rules it swapped), reporting what
     /// the settling's loads find.
     pub(super) fn settle_now(&self, hooks: &dyn CompositionHooks) {
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         self.settle_work(Settled::Required, hooks, &mut found);
         self.discover(found, hooks);
+    }
+
+    /// Delivers what operations outside a drain found
+    /// ([`discover`](Self::discover)) as a [`StageNotice::Recomposed`], ahead
+    /// of the notices of the edits pending, which were committed after it:
+    /// a boundary the stage's caller chooses. Inside a delivery the notice
+    /// waits behind the ones being delivered. While a read or an edit holds
+    /// the layers' store, what was found waits, and this fails with
+    /// [`sdf::LayerError::Busy`] once it has delivered what was reconciled
+    /// already. Fails with [`pcp::QueryError::Poisoned`] on a poisoned stage,
+    /// which delivers nothing.
+    pub(super) fn flush(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+        if let Some(poisoned) = self.poisoned.get() {
+            return Err(poisoned.error());
+        }
+        let writable = self.store.ensure_writable();
+        if writable.is_ok() {
+            let found = self.discovered.take();
+            self.report(None, StageNotice::Recomposed, found, hooks);
+        }
+        self.process_pending(hooks);
+        Ok(writable?)
+    }
+
+    /// Drops what operations found for no sink to hear: the last sink left.
+    pub(super) fn forget_discovered(&self) {
+        self.discovered.take();
     }
 
     /// Records `found`, what an operation outside a drain (a read, a
     /// mutation's own loads) dropped that no notice carries, for the next
     /// drain to report. Nothing is kept with no sink to tell.
-    fn discover(&self, found: ResyncPaths, hooks: &dyn CompositionHooks) {
+    fn discover(&self, found: Vec<sdf::Path>, hooks: &dyn CompositionHooks) {
+        if hooks.delivers() {
+            self.discovered.borrow_mut().extend(found);
+        }
+    }
+
+    /// Queues `notice` naming `found`, the subtrees an operation resynced, at
+    /// `mark` ([`queue_at`](Self::queue_at)), or behind every notice queued
+    /// with none. Nothing is queued when it found nothing, or with no sink
+    /// to tell.
+    fn report(
+        &self,
+        mark: Option<usize>,
+        notice: fn(ResyncPaths) -> StageNotice,
+        found: Vec<sdf::Path>,
+        hooks: &dyn CompositionHooks,
+    ) {
         if found.is_empty() || !hooks.delivers() {
             return;
         }
-        let mut discovered = self.discovered.borrow_mut();
-        discovered.subtrees.extend(found.subtrees);
-        discovered.prims.extend(found.prims);
+        let notice = notice(ResyncPaths::from_subtrees(found));
+        match mark {
+            Some(mark) => self.queue_at(mark, notice, hooks),
+            None => self.outbox.borrow_mut().push_back(Notice::Stage(notice)),
+        }
     }
 
-    /// Queues `notice` naming `paths`, what an operation found, behind the
-    /// notices queued before it, for the next delivery to hand the stage's
-    /// sinks. Nothing is queued for no paths, or with no sink to tell.
-    fn report(&self, notice: fn(ResyncPaths) -> StageNotice, mut paths: ResyncPaths, hooks: &dyn CompositionHooks) {
-        if paths.is_empty() || !hooks.delivers() {
-            return;
-        }
-        paths.normalize();
-        self.outbox.borrow_mut().push_back(Notice::Stage(notice(paths)));
+    /// Opens a mutation's notice: queues what operations found before it
+    /// ([`discover`](Self::discover)) as a [`StageNotice::Recomposed`], and
+    /// returns the outbox's length, the mark its own notice goes at
+    /// ([`queue_at`](Self::queue_at)).
+    fn mark(&self, hooks: &dyn CompositionHooks) -> usize {
+        let found = self.discovered.take();
+        self.report(None, StageNotice::Recomposed, found, hooks);
+        self.outbox.borrow().len()
     }
 
     /// Joins `joined`, a layer an edit just sublayered, to the stage, then
@@ -955,7 +1006,7 @@ impl StageComposition {
         committed: sdf::Committed,
         hooks: &dyn CompositionHooks,
     ) {
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         self.intern_layer(joined, hooks, &mut found);
         self.discover(found, hooks);
         self.deliver(committed, hooks);
@@ -996,10 +1047,8 @@ impl StageComposition {
         // an edit the retry rides on may have forgotten their failures.
         self.layers.borrow_mut().clear_failed_loads();
         self.retries.set(self.retries.get() + 1);
-        let mut again = ResyncPaths {
-            subtrees: self.cache.borrow_mut().drop_load_failed_indices(|_| true),
-            ..ResyncPaths::default()
-        };
+        let mark = self.mark(hooks);
+        let mut again = self.cache.borrow_mut().drop_load_failed_indices(|_| true);
         // The sweep goes first: it retires a reclaimed stack's failure
         // diagnostics, so the requeue never demands a sublayer for a stack
         // nothing uses.
@@ -1009,7 +1058,8 @@ impl StageComposition {
         self.settle_work(settled, hooks, &mut again);
         // The stacks the settled prims released are swept too.
         self.reclaim_stale_stacks();
-        self.report(StageNotice::LoadsRetried, again, hooks);
+        again.extend(self.discovered.take());
+        self.report(Some(mark), StageNotice::LoadsRetried, again, hooks);
     }
 
     /// How many times the failed loads were retried
@@ -1133,7 +1183,7 @@ impl StageComposition {
         // edited variables newly select, or a just-authored literal naming an
         // unloaded layer; open them before observers read the settled stage.
         // The prims their joins drop are this transaction's too.
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         self.resolve_recorded_demands(hooks, &mut found);
         // The layer-stack tier's paths are known only after `apply` ran — a
         // vars-only edit resyncs its dependents, and names the subtrees whose
@@ -1350,19 +1400,19 @@ impl StageComposition {
     /// leaves the graph.
     ///
     /// The anchors whose clip sets read the layer, which read it now, join
-    /// `found` as prims.
+    /// `found` as subtrees: a clip set sources values below its anchor.
     fn intern_layer(
         &self,
         layer: sdf::LoadedLayer,
         hooks: &dyn CompositionHooks,
-        found: &mut ResyncPaths,
+        found: &mut Vec<sdf::Path>,
     ) -> (pcp::LayerId, bool) {
         let (id, fresh, named) = self.join_layer(layer, false, hooks);
         let restaled = self
             .cache
             .borrow_mut()
             .invalidate_clip_sources(named.iter().map(String::as_str));
-        found.prims.extend(restaled);
+        found.extend(restaled);
         (id, fresh)
     }
 
@@ -1421,7 +1471,7 @@ impl StageComposition {
     /// pass reads nothing from it rather than asking again.
     ///
     /// Returns whether a layer joined or a failure was newly marked.
-    fn load_clips(&self, clips: &[String], hooks: &dyn CompositionHooks, found: &mut ResyncPaths) -> bool {
+    fn load_clips(&self, clips: &[String], hooks: &dyn CompositionHooks, found: &mut Vec<sdf::Path>) -> bool {
         let _loading = self.begin_load();
         let registry = self.layers.borrow().layer_registry().clone();
         let mut progress = false;
@@ -1449,10 +1499,10 @@ impl StageComposition {
         // invalidation: the only pass that read it as still to open is the
         // one the query loop discards. One that read a recovered clip as
         // missing answered other reads with it, which now change. The anchors
-        // join `found` as prims.
+        // join `found` as subtrees.
         if !recovered.is_empty() {
             let restaled = self.cache.borrow_mut().invalidate_clip_sources(recovered);
-            found.prims.extend(restaled);
+            found.extend(restaled);
         }
         progress
     }
@@ -1475,7 +1525,7 @@ impl StageComposition {
     /// loaded, or promoted from clips only), into the graph's sublayer edges
     /// and relocates before any stack is composed against them. The cached
     /// prims that drops join `found`.
-    fn wire_joined(&self, joined: &HashSet<pcp::LayerId>, found: &mut ResyncPaths) {
+    fn wire_joined(&self, joined: &HashSet<pcp::LayerId>, found: &mut Vec<sdf::Path>) {
         let mut graph = self.layers.borrow_mut();
         // A layer joined, and an asset may have appeared: one recorded as
         // unresolved that the resolver now finds is forgotten, and the
@@ -1489,16 +1539,14 @@ impl StageComposition {
                 .cache
                 .borrow_mut()
                 .drop_load_failed_indices(|asset| resolvable.contains(asset));
-            found.subtrees.extend(dropped);
+            found.extend(dropped);
         }
         let relocated = graph.wire_joined(joined);
         // A joined layer that introduces relocates restructures prims composed
         // against its stack; drop their cached indices so they recompose with
         // the relocates applied.
         if !relocated.is_empty() {
-            found
-                .subtrees
-                .extend(self.cache.borrow_mut().invalidate_layers(&graph, &relocated));
+            found.extend(self.cache.borrow_mut().invalidate_layers(&graph, &relocated));
         }
     }
 
@@ -1509,7 +1557,7 @@ impl StageComposition {
     /// on an earlier pass must not keep the query loop running forever, and a
     /// read failure is never retried, so the kind changes at most once. The
     /// cached prims that drops join `found`.
-    fn record_load_failure(&self, asset_path: &str, failure: pcp::LoadFailure, found: &mut ResyncPaths) -> bool {
+    fn record_load_failure(&self, asset_path: &str, failure: pcp::LoadFailure, found: &mut Vec<sdf::Path>) -> bool {
         let mut graph = self.layers.borrow_mut();
         let prior = graph.load_failure(asset_path).map(mem::discriminant);
         let changed = prior != Some(mem::discriminant(&failure));
@@ -1521,7 +1569,7 @@ impl StageComposition {
                 .cache
                 .borrow_mut()
                 .drop_load_failed_indices(|asset| asset == asset_path);
-            found.subtrees.extend(dropped);
+            found.extend(dropped);
         }
         changed
     }
@@ -1545,7 +1593,7 @@ impl StageComposition {
     /// newly marked failed — so the caller recomposes once more; a demanded path
     /// already loaded or already known unreadable is skipped. The cached
     /// prims the loads drop or restale join `found`.
-    fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks, found: &mut ResyncPaths) -> bool {
+    fn load_demanded(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks, found: &mut Vec<sdf::Path>) -> bool {
         if pending.is_empty() {
             return false;
         }
@@ -1700,7 +1748,7 @@ impl StageComposition {
         &self,
         mut demands: Vec<pcp::SublayerDemand>,
         hooks: &dyn CompositionHooks,
-        found: &mut ResyncPaths,
+        found: &mut Vec<sdf::Path>,
     ) -> bool {
         let _loading = self.begin_load();
         // One cache scope spans the pass. Every probe and load of a package
@@ -1794,9 +1842,7 @@ impl StageComposition {
             let mut graph = self.layers.borrow_mut();
             let affected = graph.recompute_sublayers(Some(&opened_parents)).affected;
             if !affected.is_empty() {
-                found
-                    .subtrees
-                    .extend(self.cache.borrow_mut().invalidate_layers(&graph, &affected));
+                found.extend(self.cache.borrow_mut().invalidate_layers(&graph, &affected));
             }
             demands = graph.take_sublayer_demands();
         }
@@ -1820,7 +1866,7 @@ impl StageComposition {
         // The passes build indices through the resolver, and the loads
         // between them run it too.
         let mut query = query;
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         let result = self.guarded(Poisoned::Compose, || {
             loop {
                 let evictions = self.cache.borrow().evictions();
@@ -1877,7 +1923,7 @@ impl StageComposition {
         mut pass: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         settled: Settled,
         hooks: &dyn CompositionHooks,
-        found: &mut ResyncPaths,
+        found: &mut Vec<sdf::Path>,
     ) -> Result<Result<T, pcp::QueryError>, Interrupted> {
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
@@ -1948,8 +1994,9 @@ impl StageComposition {
     }
 
     /// Applies a muted-set mutation and recomposes when it reports a change,
-    /// returning the canonical identifier whose muted state toggled and the
-    /// paths the toggle invalidated (`None` when the set was unchanged).
+    /// then tells the stage's sinks: the canonical identifier whose muted
+    /// state toggled (to `muted`) and the paths the toggle invalidated, ahead
+    /// of what its settling reconciled. An unchanged set tells nothing.
     ///
     /// Drains first so the mute recomposes against a current graph and cache
     /// rather than stranding queued changes, then resolves any `${VAR}`
@@ -1958,8 +2005,9 @@ impl StageComposition {
     pub(super) fn apply_mute(
         &self,
         mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<pcp::MuteChange>,
+        muted: bool,
         hooks: &dyn CompositionHooks,
-    ) -> Option<(String, ResyncPaths)> {
+    ) {
         // A mute rebuilds and may load the stage's layers, which a read or an
         // edit of one of them holds.
         assert!(
@@ -1968,12 +2016,14 @@ impl StageComposition {
         );
         self.process_pending(hooks);
         if !self.sound() {
-            return None;
+            return;
         }
         // From inside a load or a drain the composition is part-built.
         self.assert_settled();
         self.begin_round();
-        let (changed, mut resynced, demands) = self.guarded(Poisoned::Compose, || {
+        // The toggle's notice goes ahead of the edits its settling reconciles.
+        let mark = self.mark(hooks);
+        let Some((changed, mut resynced, demands)) = self.guarded(Poisoned::Compose, || {
             self.update_pair(|graph, cache| {
                 let change = mutate(graph)?;
                 // The mutation already rebuilt the graph's sublayer stacks, relocates, and
@@ -1986,26 +2036,53 @@ impl StageComposition {
                 let resynced = cache.invalidate_muting(&change);
                 Some((change.changed, resynced, graph.take_sublayer_demands()))
             })
-        })?;
+        }) else {
+            return;
+        };
         // An unmuted sublayer that left the graph while muted has no fanout to
         // name the prims it reaches: it joins again here, and the prims its
         // join dropped are the resyncs it adds.
         let mut found = self.guarded(Poisoned::Compose, || {
-            let mut found = ResyncPaths::default();
+            let mut found = Vec::new();
             self.resolve_sublayer_demands(demands, hooks, &mut found);
             // The prims the mute dropped settle before the stacks they held
             // are swept.
             self.settle_work(Settled::Required, hooks, &mut found);
             found
         });
-        found.subtrees.append(&mut resynced);
+        found.append(&mut resynced);
         // A mute can flip a stack's variable source (its authored variables
         // stop contributing), stranding the old-keyed instance — the mute path
         // discards variable deltas, so the sweep is what reclaims it. Discarding
         // them costs no notice; `LayerGraph::recompose_for_mute` carries the
         // argument.
         self.reclaim(hooks, pcp::Reclaim::Muted);
-        Some((changed, found))
+        found.extend(self.discovered.take());
+        if hooks.delivers() {
+            // TODO(perf): a mute that reaches the root layer hands over every
+            // cached index, so this reduction is `keep_ancestors` at its worst
+            // case — see the `sdf::PathTable` covering set noted there.
+            let notice = StageNotice::Muting {
+                layer: changed,
+                muted,
+                resynced: ResyncPaths::from_subtrees(found),
+            };
+            self.queue_at(mark, notice, hooks);
+        }
+        self.process_pending(hooks);
+    }
+
+    /// Queues `notice` for the stage's sinks at `mark`, the outbox's length
+    /// when the operation it reports began: ahead of the notices of edits
+    /// the operation itself reconciled. Nothing is queued with no sink to
+    /// tell.
+    fn queue_at(&self, mark: usize, notice: StageNotice, hooks: &dyn CompositionHooks) {
+        if !hooks.delivers() {
+            return;
+        }
+        let mut outbox = self.outbox.borrow_mut();
+        let at = mark.min(outbox.len());
+        outbox.insert(at, Notice::Stage(notice));
     }
 
     /// Resolves the layer stack an edit target authors into, loading whatever
@@ -2029,7 +2106,7 @@ impl StageComposition {
         hooks: &dyn CompositionHooks,
     ) -> Result<pcp::LayerStackId, String> {
         if let Some(identity) = authoring {
-            let mut found = ResyncPaths::default();
+            let mut found = Vec::new();
             let resolved = self.guarded(Poisoned::Compose, || {
                 loop {
                     let demand = match self.layers.borrow().resolve_stack_identity(&identity) {
@@ -2063,7 +2140,7 @@ impl StageComposition {
             let id = graph.intern_external(target_layer, pcp::LayerStackId::ROOT).0;
             (id, graph.take_sublayer_demands())
         };
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         self.resolve_sublayer_demands(demands, hooks, &mut found);
         self.discover(found, hooks);
         Ok(id)
@@ -2072,7 +2149,7 @@ impl StageComposition {
     /// Opens whatever sublayers the graph has recorded as demanded, reporting
     /// whether any layer joined. The single seam between a graph mutation and
     /// the `${VAR}` selections it newly exposed.
-    fn resolve_recorded_demands(&self, hooks: &dyn CompositionHooks, found: &mut ResyncPaths) -> bool {
+    fn resolve_recorded_demands(&self, hooks: &dyn CompositionHooks, found: &mut Vec<sdf::Path>) -> bool {
         let demands = self.layers.borrow_mut().take_sublayer_demands();
         self.resolve_sublayer_demands(demands, hooks, found)
     }
@@ -2103,7 +2180,7 @@ impl StageComposition {
         let mut root = None;
         let mut session_count = 0;
         // A stage opening has no sink to tell what its loads find.
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         for (i, layer) in layers.into_iter().enumerate() {
             let (id, fresh) = self.intern_layer(layer, hooks, &mut found);
             if i == session_layer_count {
@@ -2174,22 +2251,19 @@ impl StageComposition {
     /// Reads the load rules, applies `edit`, installs the result, and reclaims
     /// the stacks the change stranded — the deliberate mutation entry.
     ///
-    /// Returns what the change means to the stage's sinks, normalized: empty
-    /// for a no-op edit, or when no sink listens. An unload can leave
-    /// payload-target stacks
-    /// unreferenced for a long stretch, so this reclaims while the seam is
-    /// quiet, whenever accumulated registry churn has ripened the trigger.
-    pub(super) fn install_load_rules(
-        &self,
-        edit: impl FnOnce(&mut pcp::LoadRules),
-        hooks: &dyn CompositionHooks,
-    ) -> ResyncPaths {
+    /// Then tells the stage's sinks what the change means, normalized,
+    /// ahead of what its settling reconciled ([`StageNotice::LoadRules`]); a
+    /// no-op edit tells nothing, and what its settling found waits for the
+    /// next drain. An unload can leave payload-target stacks unreferenced
+    /// for a long stretch, so this reclaims while the seam is quiet,
+    /// whenever accumulated registry churn has ripened the trigger.
+    pub(super) fn install_load_rules(&self, edit: impl FnOnce(&mut pcp::LoadRules), hooks: &dyn CompositionHooks) {
         // Drain before reading: a queued edit's notification may itself install
         // load rules, and `edit` is applied to whatever this read returns, so a
         // pre-drain snapshot would overwrite that change on the way back out.
         self.process_pending(hooks);
         if !self.sound() {
-            return ResyncPaths::default();
+            return;
         }
         self.begin_round();
         let mut rules = self.settled_cache().load_rules().clone();
@@ -2199,18 +2273,24 @@ impl StageComposition {
             false => HashSet::new(),
         };
         let victims = self.swap_load_rules(rules, hooks);
+        // The change's notice goes ahead of the edits its settling reconciles.
+        let mark = self.mark(hooks);
         // The prims the change dropped settle before the stacks they held are
         // swept: an unloaded payload's prims are retired, and a loaded one's
         // rebuilt.
-        let mut found = ResyncPaths::default();
+        let mut found = Vec::new();
         self.guarded(Poisoned::Compose, || {
             self.settle_work(Settled::Required, hooks, &mut found);
         });
         self.reclaim(hooks, pcp::Reclaim::Unused);
-        if !hooks.delivers() {
-            return ResyncPaths::default();
+        found.extend(self.discovered.take());
+        if victims.subtrees.is_empty() && victims.ancestors.is_empty() {
+            self.discover(found, hooks);
+        } else if hooks.delivers() {
+            let paths = classify(victims, &payloads, found);
+            self.queue_at(mark, StageNotice::LoadRules(paths), hooks);
         }
-        classify(victims, &payloads, found)
+        self.process_pending(hooks);
     }
 
     /// The ancestors installing `rules` would flip the inclusion of, that

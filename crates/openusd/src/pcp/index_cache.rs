@@ -1384,12 +1384,6 @@ impl IndexCache {
         self.store.ownership_lost()
     }
 
-    /// The instances that shared the prototypes rooted at `roots`, which an
-    /// invalidation retired.
-    pub(super) fn retired_instances(&self, roots: &[Path]) -> Vec<Path> {
-        self.store.retired_instances(roots)
-    }
-
     /// Whether the work set holds a prim to settle, or a clip anchor waits
     /// for its sets to be refreshed
     /// ([`settle_pass`](Self::settle_pass)).
@@ -2414,7 +2408,9 @@ impl IndexCache {
     /// remains. Drops exactly the cached indices whose composition reads an
     /// `affected` layer, leaving the rest warm.
     ///
-    /// Returns the paths whose indices it dropped, for the caller to report.
+    /// Returns what it invalidated, for the caller to report: the paths whose
+    /// indices it dropped, with the prototype roots retired and the instances
+    /// that shared them ([`drop_index_victims`](Self::drop_index_victims)).
     pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
         self.retire_query_errors();
         self.invalidate_population();
@@ -2431,8 +2427,9 @@ impl IndexCache {
     /// Unmuting such a target drops the referrer's stale index so it recomposes and
     /// the load barrier finally opens the now-unmuted target.
     ///
-    /// Returns everything the toggle dropped — the indices above and the
-    /// prototype roots retired with them — for a caller to report as-is.
+    /// Returns everything the toggle invalidated — the indices above, the
+    /// prototype roots retired with them and the instances that shared
+    /// those — for a caller to report as-is.
     pub(crate) fn invalidate_muting(&mut self, change: &MuteChange) -> Vec<Path> {
         self.bump_edit_epoch();
         self.retire_query_errors();
@@ -2460,23 +2457,30 @@ impl IndexCache {
 
     /// Drops each victim prim index and the prototypes its drop touches — the tail
     /// shared by [`drop_indices_touching_layers`](Self::drop_indices_touching_layers),
-    /// [`invalidate_muting`](Self::invalidate_muting),
-    /// [`set_load_rules`](Self::set_load_rules), and the `expressionVariables`
-    /// delta path (`change::apply_vars_deltas`).
+    /// [`invalidate_muting`](Self::invalidate_muting) and the
+    /// `expressionVariables` delta path (`change::apply_vars_deltas`).
     ///
-    /// Returns everything the drop invalidated: `victims` and the prototype roots
-    /// retired with them, which no walk over `victims` could reach (see
-    /// [`invalidate_prototypes`](Self::invalidate_prototypes)).
+    /// Returns everything the drop invalidated: `victims` and what
+    /// [`drop_retiring`](Self::drop_retiring) retired with them.
     pub(super) fn drop_index_victims(&mut self, mut victims: Vec<Path>) -> Vec<Path> {
         if victims.is_empty() {
             return victims;
         }
-        // Evict prototypes whose instances or roots are among the victims, as the
-        // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
-        let retired = self.invalidate_prototypes(&victims);
-        self.drop_index_subtrees(&victims);
+        let retired = self.drop_retiring(&victims);
         victims.extend(retired);
         victims
+    }
+
+    /// Drops the indices at and under `victims` and evicts the prototypes
+    /// whose instances or roots are among them, as the prim-tier path in
+    /// [`Changes::apply`](super::change::Changes::apply) does. Returns what
+    /// [`invalidate_prototypes`](Self::invalidate_prototypes) retired: the
+    /// prototype roots, which no walk over `victims` could reach, and the
+    /// instances that shared them.
+    pub(super) fn drop_retiring(&mut self, victims: &[Path]) -> Vec<Path> {
+        let retired = self.invalidate_prototypes(victims);
+        self.drop_index_subtrees(victims);
+        retired
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -4437,7 +4441,6 @@ fn unculled_entry(index: PrimIndex, context: CompositionContext) -> PrimEntry {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::slice;
     use std::sync::Arc;
 
     use crate::Result;
@@ -6799,11 +6802,21 @@ def "Model" (
         assert_eq!(registered.len(), 3, "one prototype per nesting level");
 
         let mut expected = registered;
-        expected.push(sdf::path("/A")?);
+        // The instances of each: the victim, and the nested ones inside the
+        // enclosing prototypes.
+        expected.extend([
+            sdf::path("/A")?,
+            sdf::path("/__Prototype_0/Inner")?,
+            sdf::path("/__Prototype_1/Nested")?,
+        ]);
         expected.sort();
         let mut reported = cache.drop_index_victims(vec![sdf::path("/A")?]);
         reported.sort();
-        assert_eq!(reported, expected, "the victim and every root the cascade retired");
+        reported.dedup();
+        assert_eq!(
+            reported, expected,
+            "the victim, every root the cascade retired, and their instances"
+        );
         Ok(())
     }
 
@@ -8440,8 +8453,12 @@ def "B" (
         let shared = cache.prototype_of(&graph.read_view(), &sdf::path("/B")?)?;
         assert_eq!(shared.as_ref(), Some(&root), "/A and /B share one prototype");
         compose(&graph, &mut cache, &[&format!("{root}/Part")])?;
-        let roots = cache.invalidate_prototypes(&[sdf::path("/A")?]);
-        assert_eq!(roots, slice::from_ref(&root));
+        let retired = cache.invalidate_prototypes(&[sdf::path("/A")?]);
+        assert_eq!(
+            retired,
+            [root.clone(), sdf::path("/A")?, sdf::path("/B")?],
+            "the root, then the instances that shared it"
+        );
         let recorded = evicted(&cache);
         let under_root = recorded.iter().filter(|path| path.starts_with(root.as_str()));
         assert_eq!(under_root.count(), 2, "the root and its part, once: {recorded:?}");
@@ -8965,7 +8982,9 @@ def "B" (
         compose(&graph, &mut cache, &[&format!("{inner}/Part")])?;
 
         let retired = cache.invalidate_prototypes(&[sdf::path("/A")?]);
-        assert_eq!(retired, [outer.clone(), inner.clone()], "the cascade retires both");
+        let instances = [sdf::path("/A")?, sdf::path("/B")?, inner_instance.clone()];
+        assert_eq!(retired[..2], [outer.clone(), inner.clone()], "the cascade retires both");
+        assert_eq!(retired[2..], instances, "then the instances that shared them");
         cache.settle_pass(&view)?;
 
         let outer = cache.prototype_of(&view, &sdf::path("/A")?)?.expect("an instance");
