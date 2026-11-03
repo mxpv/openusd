@@ -802,6 +802,49 @@ fn retry_reports_recovery() -> Result<()> {
     Ok(())
 }
 
+/// A mute that drops a prim with a failed load retries that load for every
+/// prim that recorded it, and the toggle's notice names them all.
+#[test]
+fn mute_names_other_referrers() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"P\" (\n    references = @ref.usda@</R>\n) {}\n\
+         def \"Q\" (\n    references = @target.usda@\n) {}\n",
+    )?;
+    fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0\n(\n    subLayers = [@sub.usda@]\n)\ndef \"R\" {}\n",
+    )?;
+    fs::write(
+        dir.path().join("sub.usda"),
+        "#usda 1.0\nover \"R\" (\n    references = @target.usda@\n) {}\n",
+    )?;
+    fs::write(dir.path().join("target.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert!(stage.prim("/P")?.is_valid()? && stage.prim("/Q")?.is_valid()?);
+    let heard: Heard = Rc::new(RefCell::new(Vec::new()));
+    let (muted, recomposed) = (Rc::clone(&heard), Rc::clone(&heard));
+    stage.add_sink(RecordingSink {
+        muting: Some(Box::new(move |_, _, _, resynced| {
+            muted.borrow_mut().push(("muted", resynced.subtrees.to_vec()));
+        })),
+        recomposed: Some(Box::new(move |_, resynced| {
+            recomposed.borrow_mut().push(("recomposed", resynced.subtrees.to_vec()));
+        })),
+        ..Default::default()
+    });
+    let sub = stage
+        .layer_identifiers()
+        .into_iter()
+        .find(|identifier| identifier.ends_with("sub.usda"))
+        .expect("the sublayer");
+
+    stage.mute_layer(sub);
+    assert_eq!(*heard.borrow(), [("muted", paths(&["/P", "/Q"]))]);
+    Ok(())
+}
+
 /// A retry from inside a read of the registry's layers fails with `Busy`
 /// and keeps the failures, so a later retry loads the repaired sublayer.
 #[test]

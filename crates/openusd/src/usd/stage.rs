@@ -7745,6 +7745,61 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
+    /// A retry's notice follows what reads found before it.
+    #[test]
+    fn retry_after_discovery() -> Result<()> {
+        struct Order(Rc<RefCell<Vec<&'static str>>>);
+        impl StageSink for Order {
+            fn recomposed(&self, _: &Stage, _: usd::Resynced<'_>) {
+                self.0.borrow_mut().push("recomposed");
+            }
+            fn loads_retried(&self, _: &Stage, _: usd::Resynced<'_>) {
+                self.0.borrow_mut().push("retried");
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let root = clip_fixture(dir.path(), "late.usda")?;
+        let text = fs::read_to_string(&root)?;
+        fs::write(&root, format!("{text}def \"P\" (references = @./broken.usda@) {{}}\n"))?;
+        fs::write(dir.path().join("broken.usda"), "#usda 1.0\ndef Broken {{{ not valid\n")?;
+        let stage = Stage::open(&root)?;
+        assert!(stage.prim("/P")?.is_valid()?);
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Order(Rc::clone(&heard)));
+        assert_eq!(clip_x(&stage)?, None);
+        fs::copy(dir.path().join("clip.usda"), dir.path().join("late.usda"))?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+
+        stage.retry_loads()?;
+        assert_eq!(*heard.borrow(), ["recomposed", "retried"]);
+        Ok(())
+    }
+
+    /// A flush inside a read of the stage's layers fails with `Busy`, and
+    /// what reads found waits for the next one.
+    #[test]
+    fn flush_busy_in_read() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, heard) = clip_missing(dir.path())?;
+        assert_eq!(clip_x(&stage)?, Some(5.0));
+        let handle = stage
+            .layer_handle(stage.root_layer().identifier())
+            .expect("the root layer");
+
+        let inside = handle.read(|_| stage.flush())?;
+        assert!(
+            matches!(
+                inside,
+                Err(crate::Error::Query(pcp::QueryError::Layer(ref e))) if matches!(**e, sdf::LayerError::Busy)
+            ),
+            "{inside:?}"
+        );
+        assert!(heard.borrow().is_empty());
+        stage.flush()?;
+        assert_eq!(*heard.borrow(), [vec![sdf::path("/A")?]]);
+        Ok(())
+    }
+
     /// Adding a sink delivers what reads found to the sinks already there,
     /// and the new one hears none of it.
     #[test]
