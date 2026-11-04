@@ -544,13 +544,21 @@ impl Changes {
     ///
     /// Effects accumulate rather than compete: a `connectionPaths` edit both
     /// moves a composed value and restales a target memo. Every entry is
-    /// classified — one that only reorders child names lands on no effect at
-    /// all, which is a decision rather than a gap.
+    /// classified — one that only maintains child names (a child spec came or
+    /// went, which the child's own entry reports) lands on no effect at all,
+    /// which is a decision rather than a gap. A reorder of a prim's children or
+    /// properties is not bookkeeping: it names no other entry, so it resyncs
+    /// the prim, as C++ `UsdStage` does for `didReorderChildren` and
+    /// `didReorderProperties`. Composition already reads the new order, so it
+    /// invalidates nothing.
     fn effects_of(path: &Path, entry: &ChangeEntry) -> InvalidationEffects {
         let mut effects = InvalidationEffects::default();
         if entry.is_child_bookkeeping() {
             return effects;
         }
+        let reorders = entry
+            .flags
+            .intersects(sdf::ChangeFlags::REORDER_CHILDREN | sdf::ChangeFlags::REORDER_PROPERTIES);
         if path.is_abs_root() {
             effects.stack = Self::stack_flags(entry);
             effects.default_prim = entry.changed(FieldKey::DefaultPrim.as_str());
@@ -562,7 +570,7 @@ impl Changes {
             // `customLayerData`, anything read off it — moves like any other
             // value.
             effects.value = Some(ValueScope::Prim);
-            effects.report = Some(Report::Info);
+            effects.report = Some(if reorders { Report::Resync } else { Report::Info });
             return effects;
         }
         if path.is_property() {
@@ -581,8 +589,12 @@ impl Changes {
 
         // Every prim entry that authored something names itself in the notice.
         // A significant one is named twice over — the resync tier reports it as
-        // well — and the reporting layer drops the weaker of the two.
-        effects.report = Some(Report::Info);
+        // well — and the reporting layer drops the weaker of the two. A reorder
+        // names it as a resync.
+        effects.report = Some(if reorders { Report::Resync } else { Report::Info });
+        if reorders && entry.authored_fields().next().is_none() {
+            return effects;
+        }
 
         // The fields a prim's schema identity is composed from. `apiSchemas` is
         // significant as well, so this rides alongside that effect rather than

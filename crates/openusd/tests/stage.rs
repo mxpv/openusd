@@ -14738,5 +14738,84 @@ fn load_skips_siblings() -> Result<()> {
     let builds = stage.tally().builds - before;
     assert!(builds <= 2, "the load rebuilt {builds} indices");
     assert!(stage.prim("/world/element_0/Child")?.is_valid()?);
+
+    Ok(())
+}
+
+/// Sets `field` on the prim spec at `path` in `stage`'s root layer, as a layer
+/// diff replays it.
+fn set_root_layer_field(stage: &Stage, path: &str, field: &str, value: vt::Value) -> Result<()> {
+    let root = stage.root_layer().identifier().to_owned();
+    let diff = usd::Diff {
+        edits: vec![usd::Edit::SetField {
+            path: sdf::path(path)?,
+            spec_type: sdf::SpecType::Prim,
+            field: field.into(),
+            value,
+        }],
+        mapping: None,
+    };
+    stage.apply_diff(&diff, usd::ApplyMode::ExactLayer(&root))?;
+    Ok(())
+}
+
+/// A layer listing a prim's children in another order reorders the composed
+/// children, and resyncs the prim, as C++ `UsdStage` does for an entry's
+/// `didReorderChildren`: no other entry names the change, so a consumer that
+/// holds the children (a scene index) must hear of it.
+#[test]
+fn reorder_children_resync() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/W/a")?;
+    stage.define_prim("/W/b")?;
+    let notices = capture_notices(&stage);
+    set_root_layer_field(
+        &stage,
+        "/W",
+        "primChildren",
+        vt::Value::TokenVec(vec!["b".into(), "a".into()]),
+    )?;
+    let children: Vec<String> = stage
+        .prim("/W")?
+        .children()?
+        .iter()
+        .map(|c| c.path().to_string())
+        .collect();
+    assert_eq!(children, ["/W/b", "/W/a"]);
+    let resynced = &notices.borrow().resynced;
+    assert!(resynced.contains(&sdf::path("/W")?), "{resynced:?}");
+    Ok(())
+}
+
+/// A layer listing a prim's properties in another order resyncs the prim
+/// (C++ `didReorderProperties`).
+#[test]
+fn reorder_properties_resync() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.create_attribute("/W.x", "double")?;
+    stage.create_attribute("/W.y", "double")?;
+    let notices = capture_notices(&stage);
+    set_root_layer_field(
+        &stage,
+        "/W",
+        "propertyChildren",
+        vt::Value::TokenVec(vec!["y".into(), "x".into()]),
+    )?;
+    let resynced = &notices.borrow().resynced;
+    assert!(resynced.contains(&sdf::path("/W")?), "{resynced:?}");
+    Ok(())
+}
+
+/// A child added is reported at the child: the parent's `primChildren`
+/// growing is bookkeeping, not a reorder, and does not resync the parent.
+#[test]
+fn child_add_parent_unsynced() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/W/a")?;
+    let notices = capture_notices(&stage);
+    stage.define_prim("/W/b")?;
+    let resynced = &notices.borrow().resynced;
+    assert!(resynced.contains(&sdf::path("/W/b")?), "{resynced:?}");
+    assert!(!resynced.contains(&sdf::path("/W")?), "{resynced:?}");
     Ok(())
 }

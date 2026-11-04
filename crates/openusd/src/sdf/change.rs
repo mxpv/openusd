@@ -108,6 +108,12 @@ bitflags! {
         const CHANGE_RELATIONSHIP_TARGETS = 1 << 6;
         /// Attribute connection targets were edited.
         const CHANGE_ATTRIBUTE_CONNECTION = 1 << 7;
+        /// A prim's child prims were reordered: its `primChildren` lists the
+        /// same names in another order (C++ `didReorderChildren`).
+        const REORDER_CHILDREN = 1 << 8;
+        /// A prim's properties were reordered: its `propertyChildren` lists the
+        /// same names in another order (C++ `didReorderProperties`).
+        const REORDER_PROPERTIES = 1 << 9;
 
         /// Set bit when the change adds or removes a non-inert prim spec
         /// (anything that may shift composition graph topology).
@@ -313,11 +319,7 @@ impl ChangeList {
                                 }
                                 match replaced {
                                     false => entry.note(field, FieldChange::Presence),
-                                    true => {
-                                        if let Some(change) = field_change(base, path, field, value) {
-                                            entry.note(field, change);
-                                        }
-                                    }
+                                    true => note_field_change(&mut entry, base, path, field, value),
                                 }
                             }
                         }
@@ -326,9 +328,7 @@ impl ChangeList {
                             // no add flag; record each authored field that differs
                             // from the base — all of them on a fresh create.
                             for (field, value) in &spec.fields {
-                                if let Some(change) = field_change(base, path, field, value) {
-                                    entry.note(field, change);
-                                }
+                                note_field_change(&mut entry, base, path, field, value);
                             }
                         }
                     }
@@ -347,9 +347,7 @@ impl ChangeList {
                 Patch::Tombstone => note_removal(&mut entry, base, path),
                 Patch::Edited { set, erased } => {
                     for (field, value) in set {
-                        if let Some(change) = field_change(base, path, field, value) {
-                            entry.note(field, change);
-                        }
+                        note_field_change(&mut entry, base, path, field, value);
                     }
                     // CowData only tombstones a field the base actually held, so
                     // every erased field is a real removal worth recording.
@@ -365,6 +363,47 @@ impl ChangeList {
             }
         }
     }
+}
+
+/// Notes in `entry` how staging `value` at `path`.`field` changes the base
+/// ([`field_change`]), and flags a reorder: a `primChildren` or
+/// `propertyChildren` list holding the same names as before in another order.
+/// Sdf maintains those lists as bookkeeping when a child spec comes or goes,
+/// which the child's own entry reports; a reorder names no other entry, and
+/// C++ marks it `didReorderChildren` / `didReorderProperties` for `UsdStage`
+/// to resync the prim.
+fn note_field_change(entry: &mut ChangeEntry, base: &dyn AbstractData, path: &Path, field: &str, value: &Value) {
+    let Some(change) = field_change(base, path, field, value) else {
+        return;
+    };
+    let reorder = if field == super::ChildrenKey::PrimChildren.as_str() {
+        ChangeFlags::REORDER_CHILDREN
+    } else if field == super::ChildrenKey::PropertyChildren.as_str() {
+        ChangeFlags::REORDER_PROPERTIES
+    } else {
+        ChangeFlags::empty()
+    };
+    if !reorder.is_empty()
+        && change == FieldChange::Value
+        && let (Ok(Some(held)), Value::TokenVec(new)) = (base.try_field(path, field), value)
+        && let Value::TokenVec(old) = &*held
+        && is_permutation(old, new)
+    {
+        entry.flags |= reorder;
+    }
+    entry.note(field, change);
+}
+
+/// Whether `new` holds exactly the names of `old`, each as often.
+fn is_permutation(old: &[tf::Token], new: &[tf::Token]) -> bool {
+    if old.len() != new.len() {
+        return false;
+    }
+    let mut old: Vec<&str> = old.iter().map(tf::Token::as_str).collect();
+    let mut new: Vec<&str> = new.iter().map(tf::Token::as_str).collect();
+    old.sort_unstable();
+    new.sort_unstable();
+    old == new
 }
 
 /// How staging `value` at `path`.`field` changes the base, or `None` when it
