@@ -18,11 +18,11 @@
 // reference shape. Today no `Layer` method renames a prim, so the field
 // would have no producer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use bitflags::bitflags;
 
-use super::{AbstractData, CowData, FieldKey, Patch, Path, SpecData, SpecType, Specifier};
+use super::{AbstractData, ChildrenKey, CowData, FieldKey, Patch, Path, SpecData, SpecType, Specifier};
 use crate::tf;
 use crate::vt::Value;
 
@@ -82,6 +82,9 @@ pub enum FieldChange {
     Presence,
     /// The field was authored before and after, and now holds a different value.
     Value,
+    /// A `primChildren` or `propertyChildren` list holds the same names as
+    /// before in another order (C++ `_IsOrderChangeOnly`).
+    Order,
 }
 
 bitflags! {
@@ -108,11 +111,13 @@ bitflags! {
         const CHANGE_RELATIONSHIP_TARGETS = 1 << 6;
         /// Attribute connection targets were edited.
         const CHANGE_ATTRIBUTE_CONNECTION = 1 << 7;
-        /// A prim's child prims were reordered: its `primChildren` lists the
-        /// same names in another order (C++ `didReorderChildren`).
+        /// A prim's child prims were reordered: its `primOrder` changed, or its
+        /// `primChildren` lists the same names in another order (C++
+        /// `didReorderChildren`).
         const REORDER_CHILDREN = 1 << 8;
-        /// A prim's properties were reordered: its `propertyChildren` lists the
-        /// same names in another order (C++ `didReorderProperties`).
+        /// A prim's properties were reordered: its `propertyOrder` changed, or
+        /// its `propertyChildren` lists the same names in another order (C++
+        /// `didReorderProperties`).
         const REORDER_PROPERTIES = 1 << 9;
 
         /// Set bit when the change adds or removes a non-inert prim spec
@@ -190,6 +195,15 @@ impl ChangeEntry {
     /// lists.
     pub fn authored_fields(&self) -> impl Iterator<Item = &tf::Token> {
         self.info_changed().filter(|f| !super::is_children_field(f.as_str()))
+    }
+
+    /// The fields a replay of this entry sets: the
+    /// [`authored_fields`](Self::authored_fields) and each child-name list it
+    /// reordered ([`FieldChange::Order`]).
+    pub fn replayed_fields(&self) -> impl Iterator<Item = &tf::Token> {
+        self.fields()
+            .filter(|(field, change)| *change == FieldChange::Order || !super::is_children_field(field.as_str()))
+            .map(|(field, _)| field)
     }
 }
 
@@ -318,7 +332,7 @@ impl ChangeList {
                                     continue;
                                 }
                                 match replaced {
-                                    false => entry.note(field, FieldChange::Presence),
+                                    false => note_presence(&mut entry, field),
                                     true => note_field_change(&mut entry, base, path, field, value),
                                 }
                             }
@@ -339,7 +353,7 @@ impl ChangeList {
                     if replaced {
                         for field in base_fields(base, path) {
                             if !spec.fields.iter().any(|(authored, _)| *authored == field) {
-                                entry.note(&field, FieldChange::Presence);
+                                note_presence(&mut entry, &field);
                             }
                         }
                     }
@@ -352,7 +366,7 @@ impl ChangeList {
                     // CowData only tombstones a field the base actually held, so
                     // every erased field is a real removal worth recording.
                     for field in erased {
-                        entry.note(field, FieldChange::Presence);
+                        note_presence(&mut entry, field);
                     }
                 }
             }
@@ -365,60 +379,71 @@ impl ChangeList {
     }
 }
 
-/// Notes in `entry` how staging `value` at `path`.`field` changes the base
-/// ([`field_change`]), and flags a reorder: a `primChildren` or
-/// `propertyChildren` list holding the same names as before in another order.
-/// Sdf maintains those lists as bookkeeping when a child spec comes or goes,
-/// which the child's own entry reports; a reorder names no other entry, and
-/// C++ marks it `didReorderChildren` / `didReorderProperties` for `UsdStage`
-/// to resync the prim.
+/// Notes in `entry` how staging `value` at `path`.`field` changes the base,
+/// with the reorder it makes. Re-authoring an unchanged value records no
+/// change.
 fn note_field_change(entry: &mut ChangeEntry, base: &dyn AbstractData, path: &Path, field: &str, value: &Value) {
-    let Some(change) = field_change(base, path, field, value) else {
-        return;
+    let held = base.try_field(path, field);
+    let change = match &held {
+        Ok(None) => FieldChange::Presence,
+        Ok(Some(held)) if **held != *value => FieldChange::Value,
+        Ok(Some(_)) => return,
+        // A backend that cannot read the old value cannot say the field is
+        // appearing. Reporting the weaker change keeps a read failure from
+        // invalidating more than the edit itself would.
+        Err(_) => FieldChange::Value,
     };
-    let reorder = if field == super::ChildrenKey::PrimChildren.as_str() {
+    let held = held.ok().flatten();
+    let reorder = children_reorder_flag(field, held.as_deref(), value);
+    entry.flags |= order_flag(field) | reorder;
+    entry.note(field, if reorder.is_empty() { change } else { FieldChange::Order });
+}
+
+/// Notes in `entry` that `field` appeared or was removed, with the reorder it
+/// makes.
+fn note_presence(entry: &mut ChangeEntry, field: &str) {
+    entry.flags |= order_flag(field);
+    entry.note(field, FieldChange::Presence);
+}
+
+/// The reorder flag any change to `primOrder` or `propertyOrder` raises, its
+/// removal included (C++ `Sdf_ChangeManager::DidChangeField`).
+fn order_flag(field: &str) -> ChangeFlags {
+    if field == FieldKey::PrimOrder.as_str() {
         ChangeFlags::REORDER_CHILDREN
-    } else if field == super::ChildrenKey::PropertyChildren.as_str() {
+    } else if field == FieldKey::PropertyOrder.as_str() {
         ChangeFlags::REORDER_PROPERTIES
     } else {
         ChangeFlags::empty()
-    };
-    if !reorder.is_empty()
-        && change == FieldChange::Value
-        && let (Ok(Some(held)), Value::TokenVec(new)) = (base.try_field(path, field), value)
-        && let Value::TokenVec(old) = &*held
-        && is_permutation(old, new)
-    {
-        entry.flags |= reorder;
     }
-    entry.note(field, change);
 }
 
-/// Whether `new` holds exactly the names of `old`, each as often.
+/// The reorder flag staging `new` over `old` in a `primChildren` or
+/// `propertyChildren` list raises: only a list holding the same names in
+/// another order reorders (C++ `_IsOrderChangeOnly`). Sdf maintains those
+/// lists as bookkeeping when a child spec comes or goes, and the child's own
+/// entry reports that.
+fn children_reorder_flag(field: &str, old: Option<&Value>, new: &Value) -> ChangeFlags {
+    let flag = if field == ChildrenKey::PrimChildren.as_str() {
+        ChangeFlags::REORDER_CHILDREN
+    } else if field == ChildrenKey::PropertyChildren.as_str() {
+        ChangeFlags::REORDER_PROPERTIES
+    } else {
+        return ChangeFlags::empty();
+    };
+    match (old, new) {
+        (Some(Value::TokenVec(old)), Value::TokenVec(new)) if is_permutation(old, new) => flag,
+        _ => ChangeFlags::empty(),
+    }
+}
+
+/// Whether `new` holds the names of `old` in some order: the same length and
+/// the same set of names, as C++ `_IsOrderChangeOnly` compares them.
 fn is_permutation(old: &[tf::Token], new: &[tf::Token]) -> bool {
     if old.len() != new.len() {
         return false;
     }
-    let mut old: Vec<&str> = old.iter().map(tf::Token::as_str).collect();
-    let mut new: Vec<&str> = new.iter().map(tf::Token::as_str).collect();
-    old.sort_unstable();
-    new.sort_unstable();
-    old == new
-}
-
-/// How staging `value` at `path`.`field` changes the base, or `None` when it
-/// does not — the value-diff idempotence check, so re-authoring an unchanged
-/// value records no change.
-fn field_change(base: &dyn AbstractData, path: &Path, field: &str, value: &Value) -> Option<FieldChange> {
-    match base.try_field(path, field) {
-        Ok(None) => Some(FieldChange::Presence),
-        Ok(Some(held)) if &*held != value => Some(FieldChange::Value),
-        Ok(Some(_)) => None,
-        // A backend that cannot read the old value cannot say the field is
-        // appearing. Reporting the weaker change keeps a read failure from
-        // invalidating more than the edit itself would.
-        Err(_) => Some(FieldChange::Value),
-    }
+    old.iter().collect::<HashSet<_>>() == new.iter().collect::<HashSet<_>>()
 }
 
 /// Record the removal of the spec currently at `path` in `data` into `entry`:
@@ -946,6 +971,73 @@ mod tests {
             );
         });
         assert!(cl.entries()[0].1.is_child_bookkeeping());
+    }
+
+    /// A child list permuted, or any `primOrder` / `propertyOrder` change
+    /// including its removal by a spec replacement, raises the reorder flag
+    /// (C++ `Sdf_ChangeManager::DidChangeField`). A child list that grows, or
+    /// one removed, raises none.
+    #[test]
+    fn reorder_flag_cases() {
+        fn names(names: &[&str]) -> Value {
+            Value::TokenVec(names.iter().map(|n| tf::Token::from(*n)).collect())
+        }
+        const CHILDREN: &str = "primChildren";
+        const PROPERTIES: &str = "propertyChildren";
+        assert_eq!(CHILDREN, ChildrenKey::PrimChildren.as_str());
+        assert_eq!(PROPERTIES, ChildrenKey::PropertyChildren.as_str());
+        let mut base = Data::new();
+        base.create_spec(p("/P"), SpecType::Prim);
+        base.set_field(&p("/P"), CHILDREN, names(&["a", "b"]));
+        base.set_field(&p("/P"), PROPERTIES, names(&["x", "y"]));
+        base.set_field(&p("/P"), FieldKey::PrimOrder.as_str(), names(&["a", "b"]));
+        type Author = fn(&mut CowData<Data>);
+        let entry = |author: Author| entry_at(&derive(base.clone(), author), "/P").clone();
+
+        let cases: [(Author, ChangeFlags); 7] = [
+            (
+                |c| c.create_spec(p("/P"), SpecType::Prim),
+                ChangeFlags::REORDER_CHILDREN,
+            ),
+            (
+                |c| c.set_field(&p("/P"), CHILDREN, names(&["b", "a"])),
+                ChangeFlags::REORDER_CHILDREN,
+            ),
+            (
+                |c| c.set_field(&p("/P"), CHILDREN, names(&["a", "b", "c"])),
+                ChangeFlags::empty(),
+            ),
+            (|c| c.erase_field(&p("/P"), CHILDREN), ChangeFlags::empty()),
+            (
+                |c| c.set_field(&p("/P"), PROPERTIES, names(&["y", "x"])),
+                ChangeFlags::REORDER_PROPERTIES,
+            ),
+            (
+                |c| c.erase_field(&p("/P"), FieldKey::PrimOrder.as_str()),
+                ChangeFlags::REORDER_CHILDREN,
+            ),
+            (
+                |c| c.set_field(&p("/P"), FieldKey::PropertyOrder.as_str(), names(&["y"])),
+                ChangeFlags::REORDER_PROPERTIES,
+            ),
+        ];
+        for (i, (author, expected)) in cases.into_iter().enumerate() {
+            let reorders = entry(author).flags & (ChangeFlags::REORDER_CHILDREN | ChangeFlags::REORDER_PROPERTIES);
+            assert_eq!(reorders, expected, "case {i}");
+        }
+
+        // A fresh spec authoring `primOrder` reorders as well.
+        let created = derive(Data::rooted(), |c| {
+            PrimSpec::over(c, "/Q").unwrap();
+            c.set_field(&p("/Q"), FieldKey::PrimOrder.as_str(), names(&["a"]));
+        });
+        assert!(has_flag(&created, "/Q", ChangeFlags::REORDER_CHILDREN));
+        // A permuted child list is noted as an order change, which replay
+        // carries; one that grew is not.
+        let permuted = entry(|c| c.set_field(&p("/P"), CHILDREN, names(&["b", "a"])));
+        assert!(permuted.replayed_fields().any(|f| f == CHILDREN));
+        let grown = entry(|c| c.set_field(&p("/P"), CHILDREN, names(&["a", "b", "c"])));
+        assert!(grown.replayed_fields().next().is_none());
     }
 
     /// Authoring a `def` prim tree through [`PrimSpec`] — the real layer path —
