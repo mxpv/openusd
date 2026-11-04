@@ -14,7 +14,8 @@ use crate::{Error, Result, ar};
 /// Rewrites every asset path `layer` authors with `modify`, as C++
 /// `UsdUtilsModifyAssetPaths` does: sublayers, reference and payload list-op
 /// items (deleted ones included), clip template paths, and asset values in
-/// fields, dictionaries, arrays and time samples, across every spec.
+/// fields, dictionaries and arrays, across every spec. An attribute's default
+/// and time samples are walked only when it is typed `asset` or `asset[]`.
 /// Variable expressions and patterns reach `modify` as authored, and each
 /// distinct path reaches it once.
 ///
@@ -137,10 +138,11 @@ pub(super) fn apply_edits(data: &mut dyn AbstractData, edits: Vec<FieldEdit>) {
 
 /// Calls `visit` with every asset path `data` authors, across every spec,
 /// variants included: sublayers, reference and payload list-op items, clip
-/// template paths, and asset values in fields, dictionaries, arrays and time
-/// samples. A path `visit` returns a replacement for is rewritten, an emptied
-/// one removed as [`modify_asset_paths`] describes, and the rewritten fields
-/// are returned for the caller to apply. `layer` names the layer in errors.
+/// template paths, and asset values in fields, dictionaries and arrays, an
+/// attribute's default and time samples only when it is asset-typed. A path
+/// `visit` returns a replacement for is rewritten, an emptied one removed as
+/// [`modify_asset_paths`] describes, and the rewritten fields are returned
+/// for the caller to apply. `layer` names the layer in errors.
 pub(super) fn visit_asset_paths(
     data: &dyn AbstractData,
     layer: &str,
@@ -159,29 +161,23 @@ pub(super) fn visit_asset_paths(
         let mut fields = data.list_fields(&path).unwrap_or_default();
         fields.sort();
         for field in fields {
-            // Plain data holds no path: a crate layer tells so from the
-            // value's type, without decoding its arrays and time samples.
-            if data.holds_plain_data(&path, &field)? {
-                continue;
-            }
-            let value = data.field(&path, &field)?;
-            let holds_paths = match &*value {
-                Value::StringVec(_) => field == FieldKey::SubLayers.as_str(),
-                Value::AssetPath(_)
-                | Value::AssetPathVec(_)
-                | Value::Dictionary(_)
-                | Value::UnregisteredDictionary(_)
-                | Value::ValueVec(_)
-                | Value::TimeSamples(_)
-                | Value::ReferenceListOp(_)
-                | Value::PayloadListOp(_)
-                | Value::Payload(_) => true,
-                _ => false,
+            // As in C++, an attribute's default and time samples are read only
+            // when it is asset-typed. Any other field is read only when its
+            // kind may hold a path; a crate layer reads the kind from the
+            // stored type.
+            let holds_paths = if field == FieldKey::Default.as_str() || field == FieldKey::TimeSamples.as_str() {
+                is_asset_typed(data, &path)?
+            } else {
+                match data.field_kind(&path, &field)? {
+                    Some(vt::ValueKind::StringVec) => field == FieldKey::SubLayers.as_str(),
+                    Some(kind) => may_hold_paths(kind),
+                    None => true,
+                }
             };
             if !holds_paths {
                 continue;
             }
-            let mut value = value.into_owned();
+            let mut value = data.field(&path, &field)?.into_owned();
             let emptied = match &mut value {
                 Value::StringVec(sublayers) => {
                     let removed = walk.sublayers(sublayers)?;
@@ -414,9 +410,35 @@ impl Walk<'_> {
     }
 }
 
+/// Whether the attribute at `path` is typed `asset` or `asset[]`.
+fn is_asset_typed(data: &dyn AbstractData, path: &sdf::Path) -> Result<bool> {
+    Ok(matches!(
+        data.try_field(path, FieldKey::TypeName.as_str())?.as_deref(),
+        Some(Value::Token(name))
+            if sdf::ValueTypeName::ASSET.has_alias(name) || sdf::ValueTypeName::ASSET_ARRAY.has_alias(name)
+    ))
+}
+
+/// Whether a value of `kind` can hold a path [`Walk::value`] visits.
+fn may_hold_paths(kind: vt::ValueKind) -> bool {
+    matches!(
+        kind,
+        vt::ValueKind::AssetPath
+            | vt::ValueKind::AssetPathVec
+            | vt::ValueKind::Dictionary
+            | vt::ValueKind::UnregisteredDictionary
+            | vt::ValueKind::ValueVec
+            | vt::ValueKind::TimeSamples
+            | vt::ValueKind::ReferenceListOp
+            | vt::ValueKind::PayloadListOp
+            | vt::ValueKind::Payload
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::{gf, usdc};
 
     /// The layer `text` parses to, held in a registry of its own.
     fn held(identifier: &str, text: &[u8]) -> Result<sdf::LayerHandle> {
@@ -424,6 +446,55 @@ pub(crate) mod tests {
         Ok(sdf::LayerRegistry::default()
             .adopt(layer)
             .expect("a new registry holds the layer"))
+    }
+
+    /// An attribute's values are visited only when it is asset-typed, as in
+    /// C++, whether its layer is text or crate.
+    #[test]
+    fn asset_typed_values() -> Result<()> {
+        let mut layer = sdf::Data::rooted();
+        layer.create_spec(sdf::Path::new("/A")?, sdf::SpecType::Prim);
+        let points = vec![gf::vec3f(1.0, 2.0, 3.0); 20];
+        let attributes = [
+            ("/A.file", "asset", "default", Value::AssetPath("./file.png".into())),
+            ("/A.extent", "float3[]", "default", Value::Vec3fVec(points.clone())),
+            (
+                "/A.points",
+                "point3f[]",
+                "timeSamples",
+                Value::TimeSamples(vec![(1.0, Value::Vec3fVec(points)), (2.0, Value::ValueBlock)]),
+            ),
+            (
+                "/A.textures",
+                "asset[]",
+                "timeSamples",
+                Value::TimeSamples(vec![(1.0, Value::AssetPathVec(vec!["./tex.png".into()]))]),
+            ),
+            (
+                "/A.stray",
+                "float",
+                "timeSamples",
+                Value::TimeSamples(vec![(1.0, Value::AssetPath("./stray.png".into()))]),
+            ),
+        ];
+        for (path, type_name, field, value) in attributes {
+            let path = sdf::Path::new(path)?;
+            layer.create_spec(path.clone(), sdf::SpecType::Attribute);
+            layer.set_field(&path, FieldKey::TypeName.as_str(), Value::Token(type_name.into()));
+            layer.set_field(&path, field, value);
+        }
+        let file = usdc::CrateWriter::write_file(&layer)?;
+        let crate_data = usdc::CrateData::open(file.bytes().clone(), true)?;
+        for data in [&layer as &dyn AbstractData, &crate_data] {
+            let mut seen = Vec::new();
+            visit_asset_paths(data, "a.usdc", Visit::DISCOVER, |asset| {
+                seen.push(asset.path.to_owned());
+                Ok(None)
+            })?;
+            seen.sort();
+            assert_eq!(seen, ["./file.png", "./tex.png"]);
+        }
+        Ok(())
     }
 
     pub(crate) const MODIFY: &str = r#"#usda 1.0

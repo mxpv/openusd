@@ -6,7 +6,7 @@
 use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 use crate::sdf::{Path, PathMap, SpecData, SpecType};
-use crate::vt::Value;
+use crate::vt::{self, Value};
 
 /// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
 ///
@@ -51,18 +51,14 @@ pub trait AbstractData {
         })
     }
 
-    /// Whether the value of `field` at `path` is plain data: numbers,
-    /// vectors, quaternions, matrices, time codes, specifiers and the like,
-    /// or time samples of only those (blocks included). Plain data holds no
-    /// path, asset path, string, dictionary or list op, so a walk looking for
-    /// those passes it by. `false` when the field is not authored.
+    /// The kind of the value of `field` at `path`, or `None` if not authored.
+    /// Mirrors C++ `SdfAbstractData::GetTypeid`.
     ///
-    /// A backend that can tell from its encoding answers without decoding
-    /// the value, as the crate reader does from a value's type; the default
-    /// decodes it. The answer may be `false` for a value that is plain, never
-    /// `true` for one that is not.
-    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
-        Ok(self.try_field(path, field)?.is_some_and(|value| is_plain_data(&value)))
+    /// The default decodes the value. A backend that stores each value's type
+    /// may answer from it without decoding, and then names a kind even for a
+    /// value that fails to decode.
+    fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
+        Ok(self.try_field(path, field)?.map(|value| vt::ValueKind::from(&*value)))
     }
 
     /// Returns the field names for a given path in authored order.
@@ -154,75 +150,6 @@ pub enum DataError {
         /// The path with no spec behind it.
         path: Path,
     },
-}
-
-/// Whether `value` is plain data, as [`AbstractData::holds_plain_data`]
-/// defines it.
-pub(crate) fn is_plain_data(value: &Value) -> bool {
-    match value {
-        Value::TimeSamples(samples) => samples.iter().all(|(_, sample)| is_plain_data(sample)),
-        Value::Bool(_)
-        | Value::BoolVec(_)
-        | Value::Uchar(_)
-        | Value::UcharVec(_)
-        | Value::Int(_)
-        | Value::IntVec(_)
-        | Value::Uint(_)
-        | Value::UintVec(_)
-        | Value::Int64(_)
-        | Value::Int64Vec(_)
-        | Value::Uint64(_)
-        | Value::Uint64Vec(_)
-        | Value::Half(_)
-        | Value::HalfVec(_)
-        | Value::Float(_)
-        | Value::FloatVec(_)
-        | Value::Double(_)
-        | Value::DoubleVec(_)
-        | Value::Quath(_)
-        | Value::Quatf(_)
-        | Value::Quatd(_)
-        | Value::QuathVec(_)
-        | Value::QuatfVec(_)
-        | Value::QuatdVec(_)
-        | Value::Vec2h(_)
-        | Value::Vec2f(_)
-        | Value::Vec2d(_)
-        | Value::Vec2i(_)
-        | Value::Vec2hVec(_)
-        | Value::Vec2fVec(_)
-        | Value::Vec2dVec(_)
-        | Value::Vec2iVec(_)
-        | Value::Vec3h(_)
-        | Value::Vec3f(_)
-        | Value::Vec3d(_)
-        | Value::Vec3i(_)
-        | Value::Vec3hVec(_)
-        | Value::Vec3fVec(_)
-        | Value::Vec3dVec(_)
-        | Value::Vec3iVec(_)
-        | Value::Vec4h(_)
-        | Value::Vec4f(_)
-        | Value::Vec4d(_)
-        | Value::Vec4i(_)
-        | Value::Vec4hVec(_)
-        | Value::Vec4fVec(_)
-        | Value::Vec4dVec(_)
-        | Value::Vec4iVec(_)
-        | Value::Matrix2d(_)
-        | Value::Matrix3d(_)
-        | Value::Matrix4d(_)
-        | Value::Matrix2dVec(_)
-        | Value::Matrix3dVec(_)
-        | Value::Matrix4dVec(_)
-        | Value::Specifier(_)
-        | Value::Permission(_)
-        | Value::Variability(_)
-        | Value::ValueBlock
-        | Value::TimeCode(_)
-        | Value::TimeCodeVec(_) => true,
-        _ => false,
-    }
 }
 
 /// In-memory mutable layer data.
@@ -390,8 +317,8 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
         (**self).try_field(path, field)
     }
 
-    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
-        (**self).holds_plain_data(path, field)
+    fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
+        (**self).field_kind(path, field)
     }
 
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
@@ -447,8 +374,8 @@ impl<T: AbstractData + Clone> AbstractData for Arc<T> {
         (**self).try_field(path, field)
     }
 
-    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
-        (**self).holds_plain_data(path, field)
+    fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
+        (**self).field_kind(path, field)
     }
 
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
@@ -619,6 +546,22 @@ impl<T: AbstractData> CowData<T> {
         &self.overlay
     }
 
+    /// Where a read of `field` at `path` finds its answer.
+    fn staged_field(&self, path: &Path, field: &str) -> Staged<'_> {
+        let Some(patch) = self.staged(path) else {
+            return Staged::Base;
+        };
+        match patch {
+            Patch::Created(spec) => Staged::Overlay(spec.get(field)),
+            Patch::Tombstone => Staged::Overlay(None),
+            Patch::Edited { erased, .. } if erased.contains(field) => Staged::Overlay(None),
+            Patch::Edited { set, .. } => match set.iter().find(|(f, _)| f == field) {
+                Some((_, value)) => Staged::Overlay(Some(value)),
+                None => Staged::Base,
+            },
+        }
+    }
+
     /// The staged patch for `path`, or `None` when the read should fall through
     /// to `base` — both when the overlay is entirely empty (the committed steady
     /// state, kept lookup-free) and when this path is simply unstaged.
@@ -648,13 +591,9 @@ impl<T: AbstractData> AbstractData for CowData<T> {
     }
 
     fn has_field(&self, path: &Path, field: &str) -> bool {
-        match self.staged(path) {
-            Some(Patch::Created(spec)) => spec.contains(field),
-            Some(Patch::Tombstone) => false,
-            Some(Patch::Edited { set, erased }) => {
-                !erased.contains(field) && (set.iter().any(|(f, _)| f == field) || self.base.has_field(path, field))
-            }
-            None => self.base.has_field(path, field),
+        match self.staged_field(path, field) {
+            Staged::Overlay(value) => value.is_some(),
+            Staged::Base => self.base.has_field(path, field),
         }
     }
 
@@ -667,27 +606,16 @@ impl<T: AbstractData> AbstractData for CowData<T> {
     }
 
     fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
-        match self.staged(path) {
-            Some(Patch::Created(spec)) => Ok(spec.get(field).map(Cow::Borrowed)),
-            Some(Patch::Tombstone) => Ok(None),
-            Some(Patch::Edited { set, erased }) => {
-                if erased.contains(field) {
-                    Ok(None)
-                } else if let Some((_, value)) = set.iter().find(|(f, _)| f == field) {
-                    Ok(Some(Cow::Borrowed(value)))
-                } else {
-                    self.base.try_field(path, field)
-                }
-            }
-            None => self.base.try_field(path, field),
+        match self.staged_field(path, field) {
+            Staged::Overlay(value) => Ok(value.map(Cow::Borrowed)),
+            Staged::Base => self.base.try_field(path, field),
         }
     }
 
-    fn holds_plain_data(&self, path: &Path, field: &str) -> Result<bool, DataError> {
-        match self.staged(path) {
-            // A staged spec or field answers from the value it stages.
-            Some(_) => Ok(self.try_field(path, field)?.is_some_and(|value| is_plain_data(&value))),
-            None => self.base.holds_plain_data(path, field),
+    fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
+        match self.staged_field(path, field) {
+            Staged::Overlay(value) => Ok(value.map(vt::ValueKind::from)),
+            Staged::Base => self.base.field_kind(path, field),
         }
     }
 
@@ -809,6 +737,15 @@ impl<T: AbstractData> AbstractData for CowData<T> {
             }
         }
     }
+}
+
+/// Where [`CowData`] reads a field from.
+enum Staged<'a> {
+    /// The overlay decides: the value it stages, or `None` when it removes
+    /// the field.
+    Overlay(Option<&'a Value>),
+    /// The overlay leaves the field to the base.
+    Base,
 }
 
 /// The [`AbstractData::field_mask`] of `fields`, given which one a spec
