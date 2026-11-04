@@ -42,7 +42,8 @@ pub(super) struct PrototypeRegistry {
     /// Prototypes keyed by their `/__Prototype_N` root path. A namespace-aware
     /// table so the common query direction (path to prototype) is a single
     /// lookup, while change invalidation can fan a touched path up to an
-    /// enclosing root and down to nested roots without scanning every entry.
+    /// enclosing root and down to the roots below it without scanning every
+    /// entry.
     by_root: sdf::PathTable<Prototype>,
     /// Reverse index from each instance's composed path to its `/__Prototype_N`
     /// root, so a changed path resolves to the prototypes whose instances it
@@ -263,7 +264,9 @@ impl PrototypeRegistry {
 
     /// Whether `path` is a registered `/__Prototype_N` root.
     fn is_root(&self, path: &Path) -> bool {
-        self.by_root.contains_key(path)
+        // The stage's opinion reads ask about ordinary paths on every query.
+        // The syntactic test answers those without a registry lookup.
+        is_prototype_namespace(path) && self.by_root.contains_key(path)
     }
 
     /// Whether `path` is a registered instance, by composed path, or a
@@ -273,15 +276,20 @@ impl PrototypeRegistry {
         self.by_instance.contains_key(path) || self.by_root.contains_key(path)
     }
 
-    /// Returns the nearest registered `/__Prototype_N` root at or above `path`,
-    /// inclusive of `path` itself, or `None` when it is outside every
-    /// registered prototype namespace.
+    /// Returns the registered `/__Prototype_N` root enclosing `path`, inclusive
+    /// of `path` itself, or `None` when it is outside every registered
+    /// prototype namespace.
+    ///
+    /// [`register`](Self::register) mints every root as a root prim, nested
+    /// prototypes included. The only candidate is therefore `path`'s root
+    /// prim. The stage asks about ordinary paths on every query, and the
+    /// namespace test returns `None` for them before building that root prim.
     fn enclosing_root(&self, path: &Path) -> Option<Path> {
-        // Every root is a root prim, `/__Prototype_N`, nested prototypes
-        // included: the only ancestor that can be one is `path`'s root prim,
-        // so one lookup answers where walking the ancestors would build each.
+        if !is_prototype_namespace(path) {
+            return None;
+        }
         let root = path.root_prim()?;
-        self.by_root.get(&root).map(|_| root)
+        self.is_root(&root).then_some(root)
     }
 
     /// Removes every prototype the change set could have invalidated, returning
@@ -797,9 +805,7 @@ impl IndexCache {
 
     /// Returns `true` if `path` is a `/__Prototype_N` root.
     pub(crate) fn is_prototype(&self, path: &Path) -> bool {
-        // The syntactic test keeps the registry lookup off every ordinary
-        // path, which the stage's opinion reads ask about on each query.
-        is_prototype_namespace(path) && self.prototypes.is_root(path)
+        self.prototypes.is_root(path)
     }
 
     /// Returns `true` if `path` is inside a registered prototype's namespace —
@@ -811,7 +817,7 @@ impl IndexCache {
     /// to no prim still answers `true` here, so a caller reporting prim state
     /// (`Prim::is_in_prototype`) checks existence itself.
     pub(crate) fn is_in_prototype(&self, path: &Path) -> bool {
-        self.prototypes.enclosing_root(path).is_some()
+        self.prototype_root_of(path).is_some()
     }
 
     /// Returns the registered `/__Prototype_N` root enclosing `path` (inclusive
@@ -820,15 +826,7 @@ impl IndexCache {
     /// scopes load rules and the population mask onto a prototype's stored,
     /// instance-relative tables.
     pub(crate) fn prototype_root_of(&self, path: &Path) -> Option<Path> {
-        // Every registered root is `/__Prototype_N`, so a path the syntactic
-        // test rejects can match nothing — and skipping the walk keeps this off
-        // the cost of every ordinary query, which reaches it through
-        // [`Self::scoped_mask`] and `scoped_load_rules`.
-        if is_prototype_namespace(path) {
-            self.prototypes.enclosing_root(path)
-        } else {
-            None
-        }
+        self.prototypes.enclosing_root(path)
     }
 
     /// The stage-namespace policy governing `path`, and `path` translated into
@@ -863,26 +861,28 @@ impl IndexCache {
 
     /// The population mask governing `path`, in `path`'s scope — see
     /// [`Self::scoped`].
+    ///
+    /// An all-inclusive stage mask is returned with `path` unscoped. Each
+    /// prototype stores the stage mask made relative to its instance
+    /// ([`PopulationMask::make_relative_to`]), and that keeps an
+    /// all-inclusive mask all-inclusive. The stage mask is fixed at open.
+    /// Every scope therefore gives the same answer.
     pub(super) fn scoped_mask<'a>(&'a self, path: &'a Path) -> (&'a PopulationMask, Cow<'a, Path>) {
+        if self.population_mask.is_all() {
+            return (&self.population_mask, Cow::Borrowed(path));
+        }
         self.scoped(path, &self.population_mask, |p| &p.relative_mask)
     }
 
     /// Whether the stage's population exposes `path` (the mask test C++ makes
     /// in `_ComposeChildren`). Prototype content resolves through
-    /// [`Self::scoped_mask`], so the question is always asked in the instance
-    /// namespace the mask names — where C++ asks it of the prototype's source
-    /// prim index path, which is the same place.
+    /// [`Self::scoped_mask`]. A mask that excludes anything is asked in the
+    /// instance namespace it names, where C++ asks it of the prototype's
+    /// source prim index path, the same place.
     ///
     /// A pure registry read: it composes nothing and takes `&self`, so a caller
     /// already holding the cache can use it.
     pub(crate) fn mask_includes(&self, path: &Path) -> bool {
-        // A prototype's stored mask is the stage mask made relative to its
-        // instance, and the stage mask is fixed at open: when the stage mask
-        // includes everything, so does every stored one, and which prototype
-        // `path` is in cannot change the answer.
-        if self.population_mask.is_all() {
-            return true;
-        }
         let (mask, relative) = self.scoped_mask(path);
         mask.includes(&relative)
     }
@@ -1121,6 +1121,28 @@ mod tests {
         let (p1b, minted) = reg.register(key("q"), &path("/C"));
         assert!(minted);
         assert_ne!(p1b, p1);
+    }
+
+    /// `enclosing_root` finds a prototype's root from the root itself, its
+    /// properties, its variant selections and its descendants, including a
+    /// nested prototype's, and nothing for ordinary or unregistered paths.
+    #[test]
+    fn enclosing_root_cases() {
+        let mut reg = PrototypeRegistry::default();
+        let (p0, _) = reg.register(key("outer"), &path("/A"));
+        let (p1, _) = reg.register(key("inner"), &path(&format!("{p0}/Inner")));
+        for (query, root) in [
+            (format!("{p0}"), &p0),
+            (format!("{p0}.attr"), &p0),
+            (format!("{p0}{{v=x}}Child.attr"), &p0),
+            (format!("{p0}/Inner/Leaf"), &p0),
+            (format!("{p1}/Leaf"), &p1),
+        ] {
+            assert_eq!(reg.enclosing_root(&path(&query)).as_ref(), Some(root), "{query}");
+        }
+        for query in ["/", "/A", "/A/Child", "/__Prototype_9/Child", "/__PrototypeX"] {
+            assert_eq!(reg.enclosing_root(&path(query)), None, "{query}");
+        }
     }
 
     /// A nested prototype registers inside its enclosing prototype's namespace,
