@@ -741,7 +741,7 @@ impl Path {
     /// ```
     pub fn root_prim(&self) -> Option<Path> {
         let name = self.root_prim_name().filter(|_| self.is_abs())?;
-        Path::abs_root().append_path(name).ok()
+        Some(self.prefix(1 + name.len()))
     }
 
     /// Returns the final component name, or `None` for the pseudo-root and empty paths.
