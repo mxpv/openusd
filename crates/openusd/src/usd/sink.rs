@@ -238,8 +238,8 @@ pub struct CommittedChange<'a> {
     /// Composed/stage namespace.
     ///
     /// A prim path here composes afresh from that prim down: its index and
-    /// namespace descendants were dropped, or a spec of it appeared or
-    /// vanished. A
+    /// namespace descendants were dropped, a spec of it appeared or vanished,
+    /// or its children were reordered. A
     /// *property* path is one whose spec appeared or vanished: the owning prim
     /// composes exactly as it did, but the property itself is a different object
     /// than it was, so a handle to it must be re-resolved rather than re-read.
@@ -572,9 +572,9 @@ struct NamespacedPaths {
     /// The subset of [`resynced`](Self::resynced) whose entries stand for their
     /// whole subtree, and so are the only sound covering prefixes.
     ///
-    /// `resynced` mixes invalidation tiers, and only the significant tier and
-    /// the layer-stack victims drop a subtree; the spec tier refreshes a site
-    /// in place. Pruning by prefix against
+    /// `resynced` mixes invalidation tiers. Only the significant tier and the
+    /// layer-stack victims drop a subtree, and a children reorder stands for
+    /// one without dropping it; the spec tier refreshes a site in place. Pruning by prefix against
     /// the whole set would let an inert `over` at `/A` delete the report of an
     /// attribute authored at `/A/B.x`. Not reported — it is a projection of
     /// `resynced`.
@@ -623,8 +623,8 @@ impl Payload {
     /// reach composed stage namespace — its [`mapping`](Provenance::mapping)
     /// translates them, or leaves them untranslated for a local or direct edit.
     ///
-    /// [`resynced`](CommittedChange::resynced) is the union of the significant
-    /// and spec-tier composed paths, [`recomposed`](CommittedChange::recomposed)
+    /// [`resynced`](CommittedChange::resynced) is the union of the significant,
+    /// reorder and spec-tier composed paths, [`recomposed`](CommittedChange::recomposed)
     /// the prim tier's; [`changed_info_only`](CommittedChange::changed_info_only)
     /// is every other edited path that authored a field value or edited
     /// relationship/connection targets. `scratch` is the merged change list;

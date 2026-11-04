@@ -14742,67 +14742,83 @@ fn load_skips_siblings() -> Result<()> {
     Ok(())
 }
 
-/// Sets `field` on the prim spec at `path` in `stage`'s root layer, as a layer
-/// diff replays it.
-fn set_root_layer_field(stage: &Stage, path: &str, field: &str, value: vt::Value) -> Result<()> {
+/// Sets each `(path, field, value)` in `stage`'s root layer in one edit.
+fn set_root_fields(stage: &Stage, fields: &[(&str, &str, vt::Value)]) -> Result<()> {
     let root = stage.root_layer().identifier().to_owned();
-    let diff = usd::Diff {
-        edits: vec![usd::Edit::SetField {
-            path: sdf::path(path)?,
-            spec_type: sdf::SpecType::Prim,
-            field: field.into(),
-            value,
-        }],
-        mapping: None,
-    };
-    stage.apply_diff(&diff, usd::ApplyMode::ExactLayer(&root))?;
+    stage.layer_handle(&root).expect("root layer").edit(|e| {
+        for (path, field, value) in fields {
+            e.data_mut().set_field(&sdf::path(*path)?, field, value.clone());
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
-/// A layer listing a prim's children in another order reorders the composed
-/// children, and resyncs the prim, as C++ `UsdStage` does for an entry's
-/// `didReorderChildren`: no other entry names the change, so a consumer that
-/// holds the children (a scene index) must hear of it.
+/// A token list value holding `names`.
+fn tokens(names: &[&str]) -> vt::Value {
+    vt::Value::TokenVec(names.iter().map(|name| (*name).into()).collect())
+}
+
+/// A layer listing a prim's children in another order, or authoring its
+/// `primOrder`, reorders the composed children and resyncs the prim, as C++
+/// `UsdStage` does for `didReorderChildren`: no other entry names the change,
+/// so a consumer that holds the children (a scene index) must hear of it.
 #[test]
 fn reorder_children_resync() -> Result<()> {
+    for field in ["primChildren", "primOrder"] {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/W/a")?;
+        stage.define_prim("/W/b")?;
+        let notices = capture_notices(&stage);
+        set_root_fields(&stage, &[("/W", field, tokens(&["b", "a"]))])?;
+        assert_eq!(child_names(&stage, "/W")?, ["b", "a"], "{field}");
+        let resynced = &notices.borrow().resynced;
+        assert!(resynced.contains(&sdf::path("/W")?), "{field}: {resynced:?}");
+    }
+    Ok(())
+}
+
+/// A children reorder stands for the prim's whole subtree, as C++ recomposes
+/// it: a value set below it in the same edit is absorbed into the prim's
+/// resync.
+#[test]
+fn reorder_subsumes_descendants() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/W/a")?;
     stage.define_prim("/W/b")?;
+    stage.create_attribute("/W/a.x", "double")?;
     let notices = capture_notices(&stage);
-    set_root_layer_field(
+    set_root_fields(
         &stage,
-        "/W",
-        "primChildren",
-        vt::Value::TokenVec(vec!["b".into(), "a".into()]),
+        &[
+            ("/W", "primChildren", tokens(&["b", "a"])),
+            ("/W/a.x", "default", vt::Value::Double(1.0)),
+        ],
     )?;
-    let children: Vec<String> = stage
-        .prim("/W")?
-        .children()?
-        .iter()
-        .map(|c| c.path().to_string())
-        .collect();
-    assert_eq!(children, ["/W/b", "/W/a"]);
-    let resynced = &notices.borrow().resynced;
-    assert!(resynced.contains(&sdf::path("/W")?), "{resynced:?}");
+    let notices = notices.borrow();
+    assert!(notices.resynced.contains(&sdf::path("/W")?), "{:?}", notices.resynced);
+    assert!(notices.changed_info_only.is_empty(), "{:?}", notices.changed_info_only);
     Ok(())
 }
 
-/// A layer listing a prim's properties in another order resyncs the prim
-/// (C++ `didReorderProperties`).
+/// A layer listing a prim's properties in another order reports the prim as
+/// an info change. C++ `UsdStage` resyncs only for `didReorderChildren`, and
+/// a `didReorderProperties` entry lands with the other info changes.
 #[test]
-fn reorder_properties_resync() -> Result<()> {
+fn reorder_properties_info() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.create_attribute("/W.x", "double")?;
     stage.create_attribute("/W.y", "double")?;
     let notices = capture_notices(&stage);
-    set_root_layer_field(
-        &stage,
-        "/W",
-        "propertyChildren",
-        vt::Value::TokenVec(vec!["y".into(), "x".into()]),
-    )?;
-    let resynced = &notices.borrow().resynced;
-    assert!(resynced.contains(&sdf::path("/W")?), "{resynced:?}");
+    set_root_fields(&stage, &[("/W", "propertyChildren", tokens(&["y", "x"]))])?;
+    let notices = notices.borrow();
+    let w = sdf::path("/W")?;
+    assert!(
+        notices.changed_info_only.contains(&w),
+        "{:?}",
+        notices.changed_info_only
+    );
+    assert!(!notices.resynced.contains(&w), "{:?}", notices.resynced);
     Ok(())
 }
 

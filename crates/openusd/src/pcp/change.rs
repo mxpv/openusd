@@ -62,13 +62,17 @@
 //!   `permission` is data-only here and composes no arc. The rest resolve live
 //!   through the cached index's spec sites, so the new opinion is visible
 //!   without invalidating the graph.
-//! - a child-name list and nothing else → no effect: bookkeeping the spec add or
-//!   remove itself already accounts for.
+//! - a child-name list that grew or shrank, and nothing else → no effect:
+//!   bookkeeping the spec add or remove itself already accounts for.
+//! - a child-name list permuted, or `primOrder` / `propertyOrder` edited → value
+//!   on the prim alone; no index drop.
 //!
 //! Reporting is classified separately from invalidation ([`ReportedPaths`]): an
 //! entry that authored anything names itself in the notice whichever channel
 //! invalidates it, so a layer-stack or type edit still reports the metadata it
-//! moved. Collected only when a sink is listening.
+//! moved. A children reorder reports the prim as a resync of its subtree (C++
+//! `recomposeChanges` for `didReorderChildren`), and a properties reorder as an
+//! info change. Collected only when a sink is listening.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem;
@@ -234,6 +238,10 @@ enum Report {
     /// The object appeared or vanished, so a consumer must re-resolve it
     /// outright (C++ `otherResyncChanges` for a property spec add or remove).
     Resync,
+    /// The prim's children were reordered. Its index stays valid, but a
+    /// consumer must rebuild the prim and its subtree (C++ `recomposeChanges`
+    /// for `didReorderChildren`).
+    Reorder,
 }
 
 /// The paths a composed-change notice names, in the two namespaces they arrive
@@ -254,11 +262,15 @@ pub(crate) struct ReportedPaths {
     pub stage_resync: BTreeSet<Path>,
     /// The edited layer's own paths whose object appeared or vanished.
     pub authored_resync: BTreeSet<Path>,
+    /// Composed paths whose children were reordered.
+    pub stage_reorder: BTreeSet<Path>,
+    /// The edited layer's own paths whose children were reordered.
+    pub authored_reorder: BTreeSet<Path>,
     /// The layers that authored each path of the authored sets, by the set,
     /// so a notice names each path in its own layer's namespace. Recorded
     /// only for a plan built [`with_authors`](Changes::with_authors); the spec
     /// tier's sites carry their layer themselves.
-    pub authors: BTreeMap<Path, [Vec<LayerId>; 3]>,
+    pub authors: BTreeMap<Path, [Vec<LayerId>; 4]>,
 }
 
 /// An authored set a path's [`ReportedPaths::authors`] are recorded for.
@@ -270,6 +282,8 @@ pub(crate) enum Authored {
     Resync,
     /// [`ReportedPaths::authored_info`].
     Info,
+    /// [`ReportedPaths::authored_reorder`].
+    Reorder,
 }
 
 impl ReportedPaths {
@@ -321,13 +335,14 @@ struct InvalidationEffects {
 
 impl CacheChanges {
     /// The resynced paths that are already composed stage paths — the
-    /// significant tier's stage half and the property specs
+    /// [`stage_subtree_paths`](Self::stage_subtree_paths) and the property specs
     /// this round added or removed. These are the paths a consumer must
     /// re-resolve (C++ `PcpCacheChanges` resync set).
     ///
-    /// The property half is report-only: a property spec appearing or vanishing
-    /// leaves the prim's graph intact, so it names an object to re-resolve
-    /// without naming an index to drop — which is why it is absent from
+    /// The property and reorder halves are report-only: a property spec
+    /// appearing or vanishing, or a prim's children reordered, leaves the
+    /// prim's graph intact. Each names an object to re-resolve without naming
+    /// an index to drop. Neither is in
     /// [`all_significant`](Self::all_significant).
     ///
     /// The target tier is deliberately absent: a `targetPaths` / `connectionPaths`
@@ -336,9 +351,7 @@ impl CacheChanges {
     /// notice reports it through the property entry's relationship/connection-
     /// target flag instead.
     pub(crate) fn stage_resynced_paths(&self) -> impl Iterator<Item = &Path> {
-        self.did_change_significantly
-            .iter()
-            .chain(self.reported.stage_resync.iter())
+        self.stage_subtree_paths().chain(self.reported.stage_resync.iter())
     }
 
     /// The prims recomposed in place, in stage namespace: the prim tier,
@@ -348,8 +361,9 @@ impl CacheChanges {
     }
 
     /// The resynced paths expressed in the edited layer's namespace — the
-    /// significant tier's authored half and the spec tier, which is authored by
-    /// construction (its sites are literal `(layer, path)` pairs).
+    /// [`authored_subtree_paths`](Self::authored_subtree_paths), the spec tier,
+    /// which is authored by construction (its sites are literal `(layer, path)`
+    /// pairs), and the property specs the round added or removed.
     ///
     /// The spec tier is reported so an inert spec add/remove (e.g. an `over`) is
     /// surfaced, not silently dropped, even though it refreshes `has_specs` in
@@ -373,12 +387,15 @@ impl CacheChanges {
     }
 
     /// The subset of [`stage_resynced_paths`](Self::stage_resynced_paths) that
-    /// stands for a whole subtree — the significant tier, whose entries drop the
-    /// index and every namespace descendant.
+    /// stands for a whole subtree: the significant tier, whose entries drop the
+    /// index and every namespace descendant, and the prims whose children were
+    /// reordered, which a consumer rebuilds from the prim down.
     ///
     /// Only these may subsume another reported stage path by prefix.
     pub(crate) fn stage_subtree_paths(&self) -> impl Iterator<Item = &Path> {
-        self.did_change_significantly.iter()
+        self.did_change_significantly
+            .iter()
+            .chain(self.reported.stage_reorder.iter())
     }
 
     /// The covering subset of
@@ -387,9 +404,16 @@ impl CacheChanges {
     /// at `/A` says nothing about `/A/B`, so an inert `over` added on the way to
     /// authoring `/A/B.x` must not swallow the attribute's own report.
     pub(crate) fn authored_subtree_paths(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
+        let reported = &self.reported;
         self.authored_significant
             .iter()
-            .map(|path| (path, self.reported.authors(Authored::Significant, path)))
+            .map(|path| (path, reported.authors(Authored::Significant, path)))
+            .chain(
+                reported
+                    .authored_reorder
+                    .iter()
+                    .map(|path| (path, reported.authors(Authored::Reorder, path))),
+            )
     }
 
     /// Both halves of the significant tier, for invalidation — which drops every
@@ -546,19 +570,19 @@ impl Changes {
     /// moves a composed value and restales a target memo. Every entry is
     /// classified — one that only maintains child names (a child spec came or
     /// went, which the child's own entry reports) lands on no effect at all,
-    /// which is a decision rather than a gap. A reorder of a prim's children or
-    /// properties is not bookkeeping: it names no other entry, so it resyncs
-    /// the prim, as C++ `UsdStage` does for `didReorderChildren` and
-    /// `didReorderProperties`. Composition already reads the new order, so it
-    /// invalidates nothing.
+    /// which is a decision rather than a gap. A children reorder resyncs the
+    /// prim, as C++ `UsdStage` does for `didReorderChildren`, and a properties
+    /// reorder names it as an info change.
     fn effects_of(path: &Path, entry: &ChangeEntry) -> InvalidationEffects {
         let mut effects = InvalidationEffects::default();
         if entry.is_child_bookkeeping() {
             return effects;
         }
-        let reorders = entry
-            .flags
-            .intersects(sdf::ChangeFlags::REORDER_CHILDREN | sdf::ChangeFlags::REORDER_PROPERTIES);
+        let prim_report = if entry.flags.contains(sdf::ChangeFlags::REORDER_CHILDREN) {
+            Report::Reorder
+        } else {
+            Report::Info
+        };
         if path.is_abs_root() {
             effects.stack = Self::stack_flags(entry);
             effects.default_prim = entry.changed(FieldKey::DefaultPrim.as_str());
@@ -570,7 +594,7 @@ impl Changes {
             // `customLayerData`, anything read off it — moves like any other
             // value.
             effects.value = Some(ValueScope::Prim);
-            effects.report = Some(if reorders { Report::Resync } else { Report::Info });
+            effects.report = Some(prim_report);
             return effects;
         }
         if path.is_property() {
@@ -589,12 +613,9 @@ impl Changes {
 
         // Every prim entry that authored something names itself in the notice.
         // A significant one is named twice over — the resync tier reports it as
-        // well — and the reporting layer drops the weaker of the two. A reorder
-        // names it as a resync.
-        effects.report = Some(if reorders { Report::Resync } else { Report::Info });
-        if reorders && entry.authored_fields().next().is_none() {
-            return effects;
-        }
+        // well — and the reporting layer drops the weaker of the two. A children
+        // reorder names it as a recompose of its subtree.
+        effects.report = Some(prim_report);
 
         // The fields a prim's schema identity is composed from. `apiSchemas` is
         // significant as well, so this rides alongside that effect rather than
@@ -799,6 +820,11 @@ impl Changes {
                 &mut reported.stage_resync,
                 &mut reported.authored_resync,
                 Authored::Resync,
+            ),
+            Report::Reorder => (
+                &mut reported.stage_reorder,
+                &mut reported.authored_reorder,
+                Authored::Reorder,
             ),
         };
         authored.insert(path.clone());
@@ -1700,6 +1726,32 @@ mod tests {
         let restaled = restaled_keys(&changes, "/P");
         assert!(restaled.contains(&key(PropertyTargetKind::Relationship)));
         assert!(restaled.contains(&key(PropertyTargetKind::Connection)));
+    }
+
+    /// A children reorder resyncs the prim and a properties reorder reports it
+    /// as info, neither dropping the index. A reorder riding on a spec
+    /// replacement keeps the replacement's significant change.
+    #[test]
+    fn reorder_effects() {
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&p("/C")).flags |= ChangeFlags::REORDER_CHILDREN;
+        cl.entry_mut(&p("/R")).flags |= ChangeFlags::REORDER_PROPERTIES;
+        cl.entry_mut(&p("/S")).flags |=
+            ChangeFlags::REMOVE_NON_INERT_PRIM | ChangeFlags::ADD_INERT_PRIM | ChangeFlags::REORDER_CHILDREN;
+        let effects = |path: &str| {
+            let (_, entry) = cl.iter().find(|(at, _)| at == &p(path)).expect("an entry at the path");
+            Changes::effects_of(&p(path), entry)
+        };
+
+        let children = effects("/C");
+        assert_eq!(children.report, Some(Report::Reorder));
+        assert!(!children.significant);
+        let properties = effects("/R");
+        assert_eq!(properties.report, Some(Report::Info));
+        assert!(!properties.significant);
+        let replaced = effects("/S");
+        assert_eq!(replaced.report, Some(Report::Reorder));
+        assert!(replaced.significant);
     }
 
     /// The memo keys the value tier recorded for the prim at `path`.
