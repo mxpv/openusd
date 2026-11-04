@@ -48,6 +48,7 @@
 //! # }
 //! ```
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use crate::{Result, pcp, sdf, tf, vt};
 
@@ -244,11 +245,11 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
             // whole authored state is captured; a pre-existing one is owned only
             // at its touched fields — each either set (still authored) or erased
             // (absent). Child-name lists are namespace bookkeeping the
-            // destination rebuilds, never captured.
+            // destination rebuilds, captured only when the edit reordered one.
             if entry.flags.intersects(sdf::ChangeFlags::ADD) {
                 edits.push(spec_create_edit(src, path, spec_type)?);
             } else {
-                for field in entry.authored_fields() {
+                for field in entry.replayed_fields() {
                     edits.push(field_op(src, path, spec_type, field)?);
                 }
             }
@@ -297,7 +298,7 @@ pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
         } else if let Some(spec_type) = base_type {
             // Field-level edits on a surviving spec: restore each touched field
             // to its base value, or erase it when the base did not hold it.
-            for field in entry.authored_fields() {
+            for field in entry.replayed_fields() {
                 edits.push(field_op(base, path, spec_type, field)?);
             }
         }
@@ -502,12 +503,37 @@ fn apply_edit(
             value,
             ..
         } => {
-            sdf::author_spec(layer.data_mut(), dst, *spec_type, [(field.as_str(), translate(value))])?;
+            let mut value = translate(value);
+            if field == sdf::ChildrenKey::PrimChildren.as_str() || field == sdf::ChildrenKey::PropertyChildren.as_str()
+            {
+                // A child-name list registers the destination's own specs, so
+                // a recorded list reorders the names the destination holds:
+                // the ones it names in its order, then the rest as they were.
+                let held = layer.data().try_field(dst, field).ok().flatten().map(Cow::into_owned);
+                let (Some(vt::Value::TokenVec(held)), vt::Value::TokenVec(order)) = (held, &value) else {
+                    return Ok(());
+                };
+                value = vt::Value::TokenVec(reorder_names(&held, order));
+            }
+            sdf::author_spec(layer.data_mut(), dst, *spec_type, [(field.as_str(), value)])?;
         }
         Edit::EraseField { field, .. } => layer.data_mut().erase_field(dst, field.as_str()),
         Edit::RemoveSpec { .. } => remove_or_clear(layer, dst)?,
     }
     Ok(())
+}
+
+/// `held` reordered by `order`: the names `order` lists that `held` holds, in
+/// `order`'s order, then the names `order` leaves out, in `held`'s order.
+fn reorder_names(held: &[tf::Token], order: &[tf::Token]) -> Vec<tf::Token> {
+    let held_names: HashSet<&tf::Token> = held.iter().collect();
+    let ordered: HashSet<&tf::Token> = order.iter().collect();
+    order
+        .iter()
+        .filter(|name| held_names.contains(name))
+        .chain(held.iter().filter(|name| !ordered.contains(name)))
+        .cloned()
+        .collect()
 }
 
 /// Remove the spec at `path` from `layer`, clearing its authored opinions
@@ -737,6 +763,28 @@ mod tests {
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// A recorded child-name list reorders the children the destination
+    /// holds, keeping one it does not name.
+    #[test]
+    fn child_list_reorders_destination() -> Result<()> {
+        let stage = in_memory_stage()?;
+        for child in ["/W/a", "/W/b", "/W/c"] {
+            stage.define_prim(child)?;
+        }
+        let diff = Diff {
+            edits: vec![Edit::SetField {
+                path: sdf::path("/W")?,
+                spec_type: sdf::SpecType::Prim,
+                field: sdf::ChildrenKey::PrimChildren.as_str().into(),
+                value: vt::Value::TokenVec(vec!["b".into(), "a".into()]),
+            }],
+            mapping: None,
+        };
+        stage.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
+        assert_eq!(stage.prim("/W")?.child_names()?, ["b", "a", "c"]);
+        Ok(())
     }
 
     fn fixture_path(relative: &str) -> String {

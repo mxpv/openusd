@@ -1060,7 +1060,7 @@ mod tests {
 
     use super::*;
     use crate::usd::stage::tests::recorder_counts;
-    use crate::usd::{ApplyMode, EditTarget, ListPosition, StageSink};
+    use crate::usd::{ApplyMode, Diff, Edit, EditTarget, ListPosition, StageSink};
     use crate::{Error, Result};
     use crate::{sdf, vt};
 
@@ -1109,6 +1109,31 @@ mod tests {
 
         assert!(stage.undo()?);
         assert_eq!(stage.attribute("/World.size")?.get::<f64>()?, Some(1.0));
+        Ok(())
+    }
+
+    /// A layer listing a prim's children in another order undoes to the order
+    /// it replaced.
+    #[test]
+    fn undo_reorder_children() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        stage.define_prim("/W/a")?;
+        stage.define_prim("/W/b")?;
+        let root = stage.root_layer().identifier().to_string();
+        let diff = Diff {
+            edits: vec![Edit::SetField {
+                path: sdf::path("/W")?,
+                spec_type: sdf::SpecType::Prim,
+                field: "primChildren".into(),
+                value: vt::Value::TokenVec(vec!["b".into(), "a".into()]),
+            }],
+            mapping: None,
+        };
+        stage.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        assert_eq!(stage.prim("/W")?.child_names()?, ["b", "a"]);
+
+        assert!(stage.undo()?);
+        assert_eq!(stage.prim("/W")?.child_names()?, ["a", "b"]);
         Ok(())
     }
 
