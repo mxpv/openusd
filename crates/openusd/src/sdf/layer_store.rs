@@ -8,6 +8,9 @@
 //! slot alive. Once the last handle to a slot drops, the slot is freed at the
 //! next [`sweep`](LayerStore::sweep) and its epoch moves on. A key kept from
 //! before never names the layer the slot holds next.
+//!
+//! Each slot holds its layer behind an `Rc`, which a [`LayerGuard`] shares to
+//! lend that one layer without holding the arena borrowed.
 
 use std::cell::{BorrowMutError, Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -23,7 +26,8 @@ use crate::ar;
 
 use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
 use super::{
-    AuthoringError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, dry_run_layers, edit_layers, sink,
+    AuthoringError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, TargetLayer, dry_run_layers,
+    edit_layers, sink,
 };
 
 /// A failure to read, edit or add a layer of a
@@ -114,7 +118,8 @@ impl From<AuthoringError> for LayerError {
 /// The layers a registry holds and the bookkeeping their handles share.
 #[derive(Default)]
 pub(crate) struct LayerStore {
-    /// The layers, borrowed whole by every read and edit.
+    /// The slots, borrowed whole by every edit and every
+    /// [`StoreRead`], and briefly to add, find or lend a layer.
     slots: RefCell<Slots>,
     /// Slots whose last handle has dropped, waiting for a
     /// [`sweep`](Self::sweep) to free them. Pushed by a handle's drop, which
@@ -149,8 +154,33 @@ struct Slots {
 struct Slot {
     /// Advanced each time the slot is freed.
     epoch: u32,
-    /// The layer, with the token every handle to it shares.
-    entry: Option<(Layer, Weak<SlotToken>)>,
+    /// The layer and what the store keeps beside it, while the slot is filled.
+    entry: Option<Entry>,
+}
+
+/// A filled slot's layer and what the store keeps beside it.
+///
+/// The layer sits behind an `Rc` whose strong count is its borrow flag: each
+/// [`LayerGuard`] holds a clone, and an edit takes the layer through
+/// [`Rc::get_mut`], which fails while a guard lives. Three rules keep that
+/// sound:
+///
+/// - the `Rc` is set when the slot fills and taken when it frees, never
+///   replaced;
+/// - the layer's content changes only through `Rc::get_mut`: a guard never
+///   sees it change;
+/// - no `Weak<Layer>` exists: `Rc::get_mut` fails only while a guard lives.
+struct Entry {
+    /// The layer, shared with each live [`LayerGuard`] and changed only
+    /// through `Rc::get_mut`.
+    layer: Rc<Layer>,
+    /// The crate-internal observers subscribed to the layer, prepared ahead of
+    /// each commit and committed with it (see [`edit_layers`]). Kept beside
+    /// the layer so a subscription comes and goes while the layer is
+    /// borrowed.
+    subscribers: sink::Set<dyn Subscriber>,
+    /// The token every handle to the layer shares.
+    token: Weak<SlotToken>,
 }
 
 /// Names one filling of one arena slot: a key from before the slot was freed
@@ -197,16 +227,25 @@ impl Drop for SlotToken {
 ///
 /// # Borrowing
 ///
-/// A registry's layers are borrowed whole, not one at a time: a
-/// [`read`](Self::read) shares them and an [`edit`](Self::edit) takes them
-/// mutably. A nested access therefore conflicts even across two different
-/// layers — `a.read(|_| b.edit(..))` — and every borrow is fallible: a read or
-/// an edit that meets a held borrow is [`LayerError::Busy`], having read or
-/// staged nothing. User code runs under a borrow only in the closure given to
-/// `read` or `edit` and in a sink's
-/// [`before_commit`](LayerSink::before_commit); an
-/// [`after_commit`](LayerSink::after_commit) runs once the borrow is
+/// [`try_borrow`](Self::try_borrow) lends one layer. While the
+/// [`LayerGuard`] it returns lives, that layer cannot change: an edit, a save,
+/// a reload, or a sink added or removed on it fails with
+/// [`LayerError::Busy`], having staged nothing. A layer's sinks are part of
+/// the [`Layer`] (see [`Layer::add_sink`]): changing them changes the layer. The registry's other layers stay free to borrow, edit and add.
+///
+/// An edit borrows the registry's layers whole. Inside an edit's closure, and
+/// in a sink's [`before_commit`](LayerSink::before_commit) that it runs, every
+/// other access to the registry fails with `Busy`, even one to an unrelated
+/// layer. A [`read`](Self::read) shares the registry's layers whole, so
+/// inside its closure no layer can be edited or added. An
+/// [`after_commit`](LayerSink::after_commit) runs once the edit's borrow is
 /// released.
+///
+/// | Held               | add a layer | borrow a layer | edit the borrowed layer | edit another layer |
+/// |--------------------|-------------|----------------|-------------------------|--------------------|
+/// | a [`LayerGuard`]   | yes         | yes            | `Busy`                  | yes                |
+/// | a `read` closure   | `Busy`      | yes            | `Busy`                  | `Busy`             |
+/// | an edit's closure  | `Busy`      | `Busy`         | (it is the edit)        | `Busy`             |
 #[derive(Clone)]
 pub struct LayerHandle {
     /// The slot's token, declared first so it drops while the store is still
@@ -236,17 +275,38 @@ impl LayerHandle {
         Ok(f(self.store.read()?.layer(self)))
     }
 
+    /// Borrow the layer until the returned [`LayerGuard`] drops (see the
+    /// borrowing rules above). Fails with [`LayerError::Busy`] from inside an
+    /// edit on the same registry.
+    pub fn try_borrow(&self) -> Result<LayerGuard, LayerError> {
+        let slots = self.store.slots.try_borrow().map_err(|_| LayerError::Busy)?;
+        let entry = slots.entry(self.token.key).expect("a handle keeps its slot filled");
+        Ok(LayerGuard {
+            layer: Rc::clone(&entry.layer),
+            _handle: self.clone(),
+        })
+    }
+
+    /// [`try_borrow`](Self::try_borrow), panicking from inside an edit on the
+    /// same registry, as `RefCell::borrow` panics while the cell is mutably
+    /// borrowed.
+    #[track_caller]
+    pub fn borrow(&self) -> LayerGuard {
+        self.try_borrow()
+            .expect("the layer is borrowed outside an edit of its registry")
+    }
+
     /// Author a batch of edits on the layer as one atomic transaction (see
     /// [`Layer::edit`]), visible through every handle to it. Returns whether
     /// the edit produced a composition change.
     ///
     /// The closure runs with the registry borrowed: it cannot read or edit
-    /// through another handle of the same registry. An edit made from inside
-    /// a read or another edit on the registry fails with
-    /// [`LayerError::Busy`], having staged nothing. The edit is attributed to
-    /// no stage: a stage holding the layer sees it as an edit made elsewhere.
-    /// The layer's sinks see it in commit order, after the edits committed
-    /// before it.
+    /// through another handle of the same registry. An edit fails with
+    /// [`LayerError::Busy`], having staged nothing, while the layer is
+    /// borrowed, and from inside a read or another edit on the registry. The
+    /// edit is attributed to no stage: a stage holding the layer sees it as an
+    /// edit made elsewhere. The layer's sinks see it in commit order, after
+    /// the edits committed before it.
     pub fn edit(&self, f: impl FnOnce(&mut LayerEdit<'_>) -> Result<(), AuthoringError>) -> Result<bool, LayerError> {
         self.store.edit(&[self], TxnContext::new(None), |edits| {
             f(&mut edits[0]).map_err(LayerError::from)
@@ -254,8 +314,8 @@ impl LayerHandle {
     }
 
     /// Save the layer to the file its identifier names (see
-    /// [`Layer::save`]). Fails with [`LayerError::Busy`] from inside a read
-    /// or an edit on the same registry.
+    /// [`Layer::save`]). Fails with [`LayerError::Busy`] while the layer is
+    /// borrowed, and from inside a read or an edit on the same registry.
     pub fn save(&self) -> Result<(), LayerError> {
         self.with_layer_mut(Layer::save)?.map_err(LayerError::from)
     }
@@ -264,8 +324,8 @@ impl LayerHandle {
     /// whether it did. Like an [`edit`](Self::edit) through a handle, the
     /// reload is attributed to no stage: every stage holding the layer
     /// recomposes what it reads from it, and drops the undo steps touching
-    /// it. Fails with [`LayerError::Busy`] from inside a read or an edit on
-    /// the same registry.
+    /// it. Fails with [`LayerError::Busy`] while the layer is borrowed, and
+    /// from inside a read or an edit on the same registry.
     pub fn reload(&self, force: bool) -> crate::Result<bool> {
         Self::reload_all(slice::from_ref(self), force)
     }
@@ -276,47 +336,87 @@ impl LayerHandle {
     /// recomposes once, returning whether any reloaded. A layer named twice
     /// reloads once. Every layer is tried: one that cannot be read is left as
     /// it is, and the first such failure is returned once the others have
-    /// reloaded. Fails with [`LayerError::Busy`] from inside a read or an edit
-    /// on the registry, and with [`LayerError::Foreign`] for layers of two
-    /// registries, with nothing reloaded.
+    /// reloaded.
+    ///
+    /// A borrowed layer the reload would leave as it is (no unsaved edits, and
+    /// its asset unchanged unless `force`) does not stop the batch.
+    ///
+    /// Fails, with nothing reloaded, with [`LayerError::Busy`] when a layer
+    /// the batch would change is borrowed or when called from inside a read
+    /// or an edit on the registry, and with [`LayerError::Foreign`] for layers
+    /// of two registries. Both are found before any asset's content is read.
+    /// A layer borrowed while the assets are read fails the commit with `Busy`
+    /// after the reads.
     pub fn reload_all(handles: &[LayerHandle], force: bool) -> crate::Result<bool> {
         let Some(first) = handles.first() else {
             return Ok(false);
         };
-        // Fail before any file is read when the commit could not land.
-        first.store.ensure_writable()?;
         if let Some(foreign) = handles.iter().find(|handle| !Rc::ptr_eq(&handle.store, &first.store)) {
             return Err(LayerError::Foreign {
                 identifier: foreign.identifier().to_owned(),
             }
             .into());
         }
-        let _scope = ar::CacheScope::begin();
-        let mut failed = None;
-        let mut targets = Vec::new();
-        let mut reloads = Vec::new();
-        // TODO(rayon): each layer's read and diff is independent of the
-        // others'.
+        let store = &first.store;
+        // No layer is freed until the reload has committed and delivered: a
+        // freed layer's sinks drop, and a drop running user code could edit a
+        // target between its reload being computed and committed.
+        let _hold = store.hold();
         let mut seen = HashSet::new();
-        for handle in handles {
-            if !seen.insert(Rc::as_ptr(&handle.token)) {
-                continue;
-            }
-            match handle.read(|layer| layer.read_again(force))? {
-                Ok(Some(reload)) => {
-                    targets.push(handle);
-                    reloads.push(reload);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    failed.get_or_insert(error);
+        let unique: Vec<&LayerHandle> = handles
+            .iter()
+            .filter(|handle| seen.insert(Rc::as_ptr(&handle.token)))
+            .collect();
+        store.ensure_writable()?;
+        let _scope = ar::CacheScope::begin();
+        let mut failed = Vec::new();
+        // Each reload is computed against its layer's content as it is now. No
+        // layer may change from here to the commit: every read below keeps
+        // each edit of the registry out, one a resolver makes included, and
+        // no user code runs between them.
+        let mut due = Vec::new();
+        {
+            let read = store.read()?;
+            for (at, handle) in unique.into_iter().enumerate() {
+                match read.layer(handle).reload_due(force) {
+                    Ok(Some(reload)) => due.push((at, handle, reload)),
+                    Ok(None) => {}
+                    Err(error) => failed.push((at, error)),
                 }
             }
         }
+        // The first failure in the order `handles` names the layers, whichever
+        // check found it.
+        let first =
+            |failed: Vec<(usize, crate::Error)>| failed.into_iter().min_by_key(|&(at, _)| at).map(|(_, error)| error);
+        if due.is_empty() {
+            return first(failed).map_or(Ok(false), Err);
+        }
+        // A borrowed layer cannot change. A batch that would change one fails
+        // here, before any asset's content is read.
+        let changing: Vec<&LayerHandle> = due.iter().map(|&(_, handle, _)| handle).collect();
+        store.ensure_editable(&changing)?;
+        let mut targets = Vec::new();
+        let mut reloads = Vec::new();
+        {
+            let read = store.read()?;
+            // TODO(rayon): each layer's read and diff is independent of the
+            // others'.
+            for (at, handle, due) in due {
+                match read.layer(handle).read_due(due) {
+                    Ok(reload) => {
+                        targets.push(handle);
+                        reloads.push(reload);
+                    }
+                    Err(error) => failed.push((at, error)),
+                }
+            }
+        }
+        let failed = first(failed);
         if targets.is_empty() {
             return failed.map_or(Ok(false), Err);
         }
-        first.store.edit(&targets, TxnContext::new(None), |edits| {
+        store.edit(&targets, TxnContext::new(None), |edits| {
             for (edit, reload) in edits.iter_mut().zip(reloads) {
                 edit.reload(reload);
             }
@@ -326,15 +426,15 @@ impl LayerHandle {
     }
 
     /// Install a [`LayerSink`] on the layer (see
-    /// [`Layer::add_sink`]). Fails with [`LayerError::Busy`] from inside a
-    /// read or an edit on the same registry.
+    /// [`Layer::add_sink`]). Fails with [`LayerError::Busy`] while the layer
+    /// is borrowed, and from inside a read or an edit on the same registry.
     pub fn add_sink<S: LayerSink + 'static>(&self, sink: S) -> Result<LayerSinkId, LayerError> {
         self.with_layer_mut(|layer| layer.add_sink(sink))
     }
 
     /// Remove the sink with `id` (see [`Layer::remove_sink`]). Fails with
-    /// [`LayerError::Busy`] from inside a read or an edit on the same
-    /// registry.
+    /// [`LayerError::Busy`] while the layer is borrowed, and from inside a
+    /// read or an edit on the same registry.
     pub fn remove_sink(&self, id: LayerSinkId) -> Result<(), LayerError> {
         self.with_layer_mut(|layer| layer.remove_sink(id))
     }
@@ -342,7 +442,7 @@ impl LayerHandle {
     /// Subscribe `subscriber` to the layer's commits, until the returned
     /// [`Subscription`] drops.
     pub(crate) fn subscribe(&self, subscriber: Rc<dyn Subscriber>) -> Result<Subscription, LayerError> {
-        let id = self.with_layer_mut(|layer| layer.subscribe(subscriber))?;
+        let id = self.with_entry_mut(|entry| entry.subscribers.add(subscriber))?;
         Ok(Subscription {
             store: Rc::downgrade(&self.store),
             key: self.token.key,
@@ -351,12 +451,21 @@ impl LayerHandle {
     }
 
     /// Run `f` on the layer with the registry borrowed mutably. Fails with
+    /// [`LayerError::Busy`] while the layer is borrowed, and from inside a
+    /// read or an edit on the same registry.
+    fn with_layer_mut<R>(&self, f: impl FnOnce(&mut Layer) -> R) -> Result<R, LayerError> {
+        self.with_entry_mut(|entry| Rc::get_mut(&mut entry.layer).map(f))?
+            .ok_or(LayerError::Busy)
+    }
+
+    /// Run `f` on the layer's slot entry with the registry borrowed mutably,
+    /// then free the slots whose last handle dropped meanwhile. Fails with
     /// [`LayerError::Busy`] from inside a read or an edit on the same
     /// registry.
-    fn with_layer_mut<R>(&self, f: impl FnOnce(&mut Layer) -> R) -> Result<R, LayerError> {
+    fn with_entry_mut<R>(&self, f: impl FnOnce(&mut Entry) -> R) -> Result<R, LayerError> {
         let result = {
             let mut slots = self.store.slots_mut().map_err(|_| LayerError::Busy)?;
-            f(slots.get_mut(self.token.key).expect("a handle keeps its slot filled"))
+            f(slots.entry_mut(self.token.key).expect("a handle keeps its slot filled"))
         };
         self.store.sweep_dead();
         Ok(result)
@@ -378,6 +487,38 @@ impl fmt::Debug for LayerHandle {
     }
 }
 
+/// A borrow of one layer a [`LayerRegistry`](super::LayerRegistry) holds, from
+/// [`LayerHandle::try_borrow`] or [`LayerHandle::borrow`]. It derefs to the
+/// [`Layer`].
+///
+/// While it lives, the layer cannot change: an edit, a save, a reload, or a
+/// sink added or removed on it fails with [`LayerError::Busy`]. The rest of
+/// the registry is unaffected (see the borrowing rules on [`LayerHandle`]).
+/// Like a handle, it keeps the layer open.
+#[must_use = "the layer is borrowed only while the guard lives"]
+pub struct LayerGuard {
+    /// The layer, declared first so the guard gives up its count on it before
+    /// the handle's drop can mark the slot dead. The sweep that frees the slot
+    /// then finds the layer's `Rc` unique.
+    layer: Rc<Layer>,
+    /// Keeps the layer open while it is borrowed.
+    _handle: LayerHandle,
+}
+
+impl Deref for LayerGuard {
+    type Target = Layer;
+
+    fn deref(&self) -> &Layer {
+        &self.layer
+    }
+}
+
+impl fmt::Debug for LayerGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.layer, f)
+    }
+}
+
 /// A [`Subscriber`]'s subscription to one layer, ended when this drops.
 pub(crate) struct Subscription {
     /// The store the layer lives in.
@@ -396,8 +537,8 @@ impl Drop for Subscription {
         };
         match store.slots.try_borrow_mut() {
             Ok(mut slots) => {
-                if let Some(layer) = slots.get_mut(self.key) {
-                    layer.unsubscribe(self.id);
+                if let Some(entry) = slots.entry_mut(self.key) {
+                    entry.subscribers.remove(self.id);
                 }
             }
             Err(_) => store.unsubscribed.borrow_mut().push((self.key, self.id)),
@@ -419,21 +560,23 @@ pub(crate) struct StoreRead<'a> {
 impl StoreRead<'_> {
     /// The layer `handle` names. The handle belongs to this store.
     pub(crate) fn layer(&self, handle: &LayerHandle) -> &Layer {
-        self.slots
+        &self
+            .slots
             .as_ref()
             .expect("a read holds its borrow until it drops")
-            .get(handle.token.key)
+            .entry(handle.token.key)
             .expect("a handle keeps its slot filled in its own store")
+            .layer
     }
 
     /// The live layer whose identifier is `identifier`, or, with `real_path`,
     /// the one read from that location.
     pub(crate) fn find(&self, identifier: &str, real_path: Option<&str>) -> Option<&Layer> {
         let slots = self.slots.as_ref().expect("a read holds its borrow until it drops");
-        let (layer, _) = slots.slots[slots.find(identifier, real_path)? as usize]
+        let entry = slots.slots[slots.find(identifier, real_path)? as usize]
             .entry
             .as_ref()?;
-        Some(layer)
+        Some(&entry.layer)
     }
 }
 
@@ -514,7 +657,11 @@ impl LayerStore {
             anchor: layer.anchor_location(),
             store: Rc::downgrade(self),
         });
-        slot.entry = Some((layer, Rc::downgrade(&token)));
+        slot.entry = Some(Entry {
+            layer: Rc::new(layer),
+            subscribers: sink::Set::default(),
+            token: Rc::downgrade(&token),
+        });
         slots.by_identifier.insert(token.identifier.clone(), index);
         if let Some(real_path) = real_path {
             slots.by_real_path.insert(real_path, index);
@@ -530,6 +677,13 @@ impl LayerStore {
     /// reading it.
     pub(crate) fn ensure_writable(&self) -> Result<(), LayerError> {
         self.slots.try_borrow_mut().map(drop).map_err(|_| LayerError::Busy)
+    }
+
+    /// Fails as an edit of the layers `handles` name would fail now (see
+    /// [`edit`](Self::edit)), running nothing. A caller about to do the work
+    /// an edit commits checks this first.
+    fn ensure_editable(&self, handles: &[&LayerHandle]) -> Result<(), LayerError> {
+        self.with_layers(handles, |_| Ok(()))
     }
 
     /// Hold the store's sweeps until the returned guard drops (see
@@ -562,7 +716,7 @@ impl LayerStore {
         let dead = mem::take(&mut *self.dead.borrow_mut());
         // The freed layers drop once the borrow is released, so nothing their
         // drop reaches finds the store borrowed.
-        let freed: Vec<Layer> = dead.into_iter().filter_map(|key| slots.free_slot(key)).collect();
+        let freed: Vec<Entry> = dead.into_iter().filter_map(|key| slots.free_slot(key)).collect();
         drop(slots);
         drop(freed);
     }
@@ -570,7 +724,8 @@ impl LayerStore {
     /// Run `f` over the layers `handles` name, in order, as one atomic
     /// transaction `txn`, then deliver the sinks' notifications through the
     /// registry's queue. Fails, having staged nothing, with
-    /// [`LayerError::Busy`] when the store is already borrowed, and with
+    /// [`LayerError::Busy`] when the store is already borrowed or a
+    /// [`LayerGuard`] borrows one of the layers, and with
     /// [`LayerError::Foreign`] or [`LayerError::Repeated`] for a handle of
     /// another registry or one named twice.
     pub(crate) fn edit<E: From<sink::Error> + From<LayerError>>(
@@ -590,7 +745,7 @@ impl LayerStore {
         txn: TxnContext,
         f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<Committed, E> {
-        self.with_layers(handles, |layers| edit_layers(layers, txn, f))
+        self.with_layers(handles, |targets| edit_layers(targets, txn, f))
     }
 
     /// Deliver `committed`'s notifications through the store's queue, after
@@ -610,18 +765,19 @@ impl LayerStore {
         handles: &[&LayerHandle],
         f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<(), E> {
-        self.with_layers(handles, |layers| dry_run_layers(layers, f))
+        self.with_layers(handles, |targets| dry_run_layers(targets, f))
     }
 
-    /// Run `f` over the layers `handles` name, in order, with the slots
-    /// borrowed mutably. Fails, having run nothing, with
-    /// [`LayerError::Busy`] when the store is already borrowed, and with
+    /// Run `f` over the layers `handles` name, in order, each with its
+    /// subscribers, with the slots borrowed mutably. Fails, having run
+    /// nothing, with [`LayerError::Busy`] when the store is already borrowed
+    /// or a [`LayerGuard`] borrows any of the layers, and with
     /// [`LayerError::Foreign`] or [`LayerError::Repeated`] for a handle of
     /// another registry or one named twice.
     fn with_layers<R, E: From<LayerError>>(
         &self,
         handles: &[&LayerHandle],
-        f: impl FnOnce(&mut [&mut Layer]) -> Result<R, E>,
+        f: impl FnOnce(&mut [TargetLayer<'_>]) -> Result<R, E>,
     ) -> Result<R, E> {
         for (position, handle) in handles.iter().enumerate() {
             let identifier = || handle.identifier().to_owned();
@@ -638,14 +794,23 @@ impl LayerStore {
                 .into());
             }
         }
-        let result = {
-            let mut slots = self.slots_mut().map_err(|_| LayerError::Busy)?;
+        let result = 'edit: {
+            let Ok(mut slots) = self.slots_mut() else {
+                break 'edit Err(LayerError::Busy.into());
+            };
+            // A single layer, the common edit, takes its slot directly, without
+            // the scan that pairs several keys with their slots.
             if let [handle] = handles {
-                let layer = slots.get_mut(handle.token.key).expect("a handle keeps its slot filled");
-                f(&mut [layer])
+                match slots.target(handle.token.key) {
+                    Some(target) => f(&mut [target]),
+                    None => Err(LayerError::Busy.into()),
+                }
             } else {
                 let keys: Vec<SlotKey> = handles.iter().map(|handle| handle.token.key).collect();
-                f(&mut slots.layers_mut(&keys))
+                match slots.targets(&keys) {
+                    Some(mut targets) => f(&mut targets),
+                    None => Err(LayerError::Busy.into()),
+                }
             }
         };
         self.sweep_dead();
@@ -657,8 +822,8 @@ impl LayerStore {
     fn slots_mut(&self) -> Result<RefMut<'_, Slots>, BorrowMutError> {
         let mut slots = self.slots.try_borrow_mut()?;
         for (key, id) in mem::take(&mut *self.unsubscribed.borrow_mut()) {
-            if let Some(layer) = slots.get_mut(key) {
-                layer.unsubscribe(id);
+            if let Some(entry) = slots.entry_mut(key) {
+                entry.subscribers.remove(id);
             }
         }
         Ok(slots)
@@ -666,9 +831,9 @@ impl LayerStore {
 
     /// A handle to the slot at `index`, while a handle still holds it.
     fn live(self: &Rc<Self>, slots: &Slots, index: u32) -> Option<LayerHandle> {
-        let (_, token) = slots.slots[index as usize].entry.as_ref()?;
+        let entry = slots.slots[index as usize].entry.as_ref()?;
         Some(LayerHandle {
-            token: token.upgrade()?,
+            token: entry.token.upgrade()?,
             store: Rc::clone(self),
         })
     }
@@ -680,60 +845,72 @@ impl Slots {
     fn find(&self, identifier: &str, real_path: Option<&str>) -> Option<u32> {
         let live = |index: Option<&u32>| {
             let &index = index?;
-            let (_, token) = self.slots[index as usize].entry.as_ref()?;
-            (token.strong_count() > 0).then_some(index)
+            let entry = self.slots[index as usize].entry.as_ref()?;
+            (entry.token.strong_count() > 0).then_some(index)
         };
         live(self.by_identifier.get(identifier)).or_else(|| live(self.by_real_path.get(real_path?)))
     }
 
-    /// The layer in the slot `key` names, while it holds the filling `key`
+    /// The entry in the slot `key` names, while it holds the filling `key`
     /// came from.
-    fn get(&self, key: SlotKey) -> Option<&Layer> {
+    fn entry(&self, key: SlotKey) -> Option<&Entry> {
         let slot = self
             .slots
             .get(key.index as usize)
             .filter(|slot| slot.epoch == key.epoch)?;
-        slot.entry.as_ref().map(|(layer, _)| layer)
+        slot.entry.as_ref()
     }
 
-    /// [`get`](Self::get), mutably.
-    fn get_mut(&mut self, key: SlotKey) -> Option<&mut Layer> {
+    /// [`entry`](Self::entry), mutably.
+    fn entry_mut(&mut self, key: SlotKey) -> Option<&mut Entry> {
         let slot = self
             .slots
             .get_mut(key.index as usize)
             .filter(|slot| slot.epoch == key.epoch)?;
-        slot.entry.as_mut().map(|(layer, _)| layer)
+        slot.entry.as_mut()
     }
 
-    /// The layers `keys` name, in `keys` order: distinct live slots, as every
-    /// handle's key is.
-    fn layers_mut(&mut self, keys: &[SlotKey]) -> Vec<&mut Layer> {
+    /// The layer the live slot `key` names, beside its subscribers, or `None`
+    /// while a [`LayerGuard`] borrows it.
+    fn target(&mut self, key: SlotKey) -> Option<TargetLayer<'_>> {
+        let entry = self.entry_mut(key).expect("a handle keeps its slot filled");
+        entry.target()
+    }
+
+    /// [`target`](Self::target) for each of `keys`, in `keys` order, or `None`
+    /// when a [`LayerGuard`] borrows any of them. `keys` are distinct live
+    /// slots, as every handle's key is.
+    fn targets(&mut self, keys: &[SlotKey]) -> Option<Vec<TargetLayer<'_>>> {
+        // TODO(perf): pairing keys with slots scans the whole arena; walking
+        // the slots in key-index order would visit only the named ones.
         let position: HashMap<u32, usize> = keys.iter().enumerate().map(|(at, key)| (key.index, at)).collect();
-        let mut layers: Vec<(usize, &mut Layer)> = self
+        let mut found: Vec<(usize, &mut Entry)> = self
             .slots
             .iter_mut()
             .enumerate()
             .filter_map(|(index, slot)| {
                 let at = *position.get(&u32::try_from(index).ok()?)?;
                 (slot.epoch == keys[at].epoch).then_some(())?;
-                slot.entry.as_mut().map(|(layer, _)| (at, layer))
+                slot.entry.as_mut().map(|entry| (at, entry))
             })
             .collect();
-        layers.sort_by_key(|&(at, _)| at);
-        layers.into_iter().map(|(_, layer)| layer).collect()
+        found.sort_by_key(|&(at, _)| at);
+        found.into_iter().map(|(_, entry)| entry.target()).collect()
     }
 
-    /// Free the slot `key` names when no handle holds it, returning its layer
+    /// Free the slot `key` names when no handle holds it, returning its entry
     /// for the caller to drop.
-    fn free_slot(&mut self, key: SlotKey) -> Option<Layer> {
+    fn free_slot(&mut self, key: SlotKey) -> Option<Entry> {
         let slot = self
             .slots
             .get_mut(key.index as usize)
             .filter(|slot| slot.epoch == key.epoch)?;
-        if slot.entry.as_ref().is_some_and(|(_, token)| token.strong_count() > 0) {
+        if slot.entry.as_ref().is_some_and(|entry| entry.token.strong_count() > 0) {
             return None;
         }
-        let (layer, _) = slot.entry.take()?;
+        let entry = slot.entry.take()?;
+        // Every guard holds a handle: a slot no handle holds has no guard.
+        debug_assert_eq!(Rc::strong_count(&entry.layer), 1, "no guard outlives the handles");
         slot.epoch = slot.epoch.wrapping_add(1);
         self.free.push(key.index);
         let unindex = |map: &mut HashMap<String, u32>, name: &str| {
@@ -741,9 +918,20 @@ impl Slots {
                 map.remove(name);
             }
         };
-        unindex(&mut self.by_identifier, layer.identifier());
-        unindex(&mut self.by_real_path, layer.real_path());
-        Some(layer)
+        unindex(&mut self.by_identifier, entry.layer.identifier());
+        unindex(&mut self.by_real_path, entry.layer.real_path());
+        Some(entry)
+    }
+}
+
+impl Entry {
+    /// The layer as an edit takes it, beside its subscribers, or `None` while
+    /// a [`LayerGuard`] borrows it.
+    fn target(&mut self) -> Option<TargetLayer<'_>> {
+        Some(TargetLayer {
+            layer: Rc::get_mut(&mut self.layer)?,
+            subscribers: &self.subscribers,
+        })
     }
 }
 
@@ -871,18 +1059,23 @@ impl<T: ?Sized> DerefMut for HeldMut<'_, T> {
 mod tests {
     use super::*;
     use crate::sdf::commit::{CommitRecord, EditorId, Footprint, PendingCommit, Prepared, TxnId};
-    use crate::sdf::layer_registry::tests::counting_registry;
+    use crate::sdf::layer_registry::tests::{HookResolver, counting_registry};
     use crate::{ar, sdf, vt};
 
     use std::cell::Cell;
     use std::fs;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::path::Path as FsPath;
 
     /// The footprint and origin of each commit a [`Footprints`] subscriber saw.
     type Seen = Rc<RefCell<Vec<(Footprint, Option<EditorId>)>>>;
 
     /// What a test observer saw, in order.
     type Log = Rc<RefCell<Vec<String>>>;
+
+    /// A handle a test hook reaches, emptied at the test's end so the hook's
+    /// registry does not keep itself alive.
+    type HandleCell = Rc<RefCell<Option<LayerHandle>>>;
 
     /// A subscriber that logs each transaction's commit or abort, with the
     /// `documentation` of `/P` its prepare saw in the pre-edit base.
@@ -1242,7 +1435,7 @@ mod tests {
 
         let new = registry.adopt(layer_with_prim("new.usda")).unwrap();
         assert_eq!(new.token.key.index, old_key.index, "the slot is reused");
-        assert!(new.store.slots.borrow_mut().get_mut(old_key).is_none());
+        assert!(new.store.slots.borrow_mut().entry_mut(old_key).is_none());
 
         let seen = Rc::default();
         let _live = new.subscribe(Rc::new(Footprints(Rc::clone(&seen)))).unwrap();
@@ -1423,7 +1616,7 @@ mod tests {
     fn reentrant_edit_ordered() {
         let registry = sdf::LayerRegistry::default();
         let mut layer = layer_with_prim("reentrant.usda");
-        let echo: Rc<RefCell<Option<LayerHandle>>> = Rc::default();
+        let echo: HandleCell = Rc::default();
         {
             // Installed first, so it edits while the outer notification is still
             // being delivered to the sink after it.
@@ -1515,5 +1708,338 @@ mod tests {
 
         document(&handle, "second").unwrap();
         assert_eq!(events.get(), 2, "the queued notification ran, then the new one");
+    }
+
+    /// Open `a.usda` and `b.usda` in `dir`, each written as `initial`, through
+    /// `registry`, then append `appended` to both files, so a reload has
+    /// something to read.
+    fn stale_pair(
+        registry: &sdf::LayerRegistry,
+        dir: &FsPath,
+        initial: &str,
+        appended: &str,
+    ) -> crate::Result<Vec<LayerHandle>> {
+        let mut handles = Vec::new();
+        for name in ["a.usda", "b.usda"] {
+            let path = dir.join(name);
+            fs::write(&path, initial)?;
+            handles.push(registry.find_or_open(&path.to_string_lossy())?.expect("resolves"));
+            sdf::layer::tests::append(&path, appended)?;
+        }
+        Ok(handles)
+    }
+
+    /// A guard lends its one layer: the registry still adds layers and edits
+    /// the others, while an edit of the borrowed layer is `Busy`, stages
+    /// nothing, and runs none of its sinks.
+    #[test]
+    fn guard_lends_one_layer() {
+        let registry = sdf::LayerRegistry::default();
+        let a = registry.adopt(layer_with_prim("a.usda")).unwrap();
+        let b = registry.adopt(layer_with_prim("b.usda")).unwrap();
+        let heard = Rc::new(Cell::new(0));
+        let count = Rc::clone(&heard);
+        a.add_sink(move |_: &str, _: &sdf::ChangeList| count.set(count.get() + 1))
+            .unwrap();
+
+        let guard = a.try_borrow().unwrap();
+        let c = registry.adopt(layer_with_prim("c.usda"));
+        assert!(c.is_ok(), "a layer joins while another is borrowed");
+        assert!(document(&b, "b").unwrap());
+        assert!(matches!(document(&a, "a"), Err(LayerError::Busy)));
+        assert!(guard.prim("/P").unwrap().is_some(), "the guard reads its layer");
+        drop(guard);
+
+        assert_eq!(documentation(&a), None, "the refused edit staged nothing");
+        assert_eq!(heard.get(), 0, "the refused edit ran no sink");
+        assert!(document(&a, "a").unwrap(), "the edit lands once the guard drops");
+        assert_eq!(heard.get(), 1);
+    }
+
+    /// An edit naming a borrowed layer fails as a whole wherever the layer
+    /// sits in the batch: the other layers keep their content, and none of
+    /// their subscribers is prepared.
+    #[test]
+    fn guard_fails_whole_batch() {
+        let registry = sdf::LayerRegistry::default();
+        let a = registry.adopt(layer_with_prim("a.usda")).unwrap();
+        let b = registry.adopt(layer_with_prim("b.usda")).unwrap();
+        let seen: Seen = Rc::default();
+        let _subscription = b.subscribe(Rc::new(Footprints(Rc::clone(&seen)))).unwrap();
+        let guard = a.borrow();
+
+        for batch in [[&a, &b], [&b, &a]] {
+            let edited = a.store.edit(&batch, TxnContext::new(None), |edits| {
+                for edit in edits.iter_mut() {
+                    let path = sdf::path("/P").unwrap();
+                    edit.data_mut()
+                        .set_field(&path, "documentation", vt::Value::String("batch".into()));
+                }
+                Ok::<_, LayerError>(())
+            });
+            assert!(matches!(edited, Err(LayerError::Busy)), "{edited:?}");
+        }
+        drop(guard);
+        assert_eq!(documentation(&b), None, "the other layer is unchanged");
+        assert!(seen.borrow().is_empty(), "no subscriber was prepared");
+    }
+
+    /// A guard keeps its layer open after the layer's last handle drops. The
+    /// layer is freed at the first sweep after the guard drops, and not while a
+    /// hold lasts.
+    #[test]
+    fn guard_keeps_layer_open() {
+        let registry = sdf::LayerRegistry::default();
+        let mut layer = layer_with_prim("freed.usda");
+        let marker = Rc::new(());
+        let held = Rc::clone(&marker);
+        layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+            let _ = &held;
+        });
+        let identifier = layer.identifier().to_owned();
+        let handle = registry.adopt(layer).unwrap();
+        let guard = handle.borrow();
+
+        drop(handle);
+        registry.sweep();
+        assert_eq!(Rc::strong_count(&marker), 2, "the guard keeps the layer");
+        assert!(registry.find(&identifier).unwrap().is_some(), "and its slot");
+
+        let store = registry.store();
+        let hold = store.hold();
+        drop(guard);
+        registry.sweep();
+        assert_eq!(Rc::strong_count(&marker), 2, "the hold defers the free");
+        drop(hold);
+        assert_eq!(Rc::strong_count(&marker), 1, "the hold's release frees the layer");
+        assert_eq!(registry.find(&identifier).unwrap(), None);
+    }
+
+    /// Inside an edit, borrowing any layer of the registry is `Busy`: the
+    /// edited one and an unrelated one alike.
+    #[test]
+    fn borrow_inside_edit_busy() {
+        let registry = sdf::LayerRegistry::default();
+        let a = registry.adopt(layer_with_prim("a.usda")).unwrap();
+        let b = registry.adopt(layer_with_prim("b.usda")).unwrap();
+        let mut inner = Vec::new();
+        a.edit(|_| {
+            inner.push(a.try_borrow().map(drop));
+            inner.push(b.try_borrow().map(drop));
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            inner.iter().all(|result| matches!(result, Err(LayerError::Busy))),
+            "{inner:?}"
+        );
+    }
+
+    /// Saving a borrowed layer, or changing its sinks, is `Busy`.
+    #[test]
+    fn guard_blocks_save() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("saved.usda");
+        fs::write(&path, "#usda 1.0\n\ndef \"P\"\n{\n}\n")?;
+        let registry = sdf::LayerRegistry::default();
+        let handle = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
+        document(&handle, "unsaved")?;
+
+        let guard = handle.borrow();
+        assert!(matches!(handle.save(), Err(LayerError::Busy)));
+        let added = handle.add_sink(|_: &str, _: &sdf::ChangeList| {});
+        assert!(matches!(added, Err(LayerError::Busy)));
+        drop(guard);
+        handle.save()?;
+        assert!(fs::read_to_string(&path)?.contains("unsaved"));
+        Ok(())
+    }
+
+    /// A subscription joins and leaves a borrowed layer. A layer with a
+    /// subscriber and no sink still hands each commit's record on.
+    #[test]
+    fn subscribe_while_borrowed() {
+        let registry = sdf::LayerRegistry::default();
+        let a = registry.adopt(layer_with_prim("a.usda")).unwrap();
+        let seen: Seen = Rc::default();
+        let gone: Seen = Rc::default();
+
+        let guard = a.borrow();
+        let _subscription = a.subscribe(Rc::new(Footprints(Rc::clone(&seen)))).unwrap();
+        let ended = a.subscribe(Rc::new(Footprints(Rc::clone(&gone)))).unwrap();
+        drop(ended);
+        drop(guard);
+
+        document(&a, "seen").unwrap();
+        assert_eq!(seen.borrow().len(), 1, "the subscriber had the record");
+        assert!(gone.borrow().is_empty(), "the ended subscription had nothing");
+    }
+
+    /// A batch reload naming a borrowed layer fails before any file is read,
+    /// and reloads none of the layers.
+    #[test]
+    fn reload_borrowed_busy() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (registry, opens) = counting_registry();
+        let handles = stale_pair(&registry, dir.path(), "#usda 1.0\n", "def \"P\" {}\n")?;
+        let opened = opens.get();
+
+        let guard = handles[1].borrow();
+        let reloaded = LayerHandle::reload_all(&handles, false);
+        assert!(
+            matches!(reloaded, Err(crate::Error::Layer(LayerError::Busy))),
+            "{reloaded:?}"
+        );
+        assert_eq!(opens.get(), opened, "no file was read");
+        drop(guard);
+        assert!(handles[0].borrow().prim("/P")?.is_none(), "nothing was reloaded");
+        Ok(())
+    }
+
+    /// A borrowed layer whose file is unchanged does not stop a batch reload:
+    /// it is left as it is, and the batch's other layers reload.
+    #[test]
+    fn reload_skips_borrowed_unchanged() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = sdf::LayerRegistry::default();
+        let handles = stale_pair(&registry, dir.path(), "#usda 1.0\n", "def \"P\" {}\n")?;
+        let unchanged = dir.path().join("c.usda");
+        fs::write(&unchanged, "#usda 1.0\n")?;
+        let c = registry.find_or_open(&unchanged.to_string_lossy())?.expect("resolves");
+
+        let guard = c.borrow();
+        assert!(LayerHandle::reload_all(
+            &[handles[0].clone(), c.clone(), handles[1].clone()],
+            false
+        )?);
+        drop(guard);
+        for handle in &handles {
+            assert!(
+                handle.borrow().prim("/P")?.is_some(),
+                "{} reloaded",
+                handle.identifier()
+            );
+        }
+        Ok(())
+    }
+
+    /// A batch whose layers fail at different checks reports the failure of
+    /// the layer it names first: a parse error found reading the first layer
+    /// beats the second layer's failure to resolve.
+    #[test]
+    fn reload_first_failure() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = sdf::LayerRegistry::default();
+        let handles = stale_pair(
+            &registry,
+            dir.path(),
+            "#usda 1.0
+",
+            "def \"P\" {}
+",
+        )?;
+        sdf::layer::tests::rewrite(
+            &dir.path().join("a.usda"),
+            "#usda 1.0
+def (
+",
+        )?;
+        fs::remove_file(dir.path().join("b.usda"))?;
+
+        let reloaded = LayerHandle::reload_all(&handles, false);
+        assert!(reloaded.is_err(), "{reloaded:?}");
+        assert!(
+            !matches!(reloaded, Err(crate::Error::UnresolvedAsset(_))),
+            "{reloaded:?}"
+        );
+        Ok(())
+    }
+
+    /// A batch reload keeps every edit of the registry out while it reads the
+    /// files: an edit a resolver tries while reading one target is `Busy`, and
+    /// another target reloads to its file as it was computed.
+    #[test]
+    fn reload_refuses_resolver_edit() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let target: HandleCell = Rc::default();
+        let armed = Rc::new(Cell::new(false));
+        let tried = Rc::new(RefCell::new(None));
+        let resolver = {
+            let (target, armed, tried) = (Rc::clone(&target), Rc::clone(&armed), Rc::clone(&tried));
+            HookResolver::new(move |resolved| {
+                let reading_b = resolved.to_str().is_some_and(|path| path.ends_with("b.usda"));
+                if armed.get() && reading_b {
+                    let a = target.borrow().clone().expect("the target is set");
+                    tried.replace(Some(document(&a, "from the resolver")));
+                }
+            })
+        };
+        let registry = sdf::LayerRegistry::new(Box::new(resolver));
+        let handles = stale_pair(&registry, dir.path(), "#usda 1.0\ndef \"P\" {}\n", "def \"Q\" {}\n")?;
+        target.replace(Some(handles[0].clone()));
+
+        armed.set(true);
+        assert!(LayerHandle::reload_all(&handles, false)?);
+        let tried = tried.take().expect("the resolver ran");
+        assert!(matches!(tried, Err(LayerError::Busy)), "{tried:?}");
+        assert!(handles[0].borrow().prim("/Q")?.is_some(), "a reloaded");
+        assert_eq!(documentation(&handles[0]), None, "a matches its file");
+        target.take();
+        Ok(())
+    }
+
+    /// Ends a test's hook-held handle with an edit of another layer when it
+    /// drops, as a sink's destructor running user code would.
+    struct EditOnDrop(HandleCell);
+
+    impl Drop for EditOnDrop {
+        fn drop(&mut self) {
+            if let Some(handle) = self.0.take() {
+                document(&handle, "from a drop").unwrap();
+            }
+        }
+    }
+
+    /// A layer whose last handle drops while a batch reload reads its files is
+    /// freed only once the reload has committed and delivered: a drop that
+    /// edits a target then lands after the reload, as its own transaction.
+    #[test]
+    fn reload_defers_freeing() -> crate::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let doomed: HandleCell = Rc::default();
+        let armed = Rc::new(Cell::new(false));
+        let resolver = {
+            let (doomed, armed) = (Rc::clone(&doomed), Rc::clone(&armed));
+            HookResolver::new(move |resolved| {
+                if armed.get() && resolved.to_str().is_some_and(|path| path.ends_with("b.usda")) {
+                    doomed.take();
+                }
+            })
+        };
+        let registry = sdf::LayerRegistry::new(Box::new(resolver));
+        let handles = stale_pair(&registry, dir.path(), "#usda 1.0\ndef \"P\" {}\n", "def \"Q\" {}\n")?;
+        let log: Log = Rc::default();
+        let record = Rc::clone(&log);
+        handles[0]
+            .add_sink(move |_: &str, changes: &sdf::ChangeList| {
+                let kind = if changes.did_reload_content() { "reload" } else { "edit" };
+                record.borrow_mut().push(kind.to_owned());
+            })
+            .unwrap();
+        // C's only sink edits A when it drops, which is when C is freed.
+        let mut c = layer_with_prim("c.usda");
+        let on_drop = EditOnDrop(Rc::new(RefCell::new(Some(handles[0].clone()))));
+        c.add_sink(move |_: &str, _: &sdf::ChangeList| {
+            let _ = &on_drop;
+        });
+        doomed.replace(Some(registry.adopt(c).unwrap()));
+
+        armed.set(true);
+        assert!(LayerHandle::reload_all(&handles, false)?);
+        assert!(doomed.borrow().is_none(), "the resolver dropped c's handle");
+        assert_eq!(*log.borrow(), ["reload", "edit"], "the drop's edit follows the reload");
+        assert!(handles[0].borrow().prim("/Q")?.is_some(), "a reloaded");
+        assert_eq!(documentation(&handles[0]).as_deref(), Some("from a drop"));
+        Ok(())
     }
 }

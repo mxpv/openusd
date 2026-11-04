@@ -3497,9 +3497,10 @@ impl LayerView<'_> {
     /// The layer with the given id. Panics if the id is unknown.
     pub(crate) fn layer(&self, id: LayerId) -> &sdf::Layer {
         // TODO(perf): every per-prim spec probe lands here, and the lookup
-        // goes node map, then the handle's token, then the slot. If the token
-        // hop shows in an open-and-traverse profile, key the slot from a copy
-        // of its key the node keeps.
+        // goes node map, then the handle's token, then the slot, then the
+        // slot's `Rc` to the layer. If the token hop shows in an
+        // open-and-traverse profile, key the slot from a copy of its key the
+        // node keeps.
         self.store.layer(&self.nodes[&id].handle)
     }
 

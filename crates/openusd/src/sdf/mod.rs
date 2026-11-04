@@ -55,10 +55,10 @@ pub use layer::{
     AuthoringError, CommittedLayerChange, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId,
     PendingLayerChange, default_prim_path,
 };
-pub(crate) use layer::{absolute_path_at, dry_run_layers, edit_layers};
+pub(crate) use layer::{TargetLayer, absolute_path_at, dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub(crate) use layer_registry::{LoadedLayer, PreparedLayer, Presence};
-pub use layer_store::{AdoptError, LayerError, LayerHandle};
+pub use layer_store::{AdoptError, LayerError, LayerGuard, LayerHandle};
 pub(crate) use layer_store::{Held, HeldCell, HeldMut, LayerStore, StoreRead, Subscription, SweepHold};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{

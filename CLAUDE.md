@@ -49,7 +49,8 @@ source of truth for specifics.
   friends). Also here: the pluggable `FileFormat` read/write seam, the
   `LayerRegistry` that owns asset loading and format dispatch (composition opens
   reference/payload targets on demand through it, so an un-visited subtree never
-  loads) and holds layers shared through `LayerHandle`s (C++
+  loads) and holds layers shared through `LayerHandle`s, each lending its one
+  layer to read as a `LayerGuard` (C++
   `SdfLayer::FindOrOpen`, `sdf/layer_store.rs`, with the commit protocol its
   edits run in `sdf/commit.rs`), the variable-expression engine (`sdf/expr.rs`), the asset-path
   resolution tail that anchors an `asset` value against its authoring layer and

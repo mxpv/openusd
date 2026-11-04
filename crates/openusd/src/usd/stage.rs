@@ -51,7 +51,7 @@ use std::thread;
 use bitflags::bitflags;
 
 use crate::tf::Token;
-use crate::{Result, ar, pcp, sdf, vt};
+use crate::{Error, Result, ar, pcp, sdf, vt};
 
 use super::composition::{self, PendingEdit, StageComposition};
 
@@ -2987,7 +2987,10 @@ impl Stage {
     /// first failure is returned.
     ///
     /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
-    /// a layer on the stage's registry.
+    /// a layer on the stage's registry, and while a layer the reload would
+    /// change is borrowed ([`sdf::LayerHandle::try_borrow`]), with nothing
+    /// reloaded or retried. A borrowed layer the reload would leave as it is
+    /// does not stop it.
     pub fn reload(&self) -> Result<()> {
         // A retry loads, and the drain a reload runs recomposes, so neither
         // can run inside a read of the registry's layers.
@@ -3009,6 +3012,11 @@ impl Stage {
         // retries them itself when no edit reached it.
         let retries = self.composition.retries();
         let reloaded = sdf::LayerHandle::reload_all(&handles, false);
+        // A reload refused as busy changed nothing. Nothing recomposes, and no
+        // failed load is retried.
+        if matches!(reloaded, Err(Error::Layer(sdf::LayerError::Busy))) {
+            return reloaded.map(drop);
+        }
         self.process_pending();
         if self.composition.retries() == retries {
             self.composition.retry_failed_loads(self);
@@ -8675,6 +8683,35 @@ def "P" (payload = @./clip.usda@</M>) {}
             matches!(reloaded, Err(crate::Error::Layer(sdf::LayerError::Busy))),
             "{reloaded:?}"
         );
+        Ok(())
+    }
+
+    /// A reload refused because a layer it would change is borrowed changes
+    /// nothing: no failed load is retried. Once the guard drops, it reloads.
+    #[test]
+    fn reload_borrowed_busy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = shared_fixture(dir.path())?;
+        fs::remove_file(dir.path().join("sub.usda"))?;
+        let stage = Stage::open(&root)?;
+        assert!(!stage.prim("/Sub")?.is_valid()?);
+        fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
+        sdf::layer::tests::append(FsPath::new(&root), "def \"Added\" {}\n")?;
+        let handle = stage
+            .layer_handle(stage.root_layer().identifier())
+            .expect("the stage holds its root");
+
+        let guard = handle.borrow();
+        let reloaded = stage.reload();
+        assert!(
+            matches!(reloaded, Err(crate::Error::Layer(sdf::LayerError::Busy))),
+            "{reloaded:?}"
+        );
+        assert!(!stage.prim("/Sub")?.is_valid()?, "no failed load was retried");
+        drop(guard);
+        stage.reload()?;
+        assert!(stage.prim("/Sub")?.is_valid()?);
+        assert!(stage.prim("/Added")?.is_valid()?);
         Ok(())
     }
 

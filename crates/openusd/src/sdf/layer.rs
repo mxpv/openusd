@@ -101,10 +101,6 @@ pub struct Layer {
     changes: ChangeList,
     /// Per-layer change sinks notified of each commit. Empty by default.
     sinks: sink::Set<dyn LayerSink>,
-    /// The crate-internal observers a [`LayerHandle`](super::LayerHandle)
-    /// subscribes, prepared ahead of each commit and committed with it (see
-    /// [`edit_layers`]). Empty for a layer no registry holds.
-    subscribers: sink::Set<dyn Subscriber>,
     /// The resolver the layer was opened through, which a save reopens the
     /// saved file with. `None` for a layer that was not read from an asset.
     resolver: Option<Rc<dyn ar::Resolver>>,
@@ -123,13 +119,29 @@ pub struct Layer {
     reloading: Option<Reloaded>,
 }
 
-/// A reload of a layer from its asset ([`Layer::read_again`]): the edits
+/// A reload of a layer from its asset ([`Layer::read_due`]): the edits
 /// that bring the layer's content to the asset's, and the asset's state.
 pub(crate) struct Reload {
     /// The edits, in the order they apply.
     edits: Vec<ContentEdit>,
     /// The asset's state, which the layer takes on when the reload commits.
     reloaded: Reloaded,
+}
+
+/// A reload a layer is due, found without reading its asset's content.
+pub(crate) enum Due {
+    /// The reload, already known: an anonymous layer's, which reads no asset.
+    Ready(Reload),
+    /// The asset to read for the reload, where its identifier resolves now,
+    /// with its modification time.
+    Read {
+        /// The resolver the layer was opened through, which reads the asset.
+        resolver: Rc<dyn ar::Resolver>,
+        /// Where the layer's identifier resolves.
+        resolved: ar::ResolvedPath,
+        /// The asset's modification time.
+        modified: AssetTime,
+    },
 }
 
 /// What a reload read of a layer's asset besides its content.
@@ -282,7 +294,6 @@ impl Layer {
             data: CowData::new(data),
             changes: ChangeList::new(),
             sinks: sink::Set::default(),
-            subscribers: sink::Set::default(),
             resolver: None,
             format: None,
             unsaved: false,
@@ -362,7 +373,13 @@ impl Layer {
         &mut self,
         f: impl FnOnce(&mut LayerEdit<'_>) -> Result<(), AuthoringError>,
     ) -> Result<bool, EditError> {
-        let committed = edit_layers(&mut [self], TxnContext::new(None), |edits| {
+        // A layer no registry holds has no subscribers.
+        let none = sink::Set::default();
+        let target = TargetLayer {
+            layer: self,
+            subscribers: &none,
+        };
+        let committed = edit_layers(&mut [target], TxnContext::new(None), |edits| {
             f(&mut edits[0]).map_err(EditError::from)
         })?;
         Ok(committed.dispatch())
@@ -384,22 +401,27 @@ impl Layer {
         Ok(())
     }
 
-    /// Offer the accepted edit to each [`Subscriber`], collecting what they
-    /// capture, and read its [`Footprint`] for them while the overlay is
-    /// intact. Empty for a layer with no subscriber.
-    fn prepare(&self, txn: &TxnContext) -> (Footprint, Vec<Box<dyn Prepared>>) {
-        if self.subscribers.is_empty() {
+    /// Offer the accepted edit to each of the layer's `subscribers`, collecting
+    /// what they capture, and read its [`Footprint`] for them while the
+    /// overlay is intact. Empty for a layer with no subscriber.
+    fn prepare(
+        &self,
+        subscribers: &sink::Set<dyn Subscriber>,
+        txn: &TxnContext,
+    ) -> (Footprint, Vec<Box<dyn Prepared>>) {
+        if subscribers.is_empty() {
             return Default::default();
         }
         let change = self.pending_change(txn);
         let commit = PendingCommit { change: &change, txn };
-        let prepared = self.subscribers.iter().filter_map(|s| s.prepare(&commit)).collect();
+        let prepared = subscribers.iter().filter_map(|s| s.prepare(&commit)).collect();
         (Footprint::of(self.data.overlay()), prepared)
     }
 
-    /// Whether a commit to this layer has anyone to hand a record to.
-    fn observed(&self) -> bool {
-        !self.changes.is_empty() && (!self.sinks.is_empty() || !self.subscribers.is_empty())
+    /// Whether a commit to this layer has anyone to hand a record to: one of
+    /// its sinks or one of its `subscribers`.
+    fn observed(&self, subscribers: &sink::Set<dyn Subscriber>) -> bool {
+        !self.changes.is_empty() && (!self.sinks.is_empty() || !subscribers.is_empty())
     }
 
     /// The staged edit as its observers see it.
@@ -411,17 +433,6 @@ impl Layer {
             change_list: &self.changes,
             generation: txn.id.get(),
         }
-    }
-
-    /// Subscribe `subscriber` to this layer's commits, returning the id that
-    /// [`unsubscribe`](Self::unsubscribe) takes.
-    pub(crate) fn subscribe(&mut self, subscriber: Rc<dyn Subscriber>) -> sink::Id<dyn Subscriber> {
-        self.subscribers.add(subscriber)
-    }
-
-    /// End the subscription with `id`; a no-op if it already ended.
-    pub(crate) fn unsubscribe(&mut self, id: sink::Id<dyn Subscriber>) {
-        self.subscribers.remove(id);
     }
 
     /// Whether the layer holds edits not yet saved: committed since it was
@@ -674,9 +685,10 @@ impl Layer {
     /// cannot be read is an error, and the layer is left as it is.
     pub fn reload(&mut self, force: bool) -> crate::Result<bool> {
         let _scope = ar::CacheScope::begin();
-        let Some(reload) = self.read_again(force)? else {
+        let Some(due) = self.reload_due(force)? else {
             return Ok(false);
         };
+        let reload = self.read_due(due)?;
         self.edit(|e| {
             e.reload(reload);
             Ok(())
@@ -684,9 +696,10 @@ impl Layer {
         Ok(true)
     }
 
-    /// What a [`reload`](Self::reload) brings the layer to, read from its
-    /// asset, or `None` when the reload leaves it as it is.
-    pub(crate) fn read_again(&self, force: bool) -> crate::Result<Option<Reload>> {
+    /// The reload a [`reload`](Self::reload) of the layer is due, or `None`
+    /// when the reload leaves the layer as it is. Reads no asset's content:
+    /// it resolves the identifier and asks for the asset's modification time.
+    pub(crate) fn reload_due(&self, force: bool) -> crate::Result<Option<Due>> {
         if self.is_anonymous() {
             // The format that decides is the one the tag's extension names,
             // as C++ `SdfLayer::CreateAnonymous` takes it, whatever format
@@ -701,7 +714,7 @@ impl Layer {
                 format: self.format,
                 modified: AssetTime::Unread,
             };
-            return Ok((!edits.is_empty()).then_some(Reload { edits, reloaded }));
+            return Ok((!edits.is_empty()).then_some(Due::Ready(Reload { edits, reloaded })));
         }
         // A layer read from no asset has nothing to read again: C++ tells one
         // by its empty modification time, which a layer built in memory keeps
@@ -734,13 +747,30 @@ impl Layer {
         if !force && !self.is_dirty() && modified.same(self.modified) {
             return Ok(None);
         }
+        Ok(Some(Due::Read {
+            resolver: Rc::clone(resolver),
+            resolved,
+            modified,
+        }))
+    }
+
+    /// The reload `due` brings the layer to, reading the asset it names.
+    pub(crate) fn read_due(&self, due: Due) -> crate::Result<Reload> {
+        let (resolver, resolved, modified) = match due {
+            Due::Ready(reload) => return Ok(reload),
+            Due::Read {
+                resolver,
+                resolved,
+                modified,
+            } => (resolver, resolved, modified),
+        };
         let prepared = super::LayerRegistry::read(resolver.as_ref(), self.identifier.clone(), resolved, modified)?;
         let reloaded = Reloaded {
             format: prepared.format,
             modified: prepared.modified,
         };
         let edits = content_edits(&self.data, prepared.data.as_ref())?;
-        Ok(Some(Reload { edits, reloaded }))
+        Ok(Reload { edits, reloaded })
     }
 
     /// The layer's data read from a mapping of its saved file, when the
@@ -1183,7 +1213,7 @@ impl LayerEdit<'_> {
     }
 
     /// Brings the layer to the content a reload read
-    /// ([`Layer::read_again`]), and has the commit take on the asset's state
+    /// ([`Layer::read_due`]), and has the commit take on the asset's state
     /// and report the reload ([`ChangeList::did_reload_content`]).
     pub(crate) fn reload(&mut self, reload: Reload) {
         let data = &mut self.layer.data;
@@ -1410,36 +1440,36 @@ pub fn default_prim_path(token: &str) -> Option<Path> {
 ///
 /// [`Layer::edit`] is the single-layer case of this.
 pub(crate) fn edit_layers<E: From<sink::Error>>(
-    layers: &mut [&mut Layer],
+    targets: &mut [TargetLayer<'_>],
     txn: TxnContext,
     f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
 ) -> Result<Committed, E> {
     let mut guard = GroupEditGuard {
-        layers,
+        targets,
         committed: false,
     };
     {
-        let mut edits: Vec<LayerEdit<'_>> = guard.layers.iter_mut().map(|layer| LayerEdit { layer }).collect();
+        let mut edits: Vec<LayerEdit<'_>> = guard.edits();
         f(&mut edits)?;
         // `edits` drops at the block end, releasing the per-layer borrows for the
         // commit phase below.
     }
     // Refill each layer's record and offer it to that layer's `before_commit`; a
     // veto aborts before any subscriber sees the transaction.
-    for layer in guard.layers.iter_mut() {
-        layer.veto(&txn)?;
+    for target in guard.targets.iter_mut() {
+        target.layer.veto(&txn)?;
     }
     // Every layer accepted: prepare the subscribers while the old data exists.
     // An unwind from here on drops the prepared objects uncommitted.
     let prepared: Vec<_> = guard
-        .layers
+        .targets
         .iter()
-        .map(|layer| layer.observed().then(|| layer.prepare(&txn)))
+        .map(|TargetLayer { layer, subscribers }| layer.observed(subscribers).then(|| layer.prepare(subscribers, &txn)))
         .collect();
     // Drain each overlay into its backend, all layers before any record is
     // handed on, so the whole group's data lands together.
-    let changed = guard.layers.iter().any(|layer| !layer.changes.is_empty());
-    for layer in guard.layers.iter_mut() {
+    let changed = guard.targets.iter().any(|target| !target.layer.changes.is_empty());
+    for TargetLayer { layer, .. } in guard.targets.iter_mut() {
         layer.unsaved |= !layer.changes.is_empty();
         layer.data.commit();
         // A reload leaves the layer as its asset holds it, so saved.
@@ -1456,7 +1486,7 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     // subscriber's `commit` ends.
     let mut notifications = Vec::new();
     let mut landed = Vec::new();
-    for (layer, prepared) in guard.layers.iter_mut().zip(prepared) {
+    for (TargetLayer { layer, .. }, prepared) in guard.targets.iter_mut().zip(prepared) {
         let Some((footprint, prepared)) = prepared else {
             continue;
         };
@@ -1492,31 +1522,51 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     Ok(Committed::new(notifications, changed))
 }
 
-/// Stage edits across `layers` to verify they apply, then discard them all — the
-/// dry-run counterpart of [`edit_layers`]. Returns `f`'s authoring result while
-/// committing nothing and firing no sink, so a caller can check that an edit is
-/// valid (e.g. a namespace edit's `can_apply`) without mutating the layers or
-/// notifying observers.
+/// Stage edits across the `targets` layers to verify they apply, then discard
+/// them all — the dry-run counterpart of [`edit_layers`]. Returns `f`'s
+/// authoring result while committing nothing and firing no sink, so a caller
+/// can check that an edit is valid (e.g. a namespace edit's `can_apply`)
+/// without mutating the layers or notifying observers.
 pub(crate) fn dry_run_layers<E>(
-    layers: &mut [&mut Layer],
+    targets: &mut [TargetLayer<'_>],
     f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
 ) -> Result<(), E> {
     // `committed` stays false, so the guard rolls every layer back on the way out,
     // whether `f` succeeds or fails — a dry run leaves no staged state behind.
-    let guard = GroupEditGuard {
-        layers,
+    let mut guard = GroupEditGuard {
+        targets,
         committed: false,
     };
-    let mut edits: Vec<LayerEdit<'_>> = guard.layers.iter_mut().map(|layer| LayerEdit { layer }).collect();
-    f(&mut edits)
+    f(&mut guard.edits())
+}
+
+/// One layer of an [`edit_layers`] transaction, beside the crate-internal
+/// observers subscribed to it. A registry keeps the subscribers next to the
+/// layer, and a layer no registry holds has none.
+pub(crate) struct TargetLayer<'a> {
+    /// The layer the transaction edits.
+    pub(crate) layer: &'a mut Layer,
+    /// The observers prepared ahead of the layer's commit and committed with
+    /// it.
+    pub(crate) subscribers: &'a sink::Set<dyn Subscriber>,
 }
 
 /// Rolls every layer in an [`edit_layers`] group back unless the group commits —
 /// on an authoring error, a sink veto, or a panic — so a failed multi-layer edit
 /// strands no layer with a half-applied overlay.
 struct GroupEditGuard<'a, 'b> {
-    layers: &'b mut [&'a mut Layer],
+    targets: &'b mut [TargetLayer<'a>],
     committed: bool,
+}
+
+impl GroupEditGuard<'_, '_> {
+    /// An edit view of each layer, in order.
+    fn edits(&mut self) -> Vec<LayerEdit<'_>> {
+        self.targets
+            .iter_mut()
+            .map(|target| LayerEdit { layer: target.layer })
+            .collect()
+    }
 }
 
 impl Drop for GroupEditGuard<'_, '_> {
@@ -1524,8 +1574,8 @@ impl Drop for GroupEditGuard<'_, '_> {
         if self.committed {
             return;
         }
-        for layer in self.layers.iter_mut() {
-            layer.rollback();
+        for target in self.targets.iter_mut() {
+            target.layer.rollback();
         }
     }
 }
@@ -2344,7 +2394,12 @@ pub(crate) mod tests {
         a.add_sink(|_: &str, _: &ChangeList| panic!("boom"));
 
         let panicked = catch_unwind(AssertUnwindSafe(|| {
-            let _ = edit_layers(&mut [&mut a, &mut b], TxnContext::new(None), |edits| {
+            let none = sink::Set::default();
+            let mut targets = [&mut a, &mut b].map(|layer| TargetLayer {
+                layer,
+                subscribers: &none,
+            });
+            let _ = edit_layers(&mut targets, TxnContext::new(None), |edits| {
                 PrimSpec::new(edits[0].data_mut(), "/A", Specifier::Def, "Xform").expect("authored a");
                 PrimSpec::new(edits[1].data_mut(), "/B", Specifier::Def, "Xform").expect("authored b");
                 Ok::<(), EditError>(())
