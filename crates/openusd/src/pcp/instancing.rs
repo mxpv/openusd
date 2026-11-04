@@ -277,7 +277,11 @@ impl PrototypeRegistry {
     /// inclusive of `path` itself, or `None` when it is outside every
     /// registered prototype namespace.
     fn enclosing_root(&self, path: &Path) -> Option<Path> {
-        self.by_root.nearest_ancestor(path).map(|(root, _)| root.clone())
+        // Every root is a root prim, `/__Prototype_N`, nested prototypes
+        // included: the only ancestor that can be one is `path`'s root prim,
+        // so one lookup answers where walking the ancestors would build each.
+        let root = path.root_prim()?;
+        self.by_root.get(&root).map(|_| root)
     }
 
     /// Removes every prototype the change set could have invalidated, returning
@@ -872,6 +876,13 @@ impl IndexCache {
     /// A pure registry read: it composes nothing and takes `&self`, so a caller
     /// already holding the cache can use it.
     pub(crate) fn mask_includes(&self, path: &Path) -> bool {
+        // A prototype's stored mask is the stage mask made relative to its
+        // instance, and the stage mask is fixed at open: when the stage mask
+        // includes everything, so does every stored one, and which prototype
+        // `path` is in cannot change the answer.
+        if self.population_mask.is_all() {
+            return true;
+        }
         let (mask, relative) = self.scoped_mask(path);
         mask.includes(&relative)
     }
