@@ -146,48 +146,6 @@ struct Loader<'a> {
 /// stops one from pointing at itself; C++ keeps the same set for the same
 /// reason (`_LocalUnpackRecursionGuard`). A value that nests nothing never
 /// touches it.
-/// Whether a value of type `ty`, array or not, decodes to plain data
-/// ([`AbstractData::holds_plain_data`](crate::sdf::AbstractData::holds_plain_data)).
-/// A wrapped `Value` is not: its type is the wrapped value's.
-fn is_plain_type(ty: Type) -> bool {
-    matches!(
-        ty,
-        Type::Bool
-            | Type::Uchar
-            | Type::Int
-            | Type::Uint
-            | Type::Int64
-            | Type::Uint64
-            | Type::Half
-            | Type::Float
-            | Type::Double
-            | Type::DoubleVector
-            | Type::Quatd
-            | Type::Quatf
-            | Type::Quath
-            | Type::Vec2d
-            | Type::Vec2f
-            | Type::Vec2h
-            | Type::Vec2i
-            | Type::Vec3d
-            | Type::Vec3f
-            | Type::Vec3h
-            | Type::Vec3i
-            | Type::Vec4d
-            | Type::Vec4f
-            | Type::Vec4h
-            | Type::Vec4i
-            | Type::Matrix2d
-            | Type::Matrix3d
-            | Type::Matrix4d
-            | Type::Specifier
-            | Type::Permission
-            | Type::Variability
-            | Type::ValueBlock
-            | Type::TimeCode
-    )
-}
-
 struct Decoder<'a> {
     file: &'a CrateFile,
     stream: Stream<'a>,
@@ -248,13 +206,14 @@ impl CrateFile {
         Decoder::new(self).decode(rep)
     }
 
-    /// Whether `rep` encodes plain data
-    /// ([`AbstractData::holds_plain_data`](crate::sdf::AbstractData::holds_plain_data)),
-    /// told from its type and, for time samples, from each sample's type,
-    /// without decoding a payload. `false` when the encoding cannot be read:
-    /// decoding the value reports why.
-    pub fn holds_plain_data(&self, rep: ValueRep) -> bool {
-        Decoder::new(self).holds_plain_data(rep).unwrap_or(false)
+    /// The kind of the value `rep` holds, read from its type without the
+    /// checks [`value`](Self::value) makes of the payload. An unregistered
+    /// value, whose kind its payload holds, is decoded.
+    pub fn kind(&self, rep: ValueRep) -> Result<vt::ValueKind, ReadError> {
+        match kind_of(rep.ty()?, rep.is_array()) {
+            Some(kind) => Ok(kind),
+            None => Ok(vt::ValueKind::from(&self.value(rep)?)),
+        }
     }
 
     /// Sanity check of structural validity.
@@ -1037,30 +996,6 @@ impl<'a> Decoder<'a> {
         self.stream.skip(delta)
     }
 
-    /// [`CrateFile::holds_plain_data`]. A time samples value is walked as
-    /// [`decode`](Self::decode) walks it, reading the sample reps but not
-    /// the times or the samples they point at.
-    fn holds_plain_data(&mut self, rep: ValueRep) -> Result<bool, ReadError> {
-        let ty = rep.ty()?;
-        if ty != Type::TimeSamples {
-            return Ok(is_plain_type(ty));
-        }
-        if rep.is_inlined() || rep.is_compressed() {
-            return Ok(false);
-        }
-        self.stream.seek(rep.payload())?;
-        self.apply_recursive_offset()?;
-        self.stream.read_pod::<ValueRep>()?;
-        self.apply_recursive_offset()?;
-        let count = self.stream.read_count()?;
-        for sample in self.stream.read_vec::<ValueRep>(count)? {
-            if !is_plain_type(sample.ty()?) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// Reads a crate dictionary value (`customData`, `assetInfo`, and nested
     /// dictionaries).
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>, ReadError> {
@@ -1673,6 +1608,77 @@ enum ArrayKind {
     Ints,
     Floats,
     Other,
+}
+
+/// The kind [`Decoder::decode`] gives a value of type `ty`, an array if
+/// `array`, or `None` when the type alone does not tell: an unregistered value
+/// wraps a string, a dictionary or a list op, and an invalid type decodes to
+/// an error. The array flag is ignored for types with no array form.
+fn kind_of(ty: Type, array: bool) -> Option<vt::ValueKind> {
+    let scalar = match ty {
+        Type::Bool => vt::ValueKind::Bool,
+        Type::Uchar => vt::ValueKind::Uchar,
+        Type::Int => vt::ValueKind::Int,
+        Type::Uint => vt::ValueKind::Uint,
+        Type::Int64 => vt::ValueKind::Int64,
+        Type::Uint64 => vt::ValueKind::Uint64,
+        Type::Half => vt::ValueKind::Half,
+        Type::Float => vt::ValueKind::Float,
+        Type::Double => vt::ValueKind::Double,
+        Type::String => vt::ValueKind::String,
+        Type::Token => vt::ValueKind::Token,
+        Type::AssetPath => vt::ValueKind::AssetPath,
+        Type::Quatd => vt::ValueKind::Quatd,
+        Type::Quatf => vt::ValueKind::Quatf,
+        Type::Quath => vt::ValueKind::Quath,
+        Type::Vec2d => vt::ValueKind::Vec2d,
+        Type::Vec2f => vt::ValueKind::Vec2f,
+        Type::Vec2h => vt::ValueKind::Vec2h,
+        Type::Vec2i => vt::ValueKind::Vec2i,
+        Type::Vec3d => vt::ValueKind::Vec3d,
+        Type::Vec3f => vt::ValueKind::Vec3f,
+        Type::Vec3h => vt::ValueKind::Vec3h,
+        Type::Vec3i => vt::ValueKind::Vec3i,
+        Type::Vec4d => vt::ValueKind::Vec4d,
+        Type::Vec4f => vt::ValueKind::Vec4f,
+        Type::Vec4h => vt::ValueKind::Vec4h,
+        Type::Vec4i => vt::ValueKind::Vec4i,
+        Type::Matrix2d => vt::ValueKind::Matrix2d,
+        Type::Matrix3d => vt::ValueKind::Matrix3d,
+        Type::Matrix4d => vt::ValueKind::Matrix4d,
+        Type::TimeCode => vt::ValueKind::TimeCode,
+        Type::PathExpression => vt::ValueKind::PathExpression,
+        Type::Dictionary => vt::ValueKind::Dictionary,
+        Type::TokenListOp => vt::ValueKind::TokenListOp,
+        Type::StringListOp => vt::ValueKind::StringListOp,
+        Type::PathListOp => vt::ValueKind::PathListOp,
+        Type::ReferenceListOp => vt::ValueKind::ReferenceListOp,
+        Type::IntListOp => vt::ValueKind::IntListOp,
+        Type::Int64ListOp => vt::ValueKind::Int64ListOp,
+        Type::UIntListOp => vt::ValueKind::UIntListOp,
+        Type::UInt64ListOp => vt::ValueKind::UInt64ListOp,
+        Type::PathVector => vt::ValueKind::PathVec,
+        Type::TokenVector => vt::ValueKind::TokenVec,
+        Type::Specifier => vt::ValueKind::Specifier,
+        Type::Permission => vt::ValueKind::Permission,
+        Type::Variability => vt::ValueKind::Variability,
+        Type::VariantSelectionMap => vt::ValueKind::VariantSelectionMap,
+        Type::TimeSamples => vt::ValueKind::TimeSamples,
+        Type::Payload => vt::ValueKind::Payload,
+        Type::DoubleVector => vt::ValueKind::DoubleVec,
+        Type::LayerOffsetVector => vt::ValueKind::LayerOffsetVec,
+        Type::StringVector => vt::ValueKind::StringVec,
+        Type::ValueBlock => vt::ValueKind::ValueBlock,
+        Type::Value => vt::ValueKind::Value,
+        Type::UnregisteredValueListOp => vt::ValueKind::UnregisteredValueListOp,
+        Type::PayloadListOp => vt::ValueKind::PayloadListOp,
+        Type::Relocates => vt::ValueKind::Relocates,
+        Type::UnregisteredValue | Type::Invalid => return None,
+    };
+    Some(match scalar.array_kind() {
+        Some(array_kind) if array => array_kind,
+        _ => scalar,
+    })
 }
 
 /// The section table at `toc_offset`.

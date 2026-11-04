@@ -218,6 +218,18 @@ impl CrateData {
 
         Ok(Self { file, data })
     }
+
+    /// Where the value of `field` at `path` is stored, or `None` if the field
+    /// is not authored.
+    fn stored(&self, path: &sdf::Path, field: &str) -> Option<Stored<'_>> {
+        let spec = self.data.get(path)?;
+        if let Some(authored) = spec.authored(field) {
+            return authored.as_ref().map(Stored::Authored);
+        }
+        crate_fields(&self.file, spec.fieldset?)
+            .find(|(name, _)| *name == field)
+            .map(|(_, rep)| Stored::Crate(rep))
+    }
 }
 
 impl sdf::AbstractData for CrateData {
@@ -227,16 +239,7 @@ impl sdf::AbstractData for CrateData {
     }
 
     fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
-        let Some(spec) = self.data.get(path) else {
-            return false;
-        };
-        if let Some(authored) = spec.authored(field) {
-            return authored.is_some();
-        }
-        match spec.fieldset {
-            Some(start) => crate_fields(&self.file, start).any(|(name, _)| name == field),
-            None => false,
-        }
+        self.stored(path, field).is_some()
     }
 
     fn field_mask(&self, path: &sdf::Path, fields: &[&str]) -> u32 {
@@ -270,45 +273,23 @@ impl sdf::AbstractData for CrateData {
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn holds_plain_data(&self, path: &sdf::Path, field: &str) -> Result<bool, sdf::DataError> {
-        let Some(spec) = self.data.get(path) else {
-            return Ok(false);
-        };
-        if let Some(authored) = spec.authored(field) {
-            return Ok(authored.as_ref().is_some_and(sdf::is_plain_data));
+    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, vt::Value>>, sdf::DataError> {
+        match self.stored(path, field) {
+            None => Ok(None),
+            Some(Stored::Authored(value)) => Ok(Some(Cow::Borrowed(value))),
+            Some(Stored::Crate(rep)) => {
+                let value = self.file.value(rep).map_err(decode_error(path, field))?;
+                Ok(Some(Cow::Owned(value)))
+            }
         }
-        let Some(start) = spec.fieldset else {
-            return Ok(false);
-        };
-        Ok(crate_fields(&self.file, start)
-            .find(|(name, _)| *name == field)
-            .is_some_and(|(_, rep)| self.file.holds_plain_data(rep)))
     }
 
-    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, vt::Value>>, sdf::DataError> {
-        let Some(spec) = self.data.get(path) else {
-            return Ok(None);
-        };
-        if let Some(authored) = spec.authored(field) {
-            return Ok(authored.as_ref().map(Cow::Borrowed));
+    fn field_kind(&self, path: &sdf::Path, field: &str) -> Result<Option<vt::ValueKind>, sdf::DataError> {
+        match self.stored(path, field) {
+            None => Ok(None),
+            Some(Stored::Authored(value)) => Ok(Some(vt::ValueKind::from(value))),
+            Some(Stored::Crate(rep)) => self.file.kind(rep).map(Some).map_err(decode_error(path, field)),
         }
-        let Some(start) = spec.fieldset else {
-            return Ok(None);
-        };
-        let rep = crate_fields(&self.file, start)
-            .find(|(name, _)| *name == field)
-            .map(|(_, rep)| rep);
-        let Some(rep) = rep else {
-            return Ok(None);
-        };
-        // The decoder's typed `ReadError` is boxed as the `DataError`'s source:
-        // the box is the layering seam that keeps `sdf` below this format.
-        let value = self.file.value(rep).map_err(|e| sdf::DataError::Decode {
-            path: path.clone(),
-            field: field.to_owned(),
-            source: Box::new(e),
-        })?;
-        Ok(Some(Cow::Owned(value)))
     }
 
     fn list_fields(&self, path: &sdf::Path) -> Option<Vec<String>> {
@@ -375,6 +356,14 @@ impl sdf::AbstractData for CrateData {
             spec.remove_authored(field);
         }
     }
+}
+
+/// Where [`CrateData`] keeps a field's value.
+enum Stored<'a> {
+    /// A value authored after load.
+    Authored(&'a vt::Value),
+    /// A value read from the crate on demand.
+    Crate(ValueRep),
 }
 
 /// Walks a crate spec's fieldset from `start` to its terminator, yielding each
@@ -462,12 +451,24 @@ impl sdf::FileFormat for UsdcFileFormat {
 /// boundary, matching the reference crate implementation.
 const CRATE_PROPERTY_CHILDREN: &str = "properties";
 
+/// Reports a decode failure of `field` at `path`. The decoder's typed
+/// `ReadError` is boxed as the `DataError`'s source: the box is the layering
+/// seam that keeps `sdf` below this format.
+fn decode_error(path: &sdf::Path, field: &str) -> impl FnOnce(ReadError) -> sdf::DataError {
+    move |source| sdf::DataError::Decode {
+        path: path.clone(),
+        field: field.to_owned(),
+        source: Box::new(source),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
     use crate::Result;
+    use crate::gf;
     use crate::sdf::{AbstractData, FileFormat};
 
     /// Crate data can be shared across threads.
@@ -501,11 +502,10 @@ mod tests {
         Ok(())
     }
 
-    /// The crate's plain data probe, told from types alone, gives the
-    /// answer decoding each value gives, on every field of the fixtures.
+    /// `field_kind`, read from the stored types, gives the kind decoding
+    /// gives, on every field of the fixtures.
     #[test]
-    fn plain_data_probe_matches_decoding() -> Result<()> {
-        let mut plain = 0;
+    fn kinds_match_decoding() -> Result<()> {
         for name in [
             "fields",
             "sdf_types",
@@ -521,49 +521,133 @@ mod tests {
             let data = read_file(format!("fixtures/{name}.usdc"))?;
             for path in data.spec_paths() {
                 for field in data.list_fields(&path).unwrap_or_default() {
-                    let decoded = sdf::is_plain_data(&*data.field(&path, &field)?);
-                    assert_eq!(data.holds_plain_data(&path, &field)?, decoded, "{name} {path} {field}");
-                    plain += usize::from(decoded);
+                    let value = data.field(&path, &field)?;
+                    let kind = Some(vt::ValueKind::from(&*value));
+                    assert_eq!(data.field_kind(&path, &field)?, kind, "{name} {path} {field}");
                 }
             }
         }
-        assert!(plain > 0);
         Ok(())
     }
 
-    /// Time samples are plain data when every sample is: samples of asset
-    /// paths are not, whatever the rest hold.
+    /// `field_kind` gives the kind decoding gives for a value of every kind
+    /// the writer stores, arrays long enough to compress included.
     #[test]
-    fn time_samples_plain_by_their_samples() -> Result<()> {
-        let attribute = |name: &str| sdf::Path::new(&format!("/a.{name}"));
-        let mut layer = sdf::Data::rooted();
-        layer.create_spec(sdf::Path::new("/a")?, sdf::SpecType::Prim);
-        let samples = [
-            (
-                "points",
-                vec![
-                    (1.0, vt::Value::Vec3fVec(vec![crate::gf::vec3f(1.0, 2.0, 3.0)])),
-                    (2.0, vt::Value::ValueBlock),
-                ],
-            ),
-            (
-                "texture",
-                vec![
-                    (1.0, vt::Value::Float(1.0)),
-                    (2.0, vt::Value::AssetPath("tex.png".into())),
-                ],
-            ),
+    fn kinds_of_every_type() -> Result<()> {
+        fn many<T: Default + Clone>() -> Vec<T> {
+            vec![T::default(); 20]
+        }
+        let values = vec![
+            vt::Value::Bool(true),
+            vt::Value::BoolVec(many()),
+            vt::Value::Uchar(1),
+            vt::Value::UcharVec(many()),
+            vt::Value::Int(1),
+            vt::Value::IntVec(many()),
+            vt::Value::Uint(1),
+            vt::Value::UintVec(many()),
+            vt::Value::Int64(1),
+            vt::Value::Int64Vec(many()),
+            vt::Value::Uint64(1),
+            vt::Value::Uint64Vec(many()),
+            vt::Value::Half(Default::default()),
+            vt::Value::HalfVec(many()),
+            vt::Value::Float(1.5),
+            vt::Value::FloatVec(many()),
+            vt::Value::Double(1.5),
+            vt::Value::DoubleVec(many()),
+            vt::Value::String("s".into()),
+            vt::Value::StringVec(vec!["a".into(), "b".into()]),
+            vt::Value::Token("t".into()),
+            vt::Value::TokenVec(vec!["a".into(), "b".into()]),
+            vt::Value::AssetPath("a.usd".into()),
+            vt::Value::AssetPathVec(vec!["a.usd".into(), "b.usd".into()]),
+            vt::Value::Quath(Default::default()),
+            vt::Value::Quatf(Default::default()),
+            vt::Value::Quatd(Default::default()),
+            vt::Value::QuathVec(many()),
+            vt::Value::QuatfVec(many()),
+            vt::Value::QuatdVec(many()),
+            vt::Value::Vec2h(Default::default()),
+            vt::Value::Vec2f(gf::vec2f(1.0, 2.0)),
+            vt::Value::Vec2d(gf::vec2d(1.5, 2.5)),
+            vt::Value::Vec2i(gf::vec2i(1, 2)),
+            vt::Value::Vec2hVec(many()),
+            vt::Value::Vec2fVec(many()),
+            vt::Value::Vec2dVec(many()),
+            vt::Value::Vec2iVec(many()),
+            vt::Value::Vec3h(Default::default()),
+            vt::Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0)),
+            vt::Value::Vec3d(gf::vec3d(1.5, 2.5, 3.5)),
+            vt::Value::Vec3i(gf::vec3i(1, 2, 3)),
+            vt::Value::Vec3hVec(many()),
+            vt::Value::Vec3fVec(many()),
+            vt::Value::Vec3dVec(many()),
+            vt::Value::Vec3iVec(many()),
+            vt::Value::Vec4h(Default::default()),
+            vt::Value::Vec4f(Default::default()),
+            vt::Value::Vec4d(Default::default()),
+            vt::Value::Vec4i(Default::default()),
+            vt::Value::Vec4hVec(many()),
+            vt::Value::Vec4fVec(many()),
+            vt::Value::Vec4dVec(many()),
+            vt::Value::Vec4iVec(many()),
+            vt::Value::Matrix2d(Default::default()),
+            vt::Value::Matrix3d(Default::default()),
+            vt::Value::Matrix4d(Default::default()),
+            vt::Value::Matrix2dVec(many()),
+            vt::Value::Matrix3dVec(many()),
+            vt::Value::Matrix4dVec(many()),
+            vt::Value::Specifier(sdf::Specifier::Over),
+            vt::Value::Permission(sdf::Permission::Private),
+            vt::Value::Variability(sdf::Variability::Uniform),
+            vt::Value::Dictionary(Default::default()),
+            vt::Value::TokenListOp(Default::default()),
+            vt::Value::StringListOp(Default::default()),
+            vt::Value::PathListOp(Default::default()),
+            vt::Value::ReferenceListOp(Default::default()),
+            vt::Value::IntListOp(Default::default()),
+            vt::Value::Int64ListOp(Default::default()),
+            vt::Value::UIntListOp(Default::default()),
+            vt::Value::UInt64ListOp(Default::default()),
+            vt::Value::PayloadListOp(Default::default()),
+            vt::Value::Payload(Default::default()),
+            vt::Value::PathVec(vec![sdf::Path::new("/a")?]),
+            vt::Value::VariantSelectionMap(Default::default()),
+            vt::Value::LayerOffsetVec(many()),
+            vt::Value::ValueBlock,
+            vt::Value::TimeCode(1.0.into()),
+            vt::Value::TimeCodeVec(many()),
+            vt::Value::PathExpression(sdf::PathExpression::parse("/a")),
+            vt::Value::PathExpressionVec(vec![sdf::PathExpression::parse("/a")]),
+            vt::Value::Relocates(vec![(sdf::Path::new("/a")?, sdf::Path::new("/b")?)]),
+            vt::Value::UnregisteredValue("value".into()),
+            vt::Value::UnregisteredDictionary(Default::default()),
+            vt::Value::UnregisteredValueListOp(Default::default()),
+            vt::Value::TimeSamples(vec![
+                (1.0, vt::Value::AssetPath("a.usd".into())),
+                (2.0, vt::Value::FloatVec(many())),
+                (3.0, vt::Value::ValueBlock),
+            ]),
         ];
-        for (name, samples) in &samples {
-            let path = attribute(name)?;
-            layer.create_spec(path.clone(), sdf::SpecType::Attribute);
-            layer.set_field(&path, "timeSamples", vt::Value::TimeSamples(samples.clone()));
+        let path = sdf::Path::new("/a")?;
+        let mut layer = sdf::Data::rooted();
+        layer.create_spec(path.clone(), sdf::SpecType::Prim);
+        for (index, value) in values.iter().enumerate() {
+            layer.set_field(&path, &format!("field{index}"), value.clone());
         }
         let file = CrateWriter::write_file(&layer)?;
         let data = CrateData::open(file.bytes().clone(), true)?;
-        assert!(data.holds_plain_data(&attribute("points")?, "timeSamples")?);
-        assert!(!data.holds_plain_data(&attribute("texture")?, "timeSamples")?);
-        assert!(!data.holds_plain_data(&attribute("missing")?, "timeSamples")?);
+        for (index, written) in values.iter().enumerate() {
+            let field = format!("field{index}");
+            let value = data.field(&path, &field)?;
+            assert_eq!(vt::ValueKind::from(&*value), vt::ValueKind::from(written), "{field}");
+            assert_eq!(
+                data.field_kind(&path, &field)?,
+                Some(vt::ValueKind::from(&*value)),
+                "{field}"
+            );
+        }
         Ok(())
     }
 
@@ -630,7 +714,6 @@ mod tests {
         Ok(())
     }
 
-    use crate::gf;
     use crate::gf::f16;
     use std::path::Path;
 
