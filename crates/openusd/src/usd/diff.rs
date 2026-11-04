@@ -772,6 +772,7 @@ mod tests {
             provenance: &provenance,
             generation: 0,
             own: true,
+            replay: None,
         };
         let diffs = forward_diff(&stage, &change)?;
         assert_eq!(diffs.len(), 1);

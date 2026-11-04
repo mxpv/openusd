@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::mem;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::stage::Stage;
 
@@ -319,6 +320,9 @@ pub struct CommittedChange<'a> {
     pub generation: u64,
     /// Whether this stage made the edit (see [`is_own`](Self::is_own)).
     pub(crate) own: bool,
+    /// The undo revert this edit replays, when it is one of a revert's
+    /// replays (see [`PendingChange::replay`]).
+    pub(crate) replay: Option<ReplayId>,
 }
 
 impl CommittedChange<'_> {
@@ -390,6 +394,10 @@ pub struct PendingChange<'a> {
     pub generation: u64,
     /// Whether this stage is making the edit (see [`is_own`](Self::is_own)).
     pub(crate) own: bool,
+    /// The undo revert this edit replays, when it is one of a revert's
+    /// replays: the revert's own undo stage skips it, and every other
+    /// observer sees an own edit like any other.
+    pub(crate) replay: Option<ReplayId>,
 }
 
 impl PendingChange<'_> {
@@ -399,6 +407,21 @@ impl PendingChange<'_> {
     /// is not.
     pub fn is_own(&self) -> bool {
         self.own
+    }
+}
+
+/// The identity of one undo revert, which every transaction it replays
+/// carries, so the undo stage running it tells its own replays from the
+/// other edits of the stage, a sink's made while it replays among them.
+/// Unique process-wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayId(u64);
+
+impl ReplayId {
+    /// A fresh identity.
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -779,6 +802,7 @@ impl Payload {
         provenance: &'a Provenance,
         generation: u64,
         own: bool,
+        replay: Option<ReplayId>,
     ) -> CommittedChange<'a> {
         CommittedChange {
             resynced: &self.stage.resynced,
@@ -791,6 +815,7 @@ impl Payload {
             provenance,
             generation,
             own,
+            replay,
         }
     }
 }

@@ -57,7 +57,7 @@ use super::composition::{self, PendingEdit, StageComposition};
 
 use super::authoring::{Operation, PlanStamp, PlanState, PrimOp};
 use super::interp::{self, InterpolationType};
-use super::sink::{PendingChange, Provenance, StageSink, StageSinkId, TxnObserver};
+use super::sink::{PendingChange, Provenance, ReplayId, StageSink, StageSinkId, TxnObserver};
 use super::{PrimTypeId, PrimTypeInfo, SchemaRegistry, Schematics, StagePopulationMask};
 
 bitflags! {
@@ -978,11 +978,11 @@ pub struct StageInner {
     /// The internal observers of transaction outcomes (see
     /// [`TxnObserver`]).
     observers: RefCell<sdf::sink::Set<dyn TxnObserver>>,
-    /// The [`Provenance`] each stage-authored transaction publishes, keyed by
-    /// its transaction id, read by the stage's recorder as the transaction
-    /// prepares. A direct edit publishes none, and the
-    /// drain resolves it from local-layer membership.
-    edit_provenance: TxnTable<Rc<Provenance>>,
+    /// The [`Attribution`] each stage-authored transaction publishes, keyed
+    /// by its transaction id, read by the stage's recorder as the transaction
+    /// prepares. A direct edit publishes none, and the drain resolves its
+    /// provenance from local-layer membership.
+    edit_attribution: TxnTable<Attribution>,
     /// The identity the stage's own commits carry as their origin, which
     /// tells them from edits made through a [`sdf::LayerHandle`] or by another
     /// stage.
@@ -1130,6 +1130,7 @@ impl composition::CompositionHooks for Stage {
             &notice.provenance,
             notice.generation,
             notice.own,
+            notice.replay,
         );
         self.each_sink(|sink| sink.after_commit(self, &change));
     }
@@ -1148,6 +1149,7 @@ impl composition::CompositionHooks for Stage {
             &notice.provenance,
             notice.generation,
             notice.own,
+            notice.replay,
         );
         for observer in observers {
             observer.committed(self, &change, &notice.footprints);
@@ -1298,16 +1300,26 @@ impl WeakStage {
     }
 }
 
-/// The [`Provenance`] a stage-authored transaction publishes in
-/// [`StageInner::edit_provenance`] for the stage's recorder, which shares it
-/// with each layer's recording as the transaction prepares. Dropped as the
-/// commit returns, it withdraws the entry.
-struct PublishedProvenance<'a> {
-    table: &'a TxnTable<Rc<Provenance>>,
+/// What a stage-authored transaction publishes for the stage's recorder
+/// ([`StageInner::edit_attribution`]), which shares it with each layer's
+/// recording as the transaction prepares.
+#[derive(Clone, Default)]
+struct Attribution {
+    /// The [`Provenance`] of an edit through a remapping target.
+    provenance: Option<Rc<Provenance>>,
+    /// The undo revert the transaction replays, when it is one of its
+    /// replays.
+    replay: Option<ReplayId>,
+}
+
+/// The [`Attribution`] a transaction published, withdrawn as the commit
+/// returns.
+struct Published<'a> {
+    table: &'a TxnTable<Attribution>,
     generation: u64,
 }
 
-impl Drop for PublishedProvenance<'_> {
+impl Drop for Published<'_> {
     fn drop(&mut self) {
         self.table.withdraw(self.generation);
     }
@@ -1385,9 +1397,14 @@ impl sdf::Subscriber for StageRecorder {
             .flatten();
         // A stage edit's provenance travels with its recording from here.
         let generation = commit.txn.id.get();
-        let provenance = own
-            .then(|| stage.edit_provenance.with(generation, |provenance| provenance.cloned()))
-            .flatten();
+        let Attribution { provenance, replay } = own
+            .then(|| {
+                stage
+                    .edit_attribution
+                    .with(generation, |attribution| attribution.cloned())
+            })
+            .flatten()
+            .unwrap_or_default();
         // Made before the stage's sinks see the edit: a sink that panics drops
         // it unlanded, and the stage reports the transaction aborted.
         let recording = Box::new(StageRecording {
@@ -1395,12 +1412,13 @@ impl sdf::Subscriber for StageRecorder {
             layer_id: self.layer_id,
             prior_default_prim,
             own,
+            replay,
             provenance,
             generation,
             landed: false,
         });
         let mapping = recording.provenance.as_deref().and_then(Provenance::mapping);
-        stage.forward_before_commit(change, self.layer_id, own, mapping);
+        stage.forward_before_commit(change, self.layer_id, own, replay, mapping);
         Some(recording)
     }
 }
@@ -1415,6 +1433,8 @@ struct StageRecording {
     prior_default_prim: Option<Token>,
     /// Whether the stage made the edit itself.
     own: bool,
+    /// The undo revert the edit replays, when it is one of its replays.
+    replay: Option<ReplayId>,
     /// The [`Provenance`] the stage published for its own edit.
     provenance: Option<Rc<Provenance>>,
     /// The transaction the commit belongs to.
@@ -1430,6 +1450,7 @@ impl sdf::Prepared for StageRecording {
         stage.composition.record_pending(PendingEdit {
             generation: self.generation,
             own: self.own,
+            replay: self.replay,
             layer: self.layer_id,
             changes: record.changes.clone(),
             provenance: self.provenance.take(),
@@ -2506,35 +2527,49 @@ impl Stage {
     where
         E: From<sdf::sink::Error> + From<sdf::LayerError>,
     {
-        let result = {
-            // The borrow states the mode's drain contract: a commit may arrive
-            // with edits queued and appends to them, while a dry run validates
-            // against composed state and so takes the settled borrow, whose
-            // backstop catches a caller that stopped settling first.
-            let graph = if commit {
-                self.composition.authoring_graph()
-            } else {
-                self.composition.settled_graph()
-            };
-            // The realized ids, aligned with the edits below: `handles` drops any
-            // id with no live layer, so the closure keys on these rather than the
-            // requested `layer_ids` to stay paired with each `LayerEdit`.
-            let (ids, handles): (Vec<pcp::LayerId>, Vec<&sdf::LayerHandle>) =
-                graph.handles(layer_ids).into_iter().unzip();
-            let store = graph.store();
-            if commit {
-                self.commit_attributed(store, &handles, mapping, |edits| f(&ids, edits))
-                    .map(Some)
-            } else {
-                store.dry_run(&handles, |edits| f(&ids, edits)).map(|()| None)
-            }
-        };
-        let result =
-            result.map(|committed| committed.is_some_and(|committed| self.composition.deliver(committed, self)));
         if commit {
-            self.composition.end_edit(self);
+            let committed = self.commit_layers_txn(layer_ids, mapping, None, f);
+            return self.deliver_edit(committed);
         }
-        result
+        // A dry run validates against composed state, so it takes the settled
+        // borrow, whose backstop catches a caller that stopped settling first.
+        let graph = self.composition.settled_graph();
+        let (ids, handles): (Vec<pcp::LayerId>, Vec<&sdf::LayerHandle>) = graph.handles(layer_ids).into_iter().unzip();
+        graph.store().dry_run(&handles, |edits| f(&ids, edits)).map(|()| false)
+    }
+
+    /// The commit half of [`author_layers_txn`](Self::author_layers_txn):
+    /// commits `f` over `layer_ids` as one transaction and returns the landed
+    /// commit undelivered, for [`deliver_edit`](Self::deliver_edit). An undo
+    /// replaying one of its revert's transactions passes `replay`, and learns
+    /// that the transaction landed before its `after_commit` sinks hear of it.
+    pub(super) fn commit_layers_txn<E>(
+        &self,
+        layer_ids: &[pcp::LayerId],
+        mapping: Option<&pcp::MapFunction>,
+        replay: Option<ReplayId>,
+        f: impl FnOnce(&[pcp::LayerId], &mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
+    ) -> Result<sdf::Committed, E>
+    where
+        E: From<sdf::sink::Error> + From<sdf::LayerError>,
+    {
+        // A commit may arrive with edits queued and appends to them.
+        let graph = self.composition.authoring_graph();
+        // The realized ids, aligned with the edits below: `handles` drops any
+        // id with no live layer, so the closure keys on these rather than the
+        // requested `layer_ids` to stay paired with each `LayerEdit`.
+        let (ids, handles): (Vec<pcp::LayerId>, Vec<&sdf::LayerHandle>) = graph.handles(layer_ids).into_iter().unzip();
+        self.commit_attributed(graph.store(), &handles, mapping, replay, |edits| f(&ids, edits))
+    }
+
+    /// The delivery half of [`author_layers_txn`](Self::author_layers_txn):
+    /// delivers what `committed` landed and ends the edit, draining even when
+    /// the commit failed, so a failed commit still delivers what its
+    /// predecessors earned. Returns whether the transaction changed anything.
+    pub(super) fn deliver_edit<E>(&self, committed: Result<sdf::Committed, E>) -> Result<bool, E> {
+        let changed = committed.map(|committed| self.composition.deliver(committed, self));
+        self.composition.end_edit(self);
+        changed
     }
 
     /// The layer stack the mapped edit `target_layer` writes into, pinned
@@ -2616,19 +2651,22 @@ impl Stage {
     {
         // The stage's own closure error rides through the layer transaction, so
         // a stage-only failure inside it rolls the layer back like a layer one.
-        self.commit_attributed(layers.store(), &[layers.handle(layer)], mapping, |edits| {
+        self.commit_attributed(layers.store(), &[layers.handle(layer)], mapping, None, |edits| {
             f(&mut edits[0])
         })
     }
 
     /// Commit `f` over `handles` as one transaction, publishing its
-    /// [`Provenance`] in [`edit_provenance`](StageInner::edit_provenance) for
-    /// the stage's recorder to tag the queued edit with. Only a remapping arc or
+    /// [`Attribution`] in [`edit_attribution`](StageInner::edit_attribution)
+    /// for the stage's recorder to tag the queued edit with. Only a remapping arc or
     /// variant target (a non-identity `mapping`) publishes one,
     /// [`Provenance::EditTarget`]; an identity-mapped or unmapped target
     /// authors at the layer's own paths and publishes none, for the drain to
     /// resolve from local-layer membership ([`Provenance::LocalStack`] for a
     /// local layer, [`Provenance::DirectLayerEdit`] for a non-local one).
+    ///
+    /// An undo replaying one of its revert's transactions passes `replay`,
+    /// which the transaction carries ([`PendingChange::replay`]).
     ///
     /// The stage's recorder queues the edit as it lands. The caller delivers
     /// the landed commit's notifications
@@ -2639,17 +2677,21 @@ impl Stage {
         store: &sdf::LayerStore,
         handles: &[&sdf::LayerHandle],
         mapping: Option<&pcp::MapFunction>,
+        replay: Option<ReplayId>,
         f: impl FnOnce(&mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<sdf::Committed, E> {
         let txn = sdf::TxnContext::new(Some(self.editor));
         let generation = txn.id.get();
-        let _published = PublishedProvenance {
-            table: &self.edit_provenance,
+        let _published = Published {
+            table: &self.edit_attribution,
             generation,
         };
-        if let Some(mapping) = mapping.filter(|m| !m.is_identity()) {
-            self.edit_provenance
-                .insert(generation, Rc::new(Provenance::EditTarget(mapping.clone())));
+        let provenance = mapping
+            .filter(|m| !m.is_identity())
+            .map(|mapping| Rc::new(Provenance::EditTarget(mapping.clone())));
+        if provenance.is_some() || replay.is_some() {
+            self.edit_attribution
+                .insert(generation, Attribution { provenance, replay });
         }
         store.commit(handles, txn, f)
     }
@@ -2674,6 +2716,7 @@ impl Stage {
         change: &sdf::PendingLayerChange<'_>,
         layer: pcp::LayerId,
         own: bool,
+        replay: Option<ReplayId>,
         mapping: Option<&pcp::MapFunction>,
     ) {
         let observers = self.observers.borrow().snapshot();
@@ -2688,6 +2731,7 @@ impl Stage {
             mapping,
             generation: change.generation,
             own,
+            replay,
         };
         // Observers capture first, so no sink's order or panic reaches them.
         for observer in observers {
@@ -4915,7 +4959,7 @@ impl StageBuilder {
             layer_stack_id,
             sinks: RefCell::default(),
             observers: RefCell::default(),
-            edit_provenance: TxnTable::default(),
+            edit_attribution: TxnTable::default(),
             editor: sdf::EditorId::next(),
             schema_registry: self.schema_registry.unwrap_or_else(|| SchemaRegistry::global().clone()),
             prim_types: RefCell::default(),
@@ -8210,6 +8254,40 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(stage.undo_depth(), 1, "the step on the reloaded layer went");
         assert!(stage.undo()?);
         assert!(!stage.prim("/OnRoot")?.is_valid()?, "the older step on the root stays");
+        Ok(())
+    }
+
+    /// A reload dropping a step of several transactions on one layer keeps
+    /// what each of them authored: an older step overlapping any of them goes
+    /// too, so an undo never erases the kept work.
+    #[test]
+    fn reload_departs_overlap() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stage = usd::UndoStage::from(Stage::open(&shared_fixture(dir.path())?)?);
+        let root = stage.root_layer().identifier().to_string();
+        let sub = layer_named(&stage, "sub.usda");
+        stage.edit_layer(&root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/P", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        stage.group(|stage| {
+            stage.batch_edit(&[root.as_str(), sub.as_str()], |edits| {
+                sdf::PrimSpec::new(edits[0].data_mut(), "/Q", sdf::Specifier::Def, "")?;
+                sdf::PrimSpec::new(edits[1].data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
+                Ok(())
+            })?;
+            stage.edit_layer(&root, |e| {
+                sdf::PrimSpec::new(e.data_mut(), "/P/C", sdf::Specifier::Def, "")?;
+                Ok(())
+            })
+        })?;
+        assert_eq!(stage.undo_depth(), 2);
+        let handle = stage.layer_handle(&sub).expect("loaded");
+        handle.save()?;
+        sdf::layer::tests::append(&dir.path().join("sub.usda"), "def \"Elsewhere\" {}\n")?;
+        assert!(handle.reload(false)?);
+        assert_eq!(stage.undo_depth(), 0, "the step defining /P overlaps the kept /P/C");
+        assert!(stage.prim("/P/C")?.is_valid()?);
         Ok(())
     }
 

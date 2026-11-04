@@ -42,7 +42,7 @@ use std::thread;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
-use super::sink::{Payload, Provenance, ResyncPaths};
+use super::sink::{Payload, Provenance, ReplayId, ResyncPaths};
 
 /// One transaction outcome awaiting reconciliation, in commit order.
 pub(super) enum Pending {
@@ -67,6 +67,8 @@ pub(super) struct PendingEdit {
     /// Whether the edit is the stage's own (see
     /// [`CommittedChange::is_own`](super::CommittedChange::is_own)).
     pub(super) own: bool,
+    /// The undo revert the edit replays, when it is one of its replays.
+    pub(super) replay: Option<ReplayId>,
     /// The [`Provenance`] a stage authoring method staged for this edit, or
     /// `None` for a direct edit, which resolves against local-layer membership
     /// when the queue drains.
@@ -91,6 +93,9 @@ pub(super) struct CompositionNotice {
     pub(super) provenance: Provenance,
     pub(super) generation: u64,
     pub(super) own: bool,
+    /// The undo revert the transaction replays, when it is one of its
+    /// replays.
+    pub(super) replay: Option<ReplayId>,
     pub(super) layer_identifier: String,
     /// Each edited layer's footprint, for the stage's transaction observers.
     pub(super) footprints: Vec<(pcp::LayerId, Rc<sdf::Footprint>)>,
@@ -1154,6 +1159,7 @@ impl StageComposition {
     ) -> bool {
         let generation = group[0].generation;
         let own = group[0].own;
+        let replay = group[0].replay;
         let footprints = group
             .iter_mut()
             .filter_map(|edit| Some((edit.layer, edit.footprint.take()?)))
@@ -1248,6 +1254,7 @@ impl StageComposition {
             provenance,
             generation,
             own,
+            replay,
             layer_identifier,
             footprints,
         });
@@ -2585,6 +2592,7 @@ mod tests {
         PendingEdit {
             generation: 0,
             own: false,
+            replay: None,
             layer: pcp::LayerId::from_raw(0),
             changes: sdf::ChangeList::new(),
             provenance: None,
