@@ -2021,7 +2021,7 @@ mod tests {
         assert_eq!(canonical.children(local).collect::<Vec<_>>(), [class, reference]);
 
         let mut prototype = canonical.clone();
-        prototype.rebase_maps(|map| map.rebase_target(&path("/Inst"), &path("/__Prototype_1")));
+        prototype.rebase_maps(|map| map.rebase_target(&path("/Inst"), &path("/__Prototype_2")));
 
         assert!(!prototype.shares_data_with(&canonical));
         assert_eq!(structure(&prototype), before);

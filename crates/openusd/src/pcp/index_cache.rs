@@ -5110,9 +5110,9 @@ def \"Model\"
             ValueRead::default(),
         )?;
 
-        let scope = sdf::path("/__Prototype_0/Scope")?;
+        let scope = sdf::path("/__Prototype_1/Scope")?;
         let index = cache.cached(&scope);
-        let rig = sdf::path("/__Prototype_0/Rig")?;
+        let rig = sdf::path("/__Prototype_1/Rig")?;
         let node = *nodes_at_site(index, &scope, graph.root_id().unwrap(), &rig, &graph.read_view())
             .first()
             .expect("the placeholder is rebased into the prototype namespace");
@@ -5625,7 +5625,7 @@ def "Anchor" (inherits = </Rig>) {}
 
         // The check composed the prototype's prim, leaving the proxy path unindexed.
         assert!(!cache.is_indexed(&sdf::path("/Inst/Child")?));
-        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Child")?));
         Ok(())
     }
 
@@ -6530,7 +6530,7 @@ def "Model" (
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        // Query /A first so it mints /__Prototype_0 for its key.
+        // Query /A first so it mints /__Prototype_1 for its key.
         let size = |cache: &mut IndexCache, p: &str| {
             cache.value_at(
                 &graph.read_view(),
@@ -6553,11 +6553,11 @@ def "Model" (
             TimedValue::Value(vt::Value::Double(9.0))
         );
 
-        // /A and /B share /__Prototype_0; /C uses /__Prototype_1. The shared
+        // /A and /B share /__Prototype_1; /C uses /__Prototype_2. The shared
         // subtree composes once in each prototype namespace, and no instance's
         // own descendant path is ever indexed.
-        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Child")?));
         assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_2/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/A/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/C/Child")?));
@@ -6596,8 +6596,8 @@ def "Model" (
         );
 
         // The shared subtree composes once, under the prototype namespace.
-        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid")?));
-        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid/Leaf")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Mid")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Mid/Leaf")?));
         // No intermediate proxy prim is composed literally at an instance path.
         for p in ["/A/Mid", "/B/Mid", "/A/Mid/Leaf", "/B/Mid/Leaf"] {
             assert!(!cache.is_indexed(&sdf::path(p)?), "{p} must not be indexed literally");
@@ -6630,7 +6630,7 @@ def "Model" (
     fn prototype_path_before_registration() -> Result<()> {
         let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
-        let mid = sdf::path("/__Prototype_0/Mid")?;
+        let mid = sdf::path("/__Prototype_1/Mid")?;
         assert!(!cache.is_populated(&graph.read_view(), &mid)?);
         assert_eq!(cache.effective_prim(&graph.read_view(), &mid)?, mid);
         assert!(cache.own_status(&graph.read_view(), &mid)?.is_none());
@@ -6651,7 +6651,7 @@ def "Model" (
 
     /// A nested instance inside a prototype namespace mints its own prototype and
     /// its descendants redirect onto it: both an outer proxy (`/A/Nested/Leaf`)
-    /// and the prototype-namespace path (`/__Prototype_0/Nested/Leaf`) resolve
+    /// and the prototype-namespace path (`/__Prototype_1/Nested/Leaf`) resolve
     /// through the nested prototype, so the nested descendant never composes in
     /// place under the outer prototype (spec 11.3.3).
     #[test]
@@ -6669,31 +6669,31 @@ def "Model" (
             )
         };
 
-        // /A mints /__Prototype_0 (for /Outer); the nested instance mints
-        // /__Prototype_1 (for /Inner). Both the outer proxy and the
+        // /A mints /__Prototype_1 (for /Outer); the nested instance mints
+        // /__Prototype_2 (for /Inner). Both the outer proxy and the
         // prototype-namespace path resolve the nested leaf.
         assert_eq!(
             v(&mut cache, "/A/Nested/Leaf.v")?,
             TimedValue::Value(vt::Value::Double(3.0))
         );
         assert_eq!(
-            v(&mut cache, "/__Prototype_0/Nested/Leaf.v")?,
+            v(&mut cache, "/__Prototype_1/Nested/Leaf.v")?,
             TimedValue::Value(vt::Value::Double(3.0))
         );
 
         // Both redirect to the nested prototype; neither the prototype-namespace
         // nested descendant nor the outer proxy is composed in place.
-        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Leaf")?));
-        assert!(!cache.is_indexed(&sdf::path("/__Prototype_0/Nested/Leaf")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_2/Leaf")?));
+        assert!(!cache.is_indexed(&sdf::path("/__Prototype_1/Nested/Leaf")?));
         assert!(!cache.is_indexed(&sdf::path("/A/Nested/Leaf")?));
 
         // The nested instance reached via the instance namespace (/A/Nested) and
-        // via the prototype namespace (/__Prototype_0/Nested) is the same shared
+        // via the prototype namespace (/__Prototype_1/Nested) is the same shared
         // composition, so both resolve to one nested prototype — exactly two
         // prototypes total, not three.
         assert_eq!(
             cache.prototype_of(&graph.read_view(), &sdf::path("/A/Nested")?)?,
-            cache.prototype_of(&graph.read_view(), &sdf::path("/__Prototype_0/Nested")?)?,
+            cache.prototype_of(&graph.read_view(), &sdf::path("/__Prototype_1/Nested")?)?,
         );
         assert_eq!(cache.prototypes().len(), 2);
         Ok(())
@@ -6708,9 +6708,9 @@ def "Model" (
     fn nested_identity_query_order() -> Result<()> {
         let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
         let orders = [
-            ["/A/Nested", "/B/Nested", "/__Prototype_0/Nested"],
-            ["/B/Nested", "/__Prototype_0/Nested", "/A/Nested"],
-            ["/A/Nested", "/__Prototype_0/Nested", "/B/Nested"],
+            ["/A/Nested", "/B/Nested", "/__Prototype_1/Nested"],
+            ["/B/Nested", "/__Prototype_1/Nested", "/A/Nested"],
+            ["/A/Nested", "/__Prototype_1/Nested", "/B/Nested"],
         ];
         for order in orders {
             let (graph, mut cache) = single_layer_stack(&root);
@@ -6806,8 +6806,8 @@ def "Model" (
         // enclosing prototypes.
         expected.extend([
             sdf::path("/A")?,
-            sdf::path("/__Prototype_0/Inner")?,
-            sdf::path("/__Prototype_1/Nested")?,
+            sdf::path("/__Prototype_1/Inner")?,
+            sdf::path("/__Prototype_2/Nested")?,
         ]);
         expected.sort();
         let mut reported = cache.drop_index_victims(vec![sdf::path("/A")?]);
@@ -6873,8 +6873,8 @@ def "Model" (
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        // /A mints /__Prototype_0 for /Outer; the nested instance mints
-        // /__Prototype_1 for /Library/Inner, and the outer proxy's descendant
+        // /A mints /__Prototype_1 for /Outer; the nested instance mints
+        // /__Prototype_2 for /Library/Inner, and the outer proxy's descendant
         // stands in for a prim there.
         assert_eq!(
             cache.value_at(
@@ -6888,7 +6888,7 @@ def "Model" (
         );
         assert_eq!(
             cache.prim_in_prototype(&graph.read_view(), &sdf::path("/A/Nested/Leaf")?)?,
-            Some(sdf::path("/__Prototype_1/Leaf")?)
+            Some(sdf::path("/__Prototype_2/Leaf")?)
         );
 
         // The nested instance is never composed at the proxy path, and reaching
@@ -6897,7 +6897,7 @@ def "Model" (
         assert!(!cache.is_indexed(&sdf::path("/A/Nested")?));
         assert_eq!(
             cache.prototype_of(&graph.read_view(), &sdf::path("/A/Nested")?)?,
-            cache.prototype_of(&graph.read_view(), &sdf::path("/__Prototype_0/Nested")?)?,
+            cache.prototype_of(&graph.read_view(), &sdf::path("/__Prototype_1/Nested")?)?,
         );
         assert_eq!(cache.prototypes().len(), 2);
         Ok(())
@@ -6991,7 +6991,7 @@ def "Model" (
         assert_eq!(
             cache.value_at(
                 &graph.read_view(),
-                &sdf::path("/__Prototype_0.protoAttr")?,
+                &sdf::path("/__Prototype_1.protoAttr")?,
                 Some(0.0),
                 &interp,
                 ValueRead::default()
@@ -7063,7 +7063,7 @@ def "Model" (
         assert_eq!(
             cache.value_at(
                 &graph.read_view(),
-                &sdf::path("/__Prototype_0.bodyAttr")?,
+                &sdf::path("/__Prototype_1.bodyAttr")?,
                 Some(0.0),
                 &interp,
                 ValueRead::default()

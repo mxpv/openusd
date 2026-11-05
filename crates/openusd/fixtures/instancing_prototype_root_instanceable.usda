@@ -6,7 +6,7 @@
     it, which is how a published asset usually declares that it wants to be
     instanced. The opinion therefore arrives at /World/Place on the instanceable
     arc itself rather than at the instance's own namespace, so it is shared
-    content the prototype keeps: /__Prototype_0 composes with
+    content the prototype keeps: /__Prototype_1 composes with
     `instanceable = true` resolving true.
 
     A prototype root is still not an instance — the opinion describes the prims

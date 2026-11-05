@@ -3149,7 +3149,7 @@ def "Root" (
         );
 
         let mut rebased = index.clone();
-        rebased.rebase_root(&Path::new("/Root").unwrap(), &Path::new("/__Prototype_1").unwrap());
+        rebased.rebase_root(&Path::new("/Root").unwrap(), &Path::new("/__Prototype_2").unwrap());
         assert_eq!(
             before,
             sites(&rebased),
@@ -3181,8 +3181,8 @@ def \"Root\" ( references = </Ref> ) {
                 .and_then(|c| c.translate(&site))
         };
         assert_eq!(culled(&index), Some(Path::new("/Root/Child").unwrap()));
-        index.rebase_root(&Path::new("/Root").unwrap(), &Path::new("/__Prototype_1").unwrap());
-        assert_eq!(culled(&index), Some(Path::new("/__Prototype_1/Child").unwrap()));
+        index.rebase_root(&Path::new("/Root").unwrap(), &Path::new("/__Prototype_2").unwrap());
+        assert_eq!(culled(&index), Some(Path::new("/__Prototype_2/Child").unwrap()));
     }
 
     // Spec §10.3.2.1.2 / §10.3.2.2.2 / §10.3.1.1: a layer offset with
