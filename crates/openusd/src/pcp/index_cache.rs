@@ -14,6 +14,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
+use rustc_hash::FxHashMap;
+
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType};
@@ -277,13 +279,14 @@ struct DefiningKind {
 
 impl DefiningKind {
     /// Offers one spec to the rule. `None` admits it to the stack; `Some`
-    /// rejects it and carries the conflict to report.
+    /// rejects it and carries the conflict to report. `prop_path` is called
+    /// only to build that conflict.
     fn admit(
         &mut self,
         spec_type: SpecType,
         layer: &str,
         path: &Path,
-        prop_path: &Path,
+        prop_path: impl FnOnce() -> Path,
         prim_path: &Path,
     ) -> Option<CompositionDiagnostic> {
         match &self.defining {
@@ -293,7 +296,7 @@ impl DefiningKind {
             }
             Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
                 Some(CompositionDiagnostic::InconsistentPropertyType {
-                    property: prop_path.clone(),
+                    property: prop_path(),
                     defining_layer: def_layer.clone(),
                     defining_path: def_path.clone(),
                     defining_is_attribute: *def_type == SpecType::Attribute,
@@ -1213,10 +1216,13 @@ impl OpinionResolver for StackResolver<'_> {
             return Step::Continue;
         };
         let layer = self.graph.identifier(site.layer);
-        match self
-            .defining
-            .admit(spec_type, layer, &site.query_path, self.prop_path, self.prim_path)
-        {
+        match self.defining.admit(
+            spec_type,
+            layer,
+            &site.query_path,
+            || self.prop_path.clone(),
+            self.prim_path,
+        ) {
             None => self.sites.push(site.spec_record(self.graph)),
             Some(conflict) => self.conflicts.report(conflict),
         }
@@ -3475,58 +3481,18 @@ impl IndexCache {
     /// once however many passes found it.
     ///
     /// Only a name that two of the prim's spec sites author can mix kinds
-    /// ([`contested_property_names`]), so a prim whose properties each come
+    /// ([`property_type_conflicts`]), so a prim whose properties each come
     /// from one site is done after reading its sites' property lists.
     fn report_property_type_conflicts(&mut self, graph: &LayerView<'_>, prim_path: &Path) {
         let Some(index) = self.store.index_at(prim_path) else {
             return;
         };
-        let mut conflicts = Diagnostics::default();
-        for name in contested_property_names(graph, index) {
-            let Ok(prop_path) = prim_path.append_property(&name) else {
-                continue;
-            };
-            conflicts.extend(Self::property_type_conflicts(graph, index, prim_path, &prop_path));
-        }
+        let conflicts = property_type_conflicts(graph, index, prim_path);
         let cached = self.store.replace_property_errors(prim_path, conflicts);
         debug_assert!(
             cached,
             "property conflicts recorded against an uncached prim: {prim_path}"
         );
-    }
-
-    /// Walks a property's specs strongest-first across the prim's composition
-    /// graph, returning its `(layer identifier, spec path)` stack and the
-    /// inconsistent-spec-type errors. The first spec's kind (attribute vs
-    /// relationship) is the defining type; weaker specs of the other kind are
-    /// inconsistent (C++ `PcpErrorInconsistentPropertyType`) — dropped from the
-    /// stack and reported. `prop_path` is the property in `prim_path`'s namespace.
-    ///
-    /// Reads the memoized prim spec stack as the candidate set: a property spec
-    /// requires its owning prim spec, so every layer that authors the property
-    /// also authors the prim spec the stack records. Inert and culled nodes are
-    /// skipped (matching the structural node walk); permission-denied sites stay.
-    fn property_type_conflicts(
-        graph: &LayerView<'_>,
-        index: &PrimIndex,
-        prim_path: &Path,
-        prop_path: &Path,
-    ) -> Diagnostics {
-        let mut conflicts = Diagnostics::default();
-        let mut defining = DefiningKind::default();
-        for (site, node) in index.live_spec_sites() {
-            let Some(p) = prop_path.replace_prefix(prim_path, node.path()) else {
-                continue;
-            };
-            let Some(spec_type) = graph.layer(site.layer).data().spec_type(&p) else {
-                continue;
-            };
-            let layer_id = graph.identifier(site.layer);
-            if let Some(conflict) = defining.admit(spec_type, layer_id, &p, prop_path, prim_path) {
-                conflicts.report(conflict);
-            }
-        }
-        conflicts
     }
 
     /// Returns the composed [`PrimIndex`] for a prim, building it if needed (C++
@@ -4249,46 +4215,89 @@ fn fold_property_children<'a>(
     }
 }
 
-/// The property names more than one of `index`'s live spec sites authors, in
-/// the order a second site is found for each. A property spec of one kind and
-/// one of the other need two sites, so these are the names whose specs can
-/// disagree (C++ `PcpErrorInconsistentPropertyType`).
+/// The [`CompositionDiagnostic::InconsistentPropertyType`] conflicts among
+/// `prim_path`'s property specs, by property in the order a second site is
+/// found for it, then by site strongest first.
 ///
-/// A site's names are its prim spec's `propertyChildren`, which lists every
-/// property spec the prim owns.
-fn contested_property_names(graph: &LayerView<'_>, index: &PrimIndex) -> Vec<Token> {
+/// A property spec of one kind and one of the other need two sites, so only
+/// the names more than one live spec site lists can conflict. A site's names
+/// are its prim spec's `propertyChildren`, which lists every property spec the
+/// prim owns, and a name's specs are read only at the sites that list it.
+/// Inert and culled nodes are skipped (matching the structural node walk);
+/// permission-denied sites stay.
+fn property_type_conflicts(graph: &LayerView<'_>, index: &PrimIndex, prim_path: &Path) -> Diagnostics {
+    let mut conflicts = Diagnostics::default();
     if index.live_spec_sites().nth(1).is_none() {
-        return Vec::new();
+        return conflicts;
     }
     let field = ChildrenKey::PropertyChildren.as_str();
     let lists: Vec<_> = index
         .live_spec_sites()
-        .filter_map(|(site, node)| graph.layer(site.layer).data().try_field(node.path(), field).ok()?)
+        .filter_map(|(site, node)| {
+            let list = graph.layer(site.layer).data().try_field(node.path(), field).ok()??;
+            Some((site, node, list))
+        })
         .collect();
-    let mut contested = Vec::new();
     if lists.len() < 2 {
-        return contested;
+        return conflicts;
     }
-    // Whether each name seen so far has been found at a second site.
-    let mut names: HashMap<&Token, bool> = HashMap::new();
-    for list in &lists {
+    // For each distinct name, the last site listing it and its position among
+    // the contested names once a second site lists it.
+    let mut slots: FxHashMap<&Token, usize> = FxHashMap::default();
+    let mut names: Vec<(usize, Option<usize>)> = Vec::new();
+    let mut contested: Vec<&Token> = Vec::new();
+    // Each (site, name slot) listing, sites in strongest-first order.
+    let mut listings: Vec<(usize, usize)> = Vec::new();
+    for (site, (_, _, list)) in lists.iter().enumerate() {
         let Value::TokenVec(list) = list.as_ref() else {
             continue;
         };
         for name in list {
-            match names.get_mut(name) {
-                Some(repeated) => {
-                    if !mem::replace(repeated, true) {
-                        contested.push(name.clone());
-                    }
-                }
-                None => {
-                    names.insert(name, false);
-                }
+            let slot = *slots.entry(name).or_insert_with(|| {
+                names.push((usize::MAX, None));
+                names.len() - 1
+            });
+            let (last_site, at) = &mut names[slot];
+            if *last_site == site {
+                continue;
             }
+            if *last_site != usize::MAX && at.is_none() {
+                *at = Some(contested.len());
+                contested.push(name);
+            }
+            *last_site = site;
+            listings.push((site, slot));
         }
     }
-    contested
+    if contested.is_empty() {
+        return conflicts;
+    }
+    let mut found: Vec<(DefiningKind, Vec<CompositionDiagnostic>)> =
+        contested.iter().map(|_| Default::default()).collect();
+    for &(site, slot) in &listings {
+        let Some(at) = names[slot].1 else {
+            continue;
+        };
+        let (spec_site, node, _) = &lists[site];
+        let name = contested[at];
+        let Ok(path) = node.path().append_property(name) else {
+            continue;
+        };
+        let Some(spec_type) = graph.layer(spec_site.layer).data().spec_type(&path) else {
+            continue;
+        };
+        let layer = graph.identifier(spec_site.layer);
+        let (defining, reported) = &mut found[at];
+        // `name` appended to the node's path, so it appends to `prim_path` too.
+        let prop_path = || prim_path.append_property(name).unwrap_or_else(|_| path.clone());
+        if let Some(conflict) = defining.admit(spec_type, layer, &path, prop_path, prim_path) {
+            reported.push(conflict);
+        }
+    }
+    for conflict in found.into_iter().flat_map(|(_, reported)| reported) {
+        conflicts.report(conflict);
+    }
+    conflicts
 }
 
 /// Appends a layer's not-yet-seen `field` children (`primChildren` /
@@ -4860,6 +4869,53 @@ def "A" (
             2,
             "two conflicting specs are two failures, however alike, got {:?}",
             cache.composition_errors().iter().collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    /// The prim build reports each conflict once, from the sites that list the
+    /// property. `/P.x` is listed by `mid.usd` and the reference, `/P.y` by
+    /// `root.usd` and the reference, and the reference lists `x` first, so
+    /// `x`'s conflict reads first.
+    #[test]
+    fn conflicts_by_listing_sites() -> Result<()> {
+        let root = "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\ndef \"P\" (\n    references = @ref.usd@</R>\n) {\n    custom double y = 1\n}\n";
+        let reference = "#usda 1.0\ndef \"R\" {\n    custom double x = 1\n    add rel y\n}\n";
+        let graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root),
+                parse_named_layer("mid.usd", "#usda 1.0\nover \"P\" {\n    add rel x\n}\n"),
+                parse_named_layer("ref.usd", reference),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = fresh_cache();
+        cache.ensure_index(&graph.read_view(), &sdf::path("/P")?)?;
+
+        let found: Vec<_> = cache
+            .composition_errors()
+            .iter()
+            .filter_map(|e| match e {
+                CompositionDiagnostic::InconsistentPropertyType {
+                    property,
+                    defining_is_attribute,
+                    conflicting_path,
+                    ..
+                } => Some((
+                    property.to_string(),
+                    *defining_is_attribute,
+                    conflicting_path.to_string(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("/P.x".to_string(), false, "/R.x".to_string()),
+                ("/P.y".to_string(), true, "/R.y".to_string()),
+            ]
         );
         Ok(())
     }
