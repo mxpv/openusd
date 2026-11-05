@@ -1234,27 +1234,27 @@ pub(crate) mod tests {
         };
         let stack = indexed().arena().next().expect("one node").layer_stack_id();
         let mut store = IndexStore::default();
-        for path in ["/__Prototype_1", "/__Prototype_1/Part", "/__Prototype_2/Part"] {
+        for path in ["/__Prototype_2", "/__Prototype_2/Part", "/__Prototype_3/Part"] {
             register(&mut store, &g, &p(path), indexed());
         }
-        store.remove_subtrees([&p("/__Prototype_1"), &p("/__Prototype_2")]);
+        store.remove_subtrees([&p("/__Prototype_2"), &p("/__Prototype_3")]);
         assert_eq!(store.stack_owners[&stack], 3);
 
         // Two groups, one of them landing on a held entry.
-        store.transfer_work(&p("/__Prototype_1"), &[p("/__Prototype_2"), p("/__Prototype_3")]);
+        store.transfer_work(&p("/__Prototype_2"), &[p("/__Prototype_3"), p("/__Prototype_4")]);
         assert_eq!(
             evicted(&store),
             [
-                "/__Prototype_2",
-                "/__Prototype_2/Part",
                 "/__Prototype_3",
-                "/__Prototype_3/Part"
+                "/__Prototype_3/Part",
+                "/__Prototype_4",
+                "/__Prototype_4/Part"
             ]
         );
         assert_eq!(store.stack_owners[&stack], 4, "one owner per entry");
 
-        store.transfer_work(&p("/__Prototype_3"), &[]);
-        assert_eq!(evicted(&store), ["/__Prototype_2", "/__Prototype_2/Part"]);
+        store.transfer_work(&p("/__Prototype_4"), &[]);
+        assert_eq!(evicted(&store), ["/__Prototype_3", "/__Prototype_3/Part"]);
         assert_eq!(store.stack_owners[&stack], 2);
         store.retire(&Path::abs_root());
         assert!(!store.stack_owners.contains_key(&stack));

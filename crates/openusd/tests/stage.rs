@@ -206,7 +206,7 @@ fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
 
 /// The stage's first prototype in registration order, which discovery makes
 /// the first instance in stage order. Instancing tests ask the stage for it
-/// rather than naming `/__Prototype_0`, whose number depends on which instance
+/// rather than naming `/__Prototype_1`, whose number depends on which instance
 /// registered first.
 fn first_prototype(stage: &Stage) -> Result<sdf::Path> {
     Ok(stage
@@ -1986,7 +1986,7 @@ def "Q" {
     assert!(stage.prim("/A")?.is_valid()?);
     assert_eq!(
         notices.borrow().asset_paths_resynced,
-        paths(&["/A", "/B", "/__Prototype_0"]),
+        paths(&["/A", "/B", "/__Prototype_1"]),
         "both instance roots and the shared prototype compose against the edited stack; \
          the nested prototype holds only u.usda content, so it is untouched"
     );

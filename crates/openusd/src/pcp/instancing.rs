@@ -54,10 +54,12 @@ pub(super) struct PrototypeRegistry {
     /// Maps an instancing key to its prototype root, the lookup direction used
     /// only when registering an instance to dedup against an existing key.
     by_key: HashMap<InstanceKey, Path>,
-    /// Counter for minting `/__Prototype_N` identities in registration order.
-    /// Never rewound — [`remove_affected`](Self::remove_affected) leaves it
-    /// alone — so a `/__Prototype_N` identity is never reused for a different
-    /// composition within a session.
+    /// The `N` of the last `/__Prototype_N` minted, in registration order,
+    /// so the first prototype is `/__Prototype_1` (C++
+    /// `Usd_InstanceCache::_lastPrototypeIndex`). Never rewound —
+    /// [`remove_affected`](Self::remove_affected) leaves it alone — so a
+    /// `/__Prototype_N` identity is never reused for a different composition
+    /// within a session.
     count: usize,
 }
 
@@ -209,9 +211,9 @@ impl PrototypeRegistry {
             return (root, false);
         }
 
+        self.count += 1;
         let index = self.count;
         let path = Path::new(&format!("/{PROTOTYPE_PREFIX}{index}")).expect("synthetic prototype path is valid");
-        self.count += 1;
         let relative_load_rules = key.load_rules.clone();
         let relative_mask = key.mask.clone();
         self.by_key.insert(key, path.clone());
@@ -1010,7 +1012,7 @@ impl IndexCache {
     /// identical instances share one composed subtree. This is uniform across
     /// namespaces: an ordinary instance proxy (`/A/tail` → `/__Prototype_N/tail`,
     /// including the canonical instance's own descendants) and a nested instance
-    /// proxy *inside* a prototype (`/__Prototype_0/Nested/tail`, where `Nested`
+    /// proxy *inside* a prototype (`/__Prototype_1/Nested/tail`, where `Nested`
     /// is itself an instance → the nested prototype) both map onto the prototype
     /// they stand in for.
     ///

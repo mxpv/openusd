@@ -756,7 +756,7 @@ mod tests {
     fn target_in_prototype() -> Result<()> {
         let stage = stage()?;
         let rel = stage.define_prim("/A")?.create_relationship("r")?;
-        let refused = rel.add_target("/__Prototype_1/Geom");
+        let refused = rel.add_target("/__Prototype_2/Geom");
         assert!(
             matches!(refused, Err(StageAuthoringError::PrototypeTarget { .. })),
             "{refused:?}"
