@@ -487,7 +487,7 @@ impl<'a> PropertyDecl<'a> {
     // can appear in a `const`. It cannot today: its unregistered form holds a
     // `tf::Token`, whose shared spelling is an `Arc<str>`, and a value with
     // drop glue is not promoted out of a `static` initializer. Interning shared
-    // tokens (the `TODO(perf)` in `tf.rs`) or exposing a `Copy` handle for the
+    // tokens (the `TODO(perf)` in `tf/mod.rs`) or exposing a `Copy` handle for the
     // registered types would settle it and retire
     // `SchemaRegistryError::UnknownValueType` with it.
     pub const fn attribute(name: &'a str, type_name: &'a str) -> Self {
