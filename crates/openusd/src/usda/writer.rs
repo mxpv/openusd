@@ -210,7 +210,7 @@ impl Emitter<'_> {
         };
         for name in &children {
             writeln!(self.out)?;
-            let child_path = root.append_path(name.as_str())?;
+            let child_path = root.append_child(name.as_str())?;
             self.emit_prim(data, &child_path, name)?;
         }
         writeln!(self.out)?;
@@ -284,7 +284,7 @@ impl Emitter<'_> {
             if i > 0 {
                 writeln!(self.out)?;
             }
-            let child_path = path.append_path(name.as_str())?;
+            let child_path = path.append_child(name.as_str())?;
             self.emit_prim(data, &child_path, name)?;
         }
 

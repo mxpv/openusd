@@ -240,7 +240,7 @@ impl<'a> Parser<'a> {
             bail!("Expected prim name string, got {name_token:?}");
         };
         parent_children.push(name.to_string());
-        let prim_path = current_path.append_path(name.as_ref())?;
+        let prim_path = current_path.append_child(name.as_ref())?;
 
         // Optional metadata block.
         if self.cursor.at_punctuation('(')? {
