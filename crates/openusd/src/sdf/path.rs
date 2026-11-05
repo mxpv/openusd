@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
 use std::{array, cmp, convert::Infallible, fmt, iter, mem, ptr, str::FromStr};
 
@@ -101,7 +102,13 @@ struct Text {
     /// The text's hash under a fixed-key hasher. It also picks the text's
     /// shard and slot in [`INTERNER`].
     hash: u64,
+    /// The path's [`prim_element_count`](Path::prim_element_count), counted
+    /// on first use, or [`UNCOUNTED`] before.
+    prim_elements: AtomicU32,
 }
+
+/// The [`Text::prim_elements`] of a path not yet counted.
+const UNCOUNTED: u32 = u32::MAX;
 
 impl Default for Path {
     /// The empty path.
@@ -217,6 +224,7 @@ impl Path {
         let path = Arc::new(Text {
             text: text.into(),
             hash,
+            prim_elements: AtomicU32::new(UNCOUNTED),
         });
         let weak = Arc::downgrade(&path);
         // A text dropping on another thread leaves its entry behind until its
@@ -905,9 +913,19 @@ impl Path {
     /// "/"        -> 0
     /// ```
     pub fn prim_element_count(&self) -> usize {
-        self.components()
+        // Every clone shares the count, and racing threads store the same one.
+        let cached = self.path.prim_elements.load(Ordering::Relaxed);
+        if cached != UNCOUNTED {
+            return cached as usize;
+        }
+        let count = self
+            .components()
             .filter(|c| matches!(c, PathComponent::Prim(_)))
-            .count()
+            .count();
+        if let Ok(stored) = u32::try_from(count) {
+            self.path.prim_elements.store(stored, Ordering::Relaxed);
+        }
+        count
     }
 
     /// Counts every prim-namespace component of this path, including `{set=sel}`
