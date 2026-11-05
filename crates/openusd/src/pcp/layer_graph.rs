@@ -1257,16 +1257,21 @@ impl LayerGraph {
         // variables), a member, or when its seed shifted: its key source's
         // referent changed this pass. The seed is read live from that referent,
         // already refreshed by this pass's ascending order.
+        // The stacks holding an edited layer, read from the registry's
+        // layer-to-stacks index. A target's members change only when it
+        // rebuilds, so the set holds for the whole loop.
+        let reached: HashSet<LayerStackId> = affected
+            .into_iter()
+            .flatten()
+            .flat_map(|&layer| self.stacks.stacks_using(layer))
+            .collect();
         for (id, root, source) in self.stacks.targets() {
             let rebuild = match affected {
                 None => true,
                 Some(affected) => {
                     unsettled.contains(&id)
                         || affected.contains(&root)
-                        || self
-                            .stacks
-                            .member_set(id)
-                            .is_some_and(|members| !members.is_disjoint(affected))
+                        || reached.contains(&id)
                         || vars_deltas.iter().any(|delta| delta.stack == source.referent())
                 }
             };
