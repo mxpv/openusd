@@ -128,6 +128,7 @@ fn stream(s: &mut String, value: &Value) {
         Value::UIntListOp(op) => list_op(s, "SdfUIntListOp", op, display),
         Value::UInt64ListOp(op) => list_op(s, "SdfUInt64ListOp", op, display),
         Value::Payload(v) => payload(s, v),
+        Value::Path(v) => path(s, v),
         Value::PathVec(v) => vector(s, v, path),
         Value::LayerOffsetVec(v) => vector(s, v, layer_offset),
         Value::Relocates(relocates) => {
@@ -432,6 +433,7 @@ mod tests {
             (Value::TimeCode(sdf::TimeCode(1234567.0)), "1.23457e+06"),
             (Value::ValueBlock, "None"),
             (Value::Opaque, "OpaqueValue"),
+            (Value::Path(sdf::path("/A/B.x").unwrap()), "/A/B.x"),
             (
                 Value::ValueVec(vec![Value::Int(1), Value::Token(tf::Token::from("a"))]),
                 "[1, a]",

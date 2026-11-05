@@ -143,6 +143,9 @@ pub enum Value {
     PayloadListOp(PayloadListOp),
 
     Payload(Payload),
+    /// One path, as a C++ `VtValue` holding an `SdfPath`. No field a layer
+    /// stores holds one, so no file format reads or writes it.
+    Path(Path),
     PathVec(Vec<Path>),
     /// Layer-level relocates: `(source, target)` path pairs for namespace remapping.
     Relocates(RelocateList),
@@ -293,6 +296,7 @@ impl serde::Serialize for Value {
             Value::PayloadListOp(v) => v.serialize(serializer),
 
             Value::Payload(v) => v.serialize(serializer),
+            Value::Path(v) => v.serialize(serializer),
             Value::PathVec(v) => v.serialize(serializer),
             Value::Relocates(v) => {
                 let mut map = serializer.serialize_map(Some(v.len()))?;
@@ -1321,7 +1325,15 @@ mod tests {
             .collect();
         assert_eq!(items, vec!["/B/Child", "/Other"]);
 
-        // PathVec and both endpoints of a Relocates remap.
+        // A Path, a PathVec and both endpoints of a Relocates remap.
+        let path = Value::Path(p("/A/X"));
+        assert!(path.has_embedded_paths());
+        assert_eq!(path.remap_paths(remap).try_as_path().unwrap().as_str(), "/B/X");
+        assert_eq!(
+            path.filter_map_paths(|_| None).try_as_path().unwrap(),
+            Path::default(),
+            "a path mapped away is the empty path"
+        );
         let pv = Value::PathVec(vec![p("/A/X")]).remap_paths(remap);
         assert_eq!(pv.try_as_path_vec().unwrap()[0].as_str(), "/B/X");
         let relocates = Value::Relocates(vec![(p("/A/From"), p("/A/To"))]).remap_paths(remap);
