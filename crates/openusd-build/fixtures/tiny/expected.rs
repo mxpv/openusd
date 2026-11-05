@@ -77,6 +77,27 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 .bases(&["Typed"])
                 .properties(
                     &[
+                        ::openusd::usd::PropertyDecl::attribute("density", "double")
+                            .varying()
+                            .fields(
+                                &[
+                                    ::openusd::usd::Field::new(
+                                        "default",
+                                        || ::openusd::vt::Value::Double(1f64),
+                                    ),
+                                ],
+                            ),
+                        ::openusd::usd::PropertyDecl::attribute("drawMode", "token")
+                            .uniform()
+                            .fields(
+                                &[
+                                    ::openusd::usd::Field::strings(
+                                        "allowedTokens",
+                                        &["default", "bounds"],
+                                    ),
+                                    ::openusd::usd::Field::token("default", "default"),
+                                ],
+                            ),
                         ::openusd::usd::PropertyDecl::attribute("extent", "double3")
                             .varying()
                             .fields(
@@ -89,6 +110,25 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                     ),
                                 ],
                             ),
+                    ],
+                ),
+            ::openusd::usd::SchemaDecl::new(
+                    "Ball",
+                    ::openusd::usd::SchemaKind::ConcreteTyped,
+                )
+                .bases(&["Shape"])
+                .properties(
+                    &[
+                        ::openusd::usd::PropertyDecl::attribute("density", "double")
+                            .varying()
+                            .fields(
+                                &[
+                                    ::openusd::usd::Field::new(
+                                        "default",
+                                        || ::openusd::vt::Value::Double(1f64),
+                                    ),
+                                ],
+                            ),
                         ::openusd::usd::PropertyDecl::attribute("drawMode", "token")
                             .uniform()
                             .fields(
@@ -100,25 +140,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                     ::openusd::usd::Field::token("default", "default"),
                                 ],
                             ),
-                        ::openusd::usd::PropertyDecl::attribute("density", "double")
-                            .varying()
-                            .fields(
-                                &[
-                                    ::openusd::usd::Field::new(
-                                        "default",
-                                        || ::openusd::vt::Value::Double(1f64),
-                                    ),
-                                ],
-                            ),
-                    ],
-                ),
-            ::openusd::usd::SchemaDecl::new(
-                    "Ball",
-                    ::openusd::usd::SchemaKind::ConcreteTyped,
-                )
-                .bases(&["Shape"])
-                .properties(
-                    &[
                         ::openusd::usd::PropertyDecl::attribute("extent", "double3")
                             .varying()
                             .fields(
@@ -131,27 +152,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                     ),
                                 ],
                             ),
-                        ::openusd::usd::PropertyDecl::attribute("drawMode", "token")
-                            .uniform()
-                            .fields(
-                                &[
-                                    ::openusd::usd::Field::strings(
-                                        "allowedTokens",
-                                        &["default", "bounds"],
-                                    ),
-                                    ::openusd::usd::Field::token("default", "default"),
-                                ],
-                            ),
-                        ::openusd::usd::PropertyDecl::attribute("density", "double")
-                            .varying()
-                            .fields(
-                                &[
-                                    ::openusd::usd::Field::new(
-                                        "default",
-                                        || ::openusd::vt::Value::Double(1f64),
-                                    ),
-                                ],
-                            ),
+                        ::openusd::usd::PropertyDecl::relationship("material").uniform(),
                         ::openusd::usd::PropertyDecl::attribute("radius", "double")
                             .varying()
                             .fields(
@@ -165,7 +166,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                         ::openusd::usd::PropertyDecl::attribute("temperature", "float")
                             .varying()
                             .custom(),
-                        ::openusd::usd::PropertyDecl::relationship("material").uniform(),
                     ],
                 ),
             ::openusd::usd::SchemaDecl::new(
@@ -256,6 +256,45 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
 /// The accessors [`Shape`] carries. They live on a trait so that a schema
 /// deriving from this one carries them too.
 pub trait ShapeSchema: ::openusd::usd::Typed {
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn density_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::DENSITY, ::openusd::sdf::ValueTypeName::DOUBLE)
+            .custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    fn create_density_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.density_attr_builder().build()?)
+    }
+    /// How the shape draws.
+    ///
+    /// Declared `uniform token drawMode = "default"`. One of `default`, `bounds`.
+    fn draw_mode_attr(&self) -> ::openusd::usd::Attribute {
+        self.prim().attribute(tokens::DRAW_MODE)
+    }
+    /// The property's value at the default time, as the type it is
+    /// declared with: what a layer authors, else the fallback the
+    /// schema declares.
+    fn draw_mode(
+        &self,
+    ) -> ::openusd::Result<::std::option::Option<::openusd::tf::Token>> {
+        self.draw_mode_attr().get::<::openusd::tf::Token>()
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn draw_mode_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.prim()
+            .attribute_builder(tokens::DRAW_MODE, ::openusd::sdf::ValueTypeName::TOKEN)
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    fn create_draw_mode_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.draw_mode_attr_builder().build()?)
+    }
     /// The bounds, in the shape's own space.
     ///
     /// Declared `double3 extent = (1, 1, 1)`.
@@ -289,45 +328,6 @@ pub trait ShapeSchema: ::openusd::usd::Typed {
     /// Authors the property as the schema declares it, and returns it.
     fn create_extent_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.extent_attr_builder().build()?)
-    }
-    /// How the shape draws.
-    ///
-    /// Declared `uniform token drawMode = "default"`. One of `default`, `bounds`.
-    fn draw_mode_attr(&self) -> ::openusd::usd::Attribute {
-        self.prim().attribute(tokens::DRAW_MODE)
-    }
-    /// The property's value at the default time, as the type it is
-    /// declared with: what a layer authors, else the fallback the
-    /// schema declares.
-    fn draw_mode(
-        &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::tf::Token>> {
-        self.draw_mode_attr().get::<::openusd::tf::Token>()
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    fn draw_mode_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.prim()
-            .attribute_builder(tokens::DRAW_MODE, ::openusd::sdf::ValueTypeName::TOKEN)
-            .custom(false)
-            .variability(::openusd::sdf::Variability::Uniform)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    fn create_draw_mode_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.draw_mode_attr_builder().build()?)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    fn density_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.prim()
-            .attribute_builder(tokens::DENSITY, ::openusd::sdf::ValueTypeName::DOUBLE)
-            .custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    fn create_density_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.density_attr_builder().build()?)
     }
 }
 
@@ -397,6 +397,22 @@ impl ::openusd::usd::Typed for Shape {}
 /// The accessors [`Ball`] carries. They live on a trait so that a schema
 /// deriving from this one carries them too.
 pub trait BallSchema: ShapeSchema {
+    /// What the ball is made of.
+    ///
+    /// Declared `rel material`.
+    fn material_rel(&self) -> ::openusd::usd::Relationship {
+        self.prim().relationship(tokens::MATERIAL)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn material_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.prim().relationship_builder(tokens::MATERIAL).custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    fn create_material_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(self.material_rel_builder().build()?)
+    }
     /// The radius.
     ///
     /// Declared `double radius = 1`.
@@ -463,22 +479,6 @@ pub trait BallSchema: ShapeSchema {
     /// Authors the property as the schema declares it, and returns it.
     fn create_temperature_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.temperature_attr_builder().build()?)
-    }
-    /// What the ball is made of.
-    ///
-    /// Declared `rel material`.
-    fn material_rel(&self) -> ::openusd::usd::Relationship {
-        self.prim().relationship(tokens::MATERIAL)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    fn material_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
-        self.prim().relationship_builder(tokens::MATERIAL).custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    fn create_material_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(self.material_rel_builder().build()?)
     }
 }
 

@@ -83,10 +83,10 @@ pub fn apply_ordering<T: PartialEq<K>, K>(items: &mut Vec<T>, order: &[K]) {
 /// order.
 ///
 /// Callers apply this where the spec mandates element ordering — currently the
-/// relocated-in prim children of the composition engine (spec §11.3.1). The base
-/// prim-child fold (`primChildren` + `primOrder`) and property names deliberately
-/// keep their authored order, so this is not a blanket sort of every composed
-/// child.
+/// relocated-in prim children of the composition engine (spec §11.3.1) and a
+/// prim's property names (spec §11.3.2). The base prim-child fold
+/// (`primChildren` + `primOrder`) keeps its authored order, so this is not a
+/// blanket sort of every composed child.
 ///
 /// The numeric value and case distinctions act as lowest-priority tiebreakers:
 /// a run of equal numeric value compares equal so the walk continues, and the

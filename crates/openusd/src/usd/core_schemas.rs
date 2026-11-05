@@ -270,6 +270,62 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
             .properties(
                 &[
                     ::openusd::usd::PropertyDecl::attribute(
+                            "colorSpaceDefinition:__INSTANCE_NAME__:blueChroma",
+                            "float2",
+                        )
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Vec2f(
+                                        ::openusd::gf::vec2f(0f32, 0f32),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "colorSpaceDefinition:__INSTANCE_NAME__:gamma",
+                            "float",
+                        )
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Float(1f32),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "colorSpaceDefinition:__INSTANCE_NAME__:greenChroma",
+                            "float2",
+                        )
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Vec2f(
+                                        ::openusd::gf::vec2f(0f32, 1f32),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "colorSpaceDefinition:__INSTANCE_NAME__:linearBias",
+                            "float",
+                        )
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Float(0f32),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute(
                             "colorSpaceDefinition:__INSTANCE_NAME__:name",
                             "token",
                         )
@@ -291,36 +347,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             ],
                         ),
                     ::openusd::usd::PropertyDecl::attribute(
-                            "colorSpaceDefinition:__INSTANCE_NAME__:greenChroma",
-                            "float2",
-                        )
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Vec2f(
-                                        ::openusd::gf::vec2f(0f32, 1f32),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute(
-                            "colorSpaceDefinition:__INSTANCE_NAME__:blueChroma",
-                            "float2",
-                        )
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Vec2f(
-                                        ::openusd::gf::vec2f(0f32, 0f32),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute(
                             "colorSpaceDefinition:__INSTANCE_NAME__:whitePoint",
                             "float2",
                         )
@@ -335,32 +361,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ),
                             ],
                         ),
-                    ::openusd::usd::PropertyDecl::attribute(
-                            "colorSpaceDefinition:__INSTANCE_NAME__:gamma",
-                            "float",
-                        )
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Float(1f32),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute(
-                            "colorSpaceDefinition:__INSTANCE_NAME__:linearBias",
-                            "float",
-                        )
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Float(0f32),
-                                ),
-                            ],
-                        ),
                 ],
             ),
         ::openusd::usd::SchemaDecl::new(
@@ -371,6 +371,15 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
             .property_namespace_prefix("collection")
             .properties(
                 &[
+                    ::openusd::usd::PropertyDecl::attribute(
+                            "collection:__INSTANCE_NAME__",
+                            "opaque",
+                        )
+                        .uniform(),
+                    ::openusd::usd::PropertyDecl::relationship(
+                            "collection:__INSTANCE_NAME__:excludes",
+                        )
+                        .uniform(),
                     ::openusd::usd::PropertyDecl::attribute(
                             "collection:__INSTANCE_NAME__:expansionRule",
                             "token",
@@ -394,10 +403,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             "collection:__INSTANCE_NAME__:includes",
                         )
                         .uniform(),
-                    ::openusd::usd::PropertyDecl::relationship(
-                            "collection:__INSTANCE_NAME__:excludes",
-                        )
-                        .uniform(),
                     ::openusd::usd::PropertyDecl::attribute(
                             "collection:__INSTANCE_NAME__:membershipExpression",
                             "pathExpression",
@@ -417,11 +422,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ::openusd::usd::Field::token("default", "automatic"),
                             ],
                         ),
-                    ::openusd::usd::PropertyDecl::attribute(
-                            "collection:__INSTANCE_NAME__",
-                            "opaque",
-                        )
-                        .uniform(),
                 ],
             ),
         ::openusd::usd::SchemaDecl::new(
@@ -742,8 +742,8 @@ impl ColorSpaceDefinitionAPI {
     /// declares, which an instance name may therefore not end with.
     pub fn is_property_base_name(base_name: &str) -> bool {
         ::std::matches!(
-            base_name, "name" | "redChroma" | "greenChroma" | "blueChroma" | "whitePoint"
-            | "gamma" | "linearBias"
+            base_name, "blueChroma" | "gamma" | "greenChroma" | "linearBias" | "name" |
+            "redChroma" | "whitePoint"
         )
     }
     /// The prim and instance name a property path of this schema names,
@@ -767,6 +767,196 @@ impl ColorSpaceDefinitionAPI {
                 ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
             }
         }
+    }
+    /// Blue chromaticity coordinates
+    ///
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:blueChroma = (0,
+    /// 0)`.
+    pub fn blue_chroma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// The property's value at the default time, as the type it is
+    /// declared with: what a layer authors, else the fallback the
+    /// schema declares.
+    pub fn blue_chroma(
+        &self,
+    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
+        self.blue_chroma_attr().get::<::openusd::gf::Vec2f>()
+    }
+    /// The property's value at `time`, where `None` is the
+    /// default time, as the type it is declared with: what a
+    /// layer authors there, else the fallback the schema
+    /// declares.
+    pub fn blue_chroma_at(
+        &self,
+        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
+    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
+        self.blue_chroma_attr().get_at::<::openusd::gf::Vec2f>(time)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn blue_chroma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT2,
+            )
+            .custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_blue_chroma_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.blue_chroma_attr_builder().build()?)
+    }
+    /// Gamma value of the log section
+    ///
+    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:gamma = 1`.
+    pub fn gamma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// The property's value at the default time, as the type it is
+    /// declared with: what a layer authors, else the fallback the
+    /// schema declares.
+    pub fn gamma(&self) -> ::openusd::Result<::std::option::Option<f32>> {
+        self.gamma_attr().get::<f32>()
+    }
+    /// The property's value at `time`, where `None` is the
+    /// default time, as the type it is declared with: what a
+    /// layer authors there, else the fallback the schema
+    /// declares.
+    pub fn gamma_at(
+        &self,
+        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
+    ) -> ::openusd::Result<::std::option::Option<f32>> {
+        self.gamma_attr().get_at::<f32>(time)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn gamma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT,
+            )
+            .custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_gamma_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.gamma_attr_builder().build()?)
+    }
+    /// Green chromaticity coordinates
+    ///
+    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:greenChroma = (0,
+    /// 1)`.
+    pub fn green_chroma_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// The property's value at the default time, as the type it is
+    /// declared with: what a layer authors, else the fallback the
+    /// schema declares.
+    pub fn green_chroma(
+        &self,
+    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
+        self.green_chroma_attr().get::<::openusd::gf::Vec2f>()
+    }
+    /// The property's value at `time`, where `None` is the
+    /// default time, as the type it is declared with: what a
+    /// layer authors there, else the fallback the schema
+    /// declares.
+    pub fn green_chroma_at(
+        &self,
+        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
+    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
+        self.green_chroma_attr().get_at::<::openusd::gf::Vec2f>(time)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn green_chroma_attr_builder(
+        &self,
+    ) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT2,
+            )
+            .custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_green_chroma_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.green_chroma_attr_builder().build()?)
+    }
+    /// Linear bias of the log section
+    ///
+    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:linearBias = 0`.
+    pub fn linear_bias_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
+                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// The property's value at the default time, as the type it is
+    /// declared with: what a layer authors, else the fallback the
+    /// schema declares.
+    pub fn linear_bias(&self) -> ::openusd::Result<::std::option::Option<f32>> {
+        self.linear_bias_attr().get::<f32>()
+    }
+    /// The property's value at `time`, where `None` is the
+    /// default time, as the type it is declared with: what a
+    /// layer authors there, else the fallback the schema
+    /// declares.
+    pub fn linear_bias_at(
+        &self,
+        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
+    ) -> ::openusd::Result<::std::option::Option<f32>> {
+        self.linear_bias_attr().get_at::<f32>(time)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn linear_bias_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
+                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::FLOAT,
+            )
+            .custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_linear_bias_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.linear_bias_attr_builder().build()?)
     }
     /// The name of the color space defined on this prim.
     ///
@@ -846,106 +1036,6 @@ impl ColorSpaceDefinitionAPI {
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.red_chroma_attr_builder().build()?)
     }
-    /// Green chromaticity coordinates
-    ///
-    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:greenChroma = (0,
-    /// 1)`.
-    pub fn green_chroma_attr(&self) -> ::openusd::usd::Attribute {
-        self.attribute(
-            ::openusd::usd::SchemaRegistry::make_name_instance(
-                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
-                self.name.as_str(),
-            ),
-        )
-    }
-    /// The property's value at the default time, as the type it is
-    /// declared with: what a layer authors, else the fallback the
-    /// schema declares.
-    pub fn green_chroma(
-        &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
-        self.green_chroma_attr().get::<::openusd::gf::Vec2f>()
-    }
-    /// The property's value at `time`, where `None` is the
-    /// default time, as the type it is declared with: what a
-    /// layer authors there, else the fallback the schema
-    /// declares.
-    pub fn green_chroma_at(
-        &self,
-        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
-        self.green_chroma_attr().get_at::<::openusd::gf::Vec2f>(time)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn green_chroma_attr_builder(
-        &self,
-    ) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_name_instance(
-                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GREEN_CHROMA,
-                    self.name.as_str(),
-                ),
-                ::openusd::sdf::ValueTypeName::FLOAT2,
-            )
-            .custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_green_chroma_attr(
-        &self,
-    ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.green_chroma_attr_builder().build()?)
-    }
-    /// Blue chromaticity coordinates
-    ///
-    /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:blueChroma = (0,
-    /// 0)`.
-    pub fn blue_chroma_attr(&self) -> ::openusd::usd::Attribute {
-        self.attribute(
-            ::openusd::usd::SchemaRegistry::make_name_instance(
-                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
-                self.name.as_str(),
-            ),
-        )
-    }
-    /// The property's value at the default time, as the type it is
-    /// declared with: what a layer authors, else the fallback the
-    /// schema declares.
-    pub fn blue_chroma(
-        &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
-        self.blue_chroma_attr().get::<::openusd::gf::Vec2f>()
-    }
-    /// The property's value at `time`, where `None` is the
-    /// default time, as the type it is declared with: what a
-    /// layer authors there, else the fallback the schema
-    /// declares.
-    pub fn blue_chroma_at(
-        &self,
-        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::gf::Vec2f>> {
-        self.blue_chroma_attr().get_at::<::openusd::gf::Vec2f>(time)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn blue_chroma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_name_instance(
-                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_BLUE_CHROMA,
-                    self.name.as_str(),
-                ),
-                ::openusd::sdf::ValueTypeName::FLOAT2,
-            )
-            .custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_blue_chroma_attr(
-        &self,
-    ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.blue_chroma_attr_builder().build()?)
-    }
     /// Whitepoint chromaticity coordinates
     ///
     /// Declared `float2 colorSpaceDefinition:__INSTANCE_NAME__:whitePoint =
@@ -994,96 +1084,6 @@ impl ColorSpaceDefinitionAPI {
         &self,
     ) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.white_point_attr_builder().build()?)
-    }
-    /// Gamma value of the log section
-    ///
-    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:gamma = 1`.
-    pub fn gamma_attr(&self) -> ::openusd::usd::Attribute {
-        self.attribute(
-            ::openusd::usd::SchemaRegistry::make_name_instance(
-                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
-                self.name.as_str(),
-            ),
-        )
-    }
-    /// The property's value at the default time, as the type it is
-    /// declared with: what a layer authors, else the fallback the
-    /// schema declares.
-    pub fn gamma(&self) -> ::openusd::Result<::std::option::Option<f32>> {
-        self.gamma_attr().get::<f32>()
-    }
-    /// The property's value at `time`, where `None` is the
-    /// default time, as the type it is declared with: what a
-    /// layer authors there, else the fallback the schema
-    /// declares.
-    pub fn gamma_at(
-        &self,
-        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
-    ) -> ::openusd::Result<::std::option::Option<f32>> {
-        self.gamma_attr().get_at::<f32>(time)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn gamma_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_name_instance(
-                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_GAMMA,
-                    self.name.as_str(),
-                ),
-                ::openusd::sdf::ValueTypeName::FLOAT,
-            )
-            .custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_gamma_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.gamma_attr_builder().build()?)
-    }
-    /// Linear bias of the log section
-    ///
-    /// Declared `float colorSpaceDefinition:__INSTANCE_NAME__:linearBias = 0`.
-    pub fn linear_bias_attr(&self) -> ::openusd::usd::Attribute {
-        self.attribute(
-            ::openusd::usd::SchemaRegistry::make_name_instance(
-                tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
-                self.name.as_str(),
-            ),
-        )
-    }
-    /// The property's value at the default time, as the type it is
-    /// declared with: what a layer authors, else the fallback the
-    /// schema declares.
-    pub fn linear_bias(&self) -> ::openusd::Result<::std::option::Option<f32>> {
-        self.linear_bias_attr().get::<f32>()
-    }
-    /// The property's value at `time`, where `None` is the
-    /// default time, as the type it is declared with: what a
-    /// layer authors there, else the fallback the schema
-    /// declares.
-    pub fn linear_bias_at(
-        &self,
-        time: impl ::std::convert::Into<::std::option::Option<::openusd::usd::TimeCode>>,
-    ) -> ::openusd::Result<::std::option::Option<f32>> {
-        self.linear_bias_attr().get_at::<f32>(time)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn linear_bias_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_name_instance(
-                    tokens::COLOR_SPACE_DEFINITION_MULTIPLE_APPLY_TEMPLATE_LINEAR_BIAS,
-                    self.name.as_str(),
-                ),
-                ::openusd::sdf::ValueTypeName::FLOAT,
-            )
-            .custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_linear_bias_attr(
-        &self,
-    ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.linear_bias_attr_builder().build()?)
     }
 }
 
@@ -1328,8 +1328,8 @@ impl CollectionAPI {
     /// declares, which an instance name may therefore not end with.
     pub fn is_property_base_name(base_name: &str) -> bool {
         ::std::matches!(
-            base_name, "expansionRule" | "includeRoot" | "includes" | "excludes" |
-            "membershipExpression" | "mode" | ""
+            base_name, "" | "excludes" | "expansionRule" | "includeRoot" | "includes" |
+            "membershipExpression" | "mode"
         )
     }
     /// The prim and instance name a property path of this schema names,
@@ -1353,6 +1353,81 @@ impl CollectionAPI {
                 ::std::option::Option::Some((prim, ::openusd::tf::Token::from(instance)))
             }
         }
+    }
+    /// This property represents the collection for the purpose of
+    /// allowing another collection to include it. When this property is
+    /// targeted by another collection's *includes* relationship, the rules
+    /// of this collection will be inserted into the rules of the collection
+    /// that includes it.
+    ///
+    /// Declared `uniform opaque collection:__INSTANCE_NAME__`.
+    pub fn collection_attr(&self) -> ::openusd::usd::Attribute {
+        self.attribute(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn collection_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
+        self.attribute_builder(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
+                    self.name.as_str(),
+                ),
+                ::openusd::sdf::ValueTypeName::OPAQUE,
+            )
+            .custom(false)
+            .variability(::openusd::sdf::Variability::Uniform)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_collection_attr(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Attribute> {
+        ::std::result::Result::Ok(self.collection_attr_builder().build()?)
+    }
+    /// Specifies a list of targets that are excluded below
+    /// the included paths in this collection. This can target prims or
+    /// properties directly, but cannot target another collection. This is to
+    /// keep the membership determining logic simple, efficient and easier to
+    /// reason about. Finally, it is invalid for a collection to exclude
+    /// paths that are not included in it. The presence of such "orphaned"
+    /// excluded paths will not affect the set of paths included in the
+    /// collection, but may affect the performance of querying membership of
+    /// a path in the collection (see
+    /// `UsdCollectionAPI::MembershipQuery::IsPathIncluded`)
+    /// or of enumerating the objects belonging to the collection (see
+    /// `UsdCollectionAPI::GetIncludedObjects`).
+    ///
+    /// Declared `rel collection:__INSTANCE_NAME__:excludes`.
+    pub fn excludes_rel(&self) -> ::openusd::usd::Relationship {
+        self.relationship(
+            ::openusd::usd::SchemaRegistry::make_name_instance(
+                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
+                self.name.as_str(),
+            ),
+        )
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn excludes_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.relationship_builder(
+                ::openusd::usd::SchemaRegistry::make_name_instance(
+                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
+                    self.name.as_str(),
+                ),
+            )
+            .custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_excludes_rel(
+        &self,
+    ) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(self.excludes_rel_builder().build()?)
     }
     /// Specifies how the paths that are included in
     /// the collection must be expanded to determine its members.
@@ -1473,46 +1548,6 @@ impl CollectionAPI {
     ) -> ::openusd::Result<::openusd::usd::Relationship> {
         ::std::result::Result::Ok(self.includes_rel_builder().build()?)
     }
-    /// Specifies a list of targets that are excluded below
-    /// the included paths in this collection. This can target prims or
-    /// properties directly, but cannot target another collection. This is to
-    /// keep the membership determining logic simple, efficient and easier to
-    /// reason about. Finally, it is invalid for a collection to exclude
-    /// paths that are not included in it. The presence of such "orphaned"
-    /// excluded paths will not affect the set of paths included in the
-    /// collection, but may affect the performance of querying membership of
-    /// a path in the collection (see
-    /// `UsdCollectionAPI::MembershipQuery::IsPathIncluded`)
-    /// or of enumerating the objects belonging to the collection (see
-    /// `UsdCollectionAPI::GetIncludedObjects`).
-    ///
-    /// Declared `rel collection:__INSTANCE_NAME__:excludes`.
-    pub fn excludes_rel(&self) -> ::openusd::usd::Relationship {
-        self.relationship(
-            ::openusd::usd::SchemaRegistry::make_name_instance(
-                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
-                self.name.as_str(),
-            ),
-        )
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn excludes_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
-        self.relationship_builder(
-                ::openusd::usd::SchemaRegistry::make_name_instance(
-                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_EXCLUDES,
-                    self.name.as_str(),
-                ),
-            )
-            .custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_excludes_rel(
-        &self,
-    ) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(self.excludes_rel_builder().build()?)
-    }
     /// Specifies a path expression that determines membership in this
     /// collection.
     ///
@@ -1609,41 +1644,6 @@ impl CollectionAPI {
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_mode_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.mode_attr_builder().build()?)
-    }
-    /// This property represents the collection for the purpose of
-    /// allowing another collection to include it. When this property is
-    /// targeted by another collection's *includes* relationship, the rules
-    /// of this collection will be inserted into the rules of the collection
-    /// that includes it.
-    ///
-    /// Declared `uniform opaque collection:__INSTANCE_NAME__`.
-    pub fn collection_attr(&self) -> ::openusd::usd::Attribute {
-        self.attribute(
-            ::openusd::usd::SchemaRegistry::make_name_instance(
-                tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
-                self.name.as_str(),
-            ),
-        )
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn collection_attr_builder(&self) -> ::openusd::usd::AttributeBuilder<'static> {
-        self.attribute_builder(
-                ::openusd::usd::SchemaRegistry::make_name_instance(
-                    tokens::COLLECTION_MULTIPLE_APPLY_TEMPLATE_,
-                    self.name.as_str(),
-                ),
-                ::openusd::sdf::ValueTypeName::OPAQUE,
-            )
-            .custom(false)
-            .variability(::openusd::sdf::Variability::Uniform)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_collection_attr(
-        &self,
-    ) -> ::openusd::Result<::openusd::usd::Attribute> {
-        ::std::result::Result::Ok(self.collection_attr_builder().build()?)
     }
 }
 

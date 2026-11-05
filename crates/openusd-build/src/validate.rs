@@ -1427,7 +1427,7 @@ class "Thing" (
         assert_eq!(
             taken,
             vec![
-                r#"TagAPI takes ["tag", "dup"], shadowed []"#,
+                r#"TagAPI takes ["dup", "tag"], shadowed []"#,
                 r#"LabelAPI takes ["label"], shadowed ["dup by TagAPI"]"#,
             ]
         );
