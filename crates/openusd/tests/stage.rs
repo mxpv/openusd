@@ -1407,6 +1407,53 @@ fn stack_diagnostic_lifetime() -> Result<()> {
     Ok(())
 }
 
+/// Removing the instance a prototype was composed from keeps the prototype
+/// for the instances left (C++ `Usd_InstanceCache` assigns it a new source):
+/// they stay on `/__Prototype_1`, and the notice resyncs the prototype.
+#[test]
+fn prototype_outlives_its_source_instance() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "A" (
+    references = </Source>
+    instanceable = true
+) {}
+def "B" (
+    references = </Source>
+    instanceable = true
+) {}
+def "Source" {
+    def "Child" { custom double x = 1 }
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let prototype = sdf::path("/__Prototype_1")?;
+    assert_eq!(stage.prim("/A")?.prototype()?, Some(prototype.clone()));
+    assert_eq!(stage.prim("/B")?.prototype()?, Some(prototype.clone()));
+
+    let resynced = Rc::new(RefCell::new(Vec::new()));
+    let sink = resynced.clone();
+    stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+        sink.borrow_mut().extend(change.resynced.iter().cloned());
+    })?;
+    stage.remove_prim("/A")?;
+
+    assert_eq!(stage.prim("/B")?.prototype()?, Some(prototype.clone()));
+    assert_eq!(stage.prototypes()?, slice::from_ref(&prototype));
+    assert_eq!(
+        stage
+            .attribute("/B/Child.x")?
+            .get_at::<vt::Value>(usd::TimeCode::new(0.0))?,
+        Some(vt::Value::Double(1.0))
+    );
+    assert!(resynced.borrow().contains(&prototype), "{:?}", resynced.borrow());
+    Ok(())
+}
+
 /// A cold direct query into a descendant of an instanceable reference (no prior
 /// traversal) composes through the prototype, not an empty namespace: the
 /// instance-proxy redirect is not memoized while the reference layer is still

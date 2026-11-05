@@ -863,6 +863,11 @@ impl IndexStore {
         self.retired.extend(records);
     }
 
+    /// Whether the work set keeps a retired-prototype record.
+    pub(super) fn has_retired(&self) -> bool {
+        !self.retired.is_empty()
+    }
+
     /// Takes the retired-prototype records out for settlement to transfer.
     pub(super) fn take_retired(&mut self) -> Vec<RetiredPrototype> {
         mem::take(&mut self.retired)

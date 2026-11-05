@@ -61,6 +61,14 @@ pub(super) struct PrototypeRegistry {
     /// `/__Prototype_N` identity is never reused for a different composition
     /// within a session.
     count: usize,
+    /// The root and registration order of each prototype
+    /// [`remove_affected`](Self::remove_affected) retired, by its key, until
+    /// settlement places its instances
+    /// ([`forget_retired`](Self::forget_retired)). An instance registering
+    /// under a retired key takes the retired root back, as C++
+    /// `Usd_InstanceCache` keeps a prototype whose key still has instances
+    /// and only assigns it a new source.
+    retired: HashMap<InstanceKey, (Path, usize)>,
 }
 
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
@@ -211,9 +219,12 @@ impl PrototypeRegistry {
             return (root, false);
         }
 
-        self.count += 1;
-        let index = self.count;
-        let path = Path::new(&format!("/{PROTOTYPE_PREFIX}{index}")).expect("synthetic prototype path is valid");
+        let (path, index) = self.retired.remove(&key).unwrap_or_else(|| {
+            self.count += 1;
+            let path =
+                Path::new(&format!("/{PROTOTYPE_PREFIX}{}", self.count)).expect("synthetic prototype path is valid");
+            (path, self.count)
+        });
         let relative_load_rules = key.load_rules.clone();
         let relative_mask = key.mask.clone();
         self.by_key.insert(key, path.clone());
@@ -303,8 +314,9 @@ impl PrototypeRegistry {
     /// materialized index, so a localized edit no longer forces every key to be
     /// recomputed (spec 11.3.3).
     ///
-    /// `count` stays monotonic (see its doc), so a re-registered instance mints
-    /// a fresh identity rather than reusing a removed prototype's number.
+    /// `count` stays monotonic (see its doc). An instance registering again
+    /// under the key of a prototype retired here takes that prototype's root
+    /// back ([`retired`](Self::retired)); any other mints a fresh identity.
     ///
     /// Each changed path resolves to the prototypes it could affect through
     /// bounded lookups: the [`by_root`](Self::by_root) entries nested with it
@@ -336,11 +348,13 @@ impl PrototypeRegistry {
             }
         }
         let mut retired = Vec::with_capacity(affected.len());
+        let mut indices = HashMap::new();
         for root in &affected {
             if let Some(prototype) = self.by_root.remove(root) {
                 for instance in &prototype.instances {
                     self.by_instance.remove(instance);
                 }
+                indices.insert(root.clone(), prototype.index);
                 retired.push(RetiredPrototype {
                     root: root.clone(),
                     instances: prototype.instances,
@@ -348,11 +362,22 @@ impl PrototypeRegistry {
                 });
             }
         }
-        self.by_key.retain(|_, root| !affected.contains(root));
+        for (key, root) in self.by_key.extract_if(|_, root| affected.contains(root)) {
+            if let Some(&index) = indices.get(&root) {
+                self.retired.insert(key, (root, index));
+            }
+        }
         // Sorted so a cascade returns its roots in a stable order, whatever the
         // hash set's iteration happens to be.
         retired.sort_by(|a, b| a.root.cmp(&b.root));
         retired
+    }
+
+    /// Forgets the roots of the prototypes retired since settlement last
+    /// placed every instance, so a key that comes back later mints a fresh
+    /// identity, as C++ removes a prototype left with no instance.
+    pub(super) fn forget_retired(&mut self) {
+        self.retired.clear();
     }
 }
 
@@ -1100,8 +1125,9 @@ mod tests {
     }
 
     /// `remove_affected` drops only the prototypes whose instances or root the
-    /// change set touches, leaving the rest mapped, and re-registration mints a
-    /// fresh identity for a dropped prototype.
+    /// change set touches, leaving the rest mapped. Re-registering the key
+    /// takes the dropped root back until the retired roots are forgotten, and
+    /// mints a fresh identity after.
     #[test]
     fn remove_affected_targets_touched() {
         let mut reg = PrototypeRegistry::default();
@@ -1119,10 +1145,20 @@ mod tests {
         assert_eq!(reg.canonical_of(&p0), Some(path("/A")));
         assert!(reg.canonical_of(&p1).is_none());
 
-        // Re-registering /C mints a fresh identity (count stays monotonic).
+        // Re-registering /C takes its prototype back, to be materialized
+        // again.
         let (p1b, minted) = reg.register(key("q"), &path("/C"));
         assert!(minted);
-        assert_ne!(p1b, p1);
+        assert_eq!(p1b, p1);
+        assert_eq!(reg.roots(), [p0.clone(), p1.clone()], "in registration order");
+
+        // Once forgotten, a dropped key mints a fresh identity (count stays
+        // monotonic).
+        reg.remove_affected(&[path("/C")]);
+        reg.forget_retired();
+        let (p1c, minted) = reg.register(key("q"), &path("/C"));
+        assert!(minted);
+        assert_ne!(p1c, p1);
     }
 
     /// `enclosing_root` finds a prototype's root from the root itself, its

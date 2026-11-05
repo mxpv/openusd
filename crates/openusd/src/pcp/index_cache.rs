@@ -4053,6 +4053,11 @@ impl IndexCache {
     /// keeps them until the refresh.
     pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
         self.transfer_prototypes(graph)?;
+        // Every retired prototype's instances are placed, so a retired root
+        // their keys did not take back has no instance left.
+        if !self.store.has_retired() {
+            self.prototypes.forget_retired();
+        }
         // TODO(rayon): siblings settle independently once their parent has,
         // so each level of the work set could be decided in parallel.
         for path in self.store.work() {
