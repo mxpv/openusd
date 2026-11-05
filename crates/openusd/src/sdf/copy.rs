@@ -304,7 +304,7 @@ where
 
 impl vt::Value {
     /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
-    /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
+    /// rewrites — `Path`, `PathVec`, `PathListOp` (relationship targets, attribute
     /// connections, `inheritPaths`, `specializes`), `Relocates`,
     /// `ReferenceListOp` / `PayloadListOp` (whose internal entries target this
     /// layer's own namespace), and `PathExpression` / `PathExpressionVec`
@@ -314,7 +314,8 @@ impl vt::Value {
     pub fn has_embedded_paths(&self) -> bool {
         matches!(
             self,
-            vt::Value::PathVec(_)
+            vt::Value::Path(_)
+                | vt::Value::PathVec(_)
                 | vt::Value::PathListOp(_)
                 | vt::Value::Relocates(_)
                 | vt::Value::ReferenceListOp(_)
@@ -325,7 +326,7 @@ impl vt::Value {
     }
 
     /// Returns a copy of this value with every embedded namespace path rewritten
-    /// through `remap`. Paths live in `PathVec`, `PathListOp` (relationship
+    /// through `remap`. Paths live in `Path`, `PathVec`, `PathListOp` (relationship
     /// targets, attribute connections, `inheritPaths`, `specializes`),
     /// `Relocates` (source/target pairs), and the prim paths of internal
     /// (same-layer) `ReferenceListOp` / `PayloadListOp` entries. An external
@@ -347,7 +348,8 @@ impl vt::Value {
     /// the targets/connections/internal references that point at a removed object
     /// to `None` so the entries vanish, while moves map to `Some(new_path)`.
     ///
-    /// A `PathVec` element or list-op item that maps to `None` is removed. An
+    /// A `Path` that maps to `None` becomes the empty path, and a `PathVec`
+    /// element or list-op item that maps to `None` is removed. An
     /// external reference or payload (whose prim path lives in the referenced
     /// layer's namespace) is never offered to `remap` and is always kept; a
     /// relocate pair is dropped when its source maps to `None`; a
@@ -356,6 +358,7 @@ impl vt::Value {
     pub fn filter_map_paths(&self, remap: impl Fn(&sdf::Path) -> Option<sdf::Path>) -> vt::Value {
         let remap = &remap;
         match self {
+            vt::Value::Path(path) => vt::Value::Path(remap(path).unwrap_or_default()),
             vt::Value::PathVec(paths) => vt::Value::PathVec(paths.iter().filter_map(remap).collect()),
             vt::Value::PathListOp(op) => vt::Value::PathListOp(op.clone().convert(|_, p| remap(&p))),
             vt::Value::Relocates(relocates) => vt::Value::Relocates(

@@ -223,6 +223,7 @@ pub(super) fn value_expr(value: &vt::Value) -> Result<TokenStream, vt::ValueKind
         | vt::Value::UInt64ListOp(_)
         | vt::Value::PayloadListOp(_)
         | vt::Value::Payload(_)
+        | vt::Value::Path(_)
         | vt::Value::PathVec(_)
         | vt::Value::Relocates(_)
         | vt::Value::VariantSelectionMap(_)

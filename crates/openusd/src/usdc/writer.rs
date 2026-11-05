@@ -735,6 +735,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Opaque => Err(FormatError::Encode {
                 reason: "an opaque value is never serialized".into(),
             }),
+            Value::Path(_) => Err(FormatError::Encode {
+                reason: "a single path has no crate type; a layer holds a path vector".into(),
+            }),
 
             // Heterogeneous arrays are produced only by the USDA spline parser;
             // the USDC binary format has no native representation for them.

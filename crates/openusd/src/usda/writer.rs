@@ -1273,6 +1273,12 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
             });
         }
 
+        Value::Path(_) => {
+            return Err(FormatError::Encode {
+                reason: "a single path has no USDA spelling; a layer holds a path vector".into(),
+            });
+        }
+
         Value::LayerOffsetVec(offsets) => {
             format_vec(
                 s,
