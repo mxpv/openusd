@@ -909,7 +909,7 @@ impl IndexCache {
             .into_iter()
             .filter(|name| {
                 relative
-                    .append_path(name.as_str())
+                    .append_child(name.as_str())
                     .is_ok_and(|child| mask.includes(&child))
             })
             .collect()
