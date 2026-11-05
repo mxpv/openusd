@@ -25,9 +25,10 @@ types that name its main seams. They say what a type is for, not how it behaves:
 each module's own `//!` doc comment, and each item's own doc comment, are the
 source of truth for specifics.
 
-- **`tf`** - Tools Foundation (C++ `Tf`): low-level utilities, chiefly
+- **`tf/`** - Tools Foundation (C++ `Tf`): low-level utilities, chiefly
   `tf::Token`, the interned-identifier string behind every `TfToken`-equivalent
-  API. It is the single file `tf.rs`.
+  API, and `tf::HashState` (`tf/hash.rs`), C++ `TfHash`'s state over byte
+  strings with the SpookyHash it rests on (C++ `ArchHash64`).
 
 - **`vt/`** - Value Types (C++ `Vt`): `vt::Value` (C++ `VtValue`), the value
   an attribute or metadata field holds, and `vt::Dictionary` (C++
