@@ -35,7 +35,9 @@ pub use attribute::{Attribute, AttributeBuilder, AttributeQuery};
 pub use authoring::{PrimEdit, StageEdit};
 pub use capture::{ReplayStage, UndoStage};
 pub use collection::{MembershipQuery, PathExpansionRuleMap, PathRule, apply_collection, included_paths};
-pub use collection_expr::{CollectionEvaluator, CollectionSearcher, complete_membership_expression};
+pub use collection_expr::{
+    CollectionEvaluator, CollectionSearcher, complete_membership_expression, rule_map_expression,
+};
 pub use connections::ConnectionGraph;
 pub use core_schemas::{
     ClipsAPI, ClipsAPISchema, CollectionAPI, CollectionMode, ColorSpaceAPI, ColorSpaceDefinitionAPI, ExpansionRule,
