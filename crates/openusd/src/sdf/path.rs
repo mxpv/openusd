@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use std::{cmp, convert::Infallible, fmt, iter, str::FromStr};
@@ -1549,10 +1549,8 @@ impl TryFrom<&String> for Path {
 
 impl Text {
     fn new(text: String) -> Self {
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
         Self {
-            hash: hasher.finish(),
+            hash: FxBuildHasher.hash_one(text.as_str()),
             text,
         }
     }
