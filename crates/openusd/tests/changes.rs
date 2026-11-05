@@ -118,6 +118,29 @@ fn author_keeps_sibling_indexed() {
     );
 }
 
+/// A `typeName` or `kind` edit resyncs the prim in the notice, as C++
+/// `UsdStage` recomposes it, while its index stays: neither field
+/// restructures composition.
+#[test]
+fn prim_type_and_kind_edits_resync() -> Result<()> {
+    let stage = open_in_memory();
+    stage.define_prim("/Foo")?.set_type_name("Xform")?;
+    stage.define_prim("/Foo/Child")?;
+    let _ = stage.prim("/Foo")?.type_name()?;
+    let foo = revision(&stage, "/Foo");
+    let notices = capture_notices(&stage);
+
+    stage.prim("/Foo")?.set_type_name("Scope")?;
+    stage.prim("/Foo")?.set_kind("component")?;
+    let _ = stage.prim("/Foo")?.type_name()?;
+
+    assert_eq!(revision(&stage, "/Foo"), foo, "the index stays");
+    let notices = notices.borrow();
+    assert_eq!(notices.resynced, paths(&["/Foo", "/Foo"]));
+    assert!(notices.changed_info_only.is_empty(), "{:?}", notices.changed_info_only);
+    Ok(())
+}
+
 /// A significant change at an ancestor invalidates a self-root-only descendant.
 ///
 /// `/Foo/Bar`'s sole node is the skipped self-Root, so it registers only in the
@@ -1189,6 +1212,8 @@ fn clip_value(stage: &usd::Stage) -> Option<f64> {
 
 /// Editing what a clip set holds invalidates nothing: the sets are composed
 /// live on each clip query, and only whether the metadata exists is cached.
+/// The notice still resyncs the prim, as C++ `UsdStage` recomposes a prim
+/// whose clip metadata changed.
 #[test]
 fn clip_edit_is_inert() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1209,7 +1234,7 @@ fn clip_edit_is_inert() -> Result<()> {
     assert_eq!(stage.tally().builds - builds, 0, "nothing is evicted");
     assert_eq!(stage.indexed_count(), count, "nothing is evicted");
     let notices = notices.borrow();
-    assert!(notices.resynced.is_empty(), "nothing resyncs: {:?}", notices.resynced);
+    assert_eq!(notices.resynced, [sdf::path("/Model")?], "the prim resyncs");
     Ok(())
 }
 

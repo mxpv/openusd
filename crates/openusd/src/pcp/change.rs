@@ -70,9 +70,11 @@
 //! Reporting is classified separately from invalidation ([`ReportedPaths`]): an
 //! entry that authored anything names itself in the notice whichever channel
 //! invalidates it, so a layer-stack or type edit still reports the metadata it
-//! moved. A children reorder reports the prim as a resync of its subtree (C++
-//! `recomposeChanges` for `didReorderChildren`), and a properties reorder as an
-//! info change. Collected only when a sink is listening.
+//! moved. A prim C++ `UsdStage` recomposes for notification is reported as a
+//! resync of its subtree (C++ `recomposeChanges`): its children reordered, or
+//! its `typeName`, `apiSchemas`, `kind`, `specifier`, `active` or clip
+//! metadata edited, or the root's `fallbackPrimTypes`. A properties reorder
+//! is an info change. Collected only when a sink is listening.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem;
@@ -238,10 +240,10 @@ enum Report {
     /// The object appeared or vanished, so a consumer must re-resolve it
     /// outright (C++ `otherResyncChanges` for a property spec add or remove).
     Resync,
-    /// The prim's children were reordered. Its index stays valid, but a
-    /// consumer must rebuild the prim and its subtree (C++ `recomposeChanges`
-    /// for `didReorderChildren`).
-    Reorder,
+    /// The prim's index stays valid, but a consumer must rebuild the prim
+    /// and its subtree (C++ `recomposeChanges`, which `UsdStage` fills for a
+    /// children reorder and the fields [`Changes::rebuilds`] names).
+    Rebuild,
 }
 
 /// The paths a composed-change notice names, in the two namespaces they arrive
@@ -262,10 +264,10 @@ pub(crate) struct ReportedPaths {
     pub stage_resync: BTreeSet<Path>,
     /// The edited layer's own paths whose object appeared or vanished.
     pub authored_resync: BTreeSet<Path>,
-    /// Composed paths whose children were reordered.
-    pub stage_reorder: BTreeSet<Path>,
-    /// The edited layer's own paths whose children were reordered.
-    pub authored_reorder: BTreeSet<Path>,
+    /// Composed paths a consumer rebuilds from the prim down.
+    pub stage_rebuild: BTreeSet<Path>,
+    /// The edited layer's own paths a consumer rebuilds from the prim down.
+    pub authored_rebuild: BTreeSet<Path>,
     /// The layers that authored each path of the authored sets, by the set,
     /// so a notice names each path in its own layer's namespace. Recorded
     /// only for a plan built [`with_authors`](Changes::with_authors); the spec
@@ -282,8 +284,8 @@ pub(crate) enum Authored {
     Resync,
     /// [`ReportedPaths::authored_info`].
     Info,
-    /// [`ReportedPaths::authored_reorder`].
-    Reorder,
+    /// [`ReportedPaths::authored_rebuild`].
+    Rebuild,
 }
 
 impl ReportedPaths {
@@ -339,9 +341,9 @@ impl CacheChanges {
     /// this round added or removed. These are the paths a consumer must
     /// re-resolve (C++ `PcpCacheChanges` resync set).
     ///
-    /// The property and reorder halves are report-only: a property spec
-    /// appearing or vanishing, or a prim's children reordered, leaves the
-    /// prim's graph intact. Each names an object to re-resolve without naming
+    /// The property and rebuild halves are report-only: a property spec
+    /// appearing or vanishing, or a prim to rebuild, leaves the prim's graph
+    /// intact. Each names an object to re-resolve without naming
     /// an index to drop. Neither is in
     /// [`all_significant`](Self::all_significant).
     ///
@@ -388,14 +390,14 @@ impl CacheChanges {
 
     /// The subset of [`stage_resynced_paths`](Self::stage_resynced_paths) that
     /// stands for a whole subtree: the significant tier, whose entries drop the
-    /// index and every namespace descendant, and the prims whose children were
-    /// reordered, which a consumer rebuilds from the prim down.
+    /// index and every namespace descendant, and the prims a consumer rebuilds
+    /// from the prim down.
     ///
     /// Only these may subsume another reported stage path by prefix.
     pub(crate) fn stage_subtree_paths(&self) -> impl Iterator<Item = &Path> {
         self.did_change_significantly
             .iter()
-            .chain(self.reported.stage_reorder.iter())
+            .chain(self.reported.stage_rebuild.iter())
     }
 
     /// The covering subset of
@@ -410,9 +412,9 @@ impl CacheChanges {
             .map(|path| (path, reported.authors(Authored::Significant, path)))
             .chain(
                 reported
-                    .authored_reorder
+                    .authored_rebuild
                     .iter()
-                    .map(|path| (path, reported.authors(Authored::Reorder, path))),
+                    .map(|path| (path, reported.authors(Authored::Rebuild, path))),
             )
     }
 
@@ -570,16 +572,17 @@ impl Changes {
     /// moves a composed value and restales a target memo. Every entry is
     /// classified — one that only maintains child names (a child spec came or
     /// went, which the child's own entry reports) lands on no effect at all,
-    /// which is a decision rather than a gap. A children reorder resyncs the
-    /// prim, as C++ `UsdStage` does for `didReorderChildren`, and a properties
-    /// reorder names it as an info change.
+    /// which is a decision rather than a gap. A prim to
+    /// [rebuild](Self::rebuilds) is reported as a resync of its subtree, as
+    /// C++ `UsdStage` reports it, and a properties reorder names the prim as
+    /// an info change.
     fn effects_of(path: &Path, entry: &ChangeEntry) -> InvalidationEffects {
         let mut effects = InvalidationEffects::default();
         if entry.is_child_bookkeeping() {
             return effects;
         }
-        let prim_report = if entry.flags.contains(sdf::ChangeFlags::REORDER_CHILDREN) {
-            Report::Reorder
+        let prim_report = if Self::rebuilds(path, entry) {
+            Report::Rebuild
         } else {
             Report::Info
         };
@@ -613,8 +616,8 @@ impl Changes {
 
         // Every prim entry that authored something names itself in the notice.
         // A significant one is named twice over — the resync tier reports it as
-        // well — and the reporting layer drops the weaker of the two. A children
-        // reorder names it as a recompose of its subtree.
+        // well — and the reporting layer drops the weaker of the two. A prim to
+        // rebuild is named as a resync of its subtree.
         effects.report = Some(prim_report);
 
         // The fields a prim's schema identity is composed from. `apiSchemas` is
@@ -821,10 +824,10 @@ impl Changes {
                 &mut reported.authored_resync,
                 Authored::Resync,
             ),
-            Report::Reorder => (
-                &mut reported.stage_reorder,
-                &mut reported.authored_reorder,
-                Authored::Reorder,
+            Report::Rebuild => (
+                &mut reported.stage_rebuild,
+                &mut reported.authored_rebuild,
+                Authored::Rebuild,
             ),
         };
         authored.insert(path.clone());
@@ -915,6 +918,27 @@ impl Changes {
         // access.
         self.cache.authored_significant.insert(path.clone());
         self.record_author(Authored::Significant, layer, path);
+    }
+
+    /// Whether the prim entry at `path` makes C++ `UsdStage` recompose the
+    /// prim for notification (`_ProcessPendingChanges`): its children
+    /// reordered, or a field its composed prim is built from edited
+    /// (`typeName` and `apiSchemas` through its prim type info, `kind`,
+    /// `specifier`, `active`, clip metadata, and the root's
+    /// `fallbackPrimTypes`). The prim's index need not drop; a consumer
+    /// rebuilds the prim and its subtree.
+    fn rebuilds(path: &Path, entry: &ChangeEntry) -> bool {
+        const FIELDS: [FieldKey; 5] = [
+            FieldKey::TypeName,
+            FieldKey::ApiSchemas,
+            FieldKey::Kind,
+            FieldKey::Specifier,
+            FieldKey::Active,
+        ];
+        entry.flags.contains(sdf::ChangeFlags::REORDER_CHILDREN)
+            || FIELDS.iter().any(|field| entry.changed(field.as_str()))
+            || entry.fields().any(|(field, _)| clip::is_clip_field(field.as_str()))
+            || (path.is_abs_root() && entry.changed(FieldKey::FallbackPrimTypes.as_str()))
     }
 
     /// Authoring this field on a prim path forces a graph rebuild.
@@ -1741,13 +1765,13 @@ mod tests {
         };
 
         let children = effects("/C");
-        assert_eq!(children.report, Some(Report::Reorder));
+        assert_eq!(children.report, Some(Report::Rebuild));
         assert!(!children.significant);
         let properties = effects("/R");
         assert_eq!(properties.report, Some(Report::Info));
         assert!(!properties.significant);
         let replaced = effects("/S");
-        assert_eq!(replaced.report, Some(Report::Reorder));
+        assert_eq!(replaced.report, Some(Report::Rebuild));
         assert!(replaced.significant);
     }
 

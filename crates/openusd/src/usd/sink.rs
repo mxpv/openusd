@@ -240,7 +240,9 @@ pub struct CommittedChange<'a> {
     ///
     /// A prim path here composes afresh from that prim down: its index and
     /// namespace descendants were dropped, a spec of it appeared or vanished,
-    /// or its children were reordered. A
+    /// or C++ `UsdStage` would recompose it for notification: its children
+    /// reordered, or its `typeName`, `apiSchemas`, `kind`, `specifier`,
+    /// `active` or clip metadata edited. A
     /// *property* path is one whose spec appeared or vanished: the owning prim
     /// composes exactly as it did, but the property itself is a different object
     /// than it was, so a handle to it must be re-resolved rather than re-read.
@@ -574,7 +576,7 @@ struct NamespacedPaths {
     /// whole subtree, and so are the only sound covering prefixes.
     ///
     /// `resynced` mixes invalidation tiers. Only the significant tier and the
-    /// layer-stack victims drop a subtree, and a children reorder stands for
+    /// layer-stack victims drop a subtree, and a prim to rebuild stands for
     /// one without dropping it; the spec tier refreshes a site in place. Pruning by prefix against
     /// the whole set would let an inert `over` at `/A` delete the report of an
     /// attribute authored at `/A/B.x`. Not reported — it is a projection of
@@ -625,7 +627,7 @@ impl Payload {
     /// translates them, or leaves them untranslated for a local or direct edit.
     ///
     /// [`resynced`](CommittedChange::resynced) is the union of the significant,
-    /// reorder and spec-tier composed paths, [`recomposed`](CommittedChange::recomposed)
+    /// rebuild and spec-tier composed paths, [`recomposed`](CommittedChange::recomposed)
     /// the prim tier's; [`changed_info_only`](CommittedChange::changed_info_only)
     /// is every other edited path that authored a field value or edited
     /// relationship/connection targets. `scratch` is the merged change list;
