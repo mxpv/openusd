@@ -10,6 +10,7 @@ mod capture;
 mod clips;
 mod collection;
 mod collection_expr;
+mod color_space;
 mod composition;
 mod connections;
 mod diff;
