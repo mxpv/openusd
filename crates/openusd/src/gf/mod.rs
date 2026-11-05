@@ -40,6 +40,7 @@
 
 mod bbox;
 mod camera;
+mod color_space;
 mod dual_quat;
 mod frustum;
 mod interval;
@@ -54,6 +55,7 @@ mod vec;
 
 pub use bbox::BBox3d;
 pub use camera::{Camera, FovDirection};
+pub use color_space::is_valid_color_space;
 pub use dual_quat::DualQuatd;
 pub use frustum::{Frustum, FrustumPlanes};
 pub use half::f16;

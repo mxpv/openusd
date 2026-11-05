@@ -443,6 +443,17 @@ impl Attribute {
         self.edit(|spec| Ok(spec.set_type_name(type_name)?))
     }
 
+    /// The composed `colorSpace` field, or what the attribute's schema
+    /// declares for it, `None` where neither has one (C++
+    /// `UsdAttribute::GetColorSpace`, and `HasColorSpace` in its being
+    /// `Some`). [`ColorSpaceAPI::compute_attribute_name`] answers the color
+    /// space that applies to the attribute.
+    ///
+    /// [`ColorSpaceAPI::compute_attribute_name`]: crate::usd::ColorSpaceAPI::compute_attribute_name
+    pub fn color_space(&self) -> Result<Option<tf::Token>> {
+        self.metadata(sdf::FieldKey::ColorSpace.as_str())
+    }
+
     /// Set the `colorSpace` token.
     pub fn set_color_space(self, color_space: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let color_space = color_space.into();
