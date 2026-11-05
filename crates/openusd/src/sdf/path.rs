@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
-use std::sync::{Arc, LazyLock};
-use std::{cmp, convert::Infallible, fmt, iter, str::FromStr};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
+use std::{array, cmp, convert::Infallible, fmt, iter, mem, ptr, str::FromStr};
 
 use rustc_hash::FxBuildHasher;
 
@@ -47,9 +47,10 @@ pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
 /// rejects malformed text with a [`PathParseError`]. The empty path is not
 /// parseable; construct it with [`Path::default`].
 ///
-/// Clones share the path's text, as C++ `SdfPath` copies share one pooled
-/// path node, and the empty and absolute root paths share one text each
-/// however they are reached.
+/// Paths are interned, as C++ `SdfPath`s share one pooled path node: every
+/// path with the same text holds the same allocation, so comparing two paths
+/// for equality compares two pointers, and a path built again is shared
+/// rather than stored twice.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
     path: Arc<Text>,
@@ -65,28 +66,47 @@ pub type PathMap<V> = HashMap<Path, V, FxBuildHasher>;
 /// A set of [`Path`]s, hashed as a [`PathMap`] is.
 pub type PathSet = HashSet<Path, FxBuildHasher>;
 
-/// The text of the empty path, shared by every [`Path::default`].
-static EMPTY: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::new())));
+/// The empty path, shared by every [`Path::default`].
+static EMPTY: LazyLock<Path> = LazyLock::new(|| Path::intern(""));
 
-/// The text of the absolute root path, shared by every [`Path::abs_root`].
-static ABS_ROOT: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::from("/"))));
+/// The absolute root path, shared by every [`Path::abs_root`].
+static ABS_ROOT: LazyLock<Path> = LazyLock::new(|| Path::intern("/"));
 
-/// A path's shared text and its hash.
+/// The number of independently locked shards of [`INTERNER`]. A power of two,
+/// so a shard is picked by the top bits of a text's hash.
+const SHARDS: usize = 64;
+
+/// The table every live path's text is interned in (C++ `Sdf_PathNode`'s
+/// node pools), split into [`SHARDS`] locked shards so threads building paths
+/// rarely wait on one another.
+///
+/// A shard maps a text's hash to the texts with that hash. It holds them
+/// weakly: a text leaves the table when its last [`Path`] drops.
+static INTERNER: LazyLock<[Mutex<HashMap<u64, Slot, FxBuildHasher>>; SHARDS]> =
+    LazyLock::new(|| array::from_fn(|_| Mutex::default()));
+
+/// The interned texts that share one hash: almost always one.
+enum Slot {
+    One(Weak<Text>),
+    Many(Vec<Weak<Text>>),
+}
+
+/// A path's interned text and its hash.
 ///
 /// Clones of a [`Path`] share one `Text`, whose hash is computed once, when
 /// the path is made. A path keying several maps, or one map many times, does
-/// not read its text again to hash it. Equality and ordering compare the text.
+/// not read its text again to hash it. Ordering compares the text.
 struct Text {
     text: String,
-    /// The text's hash under a fixed-key hasher. Equal texts in separate
-    /// allocations hash alike.
+    /// The text's hash under a fixed-key hasher. It also picks the text's
+    /// shard and slot in [`INTERNER`].
     hash: u64,
 }
 
 impl Default for Path {
     /// The empty path.
     fn default() -> Self {
-        Path { path: EMPTY.clone() }
+        EMPTY.clone()
     }
 }
 
@@ -154,14 +174,70 @@ impl Path {
     /// The absolute root path `/` (pseudo-root).
     #[inline]
     pub fn abs_root() -> Path {
-        Path { path: ABS_ROOT.clone() }
+        ABS_ROOT.clone()
     }
 
     /// Wraps already-validated `text`.
     fn from_text(text: String) -> Path {
-        Path {
-            path: Arc::new(Text::new(text)),
+        Path::intern(text)
+    }
+
+    /// The path spelling `text`, which must already be valid: the one live
+    /// path with that text if there is one, else a new path, which `text`
+    /// becomes the text of.
+    fn intern<T: AsRef<str> + Into<String>>(text: T) -> Path {
+        let hash = FxBuildHasher.hash_one(text.as_ref());
+        // Declared before the guard so they drop after it: a path that was
+        // the last of its text runs `Text::drop`, which locks this shard.
+        let mut held: Vec<Arc<Text>> = Vec::new();
+        let mut shard = lock_shard(hash);
+        let found = |weak: &Weak<Text>, held: &mut Vec<Arc<Text>>| {
+            let live = weak.upgrade()?;
+            if live.text == text.as_ref() {
+                return Some(live);
+            }
+            held.push(live);
+            None
+        };
+        match shard.get(&hash) {
+            Some(Slot::One(weak)) => {
+                if let Some(live) = found(weak, &mut held) {
+                    return Path { path: live };
+                }
+            }
+            Some(Slot::Many(weaks)) => {
+                for weak in weaks {
+                    if let Some(live) = found(weak, &mut held) {
+                        return Path { path: live };
+                    }
+                }
+            }
+            None => {}
         }
+        let path = Arc::new(Text {
+            text: text.into(),
+            hash,
+        });
+        let weak = Arc::downgrade(&path);
+        // A text dropping on another thread leaves its entry behind until its
+        // `Text::drop` takes the lock; a dead entry is replaced here.
+        match shard.entry(hash) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(Slot::One(weak));
+            }
+            Entry::Occupied(mut occupied) => match occupied.get_mut() {
+                Slot::One(other) if other.strong_count() == 0 => *other = weak,
+                Slot::One(other) => {
+                    let other = mem::take(other);
+                    occupied.insert(Slot::Many(vec![other, weak]));
+                }
+                Slot::Many(weaks) => {
+                    weaks.retain(|other| other.strong_count() > 0);
+                    weaks.push(weak);
+                }
+            },
+        }
+        Path { path }
     }
 
     /// Takes `path` without validating it, like
@@ -1547,13 +1623,33 @@ impl TryFrom<&String> for Path {
     }
 }
 
-impl Text {
-    fn new(text: String) -> Self {
-        Self {
-            hash: FxBuildHasher.hash_one(text.as_str()),
-            text,
+impl Drop for Text {
+    /// Takes this text out of [`INTERNER`], unless another thread has
+    /// already put a new path with the same text in its place.
+    fn drop(&mut self) {
+        let mut shard = lock_shard(self.hash);
+        let me: *const Text = self;
+        let empty = match shard.get_mut(&self.hash) {
+            Some(Slot::One(weak)) => ptr::eq(weak.as_ptr(), me),
+            Some(Slot::Many(weaks)) => {
+                weaks.retain(|weak| !ptr::eq(weak.as_ptr(), me));
+                weaks.is_empty()
+            }
+            None => false,
+        };
+        if empty {
+            shard.remove(&self.hash);
         }
     }
+}
+
+/// Locks the [`INTERNER`] shard a text with `hash` lives in.
+fn lock_shard(hash: u64) -> MutexGuard<'static, HashMap<u64, Slot, FxBuildHasher>> {
+    // The top bits pick the shard; the map hashes the full word again.
+    let index = (hash >> (u64::BITS - SHARDS.trailing_zeros())) as usize;
+    // A shard is consistent between statements, so a panic elsewhere while
+    // it was held leaves nothing to repair.
+    INTERNER[index].lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Deref for Text {
@@ -1605,6 +1701,7 @@ impl fmt::Display for Text {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::HashSet;
+    use std::thread;
 
     use crate::Result;
 
@@ -1664,14 +1761,52 @@ pub(crate) mod tests {
         assert_eq!(clone.append_property("size").unwrap().as_str(), "/Root/Branch.size");
         assert_eq!(clone.append_path("Leaf").unwrap().as_str(), "/Root/Branch/Leaf");
         assert_eq!(path.as_str(), "/Root/Branch");
-        let text = String::from("/Root/Branch");
-        let allocation = text.as_ptr();
-        let independent = Path::try_from(text).unwrap();
-        assert_eq!(independent.as_str().as_ptr(), allocation);
-        assert_eq!(path, independent);
         let mut paths = HashSet::new();
         paths.insert(path);
-        assert!(paths.contains(&independent));
+        assert!(paths.contains(&Path::new("/Root/Branch").unwrap()));
+    }
+
+    /// Paths with one text share one allocation while any of them lives, and
+    /// a text no live path spells keeps the allocation it came in.
+    #[test]
+    fn interned_once() {
+        let path = Path::new("/Interned/Once").unwrap();
+        let again = Path::try_from(String::from("/Interned/Once")).unwrap();
+        assert!(Arc::ptr_eq(&path.path, &again.path));
+        let derived = Path::new("/Interned/Once/Child").unwrap().parent().unwrap();
+        assert!(Arc::ptr_eq(&path.path, &derived.path));
+        drop((path, again, derived));
+
+        let text = String::from("/Interned/Once");
+        let allocation = text.as_ptr();
+        let fresh = Path::try_from(text).unwrap();
+        assert_eq!(fresh.as_str().as_ptr(), allocation);
+    }
+
+    /// Paths built and dropped on many threads at once intern to one
+    /// allocation per text, and a text leaves the table with its last path.
+    #[test]
+    fn interned_across_threads() {
+        let texts: Vec<String> = (0..64).map(|i| format!("/Threads/P{i}")).collect();
+        thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..200 {
+                        let paths: Vec<Path> = texts.iter().map(|t| Path::new(t).unwrap()).collect();
+                        let again: Vec<Path> = texts.iter().map(|t| Path::new(t).unwrap()).collect();
+                        for (a, b) in paths.iter().zip(&again) {
+                            assert!(Arc::ptr_eq(&a.path, &b.path));
+                        }
+                    }
+                });
+            }
+        });
+        let path = Path::new("/Threads/P0").unwrap();
+        let weak = Arc::downgrade(&path.path);
+        drop(path);
+        assert!(weak.upgrade().is_none());
+        let hash = FxBuildHasher.hash_one("/Threads/P0");
+        assert!(lock_shard(hash).get(&hash).is_none());
     }
 
     #[cfg(feature = "serde")]
