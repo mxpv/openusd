@@ -84,18 +84,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
             )
             .properties(
                 &[
-                    ::openusd::usd::PropertyDecl::attribute("blocked", "double")
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::ValueBlock,
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::relationship("plain").uniform(),
-                    ::openusd::usd::PropertyDecl::relationship("loose").varying(),
                     ::openusd::usd::PropertyDecl::attribute("big", "matrix4d")
                         .varying()
                         .fields(
@@ -111,70 +99,13 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ),
                             ],
                         ),
-                    ::openusd::usd::PropertyDecl::attribute("small", "matrix2d")
+                    ::openusd::usd::PropertyDecl::attribute("blocked", "double")
                         .varying()
                         .fields(
                             &[
                                 ::openusd::usd::Field::new(
                                     "default",
-                                    || ::openusd::vt::Value::Matrix2d(
-                                        ::openusd::gf::Mat2d([1f64, 0f64, 0f64, 1f64]),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute("middling", "matrix3d")
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Matrix3d(
-                                        ::openusd::gf::Mat3d([
-                                            1f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 1f64,
-                                        ]),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute("spin", "quath")
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Quath(
-                                        ::openusd::gf::quath(
-                                            ::openusd::gf::f16::from_bits(15360u16),
-                                            ::openusd::gf::f16::from_bits(0u16),
-                                            ::openusd::gf::f16::from_bits(0u16),
-                                            ::openusd::gf::f16::from_bits(0u16),
-                                        ),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute("when", "timecode")
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::TimeCode(
-                                        ::openusd::sdf::TimeCode(3f64),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ::openusd::usd::PropertyDecl::attribute("tiny", "half")
-                        .varying()
-                        .fields(
-                            &[
-                                ::openusd::usd::Field::new(
-                                    "default",
-                                    || ::openusd::vt::Value::Half(
-                                        ::openusd::gf::f16::from_bits(14336u16),
-                                    ),
+                                    || ::openusd::vt::Value::ValueBlock,
                                 ),
                             ],
                         ),
@@ -197,6 +128,75 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ::openusd::usd::Field::new(
                                     "default",
                                     || ::openusd::vt::Value::Float(1f32),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::relationship("loose").varying(),
+                    ::openusd::usd::PropertyDecl::attribute("middling", "matrix3d")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Matrix3d(
+                                        ::openusd::gf::Mat3d([
+                                            1f64, 0f64, 0f64, 0f64, 1f64, 0f64, 0f64, 0f64, 1f64,
+                                        ]),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::relationship("plain").uniform(),
+                    ::openusd::usd::PropertyDecl::attribute("small", "matrix2d")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Matrix2d(
+                                        ::openusd::gf::Mat2d([1f64, 0f64, 0f64, 1f64]),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("spin", "quath")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Quath(
+                                        ::openusd::gf::quath(
+                                            ::openusd::gf::f16::from_bits(15360u16),
+                                            ::openusd::gf::f16::from_bits(0u16),
+                                            ::openusd::gf::f16::from_bits(0u16),
+                                            ::openusd::gf::f16::from_bits(0u16),
+                                        ),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("tiny", "half")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::Half(
+                                        ::openusd::gf::f16::from_bits(14336u16),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ::openusd::usd::PropertyDecl::attribute("when", "timecode")
+                        .varying()
+                        .fields(
+                            &[
+                                ::openusd::usd::Field::new(
+                                    "default",
+                                    || ::openusd::vt::Value::TimeCode(
+                                        ::openusd::sdf::TimeCode(3f64),
+                                    ),
                                 ),
                             ],
                         ),

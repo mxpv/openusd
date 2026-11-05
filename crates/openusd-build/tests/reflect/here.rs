@@ -122,6 +122,22 @@ pub trait CrateSchema: ::openusd::usd::Typed {
     fn create_volume_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.volume_attr_builder().build()?)
     }
+    /// Whom the thing belongs to.
+    ///
+    /// Declared `rel owner`.
+    fn owner_rel(&self) -> ::openusd::usd::Relationship {
+        self.prim().relationship(tokens::OWNER)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    fn owner_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.prim().relationship_builder(tokens::OWNER).custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    fn create_owner_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(self.owner_rel_builder().build()?)
+    }
     /// How heavy the thing is.
     ///
     /// Declared `double weight = 1`.
@@ -155,22 +171,6 @@ pub trait CrateSchema: ::openusd::usd::Typed {
     /// Authors the property as the schema declares it, and returns it.
     fn create_weight_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.weight_attr_builder().build()?)
-    }
-    /// Whom the thing belongs to.
-    ///
-    /// Declared `rel owner`.
-    fn owner_rel(&self) -> ::openusd::usd::Relationship {
-        self.prim().relationship(tokens::OWNER)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    fn owner_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
-        self.prim().relationship_builder(tokens::OWNER).custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    fn create_owner_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(self.owner_rel_builder().build()?)
     }
 }
 
@@ -322,6 +322,22 @@ impl BadgeAPI {
     pub fn create_badge_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.badge_attr_builder().build()?)
     }
+    /// Whom the thing belongs to.
+    ///
+    /// Declared `rel owner`.
+    pub fn owner_rel(&self) -> ::openusd::usd::Relationship {
+        self.relationship(tokens::OWNER)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn owner_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.relationship_builder(tokens::OWNER).custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_owner_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(self.owner_rel_builder().build()?)
+    }
     /// How heavy the thing is.
     ///
     /// Declared `double weight = 1`.
@@ -354,22 +370,6 @@ impl BadgeAPI {
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_weight_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.weight_attr_builder().build()?)
-    }
-    /// Whom the thing belongs to.
-    ///
-    /// Declared `rel owner`.
-    pub fn owner_rel(&self) -> ::openusd::usd::Relationship {
-        self.relationship(tokens::OWNER)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn owner_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
-        self.relationship_builder(tokens::OWNER).custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_owner_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(self.owner_rel_builder().build()?)
     }
 }
 

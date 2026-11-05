@@ -53,6 +53,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
             .bases(&["APISchemaBase"])
             .properties(
                 &[
+                    ::openusd::usd::PropertyDecl::relationship("owner").uniform(),
                     ::openusd::usd::PropertyDecl::attribute("weight", "double")
                         .varying()
                         .fields(
@@ -63,7 +64,6 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                                 ),
                             ],
                         ),
-                    ::openusd::usd::PropertyDecl::relationship("owner").uniform(),
                 ],
             ),
     ],
@@ -111,6 +111,22 @@ impl ThingAPI {
     ) -> ::openusd::Result<::std::option::Option<Self>> {
         Self::from_prim(stage.prim(path)?)
     }
+    /// Whom the thing belongs to.
+    ///
+    /// Declared `rel owner`.
+    pub fn owner_rel(&self) -> ::openusd::usd::Relationship {
+        self.relationship(tokens::OWNER)
+    }
+    /// The property's declaration, unauthored. Give it a value and
+    /// `build` it to author both as one edit; `build` it alone for the
+    /// declaration by itself.
+    pub fn owner_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
+        self.relationship_builder(tokens::OWNER).custom(false)
+    }
+    /// Authors the property as the schema declares it, and returns it.
+    pub fn create_owner_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
+        ::std::result::Result::Ok(self.owner_rel_builder().build()?)
+    }
     /// How heavy the thing is.
     ///
     /// Declared `double weight = 1`.
@@ -143,22 +159,6 @@ impl ThingAPI {
     /// Authors the property as the schema declares it, and returns it.
     pub fn create_weight_attr(&self) -> ::openusd::Result<::openusd::usd::Attribute> {
         ::std::result::Result::Ok(self.weight_attr_builder().build()?)
-    }
-    /// Whom the thing belongs to.
-    ///
-    /// Declared `rel owner`.
-    pub fn owner_rel(&self) -> ::openusd::usd::Relationship {
-        self.relationship(tokens::OWNER)
-    }
-    /// The property's declaration, unauthored. Give it a value and
-    /// `build` it to author both as one edit; `build` it alone for the
-    /// declaration by itself.
-    pub fn owner_rel_builder(&self) -> ::openusd::usd::RelationshipBuilder<'static> {
-        self.relationship_builder(tokens::OWNER).custom(false)
-    }
-    /// Authors the property as the schema declares it, and returns it.
-    pub fn create_owner_rel(&self) -> ::openusd::Result<::openusd::usd::Relationship> {
-        ::std::result::Result::Ok(self.owner_rel_builder().build()?)
     }
 }
 

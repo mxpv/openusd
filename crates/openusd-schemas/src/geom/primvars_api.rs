@@ -926,8 +926,9 @@ mod tests {
         Ok(())
     }
 
-    /// The primvars come back in the prim's property order, with the indices
-    /// attribute and the id relationship the order names left out.
+    /// The primvars come back in the prim's property order, sorted until it
+    /// authors a `propertyOrder`, with the indices attribute and the id
+    /// relationship the order names left out.
     #[test]
     fn primvars_follow_property_order() -> Result {
         let mesh = mesh()?;
@@ -937,7 +938,7 @@ mod tests {
         mesh.primvar("a")?.set_indices(vec![0], None)?;
         let id = mesh.create_primvar("s", "string")?;
         id.set_id_target(mesh.path())?;
-        assert_eq!(names(&mesh.authored_primvars()?), ["c", "a", "b", "s"]);
+        assert_eq!(names(&mesh.authored_primvars()?), ["a", "b", "c", "s"]);
 
         let order = [
             "primvars:displayOpacity",
@@ -1180,8 +1181,8 @@ mod tests {
             paths(&s[4].inheritable_primvars()?),
             [
                 "/s0/s1.primvars:b",
-                "/s0/s1/s2.primvars:c",
                 "/s0/s1/s2.primvars:a",
+                "/s0/s1/s2.primvars:c",
                 "/s0/s1/s2/s3.primvars:d",
             ]
         );

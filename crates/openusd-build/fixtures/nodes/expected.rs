@@ -73,6 +73,29 @@ impl TinySurface {
     pub fn shader(&self) -> &crate::shade::Shader {
         &self.0
     }
+    /// Declared `token inputs:mode = "matte"`. One of `matte`, `gloss`. It connects
+    /// only to an interface input.
+    pub fn mode_input(&self) -> crate::shade::Input {
+        <crate::shade::Shader as crate::shade::Connectable>::input(&self.0, tokens::MODE)
+    }
+    /// The input's value as the type it is declared with: what the
+    /// shader authors, else the value the node's definition gives it.
+    pub fn mode(
+        &self,
+    ) -> ::openusd::Result<::std::option::Option<::openusd::tf::Token>> {
+        match self.mode_input().attribute().get::<::openusd::tf::Token>()? {
+            ::std::option::Option::Some(value) => {
+                ::std::result::Result::Ok(::std::option::Option::Some(value))
+            }
+            ::std::option::Option::None => {
+                <::openusd::tf::Token as ::std::convert::TryFrom<
+                    ::openusd::vt::Value,
+                >>::try_from(::openusd::vt::Value::token("matte"))
+                    .map(::std::option::Option::Some)
+                    .map_err(::std::convert::Into::into)
+            }
+        }
+    }
     /// The surface's colour.
     ///
     /// Declared `color3f inputs:tint = (0.5, 0.5, 0.5)`.
@@ -96,29 +119,6 @@ impl TinySurface {
                             ::openusd::gf::vec3f(0.5f32, 0.5f32, 0.5f32),
                         ),
                     )
-                    .map(::std::option::Option::Some)
-                    .map_err(::std::convert::Into::into)
-            }
-        }
-    }
-    /// Declared `token inputs:mode = "matte"`. One of `matte`, `gloss`. It connects
-    /// only to an interface input.
-    pub fn mode_input(&self) -> crate::shade::Input {
-        <crate::shade::Shader as crate::shade::Connectable>::input(&self.0, tokens::MODE)
-    }
-    /// The input's value as the type it is declared with: what the
-    /// shader authors, else the value the node's definition gives it.
-    pub fn mode(
-        &self,
-    ) -> ::openusd::Result<::std::option::Option<::openusd::tf::Token>> {
-        match self.mode_input().attribute().get::<::openusd::tf::Token>()? {
-            ::std::option::Option::Some(value) => {
-                ::std::result::Result::Ok(::std::option::Option::Some(value))
-            }
-            ::std::option::Option::None => {
-                <::openusd::tf::Token as ::std::convert::TryFrom<
-                    ::openusd::vt::Value,
-                >>::try_from(::openusd::vt::Value::token("matte"))
                     .map(::std::option::Option::Some)
                     .map_err(::std::convert::Into::into)
             }
@@ -181,20 +181,6 @@ impl TinyReaderFloat2 {
     pub fn shader(&self) -> &crate::shade::Shader {
         &self.0
     }
-    /// Declared `string inputs:varname`.
-    pub fn varname_input(&self) -> crate::shade::Input {
-        <crate::shade::Shader as crate::shade::Connectable>::input(
-            &self.0,
-            tokens::VARNAME,
-        )
-    }
-    /// The input's value as the type it is declared with: what the
-    /// shader authors, else the value the node's definition gives it.
-    pub fn varname(
-        &self,
-    ) -> ::openusd::Result<::std::option::Option<::std::string::String>> {
-        self.varname_input().attribute().get::<::std::string::String>()
-    }
     /// Declared `float2 inputs:in = (0, 0)`.
     pub fn in_input(&self) -> crate::shade::Input {
         <crate::shade::Shader as crate::shade::Connectable>::input(&self.0, tokens::IN_)
@@ -216,6 +202,20 @@ impl TinyReaderFloat2 {
                     .map_err(::std::convert::Into::into)
             }
         }
+    }
+    /// Declared `string inputs:varname`.
+    pub fn varname_input(&self) -> crate::shade::Input {
+        <crate::shade::Shader as crate::shade::Connectable>::input(
+            &self.0,
+            tokens::VARNAME,
+        )
+    }
+    /// The input's value as the type it is declared with: what the
+    /// shader authors, else the value the node's definition gives it.
+    pub fn varname(
+        &self,
+    ) -> ::openusd::Result<::std::option::Option<::std::string::String>> {
+        self.varname_input().attribute().get::<::std::string::String>()
     }
     /// Declared `float2 outputs:result`.
     pub fn result_output(&self) -> crate::shade::Output {
