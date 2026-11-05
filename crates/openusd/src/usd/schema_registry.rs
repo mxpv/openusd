@@ -52,6 +52,9 @@ use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
 #[derive(Debug)]
 pub struct SchemaRegistry {
     infos: HashMap<tf::Token, SchemaInfo>,
+    /// Per registered schema, the registered schemas it derives from, itself
+    /// included, which [`is_a`](Self::is_a) answers from.
+    lineages: HashMap<tf::Token, HashSet<tf::Token>>,
     /// Reverse index over [`SchemaInfo::family`], so a versioned family can be
     /// queried without scanning `infos`. Ordered as
     /// [`schema_infos_in_family`](Self::schema_infos_in_family) answers.
@@ -652,9 +655,9 @@ impl SchemaRegistry {
     /// the family manifests declare (C++ `UsdPrim::IsA`, which walks the
     /// `TfType` hierarchy the same information builds).
     ///
-    /// The walk covers every base transitively, so a query against an abstract
+    /// Every base counts, transitively, so a query against an abstract
     /// ancestor (`Boundable`, `Imageable`) answers for the concrete types under
-    /// it.
+    /// it. The registry computes each schema's bases once, as it is built.
     ///
     /// Both sides have to name a registered schema, as they do in C++, where an
     /// identifier with no `TfType` resolves to nothing. An unregistered name is
@@ -663,31 +666,8 @@ impl SchemaRegistry {
     /// family that was left out gets the same answer as registering nothing,
     /// which is the only answer that does not vary with how far up the chain
     /// the loaded set happens to reach.
-    // TODO(perf): the base graph is fixed once `build` returns, so this could
-    // resolve against a transitive closure computed there instead of walking
-    // per query. Worth doing when the schema data lands and chains get deep.
     pub fn is_a(&self, schema: &tf::Token, base: &tf::Token) -> bool {
-        if !self.infos.contains_key(base) {
-            return false;
-        }
-
-        // Manifests are data, so a malformed one can name a base cycle; the
-        // visited set makes the walk terminate on it rather than the caller.
-        let mut visited = HashSet::new();
-        let mut pending = vec![schema];
-        while let Some(next) = pending.pop() {
-            if next == base {
-                return true;
-            }
-            if !visited.insert(next) {
-                continue;
-            }
-            let Some(info) = self.infos.get(next) else {
-                continue;
-            };
-            pending.extend(&info.bases);
-        }
-        false
+        self.lineages.get(schema).is_some_and(|lineage| lineage.contains(base))
     }
 
     /// `schema` and then every schema it derives from, in the order a lookup
@@ -1786,8 +1766,10 @@ impl SchemaRegistryBuilder {
             .collect();
 
         let empty_def = Arc::new(PrimDefinition::default());
+        let lineages = self.lineages();
         Ok(Arc::new(SchemaRegistry {
             infos: self.infos,
+            lineages,
             families,
             concrete_defs,
             api_defs,
@@ -1801,6 +1783,30 @@ impl SchemaRegistryBuilder {
             metadata: self.metadata,
             kinds,
         }))
+    }
+
+    /// Per registered schema, itself and every registered schema its bases
+    /// reach, for [`SchemaRegistry::is_a`].
+    fn lineages(&self) -> HashMap<tf::Token, HashSet<tf::Token>> {
+        // TODO(rayon): each schema's walk is independent of the others'.
+        self.infos
+            .keys()
+            .map(|schema| {
+                // Manifests are data, so a malformed one can name a base that
+                // is not registered, which ends the walk there, or a base
+                // cycle, which the reached set ends.
+                let mut reached = HashSet::new();
+                let mut pending = vec![schema];
+                while let Some(next) = pending.pop() {
+                    if let Some(info) = self.infos.get(next)
+                        && reached.insert(next.clone())
+                    {
+                        pending.extend(&info.bases);
+                    }
+                }
+                (schema.clone(), reached)
+            })
+            .collect()
     }
 
     /// Inverts every auto-apply declaration into the API schemas each schema
@@ -2915,6 +2921,26 @@ def "ExtraInstanceAPI" (
         assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Typed")));
         assert!(!registry.is_a(&tf::Token::new("Bogus"), &tf::Token::new("Bogus")));
         assert!(!registry.is_a(&distant, &tf::Token::default()));
+    }
+
+    /// A base cycle or a base that is not registered ends the walk `is_a`
+    /// answers from, as it ends [`ancestors_order`]'s.
+    #[test]
+    fn is_a_over_malformed_bases() {
+        let decl = |name, bases| SchemaDecl::new(name, SchemaKind::ConcreteTyped).bases(bases);
+        let decls = [
+            decl("Loop", &["Pool"]),
+            decl("Pool", &["Loop"]),
+            decl("Orphan", &["Missing"]),
+        ];
+        let family = SchemaFamily::new("mine", &decls);
+        let registry = SchemaRegistry::builder().register(&family).build().unwrap();
+        let is_a = |schema: &str, base: &str| registry.is_a(&tf::Token::from(schema), &tf::Token::from(base));
+
+        assert!(is_a("Loop", "Pool") && is_a("Pool", "Loop") && is_a("Loop", "Loop"));
+        assert!(!is_a("Loop", "Typed"));
+        assert!(is_a("Orphan", "Orphan"));
+        assert!(!is_a("Orphan", "Missing") && !is_a("Orphan", "Typed"));
     }
 
     /// A schema comes before its bases, and a direct base before another
