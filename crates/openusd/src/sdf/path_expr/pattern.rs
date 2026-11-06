@@ -205,6 +205,16 @@ impl PathPattern {
     }
 }
 
+/// The pattern matching exactly `path` (C++ `SdfPathPattern(SdfPath)`). A
+/// path a pattern cannot start from leaves the pattern matching nothing.
+impl From<Path> for PathPattern {
+    fn from(path: Path) -> Self {
+        let mut pattern = PathPattern::nothing();
+        pattern.set_prefix(path);
+        pattern
+    }
+}
+
 impl fmt::Display for PathPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut result = String::new();

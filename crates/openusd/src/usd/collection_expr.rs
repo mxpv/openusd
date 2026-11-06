@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::Result;
 use crate::sdf::path_expr::{
@@ -226,9 +226,11 @@ fn resolve_impl(collection: &CollectionAPI, state: &mut ResolveState) -> Result<
 }
 
 /// The paths a rule map includes, as one path expression (C++
-/// `UsdComputePathExpressionFromCollectionMembershipQueryRuleMap`): it
-/// matches exactly the paths [`MembershipQuery::is_included`] answers
-/// for a query built from `rule_map`. An empty map matches nothing.
+/// `UsdComputePathExpressionFromCollectionMembershipQueryRuleMap`): of the
+/// prims and properties, it matches exactly those
+/// [`MembershipQuery::is_included`] answers for a query built from
+/// `rule_map`. A key that is not the absolute root or a prim or property
+/// path contributes nothing, and an empty map matches nothing.
 ///
 /// The expression has the form `(explicit includes) + (~(explicit excludes)
 /// & hierarchy)`: an `explicitOnly` path and every property path is a single
@@ -241,13 +243,23 @@ pub fn rule_map_expression(rule_map: &PathExpansionRuleMap) -> sdf::PathExpressi
     if rule_map.is_empty() {
         return sdf::PathExpression::nothing();
     }
+    // `Path` order is C++ `SdfPath` order for the paths a collection holds:
+    // an ancestor sorts ahead of its whole subtree, and the expression's text
+    // does not depend on the map's iteration order.
+    let mut entries: Vec<(&Path, PathRule)> = rule_map.iter().map(|(path, &rule)| (path, rule)).collect();
+    entries.sort_unstable_by_key(|&(path, _)| path);
+
     let mut explicit_includes = sdf::PathExpression::nothing();
     let mut explicit_excludes = sdf::PathExpression::nothing();
     let mut rules: Vec<(&Path, PathRule)> = Vec::new();
-    for (path, &rule) in rule_map {
+    for (path, rule) in entries {
+        // A path no collection can hold contributes nothing.
+        if !super::collection::is_member_kind(path) {
+            continue;
+        }
         if rule == PathRule::ExplicitOnly {
             explicit_includes = with_path(explicit_includes, path);
-        } else if !(path.is_abs_root() || path.is_prim()) {
+        } else if path.is_prim_property() {
             // A property has no descendants, so its rule is explicit.
             if rule == PathRule::Exclude {
                 explicit_excludes = with_path(explicit_excludes, path);
@@ -258,8 +270,6 @@ pub fn rule_map_expression(rule_map: &PathExpansionRuleMap) -> sdf::PathExpressi
             rules.push((path, rule));
         }
     }
-    // Lexicographic order puts an ancestor ahead of its descendants.
-    rules.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
     // Shift-reduce: each descendant's expression is composed over its
     // ancestor's once the rules leave its subtree. The stack's bottom is
@@ -269,28 +279,24 @@ pub fn rule_map_expression(rule_map: &PathExpansionRuleMap) -> sdf::PathExpressi
         stack.push(RuleScope::new(Path::abs_root(), PathRule::Exclude));
     }
     for (path, rule) in rules {
-        while stack.last().is_some_and(|top| !path.has_prefix(&top.path)) {
+        while stack.len() > 1 && stack.last().is_some_and(|top| !path.has_prefix(&top.path)) {
             reduce(&mut stack);
         }
-        // A rule its ancestor's already covers adds nothing; the rule map
-        // can hold one, such as excludes of both `/foo` and `/foo/bar`.
+        // A rule its ancestor already covers adds nothing; the rule map can
+        // hold one, such as excludes of both `/foo` and `/foo/bar`.
         if let Some(top) = stack.last()
-            && match top.rule {
-                PathRule::Exclude | PathRule::ExpandPrims => top.rule == rule,
-                PathRule::ExpandPrimsAndProperties => rule != PathRule::Exclude,
-                PathRule::ExplicitOnly => false,
-            }
+            && (top.rule == rule || (top.rule == PathRule::ExpandPrimsAndProperties && rule != PathRule::Exclude))
         {
             continue;
         }
         stack.push(RuleScope::new(path.clone(), rule));
     }
-    let mut hierarchy = sdf::PathExpression::nothing();
-    while !stack.is_empty() {
-        if let Some(done) = reduce(&mut stack) {
-            hierarchy = done;
-        }
+    while stack.len() > 1 {
+        reduce(&mut stack);
     }
+    let hierarchy = stack
+        .pop()
+        .map_or_else(sdf::PathExpression::nothing, |root| root.expression);
 
     sdf::PathExpression::make_op(
         SetOp::ImpliedUnion,
@@ -319,13 +325,11 @@ impl RuleScope {
     fn new(path: Path, rule: PathRule) -> Self {
         let mut expression = sdf::PathExpression::nothing();
         if !(path.is_abs_root() && rule == PathRule::Exclude) {
-            let mut pattern = PathPattern::nothing();
-            pattern.set_prefix(path.clone());
+            let mut pattern = PathPattern::from(path.clone());
             pattern.append_stretch_if_possible();
             expression = sdf::PathExpression::make_atom_pattern(pattern);
             if rule == PathRule::ExpandPrims {
-                expression =
-                    sdf::PathExpression::make_op(SetOp::Difference, expression, sdf::PathExpression::parse("//*.*"));
+                expression = sdf::PathExpression::make_op(SetOp::Difference, expression, ALL_PROPERTIES.clone());
             }
             if !path.is_abs_root() {
                 let op = if rule == PathRule::Exclude {
@@ -342,28 +346,24 @@ impl RuleScope {
 }
 
 /// Pops the top of `stack` and composes its expression over the next
-/// scope's. Returns the finished expression when that empties the stack.
-fn reduce(stack: &mut Vec<RuleScope>) -> Option<sdf::PathExpression> {
-    let top = stack.pop()?.expression;
-    match stack.last_mut() {
-        Some(next) => {
-            next.expression = top.compose_over(&next.expression);
-            None
-        }
-        None => Some(top),
+/// scope's. The bottom scope stays: nothing lies below it to compose over.
+fn reduce(stack: &mut Vec<RuleScope>) {
+    if stack.len() > 1
+        && let Some(top) = stack.pop()
+        && let Some(next) = stack.last_mut()
+    {
+        next.expression = top.expression.compose_over(&next.expression);
     }
 }
 
 /// `expression` with the single `path` joined to it.
 fn with_path(expression: sdf::PathExpression, path: &Path) -> sdf::PathExpression {
-    let mut pattern = PathPattern::nothing();
-    pattern.set_prefix(path.clone());
-    sdf::PathExpression::make_op(
-        SetOp::ImpliedUnion,
-        expression,
-        sdf::PathExpression::make_atom_pattern(pattern),
-    )
+    let atom = sdf::PathExpression::make_atom_pattern(PathPattern::from(path.clone()));
+    sdf::PathExpression::make_op(SetOp::ImpliedUnion, expression, atom)
 }
+
+/// Every property, which an [`PathRule::ExpandPrims`] scope leaves out.
+static ALL_PROPERTIES: LazyLock<sdf::PathExpression> = LazyLock::new(|| sdf::PathExpression::parse("//*.*"));
 
 /// The predicate functions membership expressions may call (C++
 /// `UsdGetCollectionPredicateLibrary`); each predicate's doc note in the
@@ -642,7 +642,7 @@ mod tests {
 
     use crate::kind;
     use crate::sdf::path_expr::{PredicateExpression, link_predicate};
-    use crate::usd::{PrimPredicate, SchemaFamily};
+    use crate::usd::{MembershipQuery, PrimPredicate, SchemaFamily};
 
     static SITE: &SchemaFamily<'_> = &SchemaFamily::new("site", &[]).kinds(kind::tests::SITE);
 
@@ -736,7 +736,7 @@ mod tests {
     /// query includes, for each expansion rule, nested includes and excludes,
     /// an excluded property and `includeRoot`.
     #[test]
-    fn rule_map_expression_matches_query() -> Result<()> {
+    fn rule_map_matches() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().join("root.usda");
         fs::write(
@@ -787,9 +787,8 @@ def Xform "World" (
         let mut paths = Vec::new();
         stage.traverse(PrimPredicate::DEFAULT, |path| paths.push(path.clone()))?;
         for prim in paths.clone() {
-            let size = prim.append_property("size")?;
-            if stage.attribute(size.clone())?.is_defined()? {
-                paths.push(size);
+            for name in stage.prim(&prim)?.property_names()? {
+                paths.push(prim.append_property(name.as_str())?);
             }
         }
         let world = stage.prim("/World")?;
@@ -807,6 +806,49 @@ def Xform "World" (
             }
         }
         assert!(rule_map_expression(&PathExpansionRuleMap::new()).is_empty());
+        Ok(())
+    }
+
+    /// A rule map that mixes rules, as nested collections merge into, still
+    /// has an expression matching what its query includes.
+    #[test]
+    fn rule_map_mixed() -> Result<()> {
+        let maps = [
+            vec![("/", PathRule::ExpandPrims), ("/W/A", PathRule::ExplicitOnly)],
+            vec![
+                ("/W", PathRule::ExpandPrimsAndProperties),
+                ("/W/A", PathRule::ExpandPrims),
+            ],
+            vec![
+                ("/W", PathRule::ExpandPrims),
+                ("/W/A", PathRule::Exclude),
+                ("/W/A/B", PathRule::ExplicitOnly),
+            ],
+            // Keys no collection can hold contribute nothing.
+            vec![
+                ("/W", PathRule::ExpandPrims),
+                ("/W{v=a}", PathRule::ExpandPrims),
+                ("/W.rel[/X]", PathRule::ExplicitOnly),
+            ],
+        ];
+        let paths = ["/W", "/W.x", "/W/A", "/W/A.x", "/W/A/B", "/W/A/B.x", "/W/A/B/C", "/W/D"];
+        for map in maps {
+            let rule_map: PathExpansionRuleMap = map
+                .iter()
+                .map(|&(path, rule)| (sdf::path(path).unwrap(), rule))
+                .collect();
+            let query = MembershipQuery::new(rule_map.clone());
+            let expression = rule_map_expression(&rule_map);
+            let eval = PathExpressionEval::<()>::build(&expression, &PredicateLibrary::new())?;
+            for path in paths {
+                let path = sdf::path(path)?;
+                assert_eq!(
+                    eval.match_path(&path, &|_| ()).value,
+                    query.is_included(&path),
+                    "{path} (expression {expression})"
+                );
+            }
+        }
         Ok(())
     }
 
