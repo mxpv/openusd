@@ -143,8 +143,10 @@ pub enum Value {
     PayloadListOp(PayloadListOp),
 
     Payload(Payload),
-    /// One path, as a C++ `VtValue` holding an `SdfPath`. No field a layer
-    /// stores holds one, so no file format reads or writes it.
+    /// One path, as a C++ `VtValue` holding an `SdfPath`. No value type
+    /// names a single path, so neither file format this crate writes holds
+    /// one, and a bare [`Path`] does not convert into one implicitly.
+    #[from(skip)]
     Path(Path),
     PathVec(Vec<Path>),
     /// Layer-level relocates: `(source, target)` path pairs for namespace remapping.
@@ -476,6 +478,7 @@ impl_try_from_value!(f64, Double, "Double");
 impl_try_from_value!(u8, Uchar, "Uchar");
 impl_try_from_value!(f16, Half, "Half");
 impl_try_from_value!(TimeCode, TimeCode, "TimeCode");
+impl_try_from_value!(Path, Path, "Path");
 impl_try_from_value!(PathExpression, PathExpression, "PathExpression");
 impl_try_from_value!(Specifier, Specifier, "Specifier");
 impl_try_from_value!(Variability, Variability, "Variability");
@@ -1325,15 +1328,13 @@ mod tests {
             .collect();
         assert_eq!(items, vec!["/B/Child", "/Other"]);
 
-        // A Path, a PathVec and both endpoints of a Relocates remap.
+        // A single path is a value, not a field's targets: C++ copies remap
+        // by field (`SdfShouldCopyValue`), and no field holds one.
         let path = Value::Path(p("/A/X"));
-        assert!(path.has_embedded_paths());
-        assert_eq!(path.remap_paths(remap).try_as_path().unwrap().as_str(), "/B/X");
-        assert_eq!(
-            path.filter_map_paths(|_| None).try_as_path().unwrap(),
-            Path::default(),
-            "a path mapped away is the empty path"
-        );
+        assert!(!path.has_embedded_paths());
+        assert_eq!(path.remap_paths(remap), path);
+
+        // A PathVec and both endpoints of a Relocates remap.
         let pv = Value::PathVec(vec![p("/A/X")]).remap_paths(remap);
         assert_eq!(pv.try_as_path_vec().unwrap()[0].as_str(), "/B/X");
         let relocates = Value::Relocates(vec![(p("/A/From"), p("/A/To"))]).remap_paths(remap);
