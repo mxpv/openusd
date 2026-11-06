@@ -52,9 +52,8 @@ use super::{PrimDefinition, PrimTypeId, PrimTypeInfo, SchemaKind};
 #[derive(Debug)]
 pub struct SchemaRegistry {
     infos: HashMap<tf::Token, SchemaInfo>,
-    /// Per registered schema, the registered schemas it derives from, itself
-    /// included, which [`is_a`](Self::is_a) answers from.
-    lineages: HashMap<tf::Token, HashSet<tf::Token>>,
+    /// What [`is_a`](Self::is_a) answers from.
+    lineages: Lineages,
     /// Reverse index over [`SchemaInfo::family`], so a versioned family can be
     /// queried without scanning `infos`. Ordered as
     /// [`schema_infos_in_family`](Self::schema_infos_in_family) answers.
@@ -657,7 +656,7 @@ impl SchemaRegistry {
     ///
     /// Every base counts, transitively, so a query against an abstract
     /// ancestor (`Boundable`, `Imageable`) answers for the concrete types under
-    /// it. The registry computes each schema's bases once, as it is built.
+    /// it.
     ///
     /// Both sides have to name a registered schema, as they do in C++, where an
     /// identifier with no `TfType` resolves to nothing. An unregistered name is
@@ -1242,7 +1241,7 @@ impl SchemaInfo {
     }
 
     /// The schemas this one directly derives from, nearest first, as the
-    /// family manifest declares them. [`SchemaRegistry::is_a`] walks them
+    /// family manifest declares them. [`SchemaRegistry::is_a`] follows them
     /// transitively.
     pub fn bases(&self) -> &[tf::Token] {
         &self.bases
@@ -1566,7 +1565,7 @@ impl SchemaRegistryBuilder {
     /// [`SchemaKind::as_str`] produces. `bases` lists the schema's *direct*
     /// bases, nearest first, by schema identifier rather than by the C++ type
     /// name `plugInfo.json` records, and may name a schema registered by
-    /// another family; [`SchemaRegistry::is_a`] walks them transitively.
+    /// another family; [`SchemaRegistry::is_a`] follows them transitively.
     ///
     /// The optional `propertyNamespacePrefix`, `apiSchemaAutoApplyTo`,
     /// `apiSchemaCanOnlyApplyTo` and `allowedInstanceNames` attributes map onto
@@ -1723,7 +1722,8 @@ impl SchemaRegistryBuilder {
                 info.auto_apply_to.extend(targets);
             }
         }
-        let auto_applied = self.compute_auto_applied();
+        let lineages = self.lineages();
+        let auto_applied = self.compute_auto_applied(&lineages);
 
         let mut api_defs = HashMap::new();
         for identifier in self.sorted_identifiers(SchemaInfo::is_applied_api) {
@@ -1766,7 +1766,6 @@ impl SchemaRegistryBuilder {
             .collect();
 
         let empty_def = Arc::new(PrimDefinition::default());
-        let lineages = self.lineages();
         Ok(Arc::new(SchemaRegistry {
             infos: self.infos,
             lineages,
@@ -1786,21 +1785,22 @@ impl SchemaRegistryBuilder {
     }
 
     /// Per registered schema, itself and every registered schema its bases
-    /// reach, for [`SchemaRegistry::is_a`].
-    fn lineages(&self) -> HashMap<tf::Token, HashSet<tf::Token>> {
+    /// reach, for [`SchemaRegistry::is_a`] and auto-apply resolution.
+    fn lineages(&self) -> Lineages {
         // TODO(rayon): each schema's walk is independent of the others'.
         self.infos
             .keys()
             .map(|schema| {
                 // Manifests are data, so a malformed one can name a base that
-                // is not registered, which ends the walk there, or a base
-                // cycle, which the reached set ends.
+                // is not registered, which ends that branch of the walk, or a
+                // base cycle, which the reached set ends.
                 let mut reached = HashSet::new();
                 let mut pending = vec![schema];
                 while let Some(next) = pending.pop() {
-                    if let Some(info) = self.infos.get(next)
-                        && reached.insert(next.clone())
+                    if !reached.contains(next)
+                        && let Some(info) = self.infos.get(next)
                     {
+                        reached.insert(next.clone());
                         pending.extend(&info.bases);
                     }
                 }
@@ -1810,55 +1810,48 @@ impl SchemaRegistryBuilder {
     }
 
     /// Inverts every auto-apply declaration into the API schemas each schema
-    /// builds in (C++ `_GetTypeToAutoAppliedAPISchemaNames`), expanding each
-    /// target to the subtree derived from it and dropping what
-    /// [`auto_apply`](Self::auto_apply)'s rules exclude.
+    /// builds in (C++ `_GetTypeToAutoAppliedAPISchemaNames`): a schema builds
+    /// in every API that targets it or one of its bases, so a target carries
+    /// everything derived from it. What [`auto_apply`](Self::auto_apply)'s
+    /// rules exclude is dropped.
     ///
     /// Each schema's list is sorted in reverse dictionary order, which places
     /// a later version of a family ahead of an earlier one. Composition takes
     /// one version per family, so that ordering is what makes the newest
     /// auto-applied version of a family the one that contributes.
-    fn compute_auto_applied(&self) -> AutoApplied {
-        // The base graph reversed, mapping each schema to the schemas
-        // directly derived from it.
-        let mut derived: HashMap<&tf::Token, Vec<&tf::Token>> = HashMap::new();
-        for (identifier, info) in &self.infos {
-            for base in &info.bases {
-                derived.entry(base).or_default().push(identifier);
-            }
-        }
-
-        let mut auto_applied = AutoApplied::new();
+    fn compute_auto_applied(&self, lineages: &Lineages) -> AutoApplied {
+        let mut by_target: HashMap<&tf::Token, Vec<&tf::Token>> = HashMap::new();
         for (api, info) in &self.infos {
-            if info.kind != SchemaKind::SingleApplyApi {
-                continue;
-            }
-            let mut pending: Vec<&tf::Token> = info
-                .auto_apply_to
-                .iter()
-                .filter(|target| self.infos.contains_key(*target))
-                .collect();
-
-            // A manifest is data, so the bases it declares can cycle; the
-            // reached set makes the walk terminate on that, and keeps a schema
-            // reachable through two targets from building the API in twice.
-            let mut reached = HashSet::new();
-            while let Some(target) = pending.pop() {
-                if !reached.insert(target) {
-                    continue;
+            if info.kind == SchemaKind::SingleApplyApi {
+                for target in &info.auto_apply_to {
+                    by_target.entry(target).or_default().push(api);
                 }
-                pending.extend(derived.get(target).into_iter().flatten().copied());
-            }
-
-            for target in reached {
-                auto_applied.entry(target.clone()).or_default().push(api.clone());
             }
         }
-
-        for names in auto_applied.values_mut() {
-            names.sort_unstable_by(|a, b| sdf::element_cmp(b, a));
+        if by_target.is_empty() {
+            return AutoApplied::new();
         }
-        auto_applied
+
+        // TODO(rayon): each schema's list is independent of the others'.
+        lineages
+            .iter()
+            .filter_map(|(schema, lineage)| {
+                let mut names: Vec<tf::Token> = lineage
+                    .iter()
+                    .filter_map(|ancestor| by_target.get(ancestor))
+                    .flatten()
+                    .map(|&api| api.clone())
+                    .collect();
+                if names.is_empty() {
+                    return None;
+                }
+                // A schema reached through several targets builds an API in
+                // once.
+                names.sort_unstable_by(|a, b| sdf::element_cmp(b, a));
+                names.dedup();
+                Some((schema.clone(), names))
+            })
+            .collect()
     }
 
     /// The registered identifiers matching `wanted`, in a stable order so a
@@ -2038,6 +2031,9 @@ impl SchemaRegistryBuilder {
 /// Which API schemas are auto-applied to each schema identifier, strongest
 /// first (C++ `_typeToAutoAppliedAPISchemaNames`).
 type AutoApplied = HashMap<tf::Token, Vec<tf::Token>>;
+
+/// Per registered schema, itself and every registered schema it derives from.
+type Lineages = HashMap<tf::Token, HashSet<tf::Token>>;
 
 /// State threaded through one root's recursive built-in expansion.
 #[derive(Default)]
@@ -2923,24 +2919,22 @@ def "ExtraInstanceAPI" (
         assert!(!registry.is_a(&distant, &tf::Token::default()));
     }
 
-    /// A base cycle or a base that is not registered ends the walk `is_a`
-    /// answers from, as it ends [`ancestors_order`]'s.
+    /// A base that is not registered ends only its own branch of the bases
+    /// `is_a` follows.
     #[test]
-    fn is_a_over_malformed_bases() {
+    fn is_a_missing_base() {
         let decl = |name, bases| SchemaDecl::new(name, SchemaKind::ConcreteTyped).bases(bases);
         let decls = [
-            decl("Loop", &["Pool"]),
-            decl("Pool", &["Loop"]),
+            decl("Base", &[]),
             decl("Orphan", &["Missing"]),
+            decl("Mixed", &["Missing", "Base"]),
         ];
         let family = SchemaFamily::new("mine", &decls);
         let registry = SchemaRegistry::builder().register(&family).build().unwrap();
         let is_a = |schema: &str, base: &str| registry.is_a(&tf::Token::from(schema), &tf::Token::from(base));
 
-        assert!(is_a("Loop", "Pool") && is_a("Pool", "Loop") && is_a("Loop", "Loop"));
-        assert!(!is_a("Loop", "Typed"));
-        assert!(is_a("Orphan", "Orphan"));
-        assert!(!is_a("Orphan", "Missing") && !is_a("Orphan", "Typed"));
+        assert!(is_a("Orphan", "Orphan") && !is_a("Orphan", "Missing"));
+        assert!(is_a("Mixed", "Base") && !is_a("Mixed", "Missing"));
     }
 
     /// A schema comes before its bases, and a direct base before another

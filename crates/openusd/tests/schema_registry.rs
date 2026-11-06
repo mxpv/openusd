@@ -314,8 +314,10 @@ def "Knot"
 "#;
     let registry = registry(manifest, "#usda 1.0\n\nclass \"Loop\"\n{\n}\n\nclass \"Knot\"\n{\n}\n");
 
-    // A manifest is data, so a base cycle must not hang the query.
+    // A manifest is data, so a base cycle must not hang the registry build.
     assert!(registry.is_a(&tf::Token::new("Loop"), &tf::Token::new("Knot")));
+    assert!(registry.is_a(&tf::Token::new("Knot"), &tf::Token::new("Loop")));
+    assert!(registry.is_a(&tf::Token::new("Loop"), &tf::Token::new("Loop")));
     assert!(!registry.is_a(&tf::Token::new("Loop"), &tf::Token::new("Elsewhere")));
 }
 
@@ -675,6 +677,69 @@ class Other "Other"
         .expect("Other");
     assert!(!other.has_property(&marker));
     assert!(other.applied_api_schemas().is_empty());
+}
+
+#[test]
+fn auto_apply_dedup() {
+    let manifest = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+    uniform token[] apiSchemaAutoApplyTo = ["Base", "Widget"]
+}
+
+def "Base"
+{
+    uniform token schemaKind = "abstractTyped"
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Base"]
+}
+
+def "Gadget"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Missing", "Widget"]
+}
+"#;
+    let schematics = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    float marker:size = 2
+}
+
+class "Base"
+{
+}
+
+class Widget "Widget"
+{
+}
+
+class Gadget "Gadget"
+{
+}
+"#;
+    let registry = registry(manifest, schematics);
+
+    // Each type is reached through both targets but builds the API in once;
+    // Gadget's unregistered base `Missing` does not keep it from reaching
+    // them through `Widget`.
+    for name in ["Widget", "Gadget"] {
+        let definition = registry
+            .concrete_prim_definition(&tf::Token::new(name))
+            .expect("a derived type is defined");
+        assert_eq!(
+            definition.applied_api_schemas(),
+            [tf::Token::new("MarkerAPI")],
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -1407,7 +1472,7 @@ fn declared_family_matches_layers() {
 }
 
 /// A declared family is registered like any other, so a stage resolves its
-/// fallbacks and `is_a` walks its bases into the core family.
+/// fallbacks and `is_a` follows its bases into the core family.
 #[test]
 fn declared_family_answers_is_a() {
     let registry = SchemaRegistry::builder()
