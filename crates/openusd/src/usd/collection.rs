@@ -275,8 +275,8 @@ pub fn apply_collection(stage: &Stage, prim: impl sdf::IntoPath, name: impl Into
 /// included too.
 ///
 /// Walks the stage and tests each prim with
-/// [`MembershipQuery::is_included`], which honors excludes by the
-/// closest-ancestor rule.
+/// [`MembershipQuery::is_included_below`], which answers as
+/// [`MembershipQuery::is_included`] does.
 pub fn included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPredicate) -> Result<Vec<Path>> {
     let mut out = Vec::new();
     if query.is_empty() {
@@ -293,10 +293,9 @@ pub fn included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPre
         .any(|r| *r == PathRule::ExpandPrimsAndProperties);
 
     // Top-down traversal: `traverse` is pre-order, so a prim's parent is
-    // resolved just before it. Propagating the parent's effective rule via
-    // `is_included_below` keeps each prim O(1) instead of re-walking its
-    // ancestors. A parent the predicate skipped isn't cached, so its rule is
-    // recomputed once with `effective_rule`.
+    // resolved just before it, and `is_included_below` decides each prim from
+    // the rule its parent leaves it. A parent the predicate skipped takes its
+    // rule from `inherited`, cached beside the others.
     let mut effective: HashMap<Path, PathRule> = HashMap::new();
 
     stage.traverse(predicate, |prim| {
@@ -304,10 +303,9 @@ pub fn included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPre
             return;
         }
         let parent_rule = match prim.parent() {
-            Some(parent) => effective
-                .get(&parent)
-                .copied()
-                .unwrap_or_else(|| query.effective_rule(&parent)),
+            Some(parent) => *effective
+                .entry(parent)
+                .or_insert_with_key(|parent| query.inherited(parent)),
             None => PathRule::Exclude,
         };
         let (included, rule) = query.is_included_below(prim, parent_rule);
@@ -581,22 +579,32 @@ impl MembershipQuery {
         self.rule_map.is_empty() && self.evaluator.is_none()
     }
 
-    /// Whether `path` is a member. With rule-map opinions, walks from `path`
-    /// toward the root and takes the **closest ancestor with an opinion**
-    /// (spec §15.2):
+    /// Whether `path` is a member (C++
+    /// `UsdCollectionMembershipQuery::IsPathIncluded`). With rule-map
+    /// opinions, the nearest opinion on `path` or an ancestor that decides
+    /// for it answers:
     ///
     /// - `Exclude` → not a member;
-    /// - `ExplicitOnly` → member only if the opinion is on `path` itself;
-    /// - `ExpandPrims` → prim members always; a property only if it is itself
-    ///   the explicitly listed path;
-    /// - `ExpandPrimsAndProperties` → member.
+    /// - `ExplicitOnly` → a member, deciding only for its own path;
+    /// - `ExpandPrims` → a member, deciding for prims and for a property it
+    ///   names itself;
+    /// - `ExpandPrimsAndProperties` → a member.
     ///
-    /// Paths with no ancestor opinion are not members. Without rule-map
-    /// opinions, the membership expression answers.
+    /// A path no opinion decides is not a member, and neither is a path
+    /// other than the absolute root or an absolute prim or property path.
+    /// An opinion that does not decide is passed over, so in a map that
+    /// mixes rules, as nested collections merge into, a narrower rule does
+    /// not hide a broader one above it. C++ never counts the absolute root
+    /// as a member; here an opinion on it decides as it does on a prim, so
+    /// excluding `</>` from a collection that includes it clears
+    /// `includeRoot`. Without rule-map opinions, the membership expression
+    /// answers.
     pub fn is_included(&self, path: &Path) -> bool {
         if self.uses_rule_map() {
-            let (rule, on_self) = self.closest_rule(path);
-            return rule_includes(rule, on_self, path.is_property());
+            let parent = path
+                .parent()
+                .map_or(PathRule::Exclude, |parent| self.inherited(&parent));
+            return self.is_included_below(path, parent).0;
         }
         match &self.evaluator {
             Some(evaluator) => evaluator.match_path(path).value,
@@ -604,37 +612,73 @@ impl MembershipQuery {
         }
     }
 
-    /// Fast top-down variant for stage traversal: given the rule that applies
-    /// to `path`'s parent, decide inclusion and the rule to propagate to
-    /// `path`'s own children — without re-walking ancestors. An opinion
-    /// authored directly on `path` overrides the inherited `parent_rule`. An
-    /// expression-mode query answers through the expression and passes the
-    /// parent rule through.
-    pub fn is_included_below(&self, path: &Path, parent_rule: PathRule) -> (bool, PathRule) {
+    /// [`is_included`](Self::is_included) for a stage traversal: given the
+    /// rule `path`'s parent leaves its children, decide whether `path` is a
+    /// member and the rule it leaves its own, without re-walking its
+    /// ancestors. That rule is [`PathRule::Exclude`], where a prim with no
+    /// opinion of its own is not a member, [`PathRule::ExpandPrims`], where
+    /// it is, or [`PathRule::ExpandPrimsAndProperties`], where its properties
+    /// are too. An `ExplicitOnly` opinion passes its parent's rule on, and an
+    /// `ExpandPrims` below an `ExpandPrimsAndProperties` keeps the properties.
+    ///
+    /// It answers as `is_included` does. C++ `IsPathIncluded` with the
+    /// parent's expansion rule stops at the closest opinion instead, which
+    /// leaves out members of a mixed map that `IsPathIncluded` without it
+    /// includes. An expression-mode query answers through the expression and
+    /// passes `parent` through.
+    pub fn is_included_below(&self, path: &Path, parent: PathRule) -> (bool, PathRule) {
         if !self.uses_rule_map() {
-            return (self.is_included(path), parent_rule);
+            return (self.is_included(path), parent);
         }
-        let on_self = self.rule_map.contains_key(path);
-        let rule = self.rule_map.get(path).copied().unwrap_or(parent_rule);
-        (rule_includes(rule, on_self, path.is_property()), rule)
+        if !is_member_kind(path) {
+            return (false, parent);
+        }
+        let own = self.rule_map.get(path).copied();
+        if path.is_prim_property() {
+            let included = own.map_or(parent == PathRule::ExpandPrimsAndProperties, |rule| {
+                rule != PathRule::Exclude
+            });
+            return (included, parent);
+        }
+        let included = match own {
+            Some(rule) => rule != PathRule::Exclude,
+            None => matches!(parent, PathRule::ExpandPrims | PathRule::ExpandPrimsAndProperties),
+        };
+        let passed = match own {
+            None | Some(PathRule::ExplicitOnly) => parent,
+            Some(PathRule::ExpandPrims) if parent == PathRule::ExpandPrimsAndProperties => parent,
+            Some(rule) => rule,
+        };
+        (included, passed)
     }
 
-    /// The rule governing `path` by its closest-ancestor opinion, or
-    /// [`PathRule::Exclude`] when no ancestor opines. Used to seed the
-    /// top-down traversal in [`included_paths`] for a parent the
-    /// traversal predicate skipped (so it isn't in the rule cache).
-    fn effective_rule(&self, path: &Path) -> PathRule {
-        self.closest_rule(path).0
+    /// The rule `path` leaves its children in a traversal
+    /// ([`is_included_below`](Self::is_included_below)), from the opinions
+    /// on `path` and its ancestors: the seed for a traversal that starts
+    /// below `path`.
+    pub fn inherited(&self, path: &Path) -> PathRule {
+        // The nearest opinion that decides for prims settles the rule, except
+        // that an `ExpandPrims` still takes properties from an
+        // `ExpandPrimsAndProperties` above it.
+        let mut expand_prims = None;
+        for current in path.ancestors() {
+            match self.rule_map.get(&current) {
+                None | Some(PathRule::ExplicitOnly) => {}
+                Some(PathRule::Exclude) => break,
+                Some(PathRule::ExpandPrims) => {
+                    expand_prims.get_or_insert(PathRule::ExpandPrims);
+                }
+                Some(PathRule::ExpandPrimsAndProperties) => return PathRule::ExpandPrimsAndProperties,
+            }
+        }
+        expand_prims.unwrap_or(PathRule::Exclude)
     }
+}
 
-    /// Walk from `path` toward the root and return the closest opinion: its
-    /// rule and whether that opinion sits on `path` itself. Returns
-    /// [`PathRule::Exclude`] with `on_self = false` when no ancestor opines.
-    fn closest_rule(&self, path: &Path) -> (PathRule, bool) {
-        path.ancestors()
-            .find_map(|current| Some((*self.rule_map.get(&current)?, &current == path)))
-            .unwrap_or((PathRule::Exclude, false))
-    }
+/// Whether `path` names something a collection can hold: the absolute root,
+/// or an absolute prim or prim property path outside any variant selection.
+pub(super) fn is_member_kind(path: &Path) -> bool {
+    path.is_abs() && !path.has_variant_selection() && (path.is_abs_root() || path.is_prim_property() || path.is_prim())
 }
 
 /// The composed value of `attr` — the strongest `default` opinion, or the
@@ -661,23 +705,6 @@ fn composed_or_default<T: TryFrom<Value> + Default>(attr: &Attribute) -> Result<
     Ok(composed(attr)?
         .and_then(|value| T::try_from(value).ok())
         .unwrap_or_default())
-}
-
-/// Whether `rule` admits a path, given whether the governing opinion sits on
-/// the path itself (`on_self`) and whether the path is a property:
-///
-/// - [`PathRule::Exclude`] never admits;
-/// - [`PathRule::ExplicitOnly`] admits only the exact opinion path;
-/// - [`PathRule::ExpandPrims`] admits prims, and a property only when listed
-///   explicitly;
-/// - [`PathRule::ExpandPrimsAndProperties`] admits everything below it.
-fn rule_includes(rule: PathRule, on_self: bool, is_property: bool) -> bool {
-    match rule {
-        PathRule::Exclude => false,
-        PathRule::ExplicitOnly => on_self,
-        PathRule::ExpandPrims => !is_property || on_self,
-        PathRule::ExpandPrimsAndProperties => true,
-    }
 }
 
 #[cfg(test)]
@@ -905,14 +932,39 @@ mod tests {
         Ok(())
     }
 
+    /// An opinion that does not decide for a path is passed over, as C++
+    /// `IsPathIncluded` passes it, so a narrower rule does not hide a
+    /// broader one above it.
+    #[test]
+    fn undecided_rules_passed() -> Result<()> {
+        let q = query(&[("/", PathRule::ExpandPrims), ("/W/A", PathRule::ExplicitOnly)]);
+        assert!(q.is_included(&sdf::path("/W/A")?));
+        assert!(q.is_included(&sdf::path("/W/A/B")?));
+        assert!(q.is_included(&Path::abs_root()));
+
+        let q = query(&[
+            ("/W", PathRule::ExpandPrimsAndProperties),
+            ("/W/A", PathRule::ExpandPrims),
+        ]);
+        assert!(q.is_included(&sdf::path("/W/A.x")?));
+        assert!(q.is_included(&sdf::path("/W/A/B.x")?));
+        Ok(())
+    }
+
     #[test]
     fn below_propagates_parent_rule() -> Result<()> {
         let q = query(&[("/W", PathRule::ExpandPrims)]);
-        // A child with no own opinion inherits the parent rule and is included.
-        let (inc, rule) = q.is_included_below(&sdf::path("/W/A")?, PathRule::ExpandPrims);
+        let (_, root) = q.is_included_below(&Path::abs_root(), PathRule::Exclude);
+        let (inc, world) = q.is_included_below(&sdf::path("/W")?, root);
         assert!(inc);
-        assert_eq!(rule, PathRule::ExpandPrims);
-        // Under an Exclude parent, the child is out.
+        // A child with no own opinion inherits the parent's rule and is
+        // included; its properties are not.
+        let (inc, child) = q.is_included_below(&sdf::path("/W/A")?, world);
+        assert!(inc);
+        assert_eq!(child, world);
+        let (inc, _) = q.is_included_below(&sdf::path("/W/A.x")?, child);
+        assert!(!inc);
+        // Below a parent that includes nothing, the child is out.
         let (inc, _) = q.is_included_below(&sdf::path("/W/A/B")?, PathRule::Exclude);
         assert!(!inc);
         Ok(())
@@ -920,31 +972,30 @@ mod tests {
 
     /// Evaluate membership the way `included_paths` does: fold
     /// `is_included_below` down the ancestor chain from the pseudo-root,
-    /// whose parent rule is `Exclude`. Must agree with the closest-ancestor
-    /// point query `is_included`.
+    /// whose parent includes nothing. Must agree with the point query
+    /// `is_included`.
     fn included_top_down(q: &MembershipQuery, path: &Path) -> bool {
-        let chain: Vec<Path> = path.ancestors().collect();
-        let mut parent_rule = PathRule::Exclude;
+        let mut chain: Vec<Path> = path.ancestors().collect();
+        chain.reverse();
+        let mut parent = PathRule::Exclude;
         let mut included = false;
-        for elem in chain.iter().rev() {
-            let (inc, rule) = q.is_included_below(elem, parent_rule);
-            included = inc;
-            parent_rule = rule;
+        for current in &chain {
+            (included, parent) = q.is_included_below(current, parent);
         }
         included
     }
 
     #[test]
     fn membership_methods_agree() -> Result<()> {
-        // Guards against drift between is_included (point query) and
-        // is_included_below (top-down fold), which share the
-        // closest-ancestor walk and rule-match logic.
+        // Guards against drift between is_included (point query) and the
+        // top-down fold included_paths runs over is_included_below.
         let q = query(&[
             ("/W", PathRule::ExpandPrims),
             ("/W/A", PathRule::Exclude),
             ("/W/B", PathRule::ExpandPrimsAndProperties),
             ("/W/C", PathRule::ExplicitOnly),
             ("/W/B.size", PathRule::ExpandPrimsAndProperties),
+            ("/W/B/E", PathRule::ExpandPrims),
         ]);
         for p in [
             "/W",
@@ -955,6 +1006,8 @@ mod tests {
             "/W/B.size",
             "/W/C",
             "/W/C/D",
+            "/W/B/E",
+            "/W/B/E.x",
             "/W/D",
             "/W.x",
             "/Other",
