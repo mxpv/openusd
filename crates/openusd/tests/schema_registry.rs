@@ -598,6 +598,13 @@ class Widget "Widget"
 
     let names = prim.property_names().expect("lists");
     assert_eq!(names, ["b", "a"]);
+
+    // An authored order, even an empty one, is the prim's own and hides the
+    // schema's.
+    let prim = prim
+        .set_metadata("propertyOrder", vt::Value::TokenVec(Vec::new()))
+        .expect("authors");
+    assert_eq!(prim.property_names().expect("lists"), ["a", "b"]);
 }
 
 #[test]

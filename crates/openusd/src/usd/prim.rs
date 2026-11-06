@@ -1156,12 +1156,10 @@ impl Prim {
     /// Returns every property name of this prim — the ones layers author and
     /// the ones its schemas declare. Mirrors C++ `UsdPrim::GetPropertyNames`.
     ///
-    /// The union is sorted by path element ordering and then reordered by the
-    /// prim's `propertyOrder` (spec §11.3.2), so the result does not depend on
-    /// which half a name came from. Path element ordering sorts `:` after the
-    /// letters, where C++ `TfDictionaryLessThan` sorts it before them, so
-    /// `xformOpOrder` lists ahead of `xformOp:translate` here and after it in
-    /// C++. Where no layer authors a `propertyOrder`, the one the prim's
+    /// The union is sorted as C++ `TfDictionaryLessThan` sorts it and then
+    /// reordered by the prim's `propertyOrder` (spec §11.3.2), so the result
+    /// does not depend on which half a name came from. Where no layer authors
+    /// a `propertyOrder`, the one the prim's
     /// schema declares applies, as C++ `UsdPrim::GetPropertyOrder` reads it;
     /// §11.3.2 reads only an authored one. Use
     /// [`authored_property_names`](Self::authored_property_names) to scan
@@ -1175,8 +1173,8 @@ impl Prim {
         Ok(names)
     }
 
-    /// Returns the property names layers author on this prim, sorted by path
-    /// element ordering and then reordered by the prim's `propertyOrder`
+    /// Returns the property names layers author on this prim, sorted and then
+    /// reordered by the prim's `propertyOrder`
     /// (spec §11.3.2), or by the one its schema declares, as
     /// [`property_names`](Self::property_names) orders them. Mirrors C++
     /// `UsdPrim::GetAuthoredPropertyNames`.
@@ -3040,19 +3038,19 @@ mod tests {
         Ok(())
     }
 
-    /// The names layers author are sorted by path element ordering, then
-    /// follow `propertyOrder` exactly as the composed names do.
+    /// The names layers author are sorted, then follow `propertyOrder`
+    /// exactly as the composed names do.
     #[test]
     fn authored_names_apply_order() -> Result<()> {
         let prim = namespaced()?;
-        // A `:` sorts after the letters (spec §8.2).
+        // A `:` sorts before the letters, as in C++.
         let sorted = [
             "points",
             "primvars",
-            "primvarsFoo",
             "primvars:link",
             "primvars:skel:weights",
             "primvars:st",
+            "primvarsFoo",
         ];
         assert_eq!(prim.authored_property_names()?, sorted);
 
@@ -3064,9 +3062,9 @@ mod tests {
             "primvars:skel:weights",
             "points",
             "primvars",
-            "primvarsFoo",
             "primvars:link",
             "primvars:st",
+            "primvarsFoo",
         ];
         assert_eq!(prim.authored_property_names()?, expected);
         assert_eq!(prim.property_names()?, expected);
