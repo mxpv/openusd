@@ -19,11 +19,14 @@
 //!
 //! [`element_cmp`] is the normative element ordering of core spec §8.2; C++
 //! `TfDictionaryLessThan` orders punctuation such as `:` differently.
-//! [`order_properties`] sorts by it and then applies [`reorder`].
+//! [`order_properties`] sorts property names as C++ does and then applies
+//! [`reorder`].
 
 use std::cmp::Ordering;
 use std::iter::Peekable;
 use std::str::Chars;
+
+use crate::tf;
 
 /// Reorders `items` in place according to `order`, matching an item to an
 /// order entry by the item's equality with `K`.
@@ -89,12 +92,13 @@ pub fn reorder<T: PartialEq<K>, K>(items: &mut [T], order: &[K]) {
     }
 }
 
-/// Sorts property `names` by [`element_cmp`], then moves the ones `order`
-/// lists to the front with [`reorder`]: the normative order of property
-/// children (core spec §11.3.2), as C++ `UsdPrim::_GetPropertyNames` and
-/// `UsdPrimDefinition` order them with their own comparator.
+/// Sorts property `names` by [`tf::dictionary_cmp`], then moves the ones
+/// `order` lists to the front with [`reorder`]: the order of property
+/// children (core spec §11.3.2) as C++ `UsdPrim::_GetPropertyNames` and
+/// `UsdPrimDefinition` give it, which sorts `xformOp:translate` ahead of
+/// `xformOpOrder`.
 pub fn order_properties<T: AsRef<str> + PartialEq<K>, K>(names: &mut [T], order: Option<&[K]>) {
-    names.sort_unstable_by(|a, b| element_cmp(a.as_ref(), b.as_ref()));
+    names.sort_unstable_by(|a, b| tf::dictionary_cmp(a.as_ref(), b.as_ref()));
     if let Some(order) = order {
         reorder(names, order);
     }
@@ -117,10 +121,10 @@ pub fn order_properties<T: AsRef<str> + PartialEq<K>, K>(names: &mut [T], order:
 /// order.
 ///
 /// Callers apply this where the spec mandates element ordering — currently the
-/// relocated-in prim children of the composition engine (spec §11.3.1) and a
-/// prim's property names (spec §11.3.2). The base prim-child fold
-/// (`primChildren` + `primOrder`) keeps its authored order, so this is not a
-/// blanket sort of every composed child.
+/// relocated-in prim children of the composition engine (spec §11.3.1). The
+/// base prim-child fold (`primChildren` + `primOrder`) keeps its authored
+/// order and property names sort as C++ sorts them ([`order_properties`]),
+/// so this is not a blanket sort of every composed child.
 ///
 /// The numeric value and case distinctions act as lowest-priority tiebreakers:
 /// a run of equal numeric value compares equal so the walk continues, and the
