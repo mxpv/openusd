@@ -359,7 +359,7 @@ mod pcp_txt {
 
             let _ = writeln!(out, "Prim Stack:");
             for site in index_ref.prim_stack().unwrap() {
-                site_line(&mut out, base, &site.layer, &site.path);
+                site_line(&mut out, base, site.layer.identifier(), &site.path);
             }
             out.push('\n');
 
@@ -454,7 +454,7 @@ mod pcp_txt {
                 }
             }
             write_grouped(&mut out, "Property stacks", stacks, |out, site| {
-                site_line(out, base, &site.layer, &site.path);
+                site_line(out, base, site.layer.identifier(), &site.path);
             });
 
             // Relationship targets and attribute connections, split by spec type.

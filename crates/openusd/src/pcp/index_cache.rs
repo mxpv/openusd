@@ -862,6 +862,10 @@ impl InfoResolver<'_> {
     ///
     /// The spec is the caller's, since a value clip answers from a layer the
     /// site it was reached at does not name.
+    // TODO(perf): each caller builds the spec record before this decides
+    // whether to keep it, and a weaker source that does not compose, or any
+    // weaker one under a proximal query, drops it; a value clip's record
+    // re-derives the active clip. Passing a builder would spare that work.
     fn answer(
         &mut self,
         kind: ResolveSourceKind,
@@ -1083,15 +1087,23 @@ pub struct Tally {
 /// only meaningful inside the owning graph. C++ splits the offset-bearing stack
 /// queries from the plain ones for compatibility; a site here always carries
 /// its offset, so there is one spelling to keep in step.
+///
+/// A site holds its layer's handle, which keeps the layer, and the registry's
+/// store, alive for as long as the site is kept, and is neither `Send` nor
+/// `Sync`. C++ spec handles hold their layer weakly. A query builds its
+/// records and hands them out: no cache keeps one, as it would keep its layer
+/// from being reclaimed. A layer a kept site holds stays open in its
+/// registry: a stage that lets the layer go and later reads it again finds it
+/// as the site holds it, with no fresh read of its file. A layer sink that
+/// keeps a site holds the store in a cycle, as one that keeps a
+/// [`LayerHandle`](sdf::LayerHandle) does. Two sites are equal when they name
+/// the same layer of one registry, at the same path and offset: the same file
+/// opened by two registries is two layers. The layer's identifier, for a
+/// diagnostic, is [`layer.identifier()`](sdf::LayerHandle::identifier).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpecSiteRecord {
-    /// Canonical identifier of the layer holding the spec.
-    // TODO: hand out the layer's `sdf::LayerHandle` (C++ property and prim
-    // stacks hand out spec handles), so a consumer reads the spec without
-    // looking the layer up again by this identifier. A record the cache keeps
-    // must not hold a handle, which would keep the layer from being
-    // reclaimed: the handle is attached where the stack leaves the cache.
-    pub layer: String,
+    /// The layer holding the spec, read through live queries or a borrow.
+    pub layer: sdf::LayerHandle,
     /// The spec's path within that layer, which under a reference or variant
     /// differs from the composed stage path.
     pub path: Path,
@@ -1101,11 +1113,11 @@ pub struct SpecSiteRecord {
 }
 
 impl SpecSiteRecord {
-    /// The record for a spec `graph` holds, naming its layer as every query
-    /// that reports a site names it.
+    /// The record for the spec at `path` in the layer `layer` names, with the
+    /// handle `graph` holds for it.
     pub(crate) fn in_graph(graph: &LayerGraph, layer: LayerId, path: Path, offset: LayerOffset) -> Self {
         Self {
-            layer: graph.identifier(layer).to_string(),
+            layer: graph.handle(layer).clone(),
             path,
             offset,
         }
@@ -1241,7 +1253,8 @@ impl OpinionResolver for StackResolver<'_> {
     }
 
     /// A clip set that sources the property at the queried time contributes the
-    /// clip layer it sources it from, on top of whatever spec this site authors.
+    /// clip layer it sources it from, on top of whatever spec this site authors,
+    /// unless that layer is a manifest the stage synthesized.
     /// The offset is the site's own, since a set is only reached at the layer
     /// that introduced it (C++ reports `sourceLayer`'s offset for the same
     /// reason).
@@ -3501,7 +3514,7 @@ impl IndexCache {
     }
 
     /// Walks a property's specs strongest-first across the prim's composition
-    /// graph, returning its `(layer identifier, spec path)` stack and the
+    /// graph, returning its `(layer, spec path)` stack and the
     /// inconsistent-spec-type errors. The first spec's kind (attribute vs
     /// relationship) is the defining type; weaker specs of the other kind are
     /// inconsistent (C++ `PcpErrorInconsistentPropertyType`) — dropped from the
@@ -3544,8 +3557,8 @@ impl IndexCache {
         Ok(self.cached(&path))
     }
 
-    /// Returns the prim stack: each `(layer identifier, spec path)` site that
-    /// contributes a prim spec, strongest first (C++ `UsdPrim::GetPrimStack`).
+    /// Returns the prim stack: each `(layer, spec path)` site that contributes
+    /// a prim spec, strongest first (C++ `UsdPrim::GetPrimStack`).
     ///
     /// Projects the live spec sites; permission-denied sites are kept — they still
     /// author a spec, so the structural introspection lists them, unlike value
@@ -3556,23 +3569,20 @@ impl IndexCache {
         let index = self.cached(&path);
         let stack = index
             .live_spec_sites()
-            .map(|(site, node)| SpecSiteRecord {
-                layer: graph.identifier(site.layer).to_string(),
-                path: node.path().clone(),
-                offset: site.offset,
-            })
+            .map(|(site, node)| SpecSiteRecord::in_graph(graph, site.layer, node.path().clone(), site.offset))
             .collect();
         Ok(stack)
     }
 
-    /// Returns the property stack for a property path: each `(layer identifier,
-    /// spec path)` site that authors a property spec, strongest first. Backs
+    /// Returns the property stack for a property path: each `(layer, spec
+    /// path)` site that authors a property spec, strongest first. Backs
     /// C++ `UsdProperty::GetPropertyStack`. A non-property path yields an empty
     /// stack.
     ///
     /// `time` selects the walk: `None` collects the graph specs alone, while a
     /// numeric time also lists the clip layer each participating value-clip set
-    /// sources the property from there.
+    /// sources the property from there, unless it is a manifest the stage
+    /// synthesized.
     pub fn property_stack(
         &mut self,
         graph: &LayerView<'_>,
@@ -4460,7 +4470,10 @@ mod tests {
 
     /// Projects a spec stack onto the `(layer, path)` pairs these tests compare.
     fn sites(stack: Vec<SpecSiteRecord>) -> Vec<(String, Path)> {
-        stack.into_iter().map(|site| (site.layer, site.path)).collect()
+        stack
+            .into_iter()
+            .map(|site| (site.layer.identifier().to_owned(), site.path))
+            .collect()
     }
 
     /// Builds a stack with the root and the full transitive closure of its

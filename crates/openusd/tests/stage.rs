@@ -452,6 +452,55 @@ fn layer_lookup_spellings() -> Result<()> {
     Ok(())
 }
 
+/// A prim stack's site reads its layer live, and keeps that layer open after
+/// the stage lets it go: reading it again finds the held layer, and the site
+/// reads it after the stage drops.
+#[test]
+fn site_keeps_layer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = Stage::open(&borrow_fixture(dir.path())?)?;
+    let site = stage
+        .prim("/Ref/Child")?
+        .prim_stack()?
+        .into_iter()
+        .find(|site| site.layer.identifier().ends_with("ref.usda"))
+        .expect("the reference contributes a spec");
+    assert!(site.layer.prim(&site.path)?.is_some(), "the site reads its spec");
+
+    assert!(stage.remove_prim("/Ref")?);
+    assert!(
+        stage.layer(site.layer.identifier())?.is_none(),
+        "the layer left the stage"
+    );
+    assert!(site.layer.prim(&site.path)?.is_some(), "the site keeps its layer");
+
+    let (prim, model) = (sdf::path("/Ref")?, sdf::path("/Model")?);
+    stage.root_layer().edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/Ref", sdf::Specifier::Def, "")?;
+        e.data_mut().set_field(
+            &prim,
+            sdf::FieldKey::References.as_str(),
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                asset_path: "./ref.usda".into(),
+                prim_path: model.clone(),
+                ..Default::default()
+            }])),
+        );
+        Ok(())
+    })?;
+    let again = stage
+        .prim("/Ref/Child")?
+        .prim_stack()?
+        .into_iter()
+        .find(|again| again.layer.identifier().ends_with("ref.usda"))
+        .expect("the reference contributes again");
+    assert_eq!(again.layer, site.layer, "the stage reads the held layer");
+
+    drop((again, stage));
+    assert!(site.layer.prim(&site.path)?.is_some(), "the site outlives the stage");
+    Ok(())
+}
+
 /// A reference or payload to a prim missing from the stage's own root layer
 /// names that root layer as the target layer, not the session layer ahead of
 /// it in the root stack.
@@ -8516,7 +8565,7 @@ fn sublayer_contributors_differ() -> Result<()> {
     let info = attr.resolve_info()?;
     let site = info.spec_site().expect("an authored opinion names its spec");
     assert!(
-        site.layer.ends_with("strong.usda"),
+        site.layer.identifier().ends_with("strong.usda"),
         "the stronger sublayer answered: {site:?}"
     );
     // Both sublayers contribute under one node, which is why the spec is what
@@ -8539,7 +8588,10 @@ fn clip_names_its_layer() -> Result<()> {
     let info = attr.resolve_info_at(at)?;
     assert_eq!(info.source(), usd::ResolveInfoSource::ValueClips);
     let site = info.spec_site().expect("a clip names the layer it was read from");
-    assert!(site.layer.ends_with("clip.usd"), "the clip layer answered: {site:?}");
+    assert!(
+        site.layer.identifier().ends_with("clip.usd"),
+        "the clip layer answered: {site:?}"
+    );
     assert_eq!(site, attr.property_stack_at(at)?.first().expect("a clip site"));
 
     // Without a time no clip is selected, so there is no layer to name.
@@ -8565,10 +8617,62 @@ fn clip_interpolated_gap_site() -> Result<()> {
     let info = attr.resolve_info_at(at)?;
     let site = info.spec_site().expect("the stack's site");
     assert!(
-        site.layer.ends_with("manifest.usda"),
+        site.layer.identifier().ends_with("manifest.usda"),
         "the stack names the manifest, not the clips the samples came from: {site:?}"
     );
     assert!(attr.property_stack_at(at)?.contains(site), "the stack lists it too");
+    Ok(())
+}
+
+/// At a gap in a clip set that authors no manifest, the value interpolates
+/// from the surrounding clips and the stack would name the manifest, which
+/// the stage synthesized and no registry holds: neither the resolve info nor
+/// the stack names a site for it.
+#[test]
+fn synthesized_manifest_gap() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let fixture = FsPath::new(&fixture_path("clip_missing_interp/root.usda"))
+        .parent()
+        .expect("a fixture directory")
+        .to_path_buf();
+    for clip in ["clipA.usda", "clipB.usda", "clipC.usda"] {
+        fs::copy(fixture.join(clip), dir.path().join(clip))?;
+    }
+    let root_path = dir.path().join("root.usda");
+    fs::write(
+        &root_path,
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clipA.usda@, @./clipB.usda@, @./clipC.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1), (20, 2)]
+            bool interpolateMissingClipValues = true
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+    let stage = Stage::open(root_path.to_str().expect("utf-8 path"))?;
+    let attr = stage.attribute("/Model.size")?;
+    let at = usd::TimeCode::new(15.0);
+
+    assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(75.0));
+    let info = attr.resolve_info_at(at)?;
+    assert_eq!(info.source(), usd::ResolveInfoSource::ValueClips);
+    assert!(info.spec_site().is_none(), "{:?}", info.spec_site());
+    let stack = attr.property_stack_at(at)?;
+    assert_eq!(stack.len(), 1, "{stack:?}");
+    assert!(stack[0].layer.identifier().ends_with("root.usda"), "{stack:?}");
+
+    // Where the active clip authors samples, it is the site.
+    let clip = attr.resolve_info_at(usd::TimeCode::new(5.0))?;
+    let site = clip.spec_site().expect("the clip names its layer");
+    assert!(site.layer.identifier().ends_with("clipA.usda"), "{site:?}");
     Ok(())
 }
 
@@ -8653,7 +8757,7 @@ fn chain_names_contributors() -> Result<()> {
     let links = info.weaker_sources();
     assert_eq!(links.len(), 1);
     let site = links[0].spec_site().expect("a link names its spec");
-    assert!(site.layer.ends_with("layer1.usda"), "{site:?}");
+    assert!(site.layer.identifier().ends_with("layer1.usda"), "{site:?}");
     // A link names its node as the head does, and here both are the root.
     assert_eq!(
         links[0].node().expect("a link names its node").arc(),
@@ -9530,6 +9634,7 @@ fn chain_parses_text() -> Result<()> {
             .spec_site()
             .expect("a link names its spec")
             .layer
+            .identifier()
             .ends_with("layer1.usda"),
         "the text opinion is the contributor"
     );
@@ -9676,7 +9781,7 @@ fn chain_reaches_samples() -> Result<()> {
     assert!(
         links[0]
             .spec_site()
-            .is_some_and(|site| site.layer.ends_with("layer1.usda")),
+            .is_some_and(|site| site.layer.identifier().ends_with("layer1.usda")),
         "{links:?}"
     );
     Ok(())
@@ -9755,7 +9860,7 @@ over "Model"
     assert!(
         links[0]
             .spec_site()
-            .is_some_and(|site| site.layer.ends_with("clip.usda")),
+            .is_some_and(|site| site.layer.identifier().ends_with("clip.usda")),
         "the link names the clip the value came from: {links:?}"
     );
     Ok(())
@@ -9786,7 +9891,7 @@ fn chain_skips_answered_site() -> Result<()> {
     assert!(
         links[0]
             .spec_site()
-            .is_some_and(|site| site.layer.ends_with("layer1.usda")),
+            .is_some_and(|site| site.layer.identifier().ends_with("layer1.usda")),
         "the `default` beside the samples is not a source: {links:?}"
     );
     Ok(())
@@ -9895,7 +10000,7 @@ fn chain_omits_foreign_kind() -> Result<()> {
     assert!(
         links[0]
             .spec_site()
-            .is_some_and(|site| site.layer.ends_with("layer2.usda")),
+            .is_some_and(|site| site.layer.identifier().ends_with("layer2.usda")),
         "{links:?}"
     );
     Ok(())
@@ -11678,6 +11783,7 @@ fn manifest_joins_timed_stack() -> Result<()> {
         info.spec_site()
             .expect("the manifest answered")
             .layer
+            .identifier()
             .ends_with("manifest.usda"),
         "{:?}",
         info.spec_site()
@@ -11792,7 +11898,10 @@ def "Model" (
 
 /// The layer identifiers of a property stack, in strength order.
 fn stack_layers(stack: Vec<usd::SpecSite>) -> Vec<String> {
-    stack.into_iter().map(|site| site.layer).collect()
+    stack
+        .into_iter()
+        .map(|site| site.layer.identifier().to_owned())
+        .collect()
 }
 
 /// A `def "S"` with a plain `default`, the strong half of the split scene.

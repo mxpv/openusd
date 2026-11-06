@@ -2887,6 +2887,12 @@ impl LayerGraph {
             .copied()
     }
 
+    /// The id of the layer `handle` names, or `None` when this graph does not
+    /// hold it.
+    pub(crate) fn id_of_handle(&self, handle: &sdf::LayerHandle) -> Option<LayerId> {
+        self.id_of(handle.identifier()).filter(|&id| self.handle(id) == handle)
+    }
+
     /// The layer interned under the resolver-anchored identifier `anchored`,
     /// or — when nothing is interned there — under the authored `asset_path`'s
     /// [`in_memory_identifier`](crate::ar::Resolver::in_memory_identifier).
@@ -3515,12 +3521,6 @@ impl LayerView<'_> {
     /// [`layer`](Self::layer).
     pub(crate) fn try_layer(&self, id: LayerId) -> Option<&sdf::Layer> {
         Some(self.store.layer(&self.nodes.get(&id)?.handle))
-    }
-
-    /// The layer named `identifier`, by identifier or real path, or `None`
-    /// when no layer here answers to it.
-    pub(crate) fn find(&self, identifier: &str) -> Option<&sdf::Layer> {
-        self.try_layer(self.id_of(identifier)?)
     }
 
     /// The root layer (the first non-session layer), if any. Per spec 12.2.7,

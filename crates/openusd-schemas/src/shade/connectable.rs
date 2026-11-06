@@ -316,12 +316,9 @@ pub(super) fn define_source(source: &usd::Attribute, consumer: &usd::Attribute) 
 /// `IsSourceConnectionFromBaseMaterial`): the node that introduced the spec
 /// holding it came through one, or was implied from one.
 pub(super) fn source_from_base_material(attribute: &usd::Attribute) -> Result<bool> {
-    let stage = attribute.stage();
     for site in attribute.property_stack()? {
-        let Some(layer) = stage.layer(&site.layer)? else {
-            continue;
-        };
-        let authored = layer
+        let authored = site
+            .layer
             .try_borrow()?
             .attribute(&site.path)?
             .is_some_and(|spec| spec.has_connection_paths());

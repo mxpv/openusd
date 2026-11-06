@@ -141,7 +141,7 @@ fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim, assets: pcp::AssetM
         data,
         prim.path(),
         spec_fields(
-            site_fields(stage, &prim.prim_stack()?)?,
+            site_fields(&prim.prim_stack()?)?,
             &[],
             composed(stage, prim.path(), assets),
         )?,
@@ -183,13 +183,13 @@ fn write_property(
                 attribute.variability()?.unwrap_or_default(),
                 attribute.is_custom()?,
             )?;
-            // TODO(perf): `site_fields` and `held` each take a layer view over
-            // the same sites; one view could read the field names and the raw
-            // samples and default before the composed reads.
+            // TODO(perf): `site_fields` and `held` each borrow the same sites'
+            // layers; one pass could read the field names and the raw samples
+            // and default before the composed reads.
             write_fields(
                 data,
                 &path,
-                spec_fields(site_fields(stage, &sites)?, &[], composed(stage, &path, assets))?,
+                spec_fields(site_fields(&sites)?, &[], composed(stage, &path, assets))?,
             );
 
             let held = held(stage, &attribute, &sites, assets)?;
@@ -221,7 +221,7 @@ fn write_property(
                 data,
                 &path,
                 spec_fields(
-                    site_fields(stage, &relationship.property_stack()?)?,
+                    site_fields(&relationship.property_stack()?)?,
                     &[],
                     composed(stage, &path, assets),
                 )?,
@@ -256,13 +256,10 @@ fn stage_fields(stage: &Stage, assets: pcp::AssetMode) -> Result<Vec<(String, vt
 }
 
 /// The field names every site in `sites` authors.
-fn site_fields(stage: &Stage, sites: &[SpecSite]) -> Result<BTreeSet<String>> {
-    let view = stage.layer_view()?;
+fn site_fields(sites: &[SpecSite]) -> Result<BTreeSet<String>> {
     let mut names = BTreeSet::new();
     for site in sites {
-        let Some(layer) = view.find(&site.layer) else {
-            continue;
-        };
+        let layer = site.layer.try_borrow()?;
         names.extend(layer.data().list_fields(&site.path).unwrap_or_default());
     }
     Ok(names)
@@ -325,23 +322,35 @@ struct Held {
 /// block, which resolves to no value and would otherwise be lost along with
 /// the weaker opinion it hides.
 fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], assets: pcp::AssetMode) -> Result<Held> {
-    // The sites are read under one view, dropped before the composed reads
-    // below, which need the graph free.
+    // The sites' layers are borrowed for these reads alone.
     // TODO(perf): the raw samples and default are copied for every attribute
     // and used only when composition reports none; noting which site holds
     // them and reading the raw value only then would spare the copies.
     let (raw_samples, raw_default) = {
-        let view = stage.layer_view()?;
-        let numeric = sites
-            .iter()
-            .find(|site| holds(&view, site, sdf::FieldKey::TimeSamples) || holds(&view, site, sdf::FieldKey::Default));
-        let samples = numeric
-            .and_then(|site| Some((site, authored(&view, site, sdf::FieldKey::TimeSamples)?)))
-            .and_then(|(site, value)| Some((site, value.try_as_time_samples()?)));
-        let default = sites
-            .iter()
-            .find(|site| holds(&view, site, sdf::FieldKey::Default))
-            .and_then(|site| authored(&view, site, sdf::FieldKey::Default));
+        // The strongest site holding either field answers for the samples, and
+        // the strongest holding a `default` for the default. Presence is read
+        // without copying a field, as a sample map is expensive to clone.
+        let (mut samples, mut default) = (None, None);
+        let (mut numeric_found, mut default_found) = (false, false);
+        for site in sites {
+            let layer = site.layer.try_borrow()?;
+            let data = layer.data();
+            let has_samples = data.has_field(&site.path, sdf::FieldKey::TimeSamples.as_str());
+            let has_default = data.has_field(&site.path, sdf::FieldKey::Default.as_str());
+            if !numeric_found && (has_samples || has_default) {
+                numeric_found = true;
+                samples = authored(&layer, site, sdf::FieldKey::TimeSamples)
+                    .and_then(|value| value.try_as_time_samples())
+                    .map(|samples| (site, samples));
+            }
+            if !default_found && has_default {
+                default_found = true;
+                default = authored(&layer, site, sdf::FieldKey::Default);
+            }
+            if numeric_found && default_found {
+                break;
+            }
+        }
         (samples, default)
     };
 
@@ -364,20 +373,9 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], assets: pcp::A
     Ok(Held { default, samples })
 }
 
-/// Whether a site authors `key` at all, without copying what it holds — a
-/// sample map is answer enough to `is_some` and expensive to clone.
-fn holds(view: &pcp::LayerView<'_>, site: &SpecSite, key: sdf::FieldKey) -> bool {
-    view.find(&site.layer)
-        .is_some_and(|layer| layer.data().has_field(&site.path, key.as_str()))
-}
-
 /// One field as a single site authored it.
-fn authored(view: &pcp::LayerView<'_>, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Value> {
-    let value = view
-        .find(&site.layer)?
-        .data()
-        .try_field(&site.path, key.as_str())
-        .ok()??;
+fn authored(layer: &sdf::Layer, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Value> {
+    let value = layer.data().try_field(&site.path, key.as_str()).ok()??;
     Some(value.into_owned())
 }
 

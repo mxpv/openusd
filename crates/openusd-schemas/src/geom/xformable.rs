@@ -619,7 +619,7 @@ impl StackEdit {
         if let Some(site) = prim.attribute(super::tokens::XFORM_OP_ORDER).shadowing_opinion()? {
             return Err(SchemaError::XformOpOrderShadowed {
                 prim: prim.path().clone(),
-                layer: site.layer,
+                layer: site.layer.identifier().to_owned(),
             });
         }
         let name = XformOpKind::Transform.op_name(None, false);

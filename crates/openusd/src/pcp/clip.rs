@@ -735,6 +735,13 @@ fn get<T: TryFrom<Value>>(set: &HashMap<String, Value>, key: &str) -> Option<T> 
 #[derive(Default)]
 pub(crate) struct ClipCache {
     /// The synthesized manifests' layers, by identifier.
+    // TODO: hold a synthesized manifest in the registry, as C++ holds it as
+    // an anonymous `SdfLayer`. No registry holds it now, so a spec site
+    // cannot name it: the property stack and a resolve info leave it out. The
+    // registry's store is held while composition reads, so it would join
+    // through the query loop's demand path (`pending`). With every clip
+    // layer then in the graph, `ClipLayer::Held` could carry a `LayerId`
+    // and the clip reads could key on it.
     generated: HashMap<String, sdf::Layer>,
     /// The clip and manifest layers reads named that the graph does not hold,
     /// for the stage's query loop to open before it reads again.
@@ -1150,7 +1157,8 @@ impl ClipCache {
     /// `_PropertyStackResolver::ProcessClips`). Paired with the property's path
     /// inside that layer.
     ///
-    /// `None` when the set does not source the property at `time`.
+    /// `None` when the set does not source the property at `time`, and when
+    /// the manifest answers and the stage synthesized it.
     pub(super) fn clip_spec_site_in_set(
         &mut self,
         graph: &LayerView<'_>,
@@ -1158,7 +1166,7 @@ impl ClipCache {
         resolved: &ResolvedClipSet,
         query: &ClipQuery<'_>,
         time: f64,
-    ) -> Result<Option<(String, Path)>, QueryError> {
+    ) -> Result<Option<(LayerId, Path)>, QueryError> {
         let Some(ActiveClip {
             activation,
             asset,
@@ -1178,9 +1186,20 @@ impl ClipCache {
                 self.clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &clip_path)?
             && !samples.is_empty()
         {
-            return Ok(Some((clip_id, clip_path)));
+            let id = graph.id_of(&clip_id);
+            debug_assert!(id.is_some(), "a clip that supplied samples is in the graph");
+            return Ok(id.map(|id| (id, clip_path)));
         }
-        Ok(Some((manifest, clip_path)))
+        // A synthesized manifest is held by no registry, so it names no site.
+        if self.generated.contains_key(&manifest) {
+            return Ok(None);
+        }
+        let id = graph.id_of(&manifest);
+        debug_assert!(
+            id.is_some(),
+            "an authored manifest a clip set resolves through is in the graph"
+        );
+        Ok(id.map(|id| (id, clip_path)))
     }
 
     /// What `resolved` contributes to a query that names no time: whether it

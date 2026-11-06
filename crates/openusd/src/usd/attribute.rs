@@ -1286,7 +1286,8 @@ impl Attribute {
     /// otherwise — including where `interpolateMissingClipValues` fills the gap
     /// from surrounding clips, matching C++. Each participating set contributes
     /// one site, since a stack collects every contributor rather than stopping
-    /// at the one that answers.
+    /// at the one that answers, except where the layer is a manifest the stage
+    /// synthesized for a set that authors none.
     ///
     /// Only offered for a numeric time: clips contribute no `default`, so the
     /// default-time stack is [`property_stack`](Self::property_stack).
@@ -4653,7 +4654,7 @@ def \"M\"
     /// does.
     fn shadow(stage: &Stage) -> Result<Option<String>> {
         let site = stage.attribute("/P.x")?.shadowing_opinion()?;
-        Ok(site.map(|site| format!("{}{}", file_name(&site.layer), site.path)))
+        Ok(site.map(|site| format!("{}{}", file_name(site.layer.identifier()), site.path)))
     }
 
     const P_DECLARED: &str = "def \"P\"\n{\n    custom double x\n}";
@@ -4705,7 +4706,7 @@ def \"M\"
             let (_dir, stage) = scene(&[("root.usda", child(decl).as_str()), referenced])?;
             stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
             let site = stage.attribute("/P/Child.x")?.shadowing_opinion()?;
-            let named = site.map(|site| format!("{}{}", file_name(&site.layer), site.path));
+            let named = site.map(|site| format!("{}{}", file_name(site.layer.identifier()), site.path));
             assert_eq!(named.as_deref(), expected, "declared as {decl:?}");
         }
         Ok(())
@@ -4744,7 +4745,7 @@ def \"M\"
             let (_dir, stage) = scene(&[("root.usda", grand(decl).as_str()), referenced])?;
             stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
             let site = stage.attribute("/P/Child/Grand.x")?.shadowing_opinion()?;
-            let named = site.map(|site| format!("{}{}", file_name(&site.layer), site.path));
+            let named = site.map(|site| format!("{}{}", file_name(site.layer.identifier()), site.path));
             assert_eq!(named.as_deref(), expected, "declared as {decl:?}");
         }
         Ok(())
@@ -4789,7 +4790,7 @@ def \"P\" (
             let (_dir, stage) = scene(&[("root.usda", root(decl).as_str()), referenced])?;
             stage.set_edit_target(stage.edit_target_for_node(&sdf::Path::new("/P")?, EditTargetArc::Reference)?)?;
             let site = stage.attribute("/P/Child/Grand.x")?.shadowing_opinion()?;
-            let named = site.map(|site| format!("{}{}", file_name(&site.layer), site.path));
+            let named = site.map(|site| format!("{}{}", file_name(site.layer.identifier()), site.path));
             assert_eq!(named.as_deref(), expected, "declared as {decl:?}");
         }
         Ok(())
@@ -4818,7 +4819,8 @@ def \"P\" (
         assert_eq!(shadow(&stage)?, None);
         let site = stage.attribute("/P.x")?.shadowing_opinion_at(TimeCode::new(1.0))?;
         assert_eq!(
-            site.map(|site| file_name(&site.layer).to_string()).as_deref(),
+            site.map(|site| file_name(site.layer.identifier()).to_string())
+                .as_deref(),
             Some("strong.usda")
         );
 
@@ -4851,7 +4853,7 @@ def \"P\" (
         let x = stage.attribute("/P.x")?;
         assert_eq!(x.shadowing_opinion()?, None);
         let site = x.shadowing_opinion_at(time)?.expect("the clips answer for x");
-        assert_eq!(file_name(&site.layer), "strong.usda");
+        assert_eq!(file_name(site.layer.identifier()), "strong.usda");
         assert_eq!(stage.attribute("/P.y")?.shadowing_opinion_at(time)?, None);
 
         // The clips are what a sample written beneath them meets.
@@ -4890,7 +4892,8 @@ def \"P\" (
         assert_eq!(shadow(&stage)?, None);
         let site = stage.attribute("/P.x")?.shadowing_opinion_at(TimeCode::new(5.0))?;
         assert_eq!(
-            site.map(|site| file_name(&site.layer).to_string()).as_deref(),
+            site.map(|site| file_name(site.layer.identifier()).to_string())
+                .as_deref(),
             Some("strong.usda")
         );
         Ok(())

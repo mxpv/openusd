@@ -26,8 +26,8 @@ use crate::{pcp, sdf, tf, vt};
 
 use super::attribute::AttributeAuthoringPlan;
 use super::{
-    Attribute, AttributeBuilder, EditTarget, Prim, PrimTypeId, PrimTypeInfo, Relationship, RelationshipBuilder,
-    SpecSite, Stage, StageAuthoringError,
+    Attribute, AttributeBuilder, EditTarget, Prim, PrimTypeId, PrimTypeInfo, Relationship, RelationshipBuilder, Stage,
+    StageAuthoringError,
 };
 
 /// The prims and properties queued for one stage transaction.
@@ -1221,7 +1221,7 @@ pub(super) fn plan_property_spec(
         .into_iter()
         .next();
     if let Some(site) = strongest {
-        let declaration = declaration_at(stage, &site, kind)?;
+        let declaration = declaration_of(site.layer.try_borrow()?.data(), &site.path, kind)?;
         if declaration.kind() != kind {
             return Err(kind_mismatch(path, kind, declaration.kind()));
         }
@@ -1439,23 +1439,6 @@ pub(super) fn targets_for_authoring(
         .into_iter()
         .map(|target| target_for_authoring(stage, owner, target))
         .collect()
-}
-
-/// The declaration the spec at `site` carries, read from that layer with the
-/// fallible readers; `wanted` names the kind being authored for the error
-/// when the site holds none.
-fn declaration_at(
-    stage: &Stage,
-    site: &SpecSite,
-    wanted: sdf::SpecType,
-) -> Result<PropertyDeclaration, StageAuthoringError> {
-    let view = stage.layer_view()?;
-    let layer = view
-        .find(&site.layer)
-        .ok_or_else(|| StageAuthoringError::LayerNotFound {
-            layer: site.layer.clone(),
-        })?;
-    declaration_of(layer.data(), &site.path, wanted)
 }
 
 /// The declaration a layer's property spec at `path` carries. An attribute

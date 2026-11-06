@@ -523,9 +523,9 @@ fn unculled_dependent_resyncs() -> Result<()> {
         .prim_stack()?
         .into_iter()
         .map(|site| site.layer)
-        .find(|id| FsPath::new(id).ends_with("source.usda"))
+        .find(|layer| FsPath::new(layer.identifier()).ends_with("source.usda"))
         .expect("the reference target contributes a spec");
-    stage.layer(&source)?.expect("loaded").edit(|edit| {
+    source.edit(|edit| {
         sdf::PrimSpec::new(edit.data_mut(), "/Source/Child", sdf::Specifier::Over, "")?;
         Ok(())
     })?;
@@ -587,7 +587,7 @@ def "Ref" (
             .prim("/Ref")?
             .prim_stack()?
             .into_iter()
-            .map(|site| (leaf_of(&site.layer), site.path))
+            .map(|site| (leaf_of(site.layer.identifier()), site.path))
             .collect())
     };
     let spliced = sites(&stage)?;
@@ -679,9 +679,9 @@ def "Inst" (
         .prim_stack()?
         .into_iter()
         .map(|site| site.layer)
-        .find(|id| leaf_of(id) == "source.usda")
+        .find(|layer| leaf_of(layer.identifier()) == "source.usda")
         .expect("the reference target contributes a spec");
-    stage.layer(&source)?.expect("loaded").edit(|edit| {
+    source.edit(|edit| {
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")

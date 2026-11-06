@@ -26,6 +26,8 @@ pub enum ResolveInfoSource {
 /// Where value resolution found an attribute's answer — the resolved *location*
 /// of its value rather than the value itself (C++ `UsdResolveInfo`).
 ///
+/// It holds the layers its sites name open, as a kept [`SpecSite`] does.
+///
 /// Obtained from [`Attribute::resolve_info`](super::Attribute::resolve_info) and
 /// [`resolve_info_at`](super::Attribute::resolve_info_at). Meant for debugging
 /// and introspection: a value read should go through
@@ -87,7 +89,9 @@ impl ResolveInfo {
     /// For a value clip the site is the layer the stack names at that time,
     /// which is not always the layer the value was read from: a gap filled
     /// under `interpolateMissingClipValues` names the manifest while the
-    /// samples came from the clips around it.
+    /// samples came from the clips around it. Where the manifest is one the
+    /// stage synthesized for a clip set that authors none, the gap names no
+    /// site.
     pub fn spec_site(&self) -> Option<&SpecSite> {
         self.spec.as_ref()
     }
@@ -104,8 +108,10 @@ impl ResolveInfo {
     /// schema fallback, where the authored sources ran out before the
     /// composition closed. Each names the node and spec it answered from, as
     /// [`source`](Self::source) does, except the fallback, which was authored
-    /// in no layer and names neither. None chains further: the whole chain is
-    /// here.
+    /// in no layer and names neither. A value clip whose spec is a manifest
+    /// the stage synthesized names its node and no spec (see
+    /// [`spec_site`](Self::spec_site)). None chains further: the whole chain
+    /// is here.
     ///
     /// A proximal [`resolve_info`](super::Attribute::resolve_info) reports
     /// none: it answers which source would answer, not what went into a value.

@@ -1344,12 +1344,11 @@ impl<'a> PrimIndexView<'a> {
         Self { index, graph }
     }
 
-    /// The node providing the spec the layer `identifier` holds at `path`,
-    /// among those that contribute opinions (C++
-    /// `PcpPrimIndex::GetNodeProvidingSpec`). `None` where no node does, or
-    /// where the stage does not hold the layer.
-    pub fn node_providing_spec(&self, identifier: &str, path: &Path) -> Option<Node<'a>> {
-        let layer = self.graph.id_of(identifier)?;
+    /// The node providing the spec `layer` holds at `path`, among those that
+    /// contribute opinions (C++ `PcpPrimIndex::GetNodeProvidingSpec`). `None`
+    /// where no node does, or where the stage does not hold the layer.
+    pub fn node_providing_spec(&self, layer: &sdf::LayerHandle, path: &Path) -> Option<Node<'a>> {
+        let layer = self.graph.id_of_handle(layer)?;
         self.index.node_providing_spec(self.graph, layer, path)
     }
 }

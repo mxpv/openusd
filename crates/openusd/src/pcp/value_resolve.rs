@@ -200,8 +200,9 @@ pub(crate) struct Resolution {
     pub(crate) node: Option<ResolveNode>,
     /// The spec a property stack lists for the answering source: the layer the
     /// opinion was authored in, or — for a value clip — the layer that stack
-    /// names at the queried time. `None` where no source answered, and for a
-    /// clip reached without a time, which selects none.
+    /// names at the queried time. `None` where no source answered, for a clip
+    /// reached without a time, which selects none, and for a manifest the stage
+    /// synthesized.
     pub(crate) spec: Option<SpecSiteRecord>,
     /// Whether that source supplied a value.
     pub(crate) value: ValueState,
@@ -238,7 +239,8 @@ pub(crate) struct ResolvedSite {
     pub(crate) kind: ResolveSourceKind,
     pub(crate) node: ResolveNode,
     /// The spec a property stack lists for it, or `None` where the source
-    /// names none — a value clip reached without a time selects no layer.
+    /// names none — a value clip reached without a time selects no layer, and a
+    /// manifest the stage synthesized names none.
     pub(crate) spec: Option<SpecSiteRecord>,
 }
 
@@ -503,7 +505,8 @@ impl ClipProbe<'_> {
 
     /// The site a property stack lists for the set at `time`, carrying the
     /// reaching site's own offset — a set is only reached at the layer that
-    /// introduced it. `None` when the set does not source the property.
+    /// introduced it. `None` when the set does not source the property, and
+    /// when the site is a manifest the stage synthesized.
     pub(crate) fn spec_record_at(
         &mut self,
         time: f64,
@@ -512,7 +515,7 @@ impl ClipProbe<'_> {
         let site = self
             .cache
             .clip_spec_site_in_set(self.graph, self.diagnostics, self.set, &self.query, time)?;
-        Ok(site.map(|(layer, path)| SpecSiteRecord { layer, path, offset }))
+        Ok(site.map(|(layer, path)| SpecSiteRecord::in_graph(self.graph, layer, path, offset)))
     }
 }
 
