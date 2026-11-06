@@ -473,8 +473,11 @@ impl PrimDefinition {
     /// `propertyOrder` (C++ sorts and re-applies the order per composed tier;
     /// the result only has to hold at the end).
     pub(super) fn finish_composition(&mut self) {
-        self.properties.sort_by(|a, b| sdf::element_cmp(a, b));
-        self.apply_property_order();
+        let order = self
+            .metadata(sdf::FieldKey::PropertyOrder.as_str())
+            .cloned()
+            .and_then(vt::Value::try_as_token_vec);
+        sdf::order_properties(&mut self.properties, order.as_deref());
     }
 
     /// Reorders [`properties`](Self::property_names) by the class prim's
@@ -486,7 +489,7 @@ impl PrimDefinition {
         else {
             return;
         };
-        sdf::apply_ordering(&mut self.properties, &order);
+        sdf::reorder(&mut self.properties, &order);
     }
 }
 

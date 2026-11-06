@@ -1259,12 +1259,12 @@ mod reorder {
         // Reporting a prim's properties, all of them or only the authored ones,
         // does apply the composed `propertyOrder` (C++ `UsdPrim::GetPropertyNames`
         // and `GetAuthoredPropertyNames` call `ApplyPropertyOrder`), so the
-        // fixture's `reorder properties = [y, x]` puts `y` first and `x` last,
-        // with unlisted `z` trailing the entry it followed.
+        // fixture's `reorder properties = [y, x]` puts `y` and `x` first, with
+        // unlisted `z` after them.
         let stage = open_fixture();
         let prim = stage.prim("/Props").unwrap();
         for props in [prim.property_names().unwrap(), prim.authored_property_names().unwrap()] {
-            assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["y", "z", "x"]);
+            assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["y", "x", "z"]);
         }
     }
 }

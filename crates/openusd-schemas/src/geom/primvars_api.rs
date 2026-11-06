@@ -926,9 +926,9 @@ mod tests {
         Ok(())
     }
 
-    /// The primvars come back in the prim's property order, sorted until it
-    /// authors a `propertyOrder`, with the indices attribute and the id
-    /// relationship the order names left out.
+    /// The primvars come back in the prim's property order: sorted, with the
+    /// ones its `propertyOrder` lists moved to the front, and the indices
+    /// attribute and the id relationship the order names left out.
     #[test]
     fn primvars_follow_property_order() -> Result {
         let mesh = mesh()?;

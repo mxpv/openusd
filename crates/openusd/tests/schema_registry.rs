@@ -12,7 +12,7 @@ use openusd::usd::{
     FamilySource, Field, MetadataDecl, MetadataTargets, PropertyDecl, SchemaDecl, SchemaFamily, SchemaKind,
     SchemaRegistry, SchemaRegistryBuilder, SchemaRegistryError,
 };
-use openusd::{sdf, tf, vt};
+use openusd::{sdf, tf, usd, vt};
 
 /// One of a family's layers, over text: how a family stored as `.usda` and
 /// read into memory reaches the registry.
@@ -92,7 +92,7 @@ fn stage_metadata_dictionary_fallback() {
                 ]))
             })]);
     let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
-    let stage = openusd::usd::Stage::builder()
+    let stage = usd::Stage::builder()
         .schema_registry(registry)
         .in_memory("anon.usda")
         .expect("a stage");
@@ -120,7 +120,7 @@ fn stage_metadata_falls_back() {
             .fallback(|| vt::Value::token("plain")),
     ]);
     let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
-    let stage = openusd::usd::Stage::builder()
+    let stage = usd::Stage::builder()
         .schema_registry(registry)
         .in_memory("anon.usda")
         .expect("a stage");
@@ -564,6 +564,40 @@ class "ThingAPI_2"
         .expect("ThingAPI");
     assert_eq!(thing.applied_api_schemas(), [tf::Token::new("ThingAPI")]);
     assert!(!thing.has_property(&tf::Token::new("two")));
+}
+
+/// A prim that authors no `propertyOrder` lists its properties in the order
+/// its schema declares, as C++ `UsdPrim::GetPropertyOrder` falls back to it.
+#[test]
+fn schema_property_order() {
+    let manifest = r#"#usda 1.0
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+    let schematics = r#"#usda 1.0
+
+class Widget "Widget"
+{
+    reorder properties = ["b"]
+    float a = 1
+    float b = 2
+}
+"#;
+    let stage = usd::Stage::builder()
+        .schema_registry(registry(manifest, schematics))
+        .in_memory("anon.usda")
+        .expect("a stage");
+    let prim = stage
+        .define_prim("/W")
+        .expect("defines")
+        .set_type_name("Widget")
+        .expect("types");
+
+    let names = prim.property_names().expect("lists");
+    assert_eq!(names, ["b", "a"]);
 }
 
 #[test]
