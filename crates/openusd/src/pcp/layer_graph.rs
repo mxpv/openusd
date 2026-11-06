@@ -2584,6 +2584,17 @@ impl LayerGraph {
         self.stacks.members(id)
     }
 
+    /// The layers of `id`'s stack, strongest first, each once: a stack lists a
+    /// sublayer two of its sublayers share at each place it is reached.
+    pub(crate) fn distinct_members(&self, id: LayerStackId) -> Vec<LayerId> {
+        let mut seen = HashSet::new();
+        self.layer_stack(id)
+            .iter()
+            .map(|&(layer, _)| layer)
+            .filter(|layer| seen.insert(*layer))
+            .collect()
+    }
+
     /// The members of `id`'s stack, or `None` when the registry no longer holds
     /// the instance — the presence-aware read for introspection over a handle
     /// that may be a stale view (a node cloned out of a dropped index whose

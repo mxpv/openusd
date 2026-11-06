@@ -2479,12 +2479,11 @@ impl Stage {
     /// cache invalidation from the change lists it records — or, for a dry run
     /// (`commit = false`), stage and discard without committing or firing any
     /// sink. The shared transaction core behind
-    /// [`author_on_layer`](Self::author_on_layer) (single-layer) and the
-    /// namespace editor's mapped relocate batch (which authors across the edit
-    /// target's own layer stack: the structural moves land in the target layer
-    /// while the synthesized relocates spread across that stack's layers, all
-    /// committing together). `apply` commits, `can_apply` dry-runs, both sharing
-    /// `f` so an error surfaces identically.
+    /// [`author_on_layer`](Self::author_on_layer) (single-layer),
+    /// [`batch_edit`](Self::batch_edit) and the namespace editor's batch, which
+    /// commits for [`NamespaceEditor::apply`](super::NamespaceEditor::apply)
+    /// and dry-runs for [`can_apply`](super::NamespaceEditor::can_apply), both
+    /// sharing `f` so an error surfaces identically.
     ///
     /// `mapping` is the edit target's namespace mapping, recorded with a committed
     /// edit so the composed change keeps full path precision; a non-identity
@@ -2572,7 +2571,7 @@ impl Stage {
     /// Per spec §10.3.2.6, relocates take effect in the stack where the
     /// bringing-in arc is authored, so this is where the editor seeds and
     /// authors the mapped relocate plan; resolve it to member layer ids with
-    /// [`LayerGraph::layer_stack`](crate::pcp::LayerGraph::layer_stack).
+    /// [`LayerGraph::distinct_members`](crate::pcp::LayerGraph::distinct_members).
     ///
     /// Fails with [`StageAuthoringError::EditTargetStackUnavailable`] when a
     /// layer in the captured identity's source chain cannot be loaded here —
@@ -2685,9 +2684,11 @@ impl Stage {
     }
 
     /// The layer ids of the root (local) layer stack, strongest first — the
-    /// layers a namespace edit authors into to move or delete a composed object.
+    /// layers a namespace edit may author into to move or delete a composed
+    /// object. Each layer is listed once, a sublayer two of the stack's
+    /// sublayers share included.
     pub(super) fn root_stack_layer_ids(&self) -> Vec<pcp::LayerId> {
-        self.layers().root_layer_stack().iter().map(|&(id, _)| id).collect()
+        self.layers().distinct_members(pcp::LayerStackId::ROOT)
     }
 
     /// Fan out the staged pre-commit edit to the layer `layer` to the stage's

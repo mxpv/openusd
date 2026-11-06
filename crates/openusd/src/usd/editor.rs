@@ -16,8 +16,8 @@
 //! layers commit together once the batch authors cleanly.
 //!
 //! The current edit target selects one of two authoring shapes. An identity
-//! target on the local root layer stack authors across the whole stack, as C++
-//! does: it moves local specs directly and synthesizes `layerRelocates` for
+//! target on the local root layer stack authors across the stack's layers, as
+//! C++ does: it moves local specs directly and synthesizes `layerRelocates` for
 //! content that arrives across a reference or payload arc. A variant or
 //! cross-arc edit target authors into the layer stack it writes to — the
 //! referenced asset's stack for an arc target, the root stack for a variant —
@@ -47,8 +47,11 @@
 //! namespace, follows the batch's moves, then maps it back into the target
 //! layer's namespace.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 
+use super::composition::StackPin;
 use super::{EditTarget, Prim, Stage, StageAuthoringError};
 use crate::{Result, pcp, sdf, vt};
 
@@ -353,36 +356,43 @@ impl NamespaceEditor {
                 per_edit,
             } => self.execute_local_stack(commit, layer_ids, seeds, relocates, per_edit),
             BatchPlan::Mapped {
+                pin,
                 target,
                 per_edit,
                 stack_layer_ids,
                 seeds,
                 relocates,
-            } => self.execute_mapped(commit, &target, &per_edit, stack_layer_ids, seeds, relocates),
+            } => self.execute_mapped(commit, pin, &target, per_edit, stack_layer_ids, seeds, relocates),
         }
     }
 
     /// Stage the batch into the local root layer stack: direct structural moves
-    /// and deletes at the composed (stage == spec) paths across every local
-    /// layer, embedded-path fixup, and synthesized relocates for content that
-    /// arrives across an arc. The identity-target authoring shape behind
-    /// [`execute`](Self::execute).
+    /// and deletes at the composed (stage == spec) paths across the local
+    /// layers it writes, embedded-path fixup, and synthesized relocates for
+    /// content that arrives across an arc. The identity-target authoring shape
+    /// behind [`execute`](Self::execute).
     fn execute_local_stack(
         &self,
         commit: bool,
         layer_ids: Vec<pcp::LayerId>,
         seeds: HashMap<pcp::LayerId, sdf::RelocateList>,
         relocate_plan: RelocateStackPlan,
-        plan: Vec<EditPlan>,
+        mut plan: Vec<EditPlan>,
     ) -> Result<(), NamespaceEditError> {
         let resolved = relocate_plan.resolve(seeds)?;
-
-        // TODO: the transaction takes every root-stack layer, so a
-        // `LayerGuard` on one the batch leaves unchanged fails it with
-        // `Busy`. Naming only the layers the plan writes needs the embedded
-        // path fixup planned ahead of the commit.
+        let written = self.local_writes(&layer_ids, &resolved)?;
+        let moves = self.edits.iter().zip(&mut plan).filter_map(|(edit, plan)| match edit {
+            NamespaceEdit::Move { dst, .. } => Some((dst, &mut plan.occupied)),
+            NamespaceEdit::Delete { .. } => None,
+        });
+        self.mark_held_outside(&layer_ids, &written, moves)?;
+        // TODO(perf): `local_writes` scans the stack layers holding no source
+        // and no relocate change for embedded paths before any edit is
+        // validated, and the fixup below scans the written layers again.
+        // Collecting every rewrite for a layer written for its fixup alone
+        // would let the transaction skip rescanning it.
         self.stage
-            .author_layers_txn(&layer_ids, None, commit, |ids, edits| {
+            .author_layers_txn(&written, None, commit, |ids, edits| {
                 for (edit, plan) in self.edits.iter().zip(&plan) {
                     apply_edit(edits, edit, plan)?;
                 }
@@ -406,28 +416,42 @@ impl NamespaceEditor {
     /// a source arriving across an arc nested below the target is realized by a
     /// relocate synthesized into the target's layer stack
     /// ([`RelocateStackPlan`], resolved per stack layer). Embedded paths are
-    /// fixed up through the lift-then-map chain on every stack layer. The mapped
+    /// fixed up through the lift-then-map chain on the stack layers. The mapped
     /// authoring shape behind [`execute`](Self::execute).
     ///
     /// The whole batch — spec moves, relocates, and fixups — commits together as
-    /// one atomic transaction over the stack (or dry-runs for
+    /// one atomic transaction over the stack layers it writes (or dry-runs for
     /// [`can_apply`](Self::can_apply)). An edit whose source composes from a
     /// layer stack the target does not own is rejected by
     /// [`plan_mapped`](Self::plan_mapped) before staging, since no relocate in
     /// the target's stack can express it.
+    #[allow(clippy::too_many_arguments)] // The mapped plan's parts, moved in whole.
     fn execute_mapped(
         &self,
         commit: bool,
+        pin: StackPin<'_>,
         target: &EditTarget,
-        per_edit: &[MappedEdit],
+        mut per_edit: Vec<MappedEdit>,
         stack_layer_ids: Vec<pcp::LayerId>,
         seeds: HashMap<pcp::LayerId, sdf::RelocateList>,
         relocates: RelocateStackPlan,
     ) -> Result<(), NamespaceEditError> {
         let resolved = relocates.resolve(seeds)?;
+        let written = self.mapped_writes(&stack_layer_ids, &resolved, target, &per_edit)?;
+        let moves = per_edit.iter_mut().filter_map(|mapped| {
+            let MappedEdit { dst, occupied, .. } = mapped;
+            Some((dst.as_ref()?, occupied))
+        });
+        self.mark_held_outside(&stack_layer_ids, &written, moves)?;
+        // The reads are done: the edit's end may sweep the stack once it no
+        // longer holds the transaction's layers.
+        drop(pin);
+
+        // TODO(perf): as in `execute_local_stack`, the embedded paths are
+        // scanned before validation and again in the fixup.
         self.stage
-            .author_layers_txn(&stack_layer_ids, Some(target.map_function()), commit, |ids, edits| {
-                for mapped in per_edit {
+            .author_layers_txn(&written, Some(target.map_function()), commit, |ids, edits| {
+                for mapped in &per_edit {
                     apply_mapped_edit(edits, mapped)?;
                 }
                 for (id, layer) in ids.iter().zip(edits.iter_mut()) {
@@ -450,7 +474,7 @@ impl NamespaceEditor {
     /// target plans direct mapped authoring ([`plan_mapped`](Self::plan_mapped)).
     /// Runs before the layer graph is borrowed mutably for staging: composition
     /// queries and layer mutation cannot borrow the stage at once.
-    fn plan(&self) -> Result<BatchPlan, NamespaceEditError> {
+    fn plan(&self) -> Result<BatchPlan<'_>, NamespaceEditError> {
         let edit_target = self.stage.edit_target_layer_id()?;
         let layer_ids = self.stage.root_stack_layer_ids();
         let target = self.stage.edit_target();
@@ -473,7 +497,7 @@ impl NamespaceEditor {
         &self,
         layer_ids: Vec<pcp::LayerId>,
         edit_target: pcp::LayerId,
-    ) -> Result<BatchPlan, NamespaceEditError> {
+    ) -> Result<BatchPlan<'_>, NamespaceEditError> {
         // `seeds` (per layer) is the baseline each layer's final list is compared
         // against; the plan tracks per-occurrence freshness so validation blames
         // only the pairs this batch created or changed.
@@ -540,7 +564,7 @@ impl NamespaceEditor {
     /// §10.3.2.6 a relocate only takes effect in the stack where its bringing-in
     /// arc is authored, so authoring it anywhere else would not relink
     /// composition.
-    fn plan_mapped(&self, layer_id: pcp::LayerId, target: EditTarget) -> Result<BatchPlan, NamespaceEditError> {
+    fn plan_mapped(&self, layer_id: pcp::LayerId, target: EditTarget) -> Result<BatchPlan<'_>, NamespaceEditError> {
         self.stage.settle()?;
         let map = |path: &sdf::Path| {
             target
@@ -549,7 +573,8 @@ impl NamespaceEditor {
         };
         // The target authors into its own layer stack; seed the relocate plan
         // from that stack's existing pairs, under one graph borrow.
-        // Pinned while the plan reads the stage, which may sweep stacks.
+        // Pinned while the plan and the batch read the stage, which may sweep
+        // stacks: the plan carries the pin.
         let pin = self
             .stage
             .mapped_target_stack(layer_id)
@@ -557,7 +582,7 @@ impl NamespaceEditor {
         let stack_id = pin.id();
         let (stack_layer_ids, seeds) = {
             let layers = self.stage.layer_view()?;
-            let ids: Vec<pcp::LayerId> = layers.layer_stack(stack_id).iter().map(|&(id, _)| id).collect();
+            let ids = layers.distinct_members(stack_id);
             let seeds = seed_relocates(&layers, &ids);
             (ids, seeds)
         };
@@ -610,6 +635,7 @@ impl NamespaceEditor {
             });
         }
         Ok(BatchPlan::Mapped {
+            pin,
             target,
             per_edit,
             stack_layer_ids,
@@ -618,11 +644,18 @@ impl NamespaceEditor {
         })
     }
 
-    /// The identifiers of the local-stack layers a successful apply would write:
-    /// a layer holding a spec at a source path (the structural move or delete) or
-    /// one whose `layerRelocates` the batch would change — including a sublayer
-    /// whose relocate follows a moved or deleted prim. Mirrors C++
-    /// `GetLayersToEdit`.
+    /// The identifiers of the layers a successful apply would write, which its
+    /// transaction takes: of the local stack, or of a mapped target's own
+    /// stack. A layer holding a spec at a source path (the structural move or
+    /// delete), one whose `layerRelocates` the batch would change — including a
+    /// sublayer whose relocate follows a moved or deleted prim — or one whose
+    /// embedded paths the fixup rewrites, or whose fixup scan fails.
+    ///
+    /// The counterpart of C++ `GetLayersToEdit`, which returns only the layers
+    /// holding a spec at a source path, and an empty list, with a coding error,
+    /// for a batch that cannot apply. This reports the layers the batch's
+    /// relocates and fixup write too, and lists them for a batch whose edits
+    /// would fail while staging.
     pub fn layers_to_edit(&self) -> Result<Vec<String>, NamespaceEditError> {
         if self.edits.is_empty() {
             return Ok(Vec::new());
@@ -635,43 +668,103 @@ impl NamespaceEditor {
         // path must still settle the stage: `plan` reaches `root_stack_layer_ids`,
         // whose drain is what lets a dry run validate against composed state
         // (`Stage::author_layers_txn` does not drain for a dry run).
-        match self.plan()? {
+        // The pin, for a mapped target, keeps its stack through the names'
+        // lookup below.
+        let (ids, _pin) = match self.plan()? {
             BatchPlan::LocalStack {
                 layer_ids,
                 seeds,
                 relocates,
                 ..
-            } => {
-                let resolved = relocates.resolve(seeds)?;
-                let sources: Vec<&sdf::Path> = self.edits.iter().map(NamespaceEdit::source).collect();
-                self.touched_layers(&layer_ids, &resolved, &sources, |p| Ok(project_path(p, &self.edits)))
-            }
-            // A mapped target authors into its own layer stack: the target layer
-            // (a spec move or delete), any stack layer whose relocates change, and
-            // any stack layer whose embedded paths the mapped fixup rewrites.
+            } => (self.local_writes(&layer_ids, &relocates.resolve(seeds)?)?, None),
+            // A mapped target authors into its own layer stack: any stack layer
+            // holding the source (a spec move or delete), any whose relocates
+            // change, and any whose embedded paths the mapped fixup rewrites.
             BatchPlan::Mapped {
+                pin,
                 target,
                 stack_layer_ids,
                 seeds,
                 relocates,
                 per_edit,
-            } => {
-                let resolved = relocates.resolve(seeds)?;
-                let sources: Vec<&sdf::Path> = per_edit.iter().map(|mapped| &mapped.src).collect();
-                self.touched_layers(&stack_layer_ids, &resolved, &sources, |p| {
-                    remap_embedded_path(p, &target, &self.edits)
-                })
-            }
-        }
+            } => (
+                self.mapped_writes(&stack_layer_ids, &relocates.resolve(seeds)?, &target, &per_edit)?,
+                Some(pin),
+            ),
+        };
+        let layers = self.stage.layer_view()?;
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| layers.try_identifier(id).map(str::to_owned))
+            .collect())
     }
 
-    /// The identifiers of the layers in `layer_ids` a successful apply would
-    /// write: one holding a spec at any path in `sources` (a structural move or
+    /// The local-stack layers in `layer_ids` a successful apply writes (see
+    /// [`touched_layers`](Self::touched_layers)).
+    fn local_writes(
+        &self,
+        layer_ids: &[pcp::LayerId],
+        resolved: &ResolvedRelocates,
+    ) -> Result<Vec<pcp::LayerId>, NamespaceEditError> {
+        let sources: Vec<&sdf::Path> = self.edits.iter().map(NamespaceEdit::source).collect();
+        self.touched_layers(layer_ids, resolved, &sources, |p| Ok(project_path(p, &self.edits)))
+    }
+
+    /// The layers of a mapped target's stack in `layer_ids` a successful apply
+    /// of `per_edit` writes (see [`touched_layers`](Self::touched_layers)).
+    fn mapped_writes(
+        &self,
+        layer_ids: &[pcp::LayerId],
+        resolved: &ResolvedRelocates,
+        target: &EditTarget,
+        per_edit: &[MappedEdit],
+    ) -> Result<Vec<pcp::LayerId>, NamespaceEditError> {
+        let sources: Vec<&sdf::Path> = per_edit.iter().map(|mapped| &mapped.src).collect();
+        self.touched_layers(layer_ids, resolved, &sources, |p| {
+            remap_embedded_path(p, target, &self.edits)
+        })
+    }
+
+    /// Set each move's `occupied` flag in `moves` when a layer in `layer_ids`
+    /// outside `written` holds a spec at its destination. The batch leaves
+    /// such a layer as it is, so its spec blocks the move whatever the batch's
+    /// earlier edits did.
+    ///
+    /// C++ `UsdNamespaceEditor` refuses a move onto a composed object
+    /// (`GetObjectAtPath`) or onto a spec in a layer holding the source
+    /// (`PcpGatherLayersToEditForSpecMove`). It lets a move land on a spec the
+    /// stage does not compose (beneath an inactive prim, say) in a layer
+    /// holding no source, merging the two; this refuses that move, as the
+    /// staged check of the layers the batch writes refuses it in a layer
+    /// written for a fixup or a relocate.
+    fn mark_held_outside<'m>(
+        &self,
+        layer_ids: &[pcp::LayerId],
+        written: &[pcp::LayerId],
+        moves: impl IntoIterator<Item = (&'m sdf::Path, &'m mut bool)>,
+    ) -> Result<(), NamespaceEditError> {
+        let layers = self.stage.layer_view()?;
+        let outside: Vec<&sdf::Layer> = layer_ids
+            .iter()
+            .filter(|id| !written.contains(id))
+            .filter_map(|&id| layers.try_layer(id))
+            .collect();
+        for (dst, occupied) in moves {
+            *occupied |= outside.iter().any(|layer| layer.data().has_spec(dst));
+        }
+        Ok(())
+    }
+
+    /// The layers in `layer_ids`, in order, a successful apply would write:
+    /// one holding a spec at any path in `sources` (a structural move or
     /// delete), one whose `layerRelocates` the batch would change (`resolved`),
     /// or one whose embedded paths the fixup `rewrite` would rewrite (a
     /// relationship/connection/internal-reference target into a moved or deleted
-    /// object, even with no source spec of its own). The per-layer scan shared by
-    /// the local-stack and mapped [`layers_to_edit`](Self::layers_to_edit) shapes.
+    /// object, even with no source spec of its own). The batch's transaction
+    /// takes these layers alone, so a borrow of another layer of the stack does
+    /// not stop it, and every write the transaction makes has its test here.
+    /// A layer whose fixup scan fails is counted, so the transaction's fixup
+    /// reports the failure after the batch's edits validate.
     // TODO(perf): each layer is independent — the spec scan, the relocate
     // comparison, and the embedded-path scan can run in parallel.
     fn touched_layers(
@@ -680,16 +773,16 @@ impl NamespaceEditor {
         resolved: &ResolvedRelocates,
         sources: &[&sdf::Path],
         rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
-    ) -> Result<Vec<String>, NamespaceEditError> {
+    ) -> Result<Vec<pcp::LayerId>, NamespaceEditError> {
         let layers = self.stage.layer_view()?;
         let mut result = Vec::new();
-        for id in layer_ids {
-            let Some(layer) = layers.try_layer(*id) else { continue };
+        for &id in layer_ids {
+            let Some(layer) = layers.try_layer(id) else { continue };
             let touches = sources.iter().any(|src| layer.data().has_spec(src))
-                || resolved.change_for(*id).is_some()
-                || layer_fixup_touches(layer.data(), &rewrite)?;
+                || resolved.changed(id)
+                || layer_fixup_touches(layer.data(), &rewrite);
             if touches {
-                result.push(layers.identifier(*id).to_string());
+                result.push(id);
             }
         }
         Ok(result)
@@ -699,7 +792,7 @@ impl NamespaceEditor {
 /// The read-only result of [`NamespaceEditor::plan`], one variant per authoring
 /// shape. Consumed by `execute` to validate and stage, and by `layers_to_edit`
 /// to report which layers a successful apply would write.
-enum BatchPlan {
+enum BatchPlan<'a> {
     /// An identity local-stack target: the local-stack layer ids, each layer's
     /// seed relocates, the evolved relocate stack plan, and the per-edit
     /// cross-arc facts.
@@ -715,7 +808,10 @@ enum BatchPlan {
     /// below the target — the relocate plan over the target's own layer stack
     /// (its member layer ids and their seed relocates) that realizes those
     /// edits. A pure direct move authors no relocates, leaving the plan a no-op.
+    /// `pin` keeps the target's stack from the stack sweep until the batch's
+    /// reads are done.
     Mapped {
+        pin: StackPin<'a>,
         target: EditTarget,
         per_edit: Vec<MappedEdit>,
         stack_layer_ids: Vec<pcp::LayerId>,
@@ -744,7 +840,8 @@ struct MappedEdit {
     composed: bool,
     /// Whether a composed object already occupies the move destination on the
     /// stage (a referenced or otherwise cross-arc occupant the target layer's
-    /// overlay alone cannot see). Always `false` for a delete.
+    /// overlay alone cannot see), or a target-stack layer the batch does not
+    /// write holds a spec there. Always `false` for a delete.
     occupied: bool,
     /// Whether the edit is realized by a relocate synthesized into the target's
     /// own layer stack — content arriving across an arc nested below the edit
@@ -1407,27 +1504,37 @@ impl ResolvedRelocates {
     /// covers clearing pairs the batch folded away, while skipping an unchanged
     /// layer leaves a pre-existing (possibly invalid) pair exactly as authored.
     fn change_for(&self, id: pcp::LayerId) -> Option<sdf::RelocateList> {
-        let next = self.final_by_layer.get(&id).cloned().unwrap_or_default();
-        let prev = self.seeds.get(&id).cloned().unwrap_or_default();
-        (next != prev).then_some(next)
+        self.changed(id)
+            .then(|| self.final_by_layer.get(&id).cloned().unwrap_or_default())
+    }
+
+    /// Whether the batch changes the relocate list of `id` (see
+    /// [`change_for`](Self::change_for)).
+    fn changed(&self, id: pcp::LayerId) -> bool {
+        let empty = sdf::RelocateList::default();
+        self.final_by_layer.get(&id).unwrap_or(&empty) != self.seeds.get(&id).unwrap_or(&empty)
     }
 }
 
-/// The cross-arc facts the [`NamespaceProjection`] settles for one edit, read
-/// during staging: whether the source resolves to composed content realized by
-/// a relocate (so it has no local spec yet counts as present), and whether the
-/// destination is occupied by such content. Both account for the earlier edits.
+/// The facts found for one edit before staging, read during it: whether the
+/// source resolves to composed content realized by a relocate (so it has no
+/// local spec yet counts as present), and whether the destination is
+/// occupied, by any composed object (from [`NamespaceProjection`]) or by a spec
+/// in a stack layer the batch does not write (once its layers are known). The
+/// composed check accounts for the earlier edits; the outside-layer check holds
+/// whatever they did, as the batch leaves such a layer as it is.
 struct EditPlan {
     present: bool,
     occupied: bool,
 }
 
 /// Validate `edit` against the staged state and its [`EditPlan`], then stage it
-/// into every layer. The staged overlays already reflect the earlier edits, so
-/// local-spec checks read precise data: a destination collision is a local spec
-/// at `dst` (or a composed cross-arc occupant from `plan`), and a missing source
-/// is an edit that moves or removes nothing in any layer and is not realized by
-/// a relocate (`plan.present`).
+/// into every layer the batch writes (`layers`). The staged overlays already
+/// reflect the earlier edits, so local-spec checks read precise data: a
+/// destination collision is a spec at `dst` in one of `layers`, or an occupant
+/// from `plan` (a composed object, or a spec in a stack layer outside
+/// `layers`), and a missing source is an edit that moves or removes nothing in
+/// any of `layers` and is not realized by a relocate (`plan.present`).
 fn apply_edit(
     layers: &mut [sdf::LayerEdit<'_>],
     edit: &NamespaceEdit,
@@ -1436,8 +1543,8 @@ fn apply_edit(
     validate_edit_shape(edit)?;
     match edit {
         NamespaceEdit::Move { src, dst, .. } => {
-            // A composed cross-arc occupant (`plan.occupied`) or a local spec
-            // staged by an earlier edit in this batch blocks the move.
+            // An occupant found before staging (`plan.occupied`) or a spec in
+            // a layer the batch writes blocks the move.
             if plan.occupied || layers.iter().any(|layer| layer.data().has_spec(dst)) {
                 return Err(NamespaceEditError::DestinationExists(dst.clone()));
             }
@@ -1493,18 +1600,18 @@ fn stage_across_layers(
 /// Author one translated batch edit across the mapped target's layer stack: a
 /// move copies the source spec subtree to the destination and removes the
 /// source, a delete removes the source spec, in whichever stack layers hold it.
-/// A destination is blocked by a composed occupant settled in the plan
-/// ([`MappedEdit::occupied`]) or a spec an earlier batch edit staged into a
-/// layer overlay. A source the structural op could not author anywhere is
-/// reported through [`unreachable_source`](MappedEdit::unreachable_source),
-/// unless the edit is realized by a synthesized relocate
-/// ([`MappedEdit::relocated`]), which authors the destination on its own.
+/// A destination is blocked by an occupant found before staging
+/// ([`MappedEdit::occupied`]) or a spec in a layer the batch writes. A source
+/// the structural op could not author anywhere is reported through
+/// [`unreachable_source`](MappedEdit::unreachable_source), unless the edit is
+/// realized by a synthesized relocate ([`MappedEdit::relocated`]), which
+/// authors the destination on its own.
 fn apply_mapped_edit(layers: &mut [sdf::LayerEdit<'_>], edit: &MappedEdit) -> Result<(), NamespaceEditError> {
     let mut authored = false;
     match &edit.dst {
         Some(dst) => {
-            // A composed cross-arc occupant (`edit.occupied`) or a spec staged by
-            // an earlier edit in this batch blocks the move.
+            // An occupant found before staging (`edit.occupied`) or a spec in
+            // a layer the batch writes blocks the move.
             if edit.occupied || layers.iter().any(|layer| layer.data().has_spec(dst)) {
                 return Err(NamespaceEditError::DestinationExists(dst.clone()));
             }
@@ -1554,12 +1661,12 @@ fn fixup_mapped_paths(
     rewrite_embedded_paths(layer, |p| remap_embedded_path(p, target, edits))
 }
 
-/// The embedded-path rewrites `rewrite` would make to `data`: for each spec
-/// field whose value changes — a relationship/connection/internal-reference
-/// target into a moved or deleted object — the spec path, field name, and
-/// rewritten value, preserving list-op structure. `rewrite` maps one path to
-/// its replacement, `Ok(None)` to drop it from its list op, or an error to fail
-/// the batch.
+/// Hand `found` each embedded-path rewrite `rewrite` would make to `data`,
+/// until it breaks: for each spec field whose value changes — a
+/// relationship/connection/internal-reference target into a moved or deleted
+/// object — the spec path, field name, and rewritten value, preserving
+/// list-op structure. `rewrite` maps one path to its replacement, `Ok(None)`
+/// to drop it from its list op, or an error to fail the batch.
 ///
 /// `layerRelocates` is skipped: a layer-level relocate's source and target carry
 /// different meaning, and a deleted target becomes the empty sentinel rather than
@@ -1577,11 +1684,11 @@ fn fixup_mapped_paths(
 fn embedded_path_rewrites(
     data: &dyn sdf::AbstractData,
     rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
-) -> Result<Vec<(sdf::Path, String, vt::Value)>, NamespaceEditError> {
+    mut found: impl FnMut(&sdf::Path, &str, vt::Value) -> ControlFlow<()>,
+) -> Result<ControlFlow<()>, NamespaceEditError> {
     // `filter_map_paths` takes a `Fn` that cannot itself fail, so a rejected
     // path is parked here and surfaced after the rewrite.
-    let failed: std::cell::Cell<Option<NamespaceEditError>> = std::cell::Cell::new(None);
-    let mut changes = Vec::new();
+    let failed: Cell<Option<NamespaceEditError>> = Cell::new(None);
     for path in data.spec_paths() {
         let fields = data.list_fields(&path).unwrap_or_default();
         for field in &fields {
@@ -1608,12 +1715,12 @@ fn embedded_path_rewrites(
             if let Some(error) = failed.take() {
                 return Err(error);
             }
-            if rewritten != value {
-                changes.push((path.clone(), field.clone(), rewritten));
+            if rewritten != value && found(&path, field, rewritten).is_break() {
+                return Ok(ControlFlow::Break(()));
             }
         }
     }
-    Ok(changes)
+    Ok(ControlFlow::Continue(()))
 }
 
 /// Rewrite every embedded namespace path in `layer` through `rewrite` (see
@@ -1622,22 +1729,33 @@ fn rewrite_embedded_paths(
     layer: &mut sdf::LayerEdit<'_>,
     rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
 ) -> Result<(), NamespaceEditError> {
-    for (path, field, value) in embedded_path_rewrites(layer.data(), rewrite)? {
+    let mut changes = Vec::new();
+    // The collector never breaks, so the scan runs to its end.
+    let _: ControlFlow<()> = embedded_path_rewrites(layer.data(), rewrite, |path, field, value| {
+        changes.push((path.clone(), field.to_owned(), value));
+        ControlFlow::Continue(())
+    })?;
+    for (path, field, value) in changes {
         layer.data_mut().set_field(&path, &field, value);
     }
     Ok(())
 }
 
-/// Whether [`rewrite_embedded_paths`] would change any embedded path in `data`:
-/// a relationship/connection/internal-reference target into a moved or deleted
-/// object. The read-only preflight twin of [`rewrite_embedded_paths`], so
-/// [`layers_to_edit`](NamespaceEditor::layers_to_edit) reports a layer the fixup
+/// Whether [`rewrite_embedded_paths`] would change any embedded path in `data`
+/// (a relationship/connection/internal-reference target into a moved or
+/// deleted object), or fail. The read-only preflight twin of
+/// [`rewrite_embedded_paths`], so
+/// [`touched_layers`](NamespaceEditor::touched_layers) names a layer the fixup
 /// rewrites even when it holds no source spec and no relocate of its own.
+/// Stops at the first rewrite.
 fn layer_fixup_touches(
     data: &dyn sdf::AbstractData,
     rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
-) -> Result<bool, NamespaceEditError> {
-    Ok(!embedded_path_rewrites(data, rewrite)?.is_empty())
+) -> bool {
+    !matches!(
+        embedded_path_rewrites(data, rewrite, |_, _, _| ControlFlow::Break(())),
+        Ok(ControlFlow::Continue(()))
+    )
 }
 
 /// Rewrite one embedded namespace path for a mapped edit: lift it to composed
@@ -1744,6 +1862,8 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashSet;
     use std::rc::Rc;
+
+    use tempfile::TempDir;
 
     use super::*;
     use crate::sdf::{self, FieldKey, LayerOffset, Specifier, Variability, path};
@@ -2775,11 +2895,11 @@ mod tests {
         assert!(!valid(&stage, "/Ref/Inner"));
     }
 
-    /// A mapped move authors across every layer of the target's own stack, not
-    /// only the layer the target writes to. When a referenced asset's root and
-    /// its sublayer both carry the source spec, both move — leaving no residual
-    /// opinion in the sublayer and needing no relocate, since the content is all
-    /// local to the target's stack.
+    /// A mapped move authors into every layer of the target's own stack that
+    /// holds the source, not only the layer the target writes to. When a
+    /// referenced asset's root and its sublayer both carry the source spec,
+    /// both move — leaving no residual opinion in the sublayer and needing no
+    /// relocate, since the content is all local to the target's stack.
     #[test]
     fn mapped_within_stack_residue() {
         let mut root = sdf::Layer::new_in_memory("root.usda");
@@ -3032,12 +3152,11 @@ mod tests {
         assert_eq!(editor.layers_to_edit().unwrap(), vec!["model.usda".to_string()]);
     }
 
-    /// `layers_to_edit` reports a target-stack layer the fixup rewrites even when
-    /// it holds no source spec: a referenced asset's sublayer carrying only a
-    /// relationship target to the moved prim is rewritten by `apply`, so the
-    /// preflight must name it alongside the layer holding the moved spec.
-    #[test]
-    fn mapped_layers_to_edit_fixup_only() {
+    /// A `/Ref` referencing `model.usda`'s `/Model`, which holds `/Model/A`
+    /// and sublayers `model_sub.usda`, holding what `sub` authors. The edit
+    /// target is the reference arc, whose stack is `model.usda` and its
+    /// sublayer.
+    fn mapped_stage(sub: impl FnOnce(&mut sdf::LayerEdit<'_>)) -> Stage {
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
@@ -3062,27 +3181,103 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
         });
         let mut model_sub = sdf::Layer::new_in_memory("model_sub.usda");
-        edit_layer(&mut model_sub, |e| {
-            sdf::RelationshipSpec::new(e.data_mut(), "/Model/B.rel", Variability::Varying, false).unwrap();
-            e.data_mut().set_field(
-                &path("/Model/B.rel").unwrap(),
-                FieldKey::TargetPaths.as_str(),
-                vt::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
-            );
-        });
+        edit_layer(&mut model_sub, sub);
         let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, pcp::Diagnostics::default());
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
         stage.set_edit_target(target).unwrap();
+        stage
+    }
 
-        let mut editor = NamespaceEditor::new(&stage);
+    /// Authors `/Model/B.rel` targeting `/Model/A`.
+    fn rel_to_a(e: &mut sdf::LayerEdit<'_>) {
+        sdf::RelationshipSpec::new(e.data_mut(), "/Model/B.rel", Variability::Varying, false).unwrap();
+        e.data_mut().set_field(
+            &path("/Model/B.rel").unwrap(),
+            FieldKey::TargetPaths.as_str(),
+            vt::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
+        );
+    }
+
+    /// The batch renaming `/Ref/A` to `/Ref/Renamed` through the reference.
+    fn rename_ref_a(stage: &Stage) -> NamespaceEditor {
+        let mut editor = NamespaceEditor::new(stage);
         editor
             .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
             .unwrap();
-        let layers = editor.layers_to_edit().unwrap();
-        assert!(layers.contains(&"model.usda".to_string()), "got {layers:?}");
-        assert!(layers.contains(&"model_sub.usda".to_string()), "got {layers:?}");
+        editor
+    }
+
+    /// `layers_to_edit` reports a target-stack layer the fixup rewrites even
+    /// when it holds no source spec: a referenced asset's sublayer carrying
+    /// only a relationship target to the moved prim is rewritten by `apply`, so
+    /// the preflight names it after the layer holding the moved spec.
+    #[test]
+    fn mapped_layers_to_edit_fixup_only() {
+        let stage = mapped_stage(rel_to_a);
+        let layers = rename_ref_a(&stage).layers_to_edit().unwrap();
+        assert_eq!(layers, ["model.usda", "model_sub.usda"]);
+    }
+
+    /// A destination whose only spec, in a sublayer, an earlier edit of the
+    /// batch removes is free for a later move.
+    #[test]
+    fn vacated_dst_sublayer() {
+        let (_dir, stage, _sub) = guarded_stage("def \"X\" {\n    def \"Y\" {}\n}");
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .delete_prim(path("/X/Y").unwrap())
+            .unwrap()
+            .move_prim(path("/A").unwrap(), path("/X/Y").unwrap())
+            .unwrap();
+        editor.apply().unwrap();
+        assert!(valid(&stage, "/X/Y"));
+        assert!(!valid(&stage, "/A"));
+    }
+
+    /// Through a mapped target, a spec at the destination in a target-stack
+    /// layer the batch does not write blocks the move, where the stage
+    /// composes nothing there (beneath an inactive prim), and a borrow of that
+    /// layer does not turn it into `Busy`.
+    #[test]
+    fn mapped_dst_outside() {
+        let stage = mapped_stage(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Model/X").unwrap(),
+                FieldKey::Active.as_str(),
+                vt::Value::Bool(false),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Model/X/Y", Specifier::Def, "").unwrap();
+        });
+        let sub = stage.layer("model_sub.usda").unwrap().expect("sublayer");
+        let _guard = sub.try_borrow().unwrap();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/X/Y").unwrap())
+            .unwrap();
+        assert!(matches!(editor.apply(), Err(NamespaceEditError::DestinationExists(_))));
+    }
+
+    /// Through a mapped target, a borrow of a target-stack layer the batch
+    /// leaves as it is does not stop the batch, and one of a layer the fixup
+    /// rewrites does.
+    #[test]
+    fn mapped_guard_layers() {
+        let stage = mapped_stage(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Other", Specifier::Def, "").unwrap();
+        });
+        let sub = stage.layer("model_sub.usda").unwrap().expect("sublayer");
+        let guard = sub.try_borrow().unwrap();
+        rename_ref_a(&stage).apply().unwrap();
+        assert!(valid(&stage, "/Ref/Renamed"));
+        drop(guard);
+
+        let stage = mapped_stage(rel_to_a);
+        let sub = stage.layer("model_sub.usda").unwrap().expect("sublayer");
+        let _guard = sub.try_borrow().unwrap();
+        assert!(is_busy(&rename_ref_a(&stage).apply()));
     }
 
     /// A `/Ref` referencing `model.usda`'s `/Model`, with the root layer also
@@ -4384,6 +4579,41 @@ mod tests {
         assert!(!valid(&stage, "/Moved/Geom"));
     }
 
+    /// A sublayer two sublayers share is named once.
+    #[test]
+    fn shared_sublayer_once() {
+        let (_dir, stage) = usd::stage::tests::scene(&[
+            ("root.usda", "(\n    subLayers = [@./a.usda@, @./b.usda@]\n)"),
+            ("a.usda", "(\n    subLayers = [@./common.usda@]\n)"),
+            ("b.usda", "(\n    subLayers = [@./common.usda@]\n)"),
+            ("common.usda", "def \"A\" {}"),
+        ])
+        .unwrap();
+        let layers = rename_a(&stage).layers_to_edit().unwrap();
+        assert_eq!(layers.len(), 1, "got {layers:?}");
+        assert!(layers[0].ends_with("common.usda"), "got {layers:?}");
+    }
+
+    /// A borrow of a sublayer the batch writes only for its relocates stops
+    /// the batch with `Busy`; released, the batch moves the relocated prim.
+    #[test]
+    fn guard_relocate_layer_busy() {
+        let stage = sublayer_relocate_stage(("/Ref/Orig", "/Local/Geom"), &["Orig"]);
+        let sub = stage.layer("sub.usda").unwrap().expect("sublayer");
+        let move_geom = || {
+            let mut editor = NamespaceEditor::new(&stage);
+            editor
+                .move_prim(path("/Local/Geom").unwrap(), path("/Final").unwrap())
+                .unwrap();
+            editor
+        };
+        let guard = sub.try_borrow().unwrap();
+        assert!(is_busy(&move_geom().apply()));
+        drop(guard);
+        move_geom().apply().unwrap();
+        assert!(valid(&stage, "/Final"));
+    }
+
     /// Renaming a prim that owns a subroot reference (`@model@</Model/Geom>`)
     /// moves the local spec that carries the reference; the arc is authored at
     /// the prim itself, so no relocate is needed and the rename is not rejected.
@@ -4763,6 +4993,92 @@ mod tests {
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// A stage over `root.usda`, which defines `/A` and sublayers `sub.usda`
+    /// holding `sub`, and a handle to that sublayer. The directory holds the
+    /// files for as long as the stage reads them.
+    fn guarded_stage(sub: &str) -> (TempDir, Stage, sdf::LayerHandle) {
+        let root = "(\n    subLayers = [@./sub.usda@]\n)\ndef \"A\" {}";
+        let (dir, stage) = usd::stage::tests::scene(&[("root.usda", root), ("sub.usda", sub)]).unwrap();
+        let sub = stage
+            .layer_stack()
+            .into_iter()
+            .find(|id| id.ends_with("sub.usda"))
+            .unwrap();
+        let sub = stage.layer(&sub).unwrap().expect("the sublayer is loaded");
+        (dir, stage, sub)
+    }
+
+    /// The batch renaming `/A` to `/B`.
+    fn rename_a(stage: &Stage) -> NamespaceEditor {
+        let mut editor = NamespaceEditor::new(stage);
+        editor
+            .rename_prim(&stage.prim(path("/A").unwrap()).unwrap(), "B")
+            .unwrap();
+        editor
+    }
+
+    fn is_busy(result: &Result<(), NamespaceEditError>) -> bool {
+        matches!(
+            result,
+            Err(NamespaceEditError::Stage(StageAuthoringError::Registry(
+                sdf::LayerError::Busy
+            )))
+        )
+    }
+
+    /// A borrow of a stack layer the batch neither writes nor validates against
+    /// does not stop it.
+    #[test]
+    fn guard_untouched_layer() {
+        let (_dir, stage, sub) = guarded_stage("def \"Unrelated\" {}");
+        let guard = sub.try_borrow().unwrap();
+        let mut editor = rename_a(&stage);
+        editor.can_apply().unwrap();
+        editor.apply().unwrap();
+        assert!(valid(&stage, "/B"));
+        assert!(guard.prim("/Unrelated").unwrap().is_some(), "the guard still reads");
+    }
+
+    /// A borrow of a layer holding the source stops the batch with `Busy`,
+    /// changing nothing.
+    #[test]
+    fn guard_source_layer_busy() {
+        let (_dir, stage, sub) = guarded_stage("over \"A\" {}");
+        let guard = sub.try_borrow().unwrap();
+        let mut editor = rename_a(&stage);
+        assert!(is_busy(&editor.can_apply()));
+        assert!(is_busy(&editor.apply()));
+        drop(guard);
+        assert!(valid(&stage, "/A"), "nothing moved");
+    }
+
+    /// A borrow of a layer the fixup alone rewrites, holding a relationship
+    /// into the source, stops the batch with `Busy`.
+    #[test]
+    fn guard_fixup_layer_busy() {
+        let (_dir, stage, sub) = guarded_stage("def \"Other\" {\n    rel r = </A>\n}");
+        let guard = sub.try_borrow().unwrap();
+        assert!(is_busy(&rename_a(&stage).apply()));
+        drop(guard);
+        rename_a(&stage).apply().unwrap();
+        assert_eq!(rel_targets(&stage, "/Other.r"), vec!["/B"]);
+    }
+
+    /// A spec at the destination in a layer the batch does not write blocks
+    /// the move, where the stage composes nothing there (beneath an inactive
+    /// prim), and a borrow of that layer does not turn it into `Busy`.
+    #[test]
+    fn dst_in_other_layer() {
+        let (_dir, stage, sub) = guarded_stage("def \"X\" (\n    active = false\n) {\n    def \"Y\" {}\n}");
+        let _guard = sub.try_borrow().unwrap();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/A").unwrap(), path("/X/Y").unwrap()).unwrap();
+        assert!(matches!(
+            editor.apply(),
+            Err(NamespaceEditError::DestinationExists(dst)) if dst == path("/X/Y").unwrap()
         ));
     }
 }
