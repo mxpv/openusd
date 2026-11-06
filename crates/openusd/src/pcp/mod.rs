@@ -136,7 +136,8 @@
 //!      `AttributeQuery`'s resolved source) and clears the resolved-target memos
 //!      the edit restaled.
 //!    - Type — a prim's schema identity moved, through `typeName`, `apiSchemas`,
-//!      or the root's `fallbackPrimTypes`, whose reach no path can scope.
+//!      or the stage's `fallbackPrimTypes` (its session and root layers),
+//!      whose reach no path can scope.
 //!
 //!    Layer-stack-tier flags (`subLayers`, sublayer offsets,
 //!    `timeCodesPerSecond`, `expressionVariables`, `layerRelocates`) recompose

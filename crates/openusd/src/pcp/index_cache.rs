@@ -1558,7 +1558,8 @@ impl IndexCache {
     }
 
     /// The current type-opinion epoch, which advances once per change batch that
-    /// authored `typeName`, `apiSchemas`, or the root's `fallbackPrimTypes`.
+    /// authored `typeName`, `apiSchemas`, or the root's `fallbackPrimTypes` in
+    /// the stage's root or session layer.
     ///
     /// A memo of composed schema identities stamps this *and*
     /// [`population_epoch`](Self::population_epoch): those fields are what the

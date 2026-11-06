@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::mem;
 use std::path::Path as FsPath;
 use std::rc::Rc;
 
@@ -122,7 +123,7 @@ fn author_keeps_sibling_indexed() {
 /// `UsdStage` recomposes it, while its index stays: neither field
 /// restructures composition.
 #[test]
-fn prim_type_and_kind_edits_resync() -> Result<()> {
+fn type_kind_resync() -> Result<()> {
     let stage = open_in_memory();
     stage.define_prim("/Foo")?.set_type_name("Xform")?;
     stage.define_prim("/Foo/Child")?;
@@ -138,6 +139,40 @@ fn prim_type_and_kind_edits_resync() -> Result<()> {
     let notices = notices.borrow();
     assert_eq!(notices.resynced, paths(&["/Foo", "/Foo"]));
     assert!(notices.changed_info_only.is_empty(), "{:?}", notices.changed_info_only);
+    Ok(())
+}
+
+/// A `fallbackPrimTypes` edit resyncs the whole stage from the root layer,
+/// which the stage reads it from, and nothing from a sublayer, which it
+/// does not.
+#[test]
+fn fallback_types_resync() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("sub.usda"), "#usda 1.0\n")?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n\ndef \"A\"\n{\n}\n",
+    )?;
+    let stage = usd::Stage::open(root.to_str().expect("utf-8 temp path"))?;
+    let _ = stage.prim("/A")?.type_name()?;
+    let notices = capture_notices(&stage);
+
+    let mut fallbacks = vt::Dictionary::new();
+    fallbacks.insert("Light".into(), vt::Value::token_vec(["Scope"]));
+    for (leaf, resyncs) in [("sub.usda", false), ("root.usda", true)] {
+        stage.edit_layer(&identifier_by_leaf(&stage, leaf), |e| {
+            e.pseudo_root_mut()?
+                .set("fallbackPrimTypes", vt::Value::Dictionary(fallbacks.clone()));
+            Ok(())
+        })?;
+        let resynced = mem::take(&mut notices.borrow_mut().resynced);
+        assert_eq!(
+            resynced.contains(&sdf::Path::abs_root()),
+            resyncs,
+            "{leaf}: {resynced:?}"
+        );
+    }
     Ok(())
 }
 

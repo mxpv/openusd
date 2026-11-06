@@ -48,7 +48,8 @@
 //!   to name are reported (`apply_default_prim_edits`). Neither half is the
 //!   layer-stack tier, and the report is not C++-identical — see the parity notes
 //!   in the module docs.
-//! - `fallbackPrimTypes` on the root → type.
+//! - `fallbackPrimTypes` on the root of the stage's root or session layer →
+//!   type.
 //! - `clips` / `clipSets` appearing or disappearing → significant, because a
 //!   prim index caches whether value clips can source it at all
 //!   ([`PrimIndex::authors_clips`](super::PrimIndex::authors_clips)) and every
@@ -73,8 +74,9 @@
 //! moved. A prim C++ `UsdStage` recomposes for notification is reported as a
 //! resync of its subtree (C++ `recomposeChanges`): its children reordered, or
 //! its `typeName`, `apiSchemas`, `kind`, `specifier`, `active` or clip
-//! metadata edited, or the root's `fallbackPrimTypes`. A properties reorder
-//! is an info change. Collected only when a sink is listening.
+//! metadata edited, or the root's `fallbackPrimTypes` in the stage's root or
+//! session layer. A properties reorder is an info change. Collected only when
+//! a sink is listening.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem;
@@ -128,7 +130,8 @@ pub(crate) struct Changes {
     /// its identifier.
     edited_layers: HashSet<LayerId>,
     /// Whether this round touched a prim's schema identity — `typeName`,
-    /// `apiSchemas`, or the root's `fallbackPrimTypes`.
+    /// `apiSchemas`, or the root's `fallbackPrimTypes` in the stage's root or
+    /// session layer.
     type_opinions: bool,
     /// Whether this round authored `subLayers` or `expressionVariables`,
     /// which can select a repaired sublayer again
@@ -557,11 +560,16 @@ impl Changes {
     pub fn did_change(&mut self, cache: &IndexCache, graph: &LayerGraph, changes: &[LayerChanges<'_>]) {
         for edit in changes {
             self.edited_layers.insert(edit.layer);
+            // Stage metadata, `fallbackPrimTypes` among it, resolves from the
+            // stage's root and session layers, the two C++ `UsdStage` watches
+            // for a change to it (`_IsFallbackPrimTypesChange`).
+            let stage_layer = graph.stage_metadata_layers().any(|id| id == edit.layer);
             for (path, entry) in edit.changes.entries() {
                 self.retries_sublayers |= [FieldKey::SubLayers, FieldKey::ExpressionVariables]
                     .iter()
                     .any(|key| entry.changed(key.as_str()));
-                self.apply_effects(cache, graph, edit, path, Self::effects_of(path, entry));
+                let effects = Self::effects_of(path, entry, stage_layer);
+                self.apply_effects(cache, graph, edit, path, effects);
             }
         }
     }
@@ -575,29 +583,30 @@ impl Changes {
     /// which is a decision rather than a gap. A prim to
     /// [rebuild](Self::rebuilds) is reported as a resync of its subtree, as
     /// C++ `UsdStage` reports it, and a properties reorder names the prim as
-    /// an info change.
-    fn effects_of(path: &Path, entry: &ChangeEntry) -> InvalidationEffects {
+    /// an info change. `stage_layer` says whether the edited layer is one the
+    /// stage reads its own metadata from: its root or session layer.
+    fn effects_of(path: &Path, entry: &ChangeEntry, stage_layer: bool) -> InvalidationEffects {
         let mut effects = InvalidationEffects::default();
         if entry.is_child_bookkeeping() {
             return effects;
         }
-        let prim_report = if Self::rebuilds(path, entry) {
-            Report::Rebuild
-        } else {
-            Report::Info
-        };
+        let report = |rebuild| if rebuild { Report::Rebuild } else { Report::Info };
         if path.is_abs_root() {
             effects.stack = Self::stack_flags(entry);
             effects.default_prim = entry.changed(FieldKey::DefaultPrim.as_str());
             // `fallbackPrimTypes` maps an unknown authored type to a substitute,
             // so editing it can move the schema identity of every prim on the
-            // stage — no path names its reach.
-            effects.type_opinion = entry.changed(FieldKey::FallbackPrimTypes.as_str());
+            // stage — no path names its reach. Only an edit to a layer the
+            // stage reads it from counts.
+            let fallbacks = stage_layer && entry.changed(FieldKey::FallbackPrimTypes.as_str());
+            effects.type_opinion = fallbacks;
             // The pseudo-root's own composed metadata — `startTimeCode`,
             // `customLayerData`, anything read off it — moves like any other
             // value.
             effects.value = Some(ValueScope::Prim);
-            effects.report = Some(prim_report);
+            // A `fallbackPrimTypes` edit the stage reads recomposes the whole
+            // stage (C++ `_IsFallbackPrimTypesChange`).
+            effects.report = Some(report(Self::rebuilds(entry) || fallbacks));
             return effects;
         }
         if path.is_property() {
@@ -618,7 +627,7 @@ impl Changes {
         // A significant one is named twice over — the resync tier reports it as
         // well — and the reporting layer drops the weaker of the two. A prim to
         // rebuild is named as a resync of its subtree.
-        effects.report = Some(prim_report);
+        effects.report = Some(report(Self::rebuilds(entry)));
 
         // The fields a prim's schema identity is composed from. `apiSchemas` is
         // significant as well, so this rides alongside that effect rather than
@@ -920,14 +929,18 @@ impl Changes {
         self.record_author(Authored::Significant, layer, path);
     }
 
-    /// Whether the prim entry at `path` makes C++ `UsdStage` recompose the
-    /// prim for notification (`_ProcessPendingChanges`): its children
-    /// reordered, or a field its composed prim is built from edited
-    /// (`typeName` and `apiSchemas` through its prim type info, `kind`,
-    /// `specifier`, `active`, clip metadata, and the root's
-    /// `fallbackPrimTypes`). The prim's index need not drop; a consumer
-    /// rebuilds the prim and its subtree.
-    fn rebuilds(path: &Path, entry: &ChangeEntry) -> bool {
+    /// Whether a prim entry makes C++ `UsdStage` recompose the prim for
+    /// notification (`_ProcessPendingChanges`): its children reordered, or a
+    /// field its composed prim is built from edited (`typeName` and
+    /// `apiSchemas` through its prim type info, `kind`, `specifier`,
+    /// `active` and clip metadata). The prim's index need not drop; a
+    /// consumer rebuilds the prim and its subtree.
+    ///
+    /// A removed spec lists the fields it carried, but C++ records no
+    /// `infoChanged` for a removal, so only a reorder makes a removal
+    /// rebuild. An added spec counts: C++ authors its fields after creating
+    /// it.
+    fn rebuilds(entry: &ChangeEntry) -> bool {
         const FIELDS: [FieldKey; 5] = [
             FieldKey::TypeName,
             FieldKey::ApiSchemas,
@@ -935,10 +948,15 @@ impl Changes {
             FieldKey::Specifier,
             FieldKey::Active,
         ];
-        entry.flags.contains(sdf::ChangeFlags::REORDER_CHILDREN)
-            || FIELDS.iter().any(|field| entry.changed(field.as_str()))
+        if entry.flags.contains(sdf::ChangeFlags::REORDER_CHILDREN) {
+            return true;
+        }
+        if entry.flags.intersects(sdf::ChangeFlags::REMOVE) && !entry.flags.intersects(sdf::ChangeFlags::ADD) {
+            return false;
+        }
+        // TODO(perf): one pass over the entry's fields answers both tests.
+        FIELDS.iter().any(|field| entry.changed(field.as_str()))
             || entry.fields().any(|(field, _)| clip::is_clip_field(field.as_str()))
-            || (path.is_abs_root() && entry.changed(FieldKey::FallbackPrimTypes.as_str()))
     }
 
     /// Authoring this field on a prim path forces a graph rebuild.
@@ -969,18 +987,6 @@ impl Changes {
             || field == FieldKey::Relocates.as_str()
     }
 
-    /// Apply phase: commit the planned invalidations to `cache`.
-    ///
-    /// Returns the [`ApplyOutcome`] observers must be told on top of the
-    /// per-path entries the diff phase recorded. A layer-stack
-    /// [`SIGNIFICANT`](LayerStackChanges::SIGNIFICANT) edit drops the affected
-    /// indices wholesale and resyncs the whole stage; an `expressionVariables`
-    /// edit resyncs exactly the dependents it dropped and, on the separate
-    /// asset-path channel, names the subtrees whose `asset` values may now
-    /// resolve elsewhere. A vars edit that changed no composed set (an
-    /// identical re-authoring, or variables on a non-root member layer, which
-    /// contribute to no stack) reports nothing on either channel, matching the
-    /// C++ five-step diff's step-1 no-op.
     /// Whether this pass can change which prims exist, how they are named, or
     /// whether they are active — the question
     /// [`IndexCache::invalidate_population`] answers for. Every tier but the
@@ -996,6 +1002,18 @@ impl Changes {
             || !self.cache.did_change_specs.is_empty()
     }
 
+    /// Apply phase: commit the planned invalidations to `cache`.
+    ///
+    /// Returns the [`ApplyOutcome`] observers must be told on top of the
+    /// per-path entries the diff phase recorded. A layer-stack
+    /// [`SIGNIFICANT`](LayerStackChanges::SIGNIFICANT) edit drops the affected
+    /// indices wholesale and resyncs the whole stage; an `expressionVariables`
+    /// edit resyncs exactly the dependents it dropped and, on the separate
+    /// asset-path channel, names the subtrees whose `asset` values may now
+    /// resolve elsewhere. A vars edit that changed no composed set (an
+    /// identical re-authoring, or variables on a non-root member layer, which
+    /// contribute to no stack) reports nothing on either channel, matching the
+    /// C++ five-step diff's step-1 no-op.
     pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) -> ApplyOutcome {
         // Retire the transient query diagnostics: this is the single funnel
         // every authoring and layer-stack edit passes through, so a value-only
@@ -1367,6 +1385,21 @@ mod tests {
         graph.all_ids().first().copied().unwrap_or(LayerId::INVALID)
     }
 
+    /// The entry `cl` records at `path`.
+    fn entry_at<'a>(cl: &'a ChangeList, path: &str) -> &'a ChangeEntry {
+        cl.iter()
+            .find(|(at, _)| at == &p(path))
+            .map(|(_, entry)| entry)
+            .expect("an entry at the path")
+    }
+
+    /// A graph whose one layer is the stage's root layer, and an empty cache.
+    fn rooted_cache() -> (LayerGraph, IndexCache) {
+        let root = sdf::Layer::new("root.usda", Box::new(sdf::Data::rooted()));
+        let graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        (graph, empty_cache().1)
+    }
+
     fn empty_cache() -> (LayerGraph, IndexCache) {
         let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
         (
@@ -1568,7 +1601,7 @@ mod tests {
             ("/Foo", FieldKey::Kind.as_str(), false),
             ("/Foo.x", FieldKey::Default.as_str(), false),
         ] {
-            let (mut graph, mut cache) = empty_cache();
+            let (mut graph, mut cache) = rooted_cache();
             let before = cache.type_opinion_epoch();
             let mut cl = ChangeList::new();
             cl.entry_mut(&p(path)).note(field, sdf::FieldChange::Value);
@@ -1582,6 +1615,17 @@ mod tests {
                 if advances { "advance" } else { "leave" }
             );
         }
+
+        // A layer the stage reads no metadata from moves no fallback map.
+        let (mut graph, mut cache) = empty_cache();
+        let before = cache.type_opinion_epoch();
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&p("/"))
+            .note(FieldKey::FallbackPrimTypes.as_str(), sdf::FieldChange::Value);
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(first_layer(&graph), &cl)]);
+        changes.apply(&mut cache, &mut graph);
+        assert_eq!(cache.type_opinion_epoch(), before);
     }
 
     /// The population epoch tracks what can change which prims exist, not every
@@ -1760,8 +1804,8 @@ mod tests {
         cl.entry_mut(&p("/S")).flags |=
             ChangeFlags::REMOVE_NON_INERT_PRIM | ChangeFlags::ADD_INERT_PRIM | ChangeFlags::REORDER_CHILDREN;
         let effects = |path: &str| {
-            let (_, entry) = cl.iter().find(|(at, _)| at == &p(path)).expect("an entry at the path");
-            Changes::effects_of(&p(path), entry)
+            let entry = entry_at(&cl, path);
+            Changes::effects_of(&p(path), entry, true)
         };
 
         let children = effects("/C");
@@ -1773,6 +1817,56 @@ mod tests {
         let replaced = effects("/S");
         assert_eq!(replaced.report, Some(Report::Rebuild));
         assert!(replaced.significant);
+    }
+
+    /// The fields C++ `UsdStage` recomposes a prim for report it as a
+    /// rebuild, and a root `fallbackPrimTypes` edit does so only from a
+    /// layer the stage reads its metadata from.
+    #[test]
+    fn rebuild_effects() {
+        for (path, field, stage_layer, rebuild) in [
+            ("/Foo", FieldKey::TypeName, true, true),
+            ("/Foo", FieldKey::ApiSchemas, true, true),
+            ("/Foo", FieldKey::Kind, true, true),
+            ("/Foo", FieldKey::Specifier, true, true),
+            ("/Foo", FieldKey::Active, true, true),
+            ("/Foo", FieldKey::Clips, true, true),
+            ("/Foo", FieldKey::Documentation, true, false),
+            ("/", FieldKey::FallbackPrimTypes, true, true),
+            ("/", FieldKey::FallbackPrimTypes, false, false),
+        ] {
+            let mut cl = ChangeList::new();
+            cl.entry_mut(&p(path)).note(field.as_str(), sdf::FieldChange::Value);
+            let entry = entry_at(&cl, path);
+            let effects = Changes::effects_of(&p(path), entry, stage_layer);
+            assert_eq!(
+                effects.report == Some(Report::Rebuild),
+                rebuild,
+                "{} at {path}, stage layer {stage_layer}",
+                field.as_str()
+            );
+        }
+
+        // A removed `over` lists the fields it carried, but C++ records no
+        // info change for it.
+        let mut cl = ChangeList::new();
+        let removed = cl.entry_mut(&p("/Foo"));
+        removed.flags |= ChangeFlags::REMOVE_INERT_PRIM;
+        removed.note(FieldKey::Kind.as_str(), sdf::FieldChange::Presence);
+        let entry = entry_at(&cl, "/Foo");
+        assert_eq!(Changes::effects_of(&p("/Foo"), entry, true).report, Some(Report::Info));
+
+        // An added one carrying `kind` rebuilds, as C++ authors the field
+        // after creating the spec.
+        let mut cl = ChangeList::new();
+        let added = cl.entry_mut(&p("/Foo"));
+        added.flags |= ChangeFlags::ADD_INERT_PRIM;
+        added.note(FieldKey::Kind.as_str(), sdf::FieldChange::Presence);
+        let entry = entry_at(&cl, "/Foo");
+        assert_eq!(
+            Changes::effects_of(&p("/Foo"), entry, true).report,
+            Some(Report::Rebuild)
+        );
     }
 
     /// The memo keys the value tier recorded for the prim at `path`.

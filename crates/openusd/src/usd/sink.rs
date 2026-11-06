@@ -238,11 +238,13 @@ pub struct CommittedChange<'a> {
     /// Paths a consumer must re-resolve outright (C++ `ResyncedPaths`).
     /// Composed/stage namespace.
     ///
-    /// A prim path here composes afresh from that prim down: its index and
+    /// A prim path here is one to rebuild from that prim down: its index and
     /// namespace descendants were dropped, a spec of it appeared or vanished,
-    /// or C++ `UsdStage` would recompose it for notification: its children
-    /// reordered, or its `typeName`, `apiSchemas`, `kind`, `specifier`,
-    /// `active` or clip metadata edited. A
+    /// or C++ `UsdStage` would recompose it for notification, keeping its
+    /// index: its children reordered, or its `typeName`, `apiSchemas`,
+    /// `kind`, `specifier`, `active` or clip metadata edited. The absolute
+    /// root is here for the same edits at `/`, its root prims reordered, or
+    /// the stage's root or session layer editing `fallbackPrimTypes`. A
     /// *property* path is one whose spec appeared or vanished: the owning prim
     /// composes exactly as it did, but the property itself is a different object
     /// than it was, so a handle to it must be re-resolved rather than re-read.
