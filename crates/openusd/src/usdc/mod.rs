@@ -651,6 +651,16 @@ mod tests {
         Ok(())
     }
 
+    /// No value type holds a single path, so the writer refuses one.
+    #[test]
+    fn single_path_refused() -> Result<()> {
+        let mut layer = sdf::Data::rooted();
+        layer.set_field(&sdf::Path::abs_root(), "field", vt::Value::Path(sdf::Path::new("/a")?));
+        let error = CrateWriter::write_file(&layer).expect_err("a single path is refused");
+        assert!(matches!(error, sdf::FormatError::Encode { .. }), "{error}");
+        Ok(())
+    }
+
     /// The file the writer returns reads as the file a reader opens from the
     /// same bytes: every spec, field and value agrees.
     #[test]

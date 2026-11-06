@@ -404,9 +404,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             .collect();
 
         // Build parent → children map. Skip empty paths — they can appear in
-        // `Value::Path` / ListOp items as placeholders (e.g. internal payload
-        // paths) and are represented by the reader as the default empty slot
-        // in the paths array.
+        // list-op items as placeholders (e.g. internal payload paths) and are
+        // represented by the reader as the default empty slot in the paths
+        // array.
         let mut children = sdf::PathMap::<Vec<Path>>::default();
         for p in &self.paths.items {
             if p.as_str() == "/" || p.is_empty() {
@@ -736,7 +736,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 reason: "an opaque value is never serialized".into(),
             }),
             Value::Path(_) => Err(FormatError::Encode {
-                reason: "a single path has no crate type; a layer holds a path vector".into(),
+                reason: "no value type holds a single path; a layer holds a path vector".into(),
             }),
 
             // Heterogeneous arrays are produced only by the USDA spline parser;
