@@ -3700,7 +3700,7 @@ impl Stage {
     }
 
     /// The schema type of a prim typed `type_name` with the authored applied
-    /// schemas `applied`, the root layer's `fallbackPrimTypes` standing in for
+    /// schemas `applied`, the stage's `fallbackPrimTypes` standing in for
     /// a type the registry does not know: the identity
     /// [`prim_type_info_composed`](Self::prim_type_info_composed) resolves a
     /// composed prim to, for a type and list given rather than composed.
@@ -3717,8 +3717,10 @@ impl Stage {
     }
 
     /// The registered type to use in place of `type_name`, when the stage's
-    /// root layer names one and the registry does not know the authored type
-    /// (C++ `Usd_PrimTypeInfoCache::ComputeInvalidPrimTypeToFallbackMap`).
+    /// session or root layer names one and the registry does not know the
+    /// authored type (C++
+    /// `Usd_PrimTypeInfoCache::ComputeInvalidPrimTypeToFallbackMap` over
+    /// `UsdStage::GetMetadata`).
     ///
     /// `fallbackPrimTypes` maps each such type to an ordered list of
     /// substitutes; the first the registry knows wins, so an asset written
@@ -3730,7 +3732,7 @@ impl Stage {
             return Ok(None);
         }
         let Some(vt::Value::Dictionary(fallbacks)) =
-            self.field::<vt::Value>(sdf::Path::abs_root(), FALLBACK_PRIM_TYPES)?
+            self.with_cache(|g, c| c.stage_metadata(g, FALLBACK_PRIM_TYPES, pcp::AssetMode::Resolve))?
         else {
             return Ok(None);
         };

@@ -2200,6 +2200,26 @@ mod tests {
         Ok(())
     }
 
+    /// The session layer's `fallbackPrimTypes` maps a type too, as C++
+    /// `UsdStage::GetMetadata` composes it over the root layer's.
+    #[test]
+    fn session_fallback_type() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        fs::write(&root, "#usda 1.0\n\ndef MyStudioLight \"Sun\"\n{\n}\n")?;
+        let session = dir.path().join("session.usda");
+        fs::write(
+            &session,
+            "#usda 1.0\n(\n    fallbackPrimTypes = {\n        token[] MyStudioLight = [\"DistantLight\"]\n    }\n)\n",
+        )?;
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_registry())
+            .session_layer(session.to_str().expect("utf-8 temp path"))
+            .open(root.to_str().expect("utf-8 temp path"))?;
+        assert!(!stage.prim("/Sun")?.prim_definition()?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn fallback_prim_type() -> Result<()> {
         let stage = Stage::builder()
