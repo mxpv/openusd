@@ -62,13 +62,13 @@ fn metadata_fields_registered() {
     ]);
     let registry = SchemaRegistry::builder().register(FIELDS).build().expect("registers");
 
-    let role = registry.metadata_field(&tf::Token::new("role")).expect("registered");
+    let role = registry.metadata_field("role").expect("registered");
     assert_eq!(role.type_name(), &sdf::ValueTypeName::TOKEN);
     assert_eq!(role.applies_to(), MetadataTargets::ATTRIBUTES);
     assert_eq!(role.fallback(), Some(&vt::Value::token("plain")));
     assert_eq!(role.family().as_str(), "fields");
 
-    let hints = registry.metadata_field(&tf::Token::new("hints")).expect("registered");
+    let hints = registry.metadata_field("hints").expect("registered");
     assert_eq!(
         hints.applies_to(),
         MetadataTargets::all(),
@@ -1381,7 +1381,7 @@ static DECLARED: &SchemaFamily<'_> = &SchemaFamily::new(
                 PropertyDecl::attribute("size", "double").fields(&[Field::new("default", || vt::Value::Double(2.0))]),
                 PropertyDecl::attribute("purpose", "token").uniform().fields(&[
                     Field::token("default", "render"),
-                    Field::strings("allowedTokens", &["render", "proxy"]),
+                    Field::tokens("allowedTokens", &["render", "proxy"]),
                     Field::string("displayGroup", "Shape"),
                 ]),
                 PropertyDecl::relationship("proxyPrim").uniform(),

@@ -235,8 +235,8 @@ impl<'a> AttributeBuilder<'a> {
         let metadata = self
             .metadata
             .into_iter()
-            .map(|(key, value)| (key, stage.map_to_spec_value(&path, value)))
-            .collect();
+            .map(|(key, value)| Ok((key, stage.metadata_to_spec(&path, key, value)?)))
+            .collect::<Result<_, StageAuthoringError>>()?;
 
         // A value write stamps the spec itself, so declaring and setting is
         // the one edit rather than two.
@@ -481,13 +481,17 @@ impl Attribute {
     /// edit target's own time frame, and any path expression into its
     /// namespace (C++ `_StageValueToFieldXf`).
     ///
+    /// A value of another type than the field holds is converted to it where
+    /// nothing is lost (an `int` 1 to a `bool`, a string to a `token`), and is
+    /// [`StageAuthoringError::ValueType`] otherwise.
+    ///
     /// A field with a dedicated setter — `default`, `timeSamples`,
     /// `typeName`, `connectionPaths`, `variability`, `custom` — is refused as
     /// [`ReservedField`](StageAuthoringError::ReservedField): those setters
     /// validate what they write, and this call must not bypass them.
     pub fn set_metadata(self, key: &'static str, value: impl Into<vt::Value>) -> Result<Self, StageAuthoringError> {
         authoring::check_reserved(sdf::SpecType::Attribute, key)?;
-        let value = self.stage.map_to_spec_value(&self.path, value);
+        let value = self.stage.metadata_to_spec(&self.path, key, value.into())?;
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())
@@ -2100,13 +2104,12 @@ class Marker "Marker"
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
         // Declaration metadata is readable for a property with no authored
-        // spec. Property metadata parses untyped, so the token list reads back
-        // as a string array.
+        // spec, as the type its field holds.
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
         let allowed = rule.metadata::<vt::Value>("allowedTokens")?;
         assert_eq!(
             allowed,
-            Some(vt::Value::StringVec(vec![
+            Some(vt::Value::TokenVec(vec![
                 "explicitOnly".into(),
                 "expandPrims".into(),
                 "expandPrimsAndProperties".into(),
@@ -2276,10 +2279,12 @@ class Marker "Marker"
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
 
-        // Schema metadata parses untyped, so asking for a variant it does not
-        // hold reads as undeclared rather than failing.
+        // Asking for a type the declaration does not hold reads as
+        // undeclared.
         let rule = stage.attribute("/Sun.collection:lightLink:expansionRule")?;
-        assert_eq!(rule.metadata::<Vec<tf::Token>>("allowedTokens")?, None);
+        assert_eq!(rule.metadata::<f64>("allowedTokens")?, None);
+        let tokens = rule.metadata::<Vec<tf::Token>>("allowedTokens")?.expect("declared");
+        assert_eq!(tokens.len(), 3);
         Ok(())
     }
 

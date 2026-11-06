@@ -567,14 +567,10 @@ pub fn is_root(name: &tf::Token) -> bool {
     }
 }
 
-/// An `allowedTokens` value as the tokens it lists. A layer read with no schema
-/// to type the field holds a list of quoted names as strings.
-///
-/// TODO: type it in the parser instead, which would let this be one read.
+/// An `allowedTokens` value as the tokens it lists.
 pub fn allowed_tokens(value: Option<&vt::Value>) -> Vec<tf::Token> {
     match value {
         Some(vt::Value::TokenVec(tokens)) => tokens.clone(),
-        Some(vt::Value::StringVec(texts)) => texts.iter().map(|text| tf::Token::from(text.as_str())).collect(),
         _ => Vec::new(),
     }
 }

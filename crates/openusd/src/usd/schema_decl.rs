@@ -596,8 +596,7 @@ impl<'a> Field<'a> {
         }
     }
 
-    /// A `string[]`-valued field, which is how a text layer reads the bracketed
-    /// list of an `allowedTokens`.
+    /// A `string[]`-valued field.
     pub const fn strings(name: &'a str, texts: &'a [&'a str]) -> Self {
         Self {
             name,

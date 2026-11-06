@@ -1551,6 +1551,41 @@ impl Stage {
         self.edit_target.borrow().map_to_spec_time(stage_time)
     }
 
+    /// `value`, written as the metadata field `field` of the object at
+    /// `object_path`, as the current edit target authors it: converted by
+    /// [`coerce_metadata`](Self::coerce_metadata), then mapped by
+    /// [`map_to_spec_value`](Self::map_to_spec_value).
+    pub(super) fn metadata_to_spec(
+        &self,
+        object_path: &sdf::Path,
+        field: &str,
+        value: vt::Value,
+    ) -> Result<vt::Value, StageAuthoringError> {
+        let value = self.coerce_metadata(field, value)?;
+        Ok(self.map_to_spec_value(object_path, value))
+    }
+
+    /// `value` as the type the metadata field `field` holds: the type
+    /// [`sdf::registered_field_type`] gives it, or the one a schema family on
+    /// this stage's registry declares. A value of another type is converted
+    /// where the conversion loses nothing, and is
+    /// [`StageAuthoringError::ValueType`] otherwise; a field of no plain type
+    /// takes `value` as it is.
+    pub(super) fn coerce_metadata(&self, field: &str, value: vt::Value) -> Result<vt::Value, StageAuthoringError> {
+        let declared = match sdf::registered_field_type(field) {
+            Some(sdf::FieldType::Value(type_name)) => Some(type_name),
+            Some(_) => None,
+            None => self
+                .schema_registry()
+                .metadata_field(field)
+                .map(|declared| declared.type_name().clone()),
+        };
+        Ok(match declared.filter(|type_name| type_name.kind().is_some()) {
+            Some(type_name) => type_name.coerce(value)?,
+            None => value,
+        })
+    }
+
     /// Maps a stage value authored on the object at `object_path` to the one
     /// the current edit target authors, borrowing the target rather than
     /// cloning it. See [`EditTarget::map_to_spec_value`].
@@ -2292,18 +2327,7 @@ impl Stage {
         value: impl Into<vt::Value>,
     ) -> Result<(), StageAuthoringError> {
         super::authoring::check_reserved(sdf::SpecType::PseudoRoot, field)?;
-        let declared = match sdf::registered_field_type(field) {
-            Some(sdf::FieldType::Value(type_name)) => Some(type_name),
-            Some(_) => sdf::layer_field_type(field),
-            None => self
-                .schema_registry()
-                .metadata_field(&Token::new(field))
-                .map(|declared| declared.type_name().clone()),
-        };
-        let value = match declared.filter(|type_name| type_name.kind().is_some()) {
-            Some(type_name) => type_name.coerce(value.into())?,
-            None => value.into(),
-        };
+        let value = self.coerce_metadata(field, value.into())?;
         self.with_stage_metadata_layer(|layer| {
             layer.pseudo_root_mut()?.set(field, value);
             Ok(())

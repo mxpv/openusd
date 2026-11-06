@@ -96,6 +96,19 @@ pub trait Object: Sized {
         })
     }
 
+    /// Whether the object has a value for the metadata field `key`, authored
+    /// or declared by its schema (C++ `UsdObject::HasMetadata`).
+    fn has_metadata(&self, key: &str) -> Result<bool> {
+        Ok(self.metadata::<vt::Value>(key)?.is_some())
+    }
+
+    /// Whether the object has a value at `key_path` in the dictionary field
+    /// `key`, authored or declared by its schema (C++
+    /// `UsdObject::HasMetadataDictKey`).
+    fn has_metadata_key(&self, key: &str, key_path: &str) -> Result<bool> {
+        Ok(self.metadata_by_key(key, key_path)?.is_some())
+    }
+
     /// Whether a layer authors the metadata field `key` on the object (C++
     /// `UsdObject::HasAuthoredMetadata`). What the object's schema declares
     /// for the field is not an authored opinion.
@@ -428,8 +441,7 @@ mod tests {
     use super::{Object, Property};
     use crate::usd::stage::tests::stage;
     use crate::usd::{SchemaRegistry, Stage};
-    use crate::vt;
-    use crate::{Result, sdf};
+    use crate::{Result, sdf, tf, vt};
 
     /// The fields every object shares author and read back on a prim and
     /// an attribute alike, and clear to their fallbacks.
@@ -514,16 +526,74 @@ mod tests {
         Ok(())
     }
 
-    /// A field holding a value of another type reads as unauthored.
+    /// A field holding a value of another type reads as unauthored. A stage
+    /// write converts a value to its field's type. The test authors the
+    /// mistyped `hidden` on the layer directly, as a crate file can hold it.
     #[test]
     fn mistyped_field_unauthored() -> Result<()> {
         let stage = stage()?;
         let prim = stage
             .define_prim("/A")?
-            .set_metadata(sdf::FieldKey::Hidden.as_str(), vt::Value::Int(1))?
             .set_metadata(sdf::FieldKey::CustomData.as_str(), vt::Value::String("oops".into()))?;
-        assert!(!prim.is_hidden()?);
         assert_eq!(prim.custom_data()?, None);
+
+        let root = stage.root_layer().identifier().to_owned();
+        stage
+            .edit_layer(&root, |edit| {
+                let mut spec = edit.prim_mut("/A")?.expect("a prim spec");
+                spec.set(sdf::FieldKey::Hidden.as_str(), vt::Value::Int(1));
+                Ok(())
+            })
+            .expect("authors");
+        assert!(!prim.is_hidden()?);
+
+        // Handing the mistyped opinion back unchanged writes nothing.
+        let prim = prim.update_metadata(sdf::FieldKey::Hidden.as_str(), |held| held)?;
+        let held = stage
+            .root_layer()
+            .try_borrow()?
+            .data()
+            .try_field(prim.path(), "hidden")?
+            .map(|value| value.into_owned());
+        assert_eq!(held, Some(vt::Value::Int(1)));
+        Ok(())
+    }
+
+    /// A write converts a value to the type its field holds where nothing is
+    /// lost, and refuses one that does not convert.
+    #[test]
+    fn metadata_write_converts() -> Result<()> {
+        let stage = stage()?;
+        let hidden = sdf::FieldKey::Hidden.as_str();
+        let prim = stage.define_prim("/A")?.set_metadata(hidden, vt::Value::Int(1))?;
+        assert!(prim.is_hidden()?);
+        assert!(
+            prim.clone()
+                .set_metadata(hidden, vt::Value::String("oops".into()))
+                .is_err()
+        );
+        let attr = prim.create_attribute("tint", "color3f")?.set_metadata(
+            sdf::FieldKey::ColorSpace.as_str(),
+            vt::Value::String("lin_ap1_scene".into()),
+        )?;
+        assert_eq!(attr.color_space()?, Some(tf::Token::new("lin_ap1_scene")));
+        Ok(())
+    }
+
+    /// Whether a field has a value, and a dictionary field a value at a key
+    /// path.
+    #[test]
+    fn has_metadata_keys() -> Result<()> {
+        let stage = stage()?;
+        let custom_data = sdf::FieldKey::CustomData.as_str();
+        let prim = stage.define_prim("/A")?;
+        assert!(!prim.has_metadata(custom_data)?);
+        assert!(!prim.has_metadata_key(custom_data, "render:pass")?);
+        let prim = prim.set_custom_data_by_key("render:pass", vt::Value::String("beauty".into()))?;
+        assert!(prim.has_metadata(custom_data)?);
+        assert!(prim.has_metadata_key(custom_data, "render:pass")?);
+        assert!(prim.has_metadata_key(custom_data, "render")?);
+        assert!(!prim.has_metadata_key(custom_data, "render:quality")?);
         Ok(())
     }
 

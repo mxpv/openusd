@@ -70,8 +70,8 @@ pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern,
 pub(crate) use path_table::Covering;
 pub use path_table::PathTable;
 pub use schema::{
-    ANY_TYPE, ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, layer_field_type,
-    registered_field_type, schema_field_type,
+    ANY_TYPE, ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, registered_field_type,
+    schema_field_type,
 };
 pub(crate) use spec::prim_chain;
 pub use spec::{

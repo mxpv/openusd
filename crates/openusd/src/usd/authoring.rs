@@ -1045,6 +1045,10 @@ pub(super) fn update_metadata<P: PropertySpecKind>(
         if value == held {
             return Ok(());
         }
+        let value = value.map(|value| stage.coerce_metadata(key, value)).transpose()?;
+        if value == held {
+            return Ok(());
+        }
         match (data.spec_type(&path), value) {
             (None, None) => Ok(()),
             (Some(found), _) if found != P::KIND => Err(kind_mismatch(&path, P::KIND, found)),
@@ -1309,8 +1313,8 @@ where
             vt::Value::Dictionary(dict)
         }
         Some(authored) => authored,
-        // Schema metadata parses untyped, so a declaration may hold a variant
-        // the caller did not ask for; that is "not declared", not an error.
+        // A declaration may hold another type than the caller asks for; that
+        // is "not declared", not an error.
         None => return Ok(schema_field(stage, path, key)?.and_then(|value| T::try_from(value).ok())),
     };
     super::decode_value(Some(authored))
