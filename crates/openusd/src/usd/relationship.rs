@@ -304,10 +304,14 @@ impl Relationship {
     /// `value` is in stage time, so any `timecode` it holds is mapped into the
     /// edit target's own time frame (C++ `_StageValueToFieldXf`).
     ///
+    /// A value of another type than the field holds is converted to it where
+    /// nothing is lost (an `int` 1 to a `bool`, a string to a `token`), and is
+    /// [`StageAuthoringError::ValueType`] otherwise.
+    ///
     /// [`Attribute::set_metadata`]: crate::usd::Attribute::set_metadata
     pub fn set_metadata(self, key: &'static str, value: impl Into<vt::Value>) -> Result<Self, StageAuthoringError> {
         authoring::check_reserved(sdf::SpecType::Relationship, key)?;
-        let value = self.stage.map_to_spec_value(&self.path, value);
+        let value = self.stage.metadata_to_spec(&self.path, key, value.into())?;
         self.edit(|spec| {
             spec.set(key, value);
             Ok(())

@@ -731,14 +731,22 @@ mod tests {
         Ok(())
     }
 
-    /// An `elementSize` that is no `int` is an error, not the fallback.
+    /// An `elementSize` that is no `int` is an error, not the fallback. The
+    /// stage-tier setter converts a value to the field's type. The test
+    /// authors the mistyped value on the layer directly.
     #[test]
     fn non_int_size_errors() -> Result {
         let primvar = floats(&[1.0])?;
-        primvar
-            .attribute()
-            .clone()
-            .set_metadata(tokens::ELEMENT_SIZE, vt::Value::Float(2.0))?;
+        let path = primvar.attribute().path().clone();
+        let stage = primvar.attribute().stage().clone();
+        let root = stage.root_layer().identifier().to_owned();
+        stage
+            .edit_layer(&root, |edit| {
+                let mut spec = edit.attribute_mut(path)?.expect("an authored spec");
+                spec.set(tokens::ELEMENT_SIZE, vt::Value::Float(2.0));
+                Ok(())
+            })
+            .expect("authors");
         assert!(primvar.element_size().is_err());
         Ok(())
     }

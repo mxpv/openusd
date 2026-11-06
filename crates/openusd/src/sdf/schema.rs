@@ -87,6 +87,76 @@ impl AsRef<str> for FieldKey {
 }
 
 impl FieldKey {
+    /// The type of the plain value the field holds, as C++ `SdfSchema`
+    /// registers its fallback: `hidden` a `bool`, `colorSpace` a `token`,
+    /// `allowedTokens` a `token[]`. A reader takes the field's literal as that
+    /// type, and a writer converts a value to it.
+    ///
+    /// `None` for a field that holds a dictionary, a list op or one of the
+    /// scene-description types (`specifier`, `references`, `relocates`, ...),
+    /// which have their own grammar, and for `displayUnit`, which is written
+    /// as a bare unit name.
+    pub const fn value_type(self) -> Option<ValueTypeName> {
+        use FieldKey as F;
+        use ValueTypeName as T;
+        Some(match self {
+            F::Active | F::Custom | F::Hidden | F::HasOwnedSubLayers | F::Instanceable | F::NoLoadHint => T::BOOL,
+            F::ColorManagementSystem | F::ColorSpace | F::DefaultPrim | F::Kind | F::SymmetryFunction | F::TypeName => {
+                T::TOKEN
+            }
+            F::Comment
+            | F::DisplayGroup
+            | F::DisplayName
+            | F::Documentation
+            | F::Owner
+            | F::Prefix
+            | F::SessionOwner
+            | F::Suffix
+            | F::SymmetricPeer => T::STRING,
+            F::AllowedTokens | F::PrimOrder | F::PropertyOrder => T::TOKEN_ARRAY,
+            F::DisplayGroupOrder => T::STRING_ARRAY,
+            F::EndFrame
+            | F::EndTimeCode
+            | F::FramesPerSecond
+            | F::StartFrame
+            | F::StartTimeCode
+            | F::TimeCodesPerSecond => T::DOUBLE,
+            F::FramePrecision => T::INT,
+            F::ColorConfiguration => T::ASSET,
+            F::ApiSchemas
+            | F::AssetInfo
+            | F::Clips
+            | F::ClipSets
+            | F::ConnectionPaths
+            | F::CustomData
+            | F::CustomLayerData
+            | F::Default
+            | F::DisplayUnit
+            | F::ExpressionVariables
+            | F::FallbackPrimTypes
+            | F::InheritPaths
+            | F::LayerRelocates
+            | F::Payload
+            | F::Permission
+            | F::PrefixSubstitutions
+            | F::References
+            | F::Relocates
+            | F::Specializes
+            | F::Specifier
+            | F::Spline
+            | F::SubLayers
+            | F::SubLayerOffsets
+            | F::SuffixSubstitutions
+            | F::SymmetryArgs
+            | F::SymmetryArguments
+            | F::TargetPaths
+            | F::TimeSamples
+            | F::VariantSelection
+            | F::Variability
+            | F::VariantSetNames => return None,
+        })
+    }
+
     /// The field `name` denotes, or `None` where this enum does not name it.
     ///
     /// A schema may declare fields of its own, so a `None` here does not mean
@@ -265,8 +335,9 @@ pub enum FieldType {
     /// A list op whose items are of this type, as `inactiveIds` is an
     /// `int64listop` and so holds `int64` items.
     ListOp(ValueTypeName),
-    /// A value its declaration gives no value type: a core field
-    /// [`FieldKey`] names, or a schema field declared a `dictionary`.
+    /// A value its declaration gives no plain value type: a core field with a
+    /// grammar of its own (see [`FieldKey::value_type`]), or a schema field
+    /// declared a `dictionary`.
     Untyped,
 }
 
@@ -321,37 +392,10 @@ pub const ANY_TYPE: &str = "__AnyType__";
 // is worth a third copy of the field names before a profile asks for it.
 pub fn registered_field_type(name: &str) -> Option<FieldType> {
     let Some(spelling) = schema_field_spelling(name) else {
-        return FieldKey::from_name(name).map(|key| match key {
-            // The bool core fields C++ `SdfSchema` registers that no
-            // production of the text parser claims: read as words, they
-            // would come back as tokens.
-            FieldKey::Hidden | FieldKey::NoLoadHint => FieldType::Value(ValueTypeName::BOOL),
-            _ => FieldType::Untyped,
-        });
+        let key = FieldKey::from_name(name)?;
+        return Some(key.value_type().map_or(FieldType::Untyped, FieldType::Value));
     };
     FieldType::from_spelling(spelling)
-}
-
-/// The value type of the core field `name` on a layer's pseudo-root, for the
-/// fields that hold a plain value (C++ `SdfSchema`'s registration of each):
-/// the time codes, frames and rates, `framePrecision`, `defaultPrim`,
-/// `hasOwnedSubLayers`, and the `comment` and `documentation` strings. `None`
-/// for any other name.
-pub fn layer_field_type(name: &str) -> Option<ValueTypeName> {
-    use FieldKey as F;
-    Some(match FieldKey::from_name(name)? {
-        F::StartTimeCode
-        | F::EndTimeCode
-        | F::StartFrame
-        | F::EndFrame
-        | F::TimeCodesPerSecond
-        | F::FramesPerSecond => ValueTypeName::DOUBLE,
-        F::FramePrecision => ValueTypeName::INT,
-        F::DefaultPrim => ValueTypeName::TOKEN,
-        F::HasOwnedSubLayers => ValueTypeName::BOOL,
-        F::Comment | F::Documentation => ValueTypeName::STRING,
-        _ => return None,
-    })
 }
 
 /// The type the schema declaring `name` gives that metadata field, or `None`
@@ -471,6 +515,13 @@ mod tests {
         use FieldType::{ListOp, Untyped, Value};
         for (name, expected) in [
             (FieldKey::DisplayUnit.as_str(), Some(Untyped)),
+            (FieldKey::ColorSpace.as_str(), Some(Value(ValueTypeName::TOKEN))),
+            (FieldKey::Hidden.as_str(), Some(Value(ValueTypeName::BOOL))),
+            (
+                FieldKey::AllowedTokens.as_str(),
+                Some(Value(ValueTypeName::TOKEN_ARRAY)),
+            ),
+            (FieldKey::CustomData.as_str(), Some(Untyped)),
             ("interpolation", Some(Value(ValueTypeName::TOKEN))),
             ("elementSize", Some(Value(ValueTypeName::INT))),
             ("inactiveIds", Some(ListOp(ValueTypeName::INT64))),

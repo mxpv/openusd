@@ -520,7 +520,7 @@ impl SchemaRegistry {
 
     /// The metadata field `name` a registered family declares (C++
     /// `SdfSchemaBase::GetFieldDefinition` for a plugin field).
-    pub fn metadata_field(&self, name: &tf::Token) -> Option<&MetadataField> {
+    pub fn metadata_field(&self, name: &str) -> Option<&MetadataField> {
         self.metadata.get(name)
     }
 

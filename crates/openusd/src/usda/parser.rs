@@ -142,14 +142,6 @@ impl<'a> Parser<'a> {
             return Ok(root);
         }
 
-        // The fields read by type that `sdf::layer_field_type` does not
-        // name: the text format's `doc`, and two a schema declares.
-        const KNOWN_PROPS: &[(&str, sdf::ValueTypeName)] = &[
-            ("doc", sdf::ValueTypeName::STRING),
-            ("metersPerUnit", sdf::ValueTypeName::DOUBLE),
-            ("upAxis", sdf::ValueTypeName::TOKEN),
-        ];
-
         self.parse_block('(', ')', |this| {
             let list_op = this.try_list_op()?;
             let next = this
@@ -188,14 +180,7 @@ impl<'a> Parser<'a> {
                 }
                 Token::Identifier(name) => {
                     this.cursor.expect_punctuation('=')?;
-                    let known = sdf::layer_field_type(name)
-                        .or_else(|| KNOWN_PROPS.iter().find(|(n, _)| *n == name).map(|(_, ty)| ty.clone()));
-                    if let Some(ty) = known {
-                        ensure!(list_op.is_none(), "{name} metadata does not support list ops");
-                        let value = types::parse_value(&mut this.cursor, &ty)
-                            .with_context(|| format!("Unable to parse value for {name}"))?;
-                        root.add(name, value);
-                    } else if let Some(declared) = sdf::registered_field_type(name) {
+                    if let Some(declared) = sdf::registered_field_type(name) {
                         this.read_registered_metadata(&mut root, name, &declared, list_op)
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
                     } else {
@@ -793,10 +778,6 @@ impl<'a> Parser<'a> {
         self.cursor.expect_punctuation('=')?;
 
         match name {
-            n if n == FieldKey::Active.as_str() => {
-                let value = types::parse_token::<bool>(&mut self.cursor).context("Unable to parse active flag")?;
-                spec.add(FieldKey::Active, vt::Value::Bool(value));
-            }
             "apiSchemas" => {
                 let values = self
                     .parse_one_or_list(types::parse_token::<tf::Token>)
@@ -823,21 +804,11 @@ impl<'a> Parser<'a> {
                 let (ty, list_op) = apply_list_op(list_op, paths).context("Unable to build inherits listOp")?;
                 spec.add_list_op(FieldKey::InheritPaths, ty, vt::Value::PathListOp(list_op));
             }
-            n if n == FieldKey::Kind.as_str() => {
-                ensure!(list_op.is_none(), "kind metadata does not support list ops");
-                let value = types::parse_token::<String>(&mut self.cursor).context("Unable to parse kind metadata")?;
-                spec.add(FieldKey::Kind, vt::Value::token(value));
-            }
             "customData" => {
                 ensure!(list_op.is_none(), "customData metadata does not support list ops");
                 let value =
                     types::parse_untyped_value(&mut self.cursor).context("Unable to parse customData dictionary")?;
                 spec.add("customData", value);
-            }
-            n if n == FieldKey::Documentation.as_str() => {
-                ensure!(list_op.is_none(), "doc metadata does not support list ops");
-                let value = types::parse_token::<String>(&mut self.cursor).context("Unable to parse doc metadata")?;
-                spec.add(FieldKey::Documentation, vt::Value::String(value));
             }
             n if n == FieldKey::AssetInfo.as_str() => {
                 ensure!(list_op.is_none(), "assetInfo does not support list ops");
@@ -868,20 +839,10 @@ impl<'a> Parser<'a> {
                 let (ty, list_op) = apply_list_op(list_op, paths).context("Unable to build specializes listOp")?;
                 spec.add_list_op(FieldKey::Specializes, ty, vt::Value::PathListOp(list_op));
             }
-            n if n == FieldKey::Instanceable.as_str() => {
-                ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
-                let value = types::parse_bool(&mut self.cursor).context("Unable to parse instanceable flag")?;
-                spec.add(FieldKey::Instanceable, vt::Value::Bool(value));
-            }
             n if n == FieldKey::Relocates.as_str() => {
                 ensure!(list_op.is_none(), "relocates does not support list ops");
                 let pairs = types::parse_relocates(&mut self.cursor, anchor).context("Unable to parse relocates")?;
                 spec.add(FieldKey::Relocates, vt::Value::Relocates(pairs));
-            }
-            "displayName" => {
-                ensure!(list_op.is_none(), "displayName does not support list ops");
-                let value = self.cursor.expect_string().context("Unable to parse displayName")?;
-                spec.add("displayName", vt::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Permission.as_str() => {
                 ensure!(list_op.is_none(), "permission does not support list ops");
@@ -890,11 +851,6 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::SymmetryFunction.as_str() => {
                 ensure!(list_op.is_none(), "symmetryFunction does not support list ops");
                 self.read_symmetry_function(spec)?;
-            }
-            n if n == FieldKey::Prefix.as_str() => {
-                ensure!(list_op.is_none(), "prefix does not support list ops");
-                let value = self.cursor.expect_string().context("Unable to parse prefix")?;
-                spec.add(FieldKey::Prefix, vt::Value::String(value.into_owned()));
             }
             n if n == FieldKey::Clips.as_str() => {
                 ensure!(list_op.is_none(), "clips metadata does not support list ops");

@@ -91,7 +91,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             .uniform()
                             .fields(
                                 &[
-                                    ::openusd::usd::Field::strings(
+                                    ::openusd::usd::Field::tokens(
                                         "allowedTokens",
                                         &["default", "bounds"],
                                     ),
@@ -133,7 +133,7 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                             .uniform()
                             .fields(
                                 &[
-                                    ::openusd::usd::Field::strings(
+                                    ::openusd::usd::Field::tokens(
                                         "allowedTokens",
                                         &["default", "bounds"],
                                     ),
