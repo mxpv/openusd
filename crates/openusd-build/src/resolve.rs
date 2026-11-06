@@ -388,9 +388,10 @@ fn applied_api_schemas(flattened: &sdf::Layer, declaration: &Declaration, kind: 
 /// Every property the schema carries, its own and its ancestors'.
 ///
 /// The flattened layer is the authority on what they are: it holds the
-/// composed set, in composed order, with every field already resolved. What it
-/// cannot say — which class introduced a property, where it was written, and
-/// what its `customData` asked for — comes from the declarations.
+/// composed set, in the order a stage lists a prim's properties, with every
+/// field already resolved. What it cannot say — which class introduced a
+/// property, where it was written, and what its `customData` asked for —
+/// comes from the declarations.
 fn properties(
     flattened: &sdf::Layer,
     index: &HashMap<&tf::Token, &Declaration>,

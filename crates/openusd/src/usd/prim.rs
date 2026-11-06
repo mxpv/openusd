@@ -1158,29 +1158,34 @@ impl Prim {
     ///
     /// The union is sorted by path element ordering and then reordered by the
     /// prim's `propertyOrder` (spec §11.3.2), so the result does not depend on
-    /// which half a name came from.
-    /// Use [`authored_property_names`](Self::authored_property_names) to scan
+    /// which half a name came from. Path element ordering sorts `:` after the
+    /// letters, where C++ `TfDictionaryLessThan` sorts it before them, so
+    /// `xformOpOrder` lists ahead of `xformOp:translate` here and after it in
+    /// C++. Where no layer authors a `propertyOrder`, the one the prim's
+    /// schema declares applies, as C++ `UsdPrim::GetPropertyOrder` reads it;
+    /// §11.3.2 reads only an authored one. Use
+    /// [`authored_property_names`](Self::authored_property_names) to scan
     /// only what layers actually author.
     pub fn property_names(&self) -> Result<Vec<Token>> {
+        let info = self.prim_type_info()?;
+        let definition = info.prim_definition();
         let mut names = self.authored_names_unordered()?;
-        add_declared(
-            &mut names,
-            self.prim_type_info()?.prim_definition().property_names(),
-            Token::clone,
-        );
-        self.order_properties(&mut names)?;
+        add_declared(&mut names, definition.property_names(), Token::clone);
+        self.order_properties(definition, &mut names)?;
         Ok(names)
     }
 
     /// Returns the property names layers author on this prim, sorted by path
     /// element ordering and then reordered by the prim's `propertyOrder`
-    /// (spec §11.3.2). Mirrors C++ `UsdPrim::GetAuthoredPropertyNames`.
+    /// (spec §11.3.2), or by the one its schema declares, as
+    /// [`property_names`](Self::property_names) orders them. Mirrors C++
+    /// `UsdPrim::GetAuthoredPropertyNames`.
     ///
     /// This is the set to scan when the question is "what did someone write?" —
     /// enumerating a schema's declarations would answer a different one.
     pub fn authored_property_names(&self) -> Result<Vec<Token>> {
         let mut names = self.authored_names_unordered()?;
-        self.order_properties(&mut names)?;
+        self.order_properties(self.prim_type_info()?.prim_definition(), &mut names)?;
         Ok(names)
     }
 
@@ -1191,22 +1196,30 @@ impl Prim {
             .masked_opinions(&self.path, |g, cache| cache.prim_properties(g, &self.path))?)
     }
 
-    /// Sorts property `names` by path element ordering ([`sdf::element_cmp`]),
-    /// then reorders them by the prim's strongest `propertyOrder` where it
-    /// authors one (C++ `UsdPrim::ApplyPropertyOrder`): the normative order of
-    /// property children (spec §11.3.2), and the order C++ `UsdPrim` lists
-    /// properties in (`UsdPrim::_GetPropertyNames`), whose
-    /// `TfDictionaryLessThan` sorts `:` before the letters where §8.2 sorts it
-    /// after them.
-    fn order_properties<T: AsRef<str> + PartialEq<Token>>(&self, names: &mut Vec<T>) -> Result<()> {
-        names.sort_by(|a, b| sdf::element_cmp(a.as_ref(), b.as_ref()));
-        if let Some(order) = self
-            .stage
-            .field::<vt::Value>(&self.path, sdf::FieldKey::PropertyOrder)?
-            .and_then(vt::Value::try_as_token_vec)
-        {
-            sdf::apply_ordering(names, &order);
+    /// Puts property `names` in [`sdf::order_properties`] order under the
+    /// prim's `propertyOrder`. Where no layer authors one, the order
+    /// `definition` declares applies, as C++ `UsdPrim::GetPropertyOrder`
+    /// falls back to it.
+    fn order_properties<T: AsRef<str> + PartialEq<Token>>(
+        &self,
+        definition: &PrimDefinition,
+        names: &mut [T],
+    ) -> Result<()> {
+        // TODO(perf): every listing sorts the prim's names afresh; the sorted
+        // order could be memoized beside the cached `prim_properties`.
+        if names.is_empty() {
+            return Ok(());
         }
+        let authored = self
+            .stage
+            .field::<vt::Value>(&self.path, sdf::FieldKey::PropertyOrder)?;
+        let order = match &authored {
+            Some(value) => value.try_as_token_vec_ref(),
+            None => definition
+                .metadata(sdf::FieldKey::PropertyOrder.as_str())
+                .and_then(vt::Value::try_as_token_vec_ref),
+        };
+        sdf::order_properties(names, order.map(Vec::as_slice));
         Ok(())
     }
 
@@ -1322,7 +1335,7 @@ impl Prim {
     pub fn authored_properties(&self) -> Result<(Vec<Attribute>, Vec<Relationship>)> {
         let mut attributes = Vec::new();
         let mut relationships = Vec::new();
-        for property in self.typed_properties(PropertySource::Authored, "")? {
+        for property in self.typed_properties(PropertySource::Authored, "", None)? {
             let path = self.property_path(property.name);
             match property.kind {
                 Some(sdf::SpecType::Attribute) => attributes.push(Attribute::new(&self.stage, path)),
@@ -1338,9 +1351,8 @@ impl Prim {
     /// gives.
     fn properties_of_type(&self, source: PropertySource, ty: sdf::SpecType, namespace: &str) -> Result<Vec<sdf::Path>> {
         Ok(self
-            .typed_properties(source, namespace)?
+            .typed_properties(source, namespace, Some(ty))?
             .into_iter()
-            .filter(|property| property.kind == Some(ty))
             .map(|property| self.property_path(property.name))
             .collect())
     }
@@ -1350,9 +1362,15 @@ impl Prim {
     /// [`order_properties`](Self::order_properties) gives.
     ///
     /// The names and their composed spec types come from one cache query. The
-    /// namespace narrows the ordered names, so a property keeps the place the
-    /// whole list gave it.
-    fn typed_properties(&self, source: PropertySource, namespace: &str) -> Result<Vec<TypedName>> {
+    /// namespace, and `only` where given, narrow the names before they are
+    /// ordered, which leaves each property the place the whole list would give
+    /// it.
+    fn typed_properties(
+        &self,
+        source: PropertySource,
+        namespace: &str,
+        only: Option<sdf::SpecType>,
+    ) -> Result<Vec<TypedName>> {
         let info = self.prim_type_info()?;
         let definition = info.prim_definition();
         let declared_kind = |name: &Token| definition.property(name).map(|property| property.spec_type());
@@ -1378,8 +1396,10 @@ impl Prim {
                 kind: declared_kind(name),
             });
         }
-        self.order_properties(&mut properties)?;
-        properties.retain(|property| in_namespace(&property.name, namespace));
+        properties.retain(|property| {
+            in_namespace(&property.name, namespace) && only.is_none_or(|ty| property.kind == Some(ty))
+        });
+        self.order_properties(definition, &mut properties)?;
         Ok(properties)
     }
 
@@ -1461,9 +1481,9 @@ impl AsRef<str> for TypedName {
 }
 
 /// Adds to the authored `names` an entry, built by `declare`, for each
-/// schema-`declared` property name they lack. A schema-declared property is part of the prim's surface
-/// whether or not a layer authors a spec for it, since it still resolves a
-/// type and a fallback value.
+/// schema-`declared` property name they lack. A schema-declared property is
+/// part of the prim's surface whether or not a layer authors a spec for it,
+/// since it still resolves a type and a fallback value.
 fn add_declared<T: AsRef<str>>(names: &mut Vec<T>, declared: &[Token], declare: impl Fn(&Token) -> T) {
     if declared.is_empty() {
         return;
@@ -3028,33 +3048,28 @@ mod tests {
     fn authored_names_apply_order() -> Result<()> {
         let prim = namespaced()?;
         // A `:` sorts after the letters (spec §8.2).
-        let sorted: Vec<Token> = [
+        let sorted = [
             "points",
             "primvars",
             "primvarsFoo",
             "primvars:link",
             "primvars:skel:weights",
             "primvars:st",
-        ]
-        .into_iter()
-        .map(Token::from)
-        .collect();
+        ];
         assert_eq!(prim.authored_property_names()?, sorted);
 
         let order = vec![Token::from("primvars:skel:weights"), Token::from("points")];
         let prim = prim.set_metadata("propertyOrder", vt::Value::TokenVec(order))?;
-        // Each ordered name moves with the names that followed it.
-        let expected: Vec<Token> = [
+        // The ordered names move to the front, and the rest keep their sorted
+        // order after them.
+        let expected = [
             "primvars:skel:weights",
-            "primvars:st",
             "points",
             "primvars",
             "primvarsFoo",
             "primvars:link",
-        ]
-        .into_iter()
-        .map(Token::from)
-        .collect();
+            "primvars:st",
+        ];
         assert_eq!(prim.authored_property_names()?, expected);
         assert_eq!(prim.property_names()?, expected);
         Ok(())

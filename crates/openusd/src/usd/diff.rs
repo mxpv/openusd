@@ -48,7 +48,6 @@
 //! # }
 //! ```
 use std::borrow::Cow;
-use std::collections::HashSet;
 
 use crate::{Result, pcp, sdf, tf, vt};
 
@@ -510,10 +509,11 @@ fn apply_edit(
                 // a recorded list reorders the names the destination holds:
                 // the ones it names in its order, then the rest as they were.
                 let held = layer.data().try_field(dst, field).ok().flatten().map(Cow::into_owned);
-                let (Some(vt::Value::TokenVec(held)), vt::Value::TokenVec(order)) = (held, &value) else {
+                let (Some(vt::Value::TokenVec(mut held)), vt::Value::TokenVec(order)) = (held, &value) else {
                     return Ok(());
                 };
-                value = vt::Value::TokenVec(reorder_names(&held, order));
+                sdf::reorder(&mut held, order);
+                value = vt::Value::TokenVec(held);
             }
             sdf::author_spec(layer.data_mut(), dst, *spec_type, [(field.as_str(), value)])?;
         }
@@ -521,19 +521,6 @@ fn apply_edit(
         Edit::RemoveSpec { .. } => remove_or_clear(layer, dst)?,
     }
     Ok(())
-}
-
-/// `held` reordered by `order`: the names `order` lists that `held` holds, in
-/// `order`'s order, then the names `order` leaves out, in `held`'s order.
-fn reorder_names(held: &[tf::Token], order: &[tf::Token]) -> Vec<tf::Token> {
-    let held_names: HashSet<&tf::Token> = held.iter().collect();
-    let ordered: HashSet<&tf::Token> = order.iter().collect();
-    order
-        .iter()
-        .filter(|name| held_names.contains(name))
-        .chain(held.iter().filter(|name| !ordered.contains(name)))
-        .cloned()
-        .collect()
 }
 
 /// Remove the spec at `path` from `layer`, clearing its authored opinions

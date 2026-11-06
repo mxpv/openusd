@@ -11,8 +11,15 @@
 //! `[c, d, e, a, b]` — `c` carries its trailing `d, e` and `a` carries `b`,
 //! emitted in `order` sequence ahead of the (here empty) leading block.
 //!
-//! [`element_cmp`] is the normative element ordering of core spec §8.2 (C++
-//! `TfDictionaryLessThan`).
+//! [`reorder`] is the spec's `reorder` as §11.3.2 applies it to
+//! `propertyOrder`, which C++ `UsdPrim::ApplyPropertyOrder` implements: the
+//! ordered entries move to the front and every other entry keeps its relative
+//! place after them. The `primOrder` fold of §11.3.1 uses [`apply_ordering`]
+//! instead, as C++ `PcpComposeSiteChildNames` does.
+//!
+//! [`element_cmp`] is the normative element ordering of core spec §8.2; C++
+//! `TfDictionaryLessThan` orders punctuation such as `:` differently.
+//! [`order_properties`] sorts by it and then applies [`reorder`].
 
 use std::cmp::Ordering;
 use std::iter::Peekable;
@@ -64,6 +71,33 @@ pub fn apply_ordering<T: PartialEq<K>, K>(items: &mut Vec<T>, order: &[K]) {
         result.extend(run);
     }
     *items = result;
+}
+
+/// Moves the entries of `items` that `order` names to the front, in `order`
+/// sequence, leaving every other entry in its relative place after them: the
+/// `reorder` of core spec §11.3 (C++ `UsdPrim::ApplyPropertyOrder`).
+///
+/// A name `order` repeats moves once, as in C++, where the spec's pseudocode
+/// would list it again; a name no entry matches moves nothing.
+pub fn reorder<T: PartialEq<K>, K>(items: &mut [T], order: &[K]) {
+    let mut rest = 0;
+    for name in order {
+        if let Some(found) = items[rest..].iter().position(|item| item == name) {
+            items[rest..=rest + found].rotate_right(1);
+            rest += 1;
+        }
+    }
+}
+
+/// Sorts property `names` by [`element_cmp`], then moves the ones `order`
+/// lists to the front with [`reorder`]: the normative order of property
+/// children (core spec §11.3.2), as C++ `UsdPrim::_GetPropertyNames` and
+/// `UsdPrimDefinition` order them with their own comparator.
+pub fn order_properties<T: AsRef<str> + PartialEq<K>, K>(names: &mut [T], order: Option<&[K]>) {
+    names.sort_unstable_by(|a, b| element_cmp(a.as_ref(), b.as_ref()));
+    if let Some(order) = order {
+        reorder(names, order);
+    }
 }
 
 /// Compares two namespace element names by the normative element ordering of
@@ -239,6 +273,17 @@ mod tests {
         let mut children = s(&["a", "b", "c"]);
         apply_ordering(&mut children, &s(&["x", "y", "z"]));
         assert_eq!(children, s(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn reorder_to_front() {
+        let mut items = s(&["a", "b", "c", "d", "e"]);
+        reorder(&mut items, &s(&["c", "missing", "a", "c"]));
+        assert_eq!(items, s(&["c", "a", "b", "d", "e"]));
+
+        let mut items = s(&["a", "b", "z"]);
+        reorder(&mut items, &s(&["z"]));
+        assert_eq!(items, s(&["z", "a", "b"]));
     }
 
     #[test]
