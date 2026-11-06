@@ -39,6 +39,7 @@ pub use collection::{MembershipQuery, PathExpansionRuleMap, PathRule, apply_coll
 pub use collection_expr::{
     CollectionEvaluator, CollectionSearcher, complete_membership_expression, rule_map_expression,
 };
+pub use color_space::ColorSpaceCache;
 pub use connections::ConnectionGraph;
 pub use core_schemas::{
     ClipsAPI, ClipsAPISchema, CollectionAPI, CollectionMode, ColorSpaceAPI, ColorSpaceDefinitionAPI, ExpansionRule,

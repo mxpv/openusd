@@ -753,6 +753,18 @@ where
         self.get(sdf::FieldKey::FramesPerSecond)
     }
 
+    /// The `colorConfiguration` asset, if authored (C++
+    /// `SdfLayer::GetColorConfiguration`).
+    pub fn color_configuration(&self) -> Option<sdf::AssetPath> {
+        self.get(sdf::FieldKey::ColorConfiguration)
+    }
+
+    /// The `colorManagementSystem` token, if authored (C++
+    /// `SdfLayer::GetColorManagementSystem`).
+    pub fn color_management_system(&self) -> Option<tf::Token> {
+        self.get(sdf::FieldKey::ColorManagementSystem)
+    }
+
     /// Number of decimal digits printed for sub-frame time codes.
     pub fn frame_precision(&self) -> Option<i32> {
         self.get(sdf::FieldKey::FramePrecision)
@@ -905,6 +917,19 @@ where
     /// Set the number of decimal digits printed for sub-frame time codes.
     pub fn set_frame_precision(&mut self, precision: i32) {
         self.set(sdf::FieldKey::FramePrecision.as_str(), vt::Value::Int(precision));
+    }
+
+    /// Set the `colorConfiguration` asset.
+    pub fn set_color_configuration(&mut self, config: impl Into<sdf::AssetPath>) {
+        self.set(
+            sdf::FieldKey::ColorConfiguration.as_str(),
+            vt::Value::AssetPath(config.into()),
+        );
+    }
+
+    /// Set the `colorManagementSystem` token.
+    pub fn set_color_management_system(&mut self, cms: impl Into<tf::Token>) {
+        self.set(sdf::FieldKey::ColorManagementSystem.as_str(), vt::Value::token(cms));
     }
 }
 
@@ -1100,9 +1125,16 @@ where
             .unwrap_or_else(|| self.type_name().map_or(sdf::Unit::Default, |ty| ty.default_unit()))
     }
 
-    /// Color-space token, if authored.
+    /// The `colorSpace` token, if authored (C++
+    /// `SdfAttributeSpec::GetColorSpace`).
     pub fn color_space(&self) -> Option<tf::Token> {
         self.get(sdf::FieldKey::ColorSpace)
+    }
+
+    /// Whether the spec authors `colorSpace` (C++
+    /// `SdfAttributeSpec::HasColorSpace`).
+    pub fn has_color_space(&self) -> bool {
+        self.has_field(sdf::FieldKey::ColorSpace.as_str())
     }
 
     /// `allowedTokens` array, if authored.
@@ -1267,9 +1299,15 @@ where
         Ok(declared.coerce(value)?)
     }
 
-    /// Set the `colorSpace` token.
+    /// Set the `colorSpace` token (C++ `SdfAttributeSpec::SetColorSpace`).
     pub fn set_color_space(&mut self, color_space: impl Into<tf::Token>) {
         self.set(sdf::FieldKey::ColorSpace.as_str(), vt::Value::token(color_space));
+    }
+
+    /// Clear any authored `colorSpace` (C++
+    /// `SdfAttributeSpec::ClearColorSpace`).
+    pub fn clear_color_space(&mut self) {
+        self.erase(sdf::FieldKey::ColorSpace.as_str());
     }
 
     /// Set the `allowedTokens` array.
@@ -1881,6 +1919,20 @@ pub(crate) mod tests {
         let mut data = Data::new();
         data.create_spec(path.clone(), ty);
         (data, path)
+    }
+
+    /// `colorSpace` is set, reported and cleared on the attribute spec.
+    #[test]
+    fn color_space_set_clear() {
+        let (mut data, path) = data_with_spec("/p.a", sdf::SpecType::Attribute);
+        let mut attr = AttributeSpecMut::get(&mut data, path.clone()).expect("attr spec");
+        assert!(!attr.has_color_space());
+        attr.set_color_space("srgb_rec709_scene");
+        assert!(attr.has_color_space());
+        assert_eq!(attr.color_space(), Some(tf::Token::new("srgb_rec709_scene")));
+        attr.clear_color_space();
+        assert!(!attr.has_color_space());
+        assert_eq!(attr.color_space(), None);
     }
 
     /// An authored `displayUnit` wins; without one the declared type

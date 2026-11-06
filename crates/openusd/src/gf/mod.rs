@@ -1,7 +1,7 @@
 //! Graphics foundations — the value types beneath the schema layer: linear
 //! algebra, the [`Interval`] a time-sample query is asked over, the
-//! [`Range3d`] and [`BBox3d`] that bound geometry, and the [`Camera`] that
-//! looks at it through its [`Frustum`].
+//! [`Range3d`] and [`BBox3d`] that bound geometry, the [`Camera`] that looks
+//! at it through its [`Frustum`], and the [`Color`] in its [`ColorSpace`].
 //!
 //! Mirrors Pixar's `Gf` namespace.
 //!
@@ -40,6 +40,7 @@
 
 mod bbox;
 mod camera;
+mod color;
 mod color_space;
 mod dual_quat;
 mod frustum;
@@ -55,7 +56,8 @@ mod vec;
 
 pub use bbox::BBox3d;
 pub use camera::{Camera, FovDirection};
-pub use color_space::is_valid_color_space;
+pub use color::{Color, planckian_xy};
+pub use color_space::{ColorSpace, color_space_names, xyz_to_yxy, yxy_to_xyz};
 pub use dual_quat::DualQuatd;
 pub use frustum::{Frustum, FrustumPlanes};
 pub use half::f16;

@@ -110,9 +110,11 @@ source of truth for specifics.
   `ReplayStage`, recording wrappers over the change seam), `usd/editor.rs`
   (namespace editing), `usd/list_edit.rs` (`ListEdit`, C++ `UsdInherits` /
   `UsdSpecializes` / `UsdReferences` / `UsdPayloads`, a prim's arc lists
-  edited on the edit target), `usd/object.rs` (`Object` and `Property`, C++
-  `UsdObject` and `UsdProperty`: the metadata a prim and its properties
-  share), `usd/composition.rs` (private
+  edited on the edit target), `usd/color_space.rs` (the color-space
+  resolution of C++ `UsdColorSpaceAPI` and `UsdColorSpaceDefinitionAPI`,
+  with the per-stage `ColorSpaceCache`), `usd/object.rs` (`Object` and
+  `Property`, C++ `UsdObject` and `UsdProperty`: the metadata a prim and its
+  properties share), `usd/composition.rs` (private
   `StageComposition`: owns
   the layer graph, index cache, and pending-edit queue, and the operations over
   them — reconciliation, the composed-query/load fixpoint, demand loading,
@@ -172,7 +174,10 @@ source of truth for specifics.
   `gf::Camera` and `gf::Frustum` (C++ `GfCamera`, `GfFrustum`), a camera
   as a plain value and the volume it sees, with `gf::ProjectionParams` for
   what a projection matrix projects and `gf::Plane` and `gf::Ray` for the
-  frustum's intersection tests. See `gf/mod.rs` for the conventions.
+  frustum's intersection tests; and `gf::ColorSpace` and `gf::Color` (C++
+  `GfColorSpace`, `GfColor`), a color space built from primaries or a matrix,
+  with the conversions C++ takes from its bundled nanocolor library, and an
+  RGB triple in one. See `gf/mod.rs` for the conventions.
 
 ## Development Commands
 

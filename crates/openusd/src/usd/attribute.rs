@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::{
-    ListPosition, Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError, StageEdit,
-    TimeCode, TypeConflict, authoring, interp, list_edit,
+    ListPosition, Object, Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError,
+    StageEdit, TimeCode, TypeConflict, authoring, interp, list_edit,
 };
 use crate::Result;
 use crate::gf;
@@ -443,24 +443,38 @@ impl Attribute {
         self.edit(|spec| Ok(spec.set_type_name(type_name)?))
     }
 
-    /// The composed `colorSpace` field, or what the attribute's schema
-    /// declares for it, `None` where neither has one (C++
-    /// `UsdAttribute::GetColorSpace`, and `HasColorSpace` in its being
-    /// `Some`). [`ColorSpaceAPI::compute_attribute_name`] answers the color
-    /// space that applies to the attribute.
+    /// The composed `colorSpace` metadata, falling back to what the
+    /// attribute's schema declares (C++ `UsdAttribute::GetColorSpace`). A
+    /// value that is not a token reads as unauthored.
     ///
-    /// [`ColorSpaceAPI::compute_attribute_name`]: crate::usd::ColorSpaceAPI::compute_attribute_name
+    /// This is the attribute's own opinion. The color space that applies to
+    /// the attribute also inherits from its prim and the prim's ancestors;
+    /// [`ColorSpaceAPI::compute_attribute_name`](super::ColorSpaceAPI::compute_attribute_name)
+    /// resolves it.
     pub fn color_space(&self) -> Result<Option<tf::Token>> {
-        self.metadata(sdf::FieldKey::ColorSpace.as_str())
+        super::object::field(self, sdf::FieldKey::ColorSpace, vt::Value::try_as_token)
     }
 
-    /// Set the `colorSpace` token.
-    pub fn set_color_space(self, color_space: impl Into<String>) -> Result<Self, StageAuthoringError> {
+    /// Whether the attribute has a `colorSpace`, authored or declared by its
+    /// schema (C++ `UsdAttribute::HasColorSpace`).
+    pub fn has_color_space(&self) -> Result<bool> {
+        self.has_metadata(sdf::FieldKey::ColorSpace.as_str())
+    }
+
+    /// Author the `colorSpace` metadata on the edit target (C++
+    /// `UsdAttribute::SetColorSpace`).
+    pub fn set_color_space(self, color_space: impl Into<tf::Token>) -> Result<Self, StageAuthoringError> {
         let color_space = color_space.into();
         self.edit(|spec| {
             spec.set_color_space(color_space);
             Ok(())
         })
+    }
+
+    /// Drop the edit target's `colorSpace` opinion (C++
+    /// `UsdAttribute::ClearColorSpace`).
+    pub fn clear_color_space(self) -> Result<Self, StageAuthoringError> {
+        self.clear_metadata(sdf::FieldKey::ColorSpace.as_str())
     }
 
     /// Author a generic metadata field on the attribute spec. Mirrors C++
@@ -1985,6 +1999,58 @@ mod tests {
 
         let rule = stage.attribute("/Group.collection:render:expansionRule")?;
         assert_eq!(rule.get::<tf::Token>()?, Some(tf::Token::new("expandPrims")));
+        Ok(())
+    }
+
+    /// A schema's `colorSpace` on a declared attribute is the attribute's
+    /// color space until a layer authors one, and clearing the authored one
+    /// falls back to it again.
+    #[test]
+    fn color_space_falls_back() -> Result<()> {
+        const MANIFEST: &str = r#"#usda 1.0
+
+def "Typed"
+{
+    uniform token schemaKind = "abstractBase"
+}
+
+def "Swatch"
+{
+    uniform token schemaKind = "concreteTyped"
+    uniform token[] bases = ["Typed"]
+}
+"#;
+        const SCHEMATICS: &str = r#"#usda 1.0
+
+class "Typed"
+{
+}
+
+class Swatch "Swatch"
+{
+    color3f tint = (1, 1, 1) (
+        colorSpace = "srgb_rec709_scene"
+    )
+    color3f plain = (1, 1, 1)
+}
+"#;
+        let stage = Stage::builder()
+            .schema_registry(SchemaRegistry::test_family(MANIFEST, SCHEMATICS))
+            .in_memory("anon.usda")?;
+        stage.define_prim("/S")?.set_type_name("Swatch")?;
+
+        let tint = stage.attribute("/S.tint")?;
+        assert!(tint.has_color_space()?);
+        assert!(!tint.has_authored_metadata(sdf::FieldKey::ColorSpace.as_str())?);
+        assert_eq!(tint.color_space()?, Some(tf::Token::new("srgb_rec709_scene")));
+        let plain = stage.attribute("/S.plain")?;
+        assert!(!plain.has_color_space()?);
+        assert_eq!(plain.color_space()?, None);
+
+        let tint = tint.set_color_space("lin_ap1_scene")?;
+        assert_eq!(tint.color_space()?, Some(tf::Token::new("lin_ap1_scene")));
+        let tint = tint.clear_color_space()?;
+        assert_eq!(tint.color_space()?, Some(tf::Token::new("srgb_rec709_scene")));
         Ok(())
     }
 

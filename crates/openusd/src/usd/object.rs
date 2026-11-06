@@ -428,7 +428,7 @@ fn at_key(value: Option<vt::Value>, key_path: &str) -> Option<vt::Value> {
 
 /// The composed field `key` of `object` as `decode` takes it out of the
 /// value held; `None` where the field is unauthored or holds another type.
-fn field<O: Object, T>(
+pub(super) fn field<O: Object, T>(
     object: &O,
     key: sdf::FieldKey,
     decode: impl FnOnce(vt::Value) -> Option<T>,
