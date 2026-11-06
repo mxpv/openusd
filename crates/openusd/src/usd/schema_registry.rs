@@ -932,7 +932,6 @@ impl SchemaRegistry {
             };
             definition.compose_weaker_api(weaker, instance.as_ref(), &self.infos, &mut seen);
         }
-        definition.finish_composition();
         Arc::new(definition)
     }
 
@@ -2085,7 +2084,6 @@ impl PendingDefinition {
             self.definition
                 .compose_override(name, &self.schematics, &self.class_prim);
         }
-        self.definition.finish_composition();
         self.definition
     }
 }

@@ -281,7 +281,7 @@ impl PrimDefinition {
     }
 
     /// Copies a weaker definition's properties in, composing fields into any
-    /// this definition already declares
+    /// this definition already declares, then reorders the properties
     /// (C++ `_ComposePropertiesFromPrimDef`).
     fn compose_properties_from(&mut self, weaker: &PrimDefinition, instance: Option<&tf::Token>) {
         let mut names: Vec<&tf::Token> = weaker.prop_map.keys().collect();
@@ -294,6 +294,7 @@ impl PrimDefinition {
             };
             self.add_or_compose_property(instanced, weaker, &weaker.prop_map[name]);
         }
+        self.order_properties();
     }
 
     /// Installs one property from a weaker definition, or composes its fields
@@ -468,11 +469,11 @@ impl PrimDefinition {
         }
     }
 
-    /// Puts [`properties`](Self::property_names) in their final order once every
-    /// tier has contributed: element order, then the class prim's
-    /// `propertyOrder` (C++ sorts and re-applies the order per composed tier;
-    /// the result only has to hold at the end).
-    pub(super) fn finish_composition(&mut self) {
+    /// Sorts [`properties`](Self::property_names) and applies the composed
+    /// `propertyOrder` ([`sdf::order_properties`]), as C++ does each time a
+    /// weaker definition composes in. A definition nothing composes into
+    /// keeps its schematics order under its own `propertyOrder`.
+    fn order_properties(&mut self) {
         let order = self
             .metadata(sdf::FieldKey::PropertyOrder.as_str())
             .cloned()
@@ -1123,6 +1124,100 @@ class Thing "Thing" (
                 tf::Token::new("only_weak"),
             ]
         );
+    }
+
+    /// A family whose `Widget` composes nothing in, whose `Gadget` builds in
+    /// an API schema with no properties, and whose `MarkerAPI` carries an
+    /// order of its own.
+    const ORDER_MANIFEST: &str = r#"#usda 1.0
+
+def "MarkerAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+}
+
+def "EmptyAPI"
+{
+    uniform token schemaKind = "singleApplyAPI"
+}
+
+def "Widget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+
+def "Gadget"
+{
+    uniform token schemaKind = "concreteTyped"
+}
+"#;
+
+    const ORDER_SCHEMATICS: &str = r#"#usda 1.0
+
+class "MarkerAPI"
+{
+    reorder properties = ["marker:size"]
+    float marker:color = 1
+    float marker:size = 2
+}
+
+class "EmptyAPI"
+{
+}
+
+class Widget "Widget"
+{
+    reorder properties = ["m"]
+    float z = 1
+    float a = 2
+    float m = 3
+}
+
+class Gadget "Gadget" (
+    apiSchemas = ["EmptyAPI"]
+)
+{
+    reorder properties = ["m"]
+    float z = 1
+    float a = 2
+    float m = 3
+}
+"#;
+
+    fn order_names(definition: &super::PrimDefinition) -> Vec<&str> {
+        definition.property_names().iter().map(tf::Token::as_str).collect()
+    }
+
+    /// A definition nothing composes into keeps its schematics order under
+    /// its `propertyOrder`, and an applied name that is unknown or whose
+    /// shape its schema rejects composes nothing.
+    #[test]
+    fn order_without_composition() {
+        let registry = SchemaRegistry::test_family(ORDER_MANIFEST, ORDER_SCHEMATICS);
+        let widget = tf::Token::new("Widget");
+        let typed = registry.concrete_prim_definition(&widget).expect("Widget");
+        assert_eq!(order_names(typed), ["m", "z", "a"]);
+
+        let applied = [tf::Token::new("NoSuchAPI"), tf::Token::new("MarkerAPI:x")];
+        let composed = registry.build_composed_prim_definition(&widget, &applied);
+        assert_eq!(order_names(&composed), ["m", "z", "a"]);
+    }
+
+    /// A weaker definition composing in sorts the properties and applies
+    /// the composed `propertyOrder`, even one that adds no property.
+    #[test]
+    fn order_after_composition() {
+        let registry = SchemaRegistry::test_family(ORDER_MANIFEST, ORDER_SCHEMATICS);
+        let gadget = registry
+            .concrete_prim_definition(&tf::Token::new("Gadget"))
+            .expect("Gadget");
+        assert_eq!(order_names(gadget), ["m", "a", "z"]);
+
+        let marker = [tf::Token::new("MarkerAPI")];
+        let composed = registry.build_composed_prim_definition(&tf::Token::new("Widget"), &marker);
+        assert_eq!(order_names(&composed), ["m", "marker:size", "a", "marker:color", "z"]);
+        let typeless = registry.build_composed_prim_definition(&tf::Token::default(), &marker);
+        assert_eq!(order_names(&typeless), ["marker:size", "marker:color"]);
     }
 
     #[test]
