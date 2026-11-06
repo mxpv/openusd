@@ -25,6 +25,7 @@ use super::{Dictionary, Value};
 ///   `{'key': value}` sorted by key.
 /// - A list op is its C++ type alias with each list it authors, as
 ///   `SdfTokenListOp(Prepended Items: [a, b])`.
+/// - A single path is its text, so the empty path is nothing.
 /// - A value block is `None`, an opaque value `OpaqueValue`, and an empty
 ///   value nothing.
 ///

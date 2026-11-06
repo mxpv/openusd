@@ -1275,7 +1275,7 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
 
         Value::Path(_) => {
             return Err(FormatError::Encode {
-                reason: "a single path has no USDA spelling; a layer holds a path vector".into(),
+                reason: "no value type holds a single path; a layer holds a path vector".into(),
             });
         }
 
@@ -1752,6 +1752,15 @@ mod tests {
             .expect("writes");
             assert_eq!(out, literal);
         }
+    }
+
+    /// No value type holds a single path, so the writer refuses one.
+    #[test]
+    fn single_path_refused() {
+        let mut data = Data::rooted();
+        data.set_field(&Path::abs_root(), "field", Value::Path(path("/a").unwrap()));
+        let error = TextWriter::write_to_string(&data as &dyn AbstractData).expect_err("a single path is refused");
+        assert!(matches!(error, FormatError::Encode { .. }), "{error}");
     }
 
     /// Each item of an unregistered list op is the recorded text of a whole
