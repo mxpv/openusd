@@ -144,6 +144,40 @@ things:
   code mixed into production code. For C++ parity, read the C++ source in
   `D:\Projects\cpp_OpenUSD`; don't trust the PR's own claims.
 
+### Verify, don't trust
+
+Start from the assumption that the PR is wrong somewhere, and look for where.
+A green CI run, a clean bot review and a confident description are not
+evidence that the change is correct.
+
+- Every claim in the PR body, the commit messages and the doc and code
+  comments is unverified until you check it against its primary source:
+  "as C++ does" against the C++ source, "the spec requires" against the spec
+  text (`pdftotext -layout docs/aousd_core_spec_1.0.1.pdf`), a measurement by
+  rerunning it, "only the order changes" or "no behavior change" against the
+  diff. Don't check a claim against a neighbouring doc comment that says the
+  same thing.
+- Settle every ambiguity in the C++ source: wording in the spec that allows
+  more than one reading, a case the spec does not cover, or behavior the PR
+  and a reviewer disagree on. Read what C++ OpenUSD does and take that as
+  the expected behavior, then report the ambiguity and the C++ answer so the
+  user can overrule it.
+- Read what the change relies on, not only what it changes. When the PR
+  calls a helper in a new place or feeds it new input, read the helper and
+  check that its semantics are the ones the new caller needs. A bug that was
+  harmless before the PR can surface through it.
+- Treat every test expectation the PR rewrites as a claim about correct
+  behavior. Work out the expected value yourself, from C++ or the spec,
+  before accepting the new one. A test updated to match new output proves
+  only that the output changed. For regenerated goldens, check a sample
+  against the C++ output where there is one.
+- Look for the case the PR's tests leave out: the input that would tell the
+  new behavior from a plausible wrong one.
+
+Write down each claim with what you checked it against and the result:
+verified, contradicted, or unverifiable. The verdict below and the report in
+step 10 draw on this list.
+
 Also check `maintainerCanModify`. For a PR from a fork (`isCrossRepository`)
 with it false, nothing can be pushed to the branch: no follow-up commits and
 no rebase. Say so now, because it changes the plan. Note `mergeable` too; a
@@ -151,9 +185,11 @@ no rebase. Say so now, because it changes the plan. Note `mergeable` too; a
 
 Report a short verdict: what the PR does, whether it is worth taking, any
 architectural concern that would need rework, and whether it conflicts with
-`main`. Then ask the user once with `AskUserQuestion` whether to take it (full
-review), decline it, or discuss it. Stop until they answer. If they decline,
-draft a short, courteous reply for the contributor in the terminal and finish.
+`main`. Say which of the PR's claims you verified and which you could not,
+and each ambiguity you settled from C++. Then ask the user once with
+`AskUserQuestion` whether to take it (full review), decline it, or discuss
+it. Stop until they answer. If they decline, draft a short, courteous reply
+for the contributor in the terminal and finish.
 
 ## 4. Resolve merge conflicts
 
@@ -229,6 +265,14 @@ wrong is dismissed, not a reason for another pass; note it for the report.
 Stop after three passes. If a pass still finds issues, list them for the user
 instead of looping.
 
+Reviewers are as fallible as the PR. Check a finding's C++ or spec claim at
+the source, as in step 3, before acting on it. Passes can contradict each
+other, one asking for what an earlier one had removed. Settle the
+disagreement against the source, in the C++ source where the spec leaves it
+open, and don't undo a fix without a reason the earlier pass did not already
+weigh. A clean pass means only that the reviewers found nothing. It does not
+cover what they did not read, such as the helpers the change relies on.
+
 Run the fixes through the `writing-review` skill for any comments or docs
 they touch.
 
@@ -286,6 +330,9 @@ cargo test --workspace --all-targets --all-features
 Then report to the user:
 
 - what the PR does and the verdict from step 3;
+- the PR's claims you checked, with the source each was checked against, and
+  any you could not verify;
+- each ambiguity you settled from C++, with the C++ behavior you followed;
 - whether the branch was rebased, and the conflicts resolved;
 - the follow-up commits about to go out, one line each
   (`git log --oneline origin/main..HEAD`);
