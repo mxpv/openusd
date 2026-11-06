@@ -4751,7 +4751,7 @@ impl StageBuilder {
         // One cache scope spans the open. A packaged root is opened once for
         // its default-layer lookup, its probes and its entry reads.
         let _scope = ar::CacheScope::begin();
-        let root = self.registry.prepare_root(root_path, None)?;
+        let root = self.registry.prepare_root(root_path)?;
         self.open_root(root)
     }
 
@@ -4831,7 +4831,7 @@ impl StageBuilder {
         Ok(self
             .session_layer
             .as_deref()
-            .map(|path| self.registry.prepare_root(path, None))
+            .map(|path| self.registry.prepare_root(path))
             .transpose()?)
     }
 

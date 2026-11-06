@@ -422,10 +422,11 @@ impl LayerRegistry {
     }
 
     /// Canonicalizes `asset_path` into a stable identifier, anchoring a relative
-    /// path against `anchor`. Every canonical-identifier computation — interning a
-    /// layer as it loads, anchoring an authored sublayer/arc path for lookup,
-    /// keying the muted set — flows through here, so the underlying
-    /// [`ar::Resolver`] stays private and the rules below apply uniformly.
+    /// path against `anchor` (C++ `ArResolver::CreateIdentifier`). Interning a
+    /// layer by a path the caller names and keying the muted set call it
+    /// directly; a path a layer authors is anchored by
+    /// [`sdf::absolute_path_at`], which calls it with the registry as the
+    /// resolver. The underlying [`ar::Resolver`] stays private.
     ///
     /// An anonymous layer identifier is its own canonical id: it names no
     /// asset-resolvable location, so it passes through unchanged (C++
@@ -613,8 +614,8 @@ impl LayerRegistry {
         Ok(sdf::Layer::new_resolved(prepared, Rc::clone(&self.resolver)))
     }
 
-    /// The layer at `asset_path` (anchored against `anchor`), the one the
-    /// registry holds or else one read and held from then on, without opening
+    /// The layer at `asset_path`, the one the registry holds or else one read
+    /// and held from then on, without opening
     /// its sublayers: the shallow read the stage root stack needs to compose
     /// its root and session layers' own expression variables into one context
     /// before either region's sublayer subtree is collected. The layer is then
@@ -623,13 +624,9 @@ impl LayerRegistry {
     /// once at open. A path that does not resolve, the empty path
     /// among them, is [`Unresolved`](LoadError::Unresolved); a read failure
     /// propagates.
-    pub(crate) fn prepare_root(
-        &self,
-        asset_path: &str,
-        anchor: Option<&ar::ResolvedPath>,
-    ) -> Result<LoadedLayer, LoadError> {
+    pub(crate) fn prepare_root(&self, asset_path: &str) -> Result<LoadedLayer, LoadError> {
         self.ensure_writable()?;
-        let identifier = self.create_identifier(asset_path, anchor);
+        let identifier = self.create_identifier(asset_path, None);
         let unresolved = || LoadError::Unresolved {
             asset_path: asset_path.to_owned(),
         };
@@ -888,7 +885,7 @@ impl LayerRegistry {
                 sub_path
             };
 
-            let sub_id = self.create_identifier(&sub_asset, anchor.as_ref());
+            let sub_id = sdf::absolute_path_at(self, anchor.as_ref(), &sub_asset);
             // A sublayer already opened this pass is skipped, and so is one the
             // caller excludes. One the caller holds is skipped too, except in a
             // reload pass, where it is re-walked to reach the `${VAR}` sublayers
@@ -1056,7 +1053,7 @@ pub(crate) mod tests {
         layers: &mut Vec<sdf::Layer>,
         visited: &mut HashSet<String>,
     ) -> Result<(), LoadError> {
-        let identifier = registry.create_identifier(asset_path, anchor);
+        let identifier = sdf::absolute_path_at(registry, anchor, asset_path);
         if identifier.is_empty() || visited.contains(&identifier) {
             return Ok(());
         }

@@ -3429,6 +3429,10 @@ impl LayerGraph {
     /// identifier it will be interned under. The result is a pure function of
     /// `(path, anchor)`, independent of which layers are currently loaded — so the
     /// same physical layer never keys under different strings by load order.
+    ///
+    /// The authored path is anchored through the resolver, as C++
+    /// `Pcp_MutedLayers::_GetCanonicalLayerId` anchors it with
+    /// `ArResolver::CreateIdentifier`.
     fn canonical_muted_id(&self, path: &str, anchor: Option<&ResolvedPath>) -> String {
         if anchor.is_none() {
             return path.to_string();

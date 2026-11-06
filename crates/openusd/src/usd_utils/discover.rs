@@ -327,10 +327,10 @@ struct Discoverer<'a> {
     package: Option<String>,
     /// The source index of each identifier found.
     index: HashMap<String, usize>,
-    /// Each UDIM set probed, by its anchored identifier, or `None` where no
-    /// tile of it resolves. A set authored by several layers is probed once,
-    /// however it is interned.
-    udim_sets: HashMap<String, Option<UdimSet>>,
+    /// Each UDIM set probed, by the anchor of the layer authoring it and its
+    /// anchored identifier, or `None` where no tile of it resolves. A set
+    /// authored by several layers that anchor it alike is probed once.
+    udim_sets: HashMap<(Option<ar::ResolvedPath>, String), Option<UdimSet>>,
     /// The layer sources still to walk.
     queue: VecDeque<usize>,
     sources: Vec<Source<'a>>,
@@ -448,16 +448,18 @@ impl<'a> Discoverer<'a> {
         };
         let registry = self.graph.layer_registry();
         let anchor = self.sources[referrer].content.anchor();
-        let set = registry.create_identifier(path, anchor.as_ref());
+        let anchored: &dyn Fn(&str) -> String = &|path| sdf::absolute_path_at(registry, anchor.as_ref(), path);
+        // A search path anchors to the same spelling from every layer, so the
+        // anchor is part of the key.
+        let key = (anchor.clone(), anchored(path));
         self.udim_sets
-            .entry(set)
+            .entry(key)
             .or_insert_with(|| {
                 // One scope over the probe for the first tile and the walk of
                 // the rest: a packaged set opens its package once.
                 let _scope = ar::CacheScope::begin();
-                let first = udim.tiles(registry, anchor.as_ref()).next()?;
-                let identifier =
-                    udim.with_pattern(&registry.create_identifier(&udim.tile(first.number), anchor.as_ref()))?;
+                let first = udim.tiles(registry, anchor.as_ref().map(|_| anchored)).next()?;
+                let identifier = udim.with_pattern(&anchored(&udim.tile(first.number)))?;
                 let resolved = udim.with_pattern(first.path.to_str()?)?;
                 let numbers = ar::UdimPath::parse(&resolved)?
                     .resolve_tiles(registry, None)
@@ -545,8 +547,12 @@ impl<'a> Discoverer<'a> {
     fn locate(&self, referrer: usize, path: &str, kind: AssetKind) -> Located {
         let registry = self.graph.layer_registry();
         let anchor = self.sources[referrer].content.anchor();
-        let target = registry.create_identifier(path, anchor.as_ref());
-        let set = self.udim_sets.get(&target).and_then(Option::as_ref);
+        let anchored = |path: &str| sdf::absolute_path_at(registry, anchor.as_ref(), path);
+        let target = anchored(path);
+        let set = self
+            .udim_sets
+            .get(&(anchor.clone(), target.clone()))
+            .and_then(Option::as_ref);
         let (identifier, placement, admit, packaged) = if let Some(package) = &self.package
             && let Some(part) = packaged_part(&target, package)
         {
@@ -575,7 +581,7 @@ impl<'a> Discoverer<'a> {
             let named = |path: String| Placement::Named { by: referrer, path };
             match ar::split_package_relative_path_outer(path) {
                 Some((package, inner)) if !self.policy.open_packages => {
-                    let identifier = registry.create_identifier(&package, anchor.as_ref());
+                    let identifier = anchored(&package);
                     // The packaged path is read back from the resolver's
                     // identifier, which spells it as the entry name it reaches.
                     let packaged = packaged_part(&target, &identifier).unwrap_or(inner);
@@ -1085,6 +1091,36 @@ def "N" (
         assert_eq!(
             relative(dir.path(), &dependencies.unresolved),
             ["scene/missing.<UDIM>.png"]
+        );
+        Ok(())
+    }
+
+    /// One UDIM search path authored by layers in two directories names each
+    /// layer's own tiles.
+    #[test]
+    fn udim_search_path_per_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\n(\n    subLayers = [@a/a.usda@, @b/b.usda@]\n)\n",
+        );
+        for (layer, tile) in [("a", "1001"), ("b", "1002")] {
+            write(
+                dir.path(),
+                &format!("{layer}/{layer}.usda"),
+                &format!(
+                    "#usda 1.0\ndef \"{}\" {{\n    asset t = @tex/wood.<UDIM>.png@\n}}\n",
+                    layer.to_uppercase()
+                ),
+            );
+            write(dir.path(), &format!("{layer}/tex/wood.{tile}.png"), "PNG");
+        }
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        let dependencies = all_dependencies(&stage, &root)?;
+        assert_eq!(
+            relative(dir.path(), &dependencies.assets),
+            ["a/tex/wood.1001.png", "b/tex/wood.1002.png"]
         );
         Ok(())
     }

@@ -1609,15 +1609,20 @@ impl Drop for GroupEditGuard<'_, '_> {
 // the package and, with no anchor, joins the current directory where C++
 // returns the normalized path.
 //
-// The rules must apply at every anchoring site at once, or one layer gets
-// two identifiers: this function's callers in composition and clips,
-// `LayerRegistry::open_sublayers`, the mute keys (`muted_asset_id`,
-// `canonical_muted_id`, `sublayer_diagnostic_contributes`), asset-value
-// resolution in `sdf::asset_path`, and the `usd_utils` discovery. The
-// fallback probes the resolver, which a prim-index build does not do: either
-// resolve these paths once per layer stack, or allow the probe in builds.
+// The sites that anchor a path a layer authors to load or resolve it call
+// this function: composition and clips, `LayerRegistry::open_sublayers`,
+// asset-value resolution in `sdf::asset_path`, the `usd_utils` discovery,
+// and `Layer::absolute_path`.
+//
+// The fallback needs to know whether a packaged path exists, which a
+// prim-index build must not ask the resolver: answer it from the package's
+// entries held as data, deferring to loading where they are not known.
 // `failed_loads` keys must stay stable when a path moves from the authoring
-// layer to the package root.
+// layer to the package root. Mute keys anchor the authored path through the
+// resolver alone (`LayerGraph::canonical_muted_id`), while the graph matches
+// them against interned identifiers: once the fallback can move a path,
+// check mutes on the authored path before loading, as C++ `IsLayerMuted`
+// does, or a muted layer loads under its fallback identifier.
 //
 // TODO(perf): the default resolver canonicalizes through the filesystem, so
 // each call runs a `canonicalize`. Cache identifiers per `(anchor location,

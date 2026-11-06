@@ -463,7 +463,7 @@ fn resolve_path(
     if asset.is_empty() || asset.evaluated_path() == Some("") || outcome != AssetOutcome::Evaluated {
         return (asset, outcome);
     }
-    let identifier = registry.create_identifier(asset.asset_path(), anchor);
+    let identifier = sdf::absolute_path_at(registry, anchor, asset.asset_path());
     if let Some(resolved) = registry.resolve(&identifier) {
         asset.set_resolved_path(resolved.to_string_lossy().into_owned());
     }
@@ -486,7 +486,7 @@ fn anchor_path(
     let path = asset.evaluated_path().unwrap_or(asset.as_str());
     match anchor {
         Some(anchor) if !path.is_empty() && ar::is_relative_path(path) => {
-            AssetPath::new(registry.create_identifier(path, Some(anchor)))
+            AssetPath::new(sdf::absolute_path_at(registry, Some(anchor), path))
         }
         _ => AssetPath::new(path),
     }
@@ -517,7 +517,7 @@ mod tests {
             assert!(errors.is_empty(), "{errors:?}");
             value.try_as_asset_path().expect("an asset").as_str().to_string()
         };
-        let beside = |name: &str| registry.create_identifier(name, Some(&anchor));
+        let beside = |name: &str| sdf::absolute_path_at(&registry, Some(&anchor), name);
 
         assert!(anchored("./missing.png").contains("missing.png") && !anchored("./missing.png").starts_with('.'));
         assert_eq!(anchored("`\"./tex_${V}.png\"`"), beside("./tex_x.png"));

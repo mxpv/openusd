@@ -1178,28 +1178,32 @@ impl UdimPath {
     }
 
     /// Every tile `resolver` finds, in tile order, each probed as the path of
-    /// its number, anchored at `anchor` where one is given the way a layer
-    /// there anchors the relative asset paths it authors (C++
-    /// `ResolveUdimTilePaths`). The probes share one cache scope. A packaged
-    /// set opens its package once.
+    /// its number, passed through `anchored` where one is given: the way the
+    /// authoring layer anchors the relative asset paths it authors (C++
+    /// `ResolveUdimTilePaths`, which anchors through
+    /// `SdfComputeAssetPathRelativeToLayer`). `anchored` anchors through
+    /// `resolver`, as [`Layer::absolute_path`](crate::sdf::Layer::absolute_path)
+    /// does for a layer read through that resolver. The probes share one
+    /// cache scope. A packaged set opens its package once.
     ///
     /// TODO(perf): a hundred probes, each a resolution and, anchored, an
     /// identifier. A `Resolver` method listing the names under a prefix,
     /// defaulted to this loop and answered by `DefaultResolver` with one
     /// directory read, would find the tiles in one call.
-    pub fn resolve_tiles(&self, resolver: &dyn Resolver, anchor: Option<&ResolvedPath>) -> Vec<UdimTile> {
+    pub fn resolve_tiles(&self, resolver: &dyn Resolver, anchored: Option<&dyn Fn(&str) -> String>) -> Vec<UdimTile> {
         let _scope = CacheScope::begin();
-        self.tiles(resolver, anchor).collect()
+        self.tiles(resolver, anchored).collect()
     }
 
     /// The path in resolved form: the first tile's resolved path with the
     /// pattern put back where its number is, inside the packaged part where
-    /// a plain path resolved into a package (C++ `ResolveUdimPath`). `None`
-    /// where no tile resolves, or where the first tile's resolved path does
-    /// not end with the suffix.
-    pub fn resolve(&self, resolver: &dyn Resolver, anchor: Option<&ResolvedPath>) -> Option<String> {
+    /// a plain path resolved into a package (C++ `ResolveUdimPath`). Each
+    /// tile is probed as [`resolve_tiles`](Self::resolve_tiles) probes it,
+    /// through `anchored` where one is given. `None` where no tile resolves,
+    /// or where the first tile's resolved path does not end with the suffix.
+    pub fn resolve(&self, resolver: &dyn Resolver, anchored: Option<&dyn Fn(&str) -> String>) -> Option<String> {
         let _scope = CacheScope::begin();
-        let first = self.tiles(resolver, anchor).next()?;
+        let first = self.tiles(resolver, anchored).next()?;
         self.with_pattern(first.path.to_str()?)
     }
 
@@ -1238,12 +1242,12 @@ impl UdimPath {
     pub fn tiles<'a>(
         &'a self,
         resolver: &'a dyn Resolver,
-        anchor: Option<&'a ResolvedPath>,
+        anchored: Option<&'a dyn Fn(&str) -> String>,
     ) -> impl Iterator<Item = UdimTile> + 'a {
         UDIM_TILES.filter_map(move |number| {
             let tile = self.tile(number);
-            let asset_path = match anchor {
-                Some(_) => resolver.create_identifier(&tile, anchor),
+            let asset_path = match anchored {
+                Some(anchored) => anchored(&tile),
                 None => tile,
             };
             let path = resolver.resolve(&asset_path)?;
@@ -2393,23 +2397,26 @@ pub(crate) mod tests {
 
         /// Where `path`, anchored beside the tiles, resolves.
         fn at(&self, path: &str) -> ResolvedPath {
-            self.resolver
-                .resolve(&self.resolver.create_identifier(path, Some(&self.anchor)))
-                .expect(path)
+            self.resolver.resolve(&self.anchored(path)).expect(path)
+        }
+
+        /// `tile` anchored beside the tiles.
+        fn anchored(&self, tile: &str) -> String {
+            self.resolver.create_identifier(tile, Some(&self.anchor))
         }
 
         /// The tiles of the UDIM path `path`.
         fn tiles(&self, path: &str) -> Vec<UdimTile> {
             UdimPath::parse(path)
                 .expect("a UDIM path")
-                .resolve_tiles(&self.resolver, Some(&self.anchor))
+                .resolve_tiles(&self.resolver, Some(&|tile: &str| self.anchored(tile)))
         }
 
         /// The UDIM path `path` in resolved form.
         fn resolved(&self, path: &str) -> Option<String> {
             UdimPath::parse(path)
                 .expect("a UDIM path")
-                .resolve(&self.resolver, Some(&self.anchor))
+                .resolve(&self.resolver, Some(&|tile: &str| self.anchored(tile)))
         }
 
         /// Where the tile `tile` resolves, with its last `number` replaced by
@@ -2470,6 +2477,24 @@ pub(crate) mod tests {
             ]
         );
         assert!(fixture.tiles("./missing.<UDIM>.exr").is_empty());
+    }
+
+    /// A tile path authored inside a package is anchored by the closure the
+    /// way the packaged layer anchors it, so it finds the package's tiles.
+    #[test]
+    fn udim_tiles_in_package() {
+        let fixture = UdimFixture::new();
+        let package = fixture.at("udims.usdz");
+        let layer = ResolvedPath::new(join_package_relative_path(&package.to_string_lossy(), "udims.usda"));
+        let anchored = |tile: &str| fixture.resolver.create_identifier(tile, Some(&layer));
+        let tiles = UdimPath::parse("udim_tex_<UDIM>_.foo.bar.baz")
+            .expect("a UDIM path")
+            .resolve_tiles(&fixture.resolver, Some(&anchored));
+        let tile = |number| UdimTile {
+            number,
+            path: fixture.at(&format!("udims.usdz[udim_tex_{number}_.foo.bar.baz]")),
+        };
+        assert_eq!(tiles, [tile(1001), tile(1002), tile(1003)]);
     }
 
     #[test]
