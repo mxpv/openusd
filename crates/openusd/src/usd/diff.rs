@@ -987,7 +987,7 @@ mod tests {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
 
-        let layer = b.root_layer();
+        let layer = b.root_layer().try_borrow()?;
         let data = layer.data();
         assert_eq!(
             data.spec_type(&sdf::path("/Prim{set=sel}child")?),
@@ -1040,7 +1040,12 @@ mod tests {
 
         // The specs landed at the arc-source paths in the referenced layer, not in
         // the root layer, and compose back through the reference.
-        assert!(!b.root_layer().data().has_spec(&sdf::path("/World/MyPrim/added")?));
+        assert!(
+            !b.root_layer()
+                .borrow()
+                .data()
+                .has_spec(&sdf::path("/World/MyPrim/added")?)
+        );
         assert!(b.prim("/World/MyPrim/added")?.is_valid()?);
         assert_eq!(
             b.attribute(&sdf::path("/World/MyPrim/added.out")?)?.connections()?,
@@ -1074,7 +1079,7 @@ mod tests {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
 
-        let layer = b.root_layer();
+        let layer = b.root_layer().try_borrow()?;
         let data = layer.data();
         assert_eq!(
             data.spec_type(&sdf::path("/Prim{mirror=m}child")?),
@@ -1155,7 +1160,7 @@ mod tests {
             )?;
         }
 
-        let data_b = b.root_layer();
+        let data_b = b.root_layer().try_borrow()?;
         assert_eq!(
             data_b.data().spec_type(&sdf::path("/Prim{mirror=m}child")?),
             Some(sdf::SpecType::Prim)
@@ -1183,10 +1188,7 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::ExactLayer(&root_b))?;
         }
-        assert_eq!(
-            b.root_layer().data().spec_type(&sdf::path("/Prim{set=sel}child")?),
-            Some(sdf::SpecType::Prim)
-        );
+        assert!(b.root_layer().prim("/Prim{set=sel}child")?.is_some());
         // A layer the stage does not hold is refused, not silently substituted.
         assert!(matches!(
             b.apply_diff(&diffs.borrow()[0], ApplyMode::ExactLayer("not-a-layer.usda")),
@@ -1230,7 +1232,12 @@ mod tests {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
         // The over landed at the arc-source path and composes back.
-        assert!(!b.root_layer().data().has_spec(&sdf::path("/World/MyPrim/bare")?));
+        assert!(
+            !b.root_layer()
+                .borrow()
+                .data()
+                .has_spec(&sdf::path("/World/MyPrim/bare")?)
+        );
         assert!(b.prim("/World/MyPrim/bare")?.is_valid()?);
         Ok(())
     }
@@ -1381,7 +1388,7 @@ mod tests {
             stage.apply_diff(&diff, ApplyMode::CurrentEditTarget),
             Err(StageAuthoringError::Layer(_))
         ));
-        assert!(!stage.root_layer().data().has_spec(&sdf::path("/A")?));
+        assert!(!stage.root_layer().borrow().data().has_spec(&sdf::path("/A")?));
         Ok(())
     }
 
@@ -1401,7 +1408,7 @@ mod tests {
             b.apply_diff(&diffs.borrow()[0], ApplyMode::CurrentEditTarget),
             Err(StageAuthoringError::Layer(_))
         ));
-        assert!(!b.root_layer().data().has_spec(&sdf::path("/Prim.x")?));
+        assert!(!b.root_layer().borrow().data().has_spec(&sdf::path("/Prim.x")?));
         Ok(())
     }
 
@@ -1426,7 +1433,13 @@ mod tests {
         }
         let variant = sdf::path("/Prim{set=sel}")?;
         let type_name = sdf::FieldKey::TypeName.as_str();
-        assert!(b.root_layer().data().try_field(&variant, type_name)?.is_some());
+        assert!(
+            b.root_layer()
+                .try_borrow()?
+                .data()
+                .try_field(&variant, type_name)?
+                .is_some()
+        );
 
         let replayed = diffs.borrow().len();
         a.remove_prim("/Prim")?;
@@ -1435,7 +1448,7 @@ mod tests {
         }
         // The variant spec survives as scaffolding, but the deleted prim's
         // opinions and children are gone.
-        let layer = b.root_layer();
+        let layer = b.root_layer().try_borrow()?;
         let data = layer.data();
         assert!(data.try_field(&variant, type_name)?.is_none());
         assert!(!data.has_spec(&sdf::path("/Prim{set=sel}child")?));
@@ -1504,7 +1517,7 @@ mod tests {
         }
         let variant = sdf::path("/Prim{set=sel}")?;
         let kind = sdf::FieldKey::Kind.as_str();
-        assert!(b.root_layer().data().try_field(&variant, kind)?.is_some());
+        assert!(b.root_layer().try_borrow()?.data().try_field(&variant, kind)?.is_some());
 
         // A fresh producer's create of `/Prim` carries no kind; its whole
         // state replaces the variant spec's prim-level opinions on replay.
@@ -1514,7 +1527,7 @@ mod tests {
         for diff in fresh_diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
         }
-        assert!(b.root_layer().data().try_field(&variant, kind)?.is_none());
+        assert!(b.root_layer().try_borrow()?.data().try_field(&variant, kind)?.is_none());
         Ok(())
     }
 
@@ -1534,10 +1547,7 @@ mod tests {
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::ExactLayer(&root))?;
         }
-        assert_eq!(
-            b.root_layer().data().spec_type(&sdf::path("/Prim.x")?),
-            Some(sdf::SpecType::Attribute)
-        );
+        assert!(b.root_layer().attribute("/Prim.x")?.is_some());
         Ok(())
     }
 

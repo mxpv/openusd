@@ -231,7 +231,7 @@ pub fn bake_roots(roots: &[Root], interval: impl Into<gf::Interval>) -> Result<(
 /// last, and so is the edit target's layer where a hint was authored there,
 /// where C++ saves only the bindings' layers. A layer that fails to save,
 /// an anonymous one among them, fails the bake with its export error
-/// ([`sdf::LayerError::Export`] inside [`openusd::Error::Layer`]), the layers
+/// ([`openusd::Error::Export`]), the layers
 /// saved before it staying saved.
 ///
 /// Fails after the geometry committed, with [`SchemaError::BakeExtents`]
@@ -381,8 +381,8 @@ pub fn bake_skinning(
     if options.save_layers {
         // TODO(rayon): each layer saves independently of the others.
         for identifier in &saves {
-            if let Some(layer) = stage.layer_handle(identifier) {
-                layer.save().map_err(openusd::Error::from)?;
+            if let Some(layer) = stage.layer(identifier)? {
+                layer.save()?;
             }
         }
     }
@@ -1094,13 +1094,13 @@ fn check_type(
     path: &sdf::Path,
     type_name: &sdf::ValueTypeName,
 ) -> Result<(), SchemaError> {
-    let Some(layer) = stage.layer(layer) else {
+    let Some(layer) = stage.layer(layer)? else {
         return Ok(());
     };
-    let Some(spec) = layer.attribute(path)? else {
-        return Ok(());
+    let found = match layer.try_borrow()?.attribute(path)? {
+        Some(spec) => spec.type_name(),
+        None => return Ok(()),
     };
-    let found = spec.type_name();
     if found.as_ref() == Some(type_name) {
         return Ok(());
     }

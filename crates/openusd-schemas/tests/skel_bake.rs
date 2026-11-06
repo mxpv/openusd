@@ -80,7 +80,7 @@ type Samples = Vec<(f64, Vec<Vec3f>)>;
 /// The default value and the time samples `layer` authors for the
 /// `point3f[]`, `normal3f[]` or `float3[]` attribute at `path`.
 fn authored(stage: &Stage, layer: &str, path: &str) -> (Option<Vec<Vec3f>>, Samples) {
-    let layer = stage.layer(layer).expect("layer");
+    let layer = stage.layer(layer).unwrap().expect("layer").borrow();
     let Some(spec) = layer.attribute(path).expect("attribute path") else {
         return (None, Vec::new());
     };
@@ -275,11 +275,9 @@ fn bake_animated_ancestor() -> Result<(), SchemaError> {
 fn bake_root_becomes_xform() -> Result<(), SchemaError> {
     let stage = from_usda(&rig("", LIFT, "", ""))?;
     bake_roots(&[root(&stage)?], ..)?;
-    let layer = stage.root_layer();
-    let spec = layer.prim("/Root")?.expect("root spec");
-    assert_eq!(spec.type_name().as_deref(), Some("Xform"));
-    assert_eq!(spec.specifier(), Some(sdf::Specifier::Def));
-    drop(layer);
+    let spec = stage.root_layer().prim("/Root")?.expect("root spec");
+    assert_eq!(spec.type_name()?.as_deref(), Some("Xform"));
+    assert_eq!(spec.specifier()?, Some(sdf::Specifier::Def));
     assert!(Root::get(&stage, "/Root")?.is_none());
     // The binding and the skeleton stay.
     let body = BindingAPI::get(&stage, BODY)?.expect("binding stays applied");
@@ -714,7 +712,7 @@ fn rigid(kind: &str, name: &str, joints: &str, index: u32, body: &str) -> String
 
 /// The transform and the op order `prim` bakes in the root layer.
 fn baked_xform(stage: &Stage, prim: &str) -> (Vec<(f64, gf::Mat4d)>, Option<Vec<String>>) {
-    let layer = stage.root_layer();
+    let layer = stage.root_layer().borrow();
     let samples = layer
         .attribute(format!("{prim}.xformOp:transform"))
         .expect("attribute path")
@@ -987,10 +985,7 @@ fn bake_anonymous_unsaved() -> Result<(), SchemaError> {
     )
     .expect_err("an anonymous layer has nowhere to save to");
     assert!(
-        matches!(
-            &error,
-            SchemaError::Core(openusd::Error::Layer(sdf::LayerError::Export(_)))
-        ),
+        matches!(&error, SchemaError::Core(openusd::Error::Export(_))),
         "{error:?}"
     );
     // The bake is on the stage all the same.

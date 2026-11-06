@@ -886,10 +886,10 @@ fn validate_material_switch(stage: &usd::Stage, root: &usd::Prim) -> Result<(), 
 }
 
 /// `layer` written as text is the C++ baseline at `baseline`, byte for byte.
-fn assert_baseline(layer: &sdf::Layer, baseline: &str) -> Result<()> {
+fn assert_baseline(layer: &sdf::LayerHandle, baseline: &str) -> Result<()> {
     // A checkout that turns line ends into CRLF still holds the same text.
     let expected = fs::read_to_string(baseline).expect("baseline").replace("\r\n", "\n");
-    assert_eq!(layer.export_to_string().map_err(openusd::Error::from)?, expected);
+    assert_eq!(layer.export_to_string()?, expected);
     Ok(())
 }
 
@@ -1001,11 +1001,10 @@ fn source_created_in_variant() -> Result<(), SchemaError> {
         let _context = stage.edit_context(material.variant_edit_target("Wet", None)?)?;
         material.create_surface_output()?.connect_to(&source)?;
     }
-    let layer = stage.root_layer();
     let in_variant = sdf::path("/Mat{materialVariant=Wet}Source.outputs:out")?;
+    let layer = stage.root_layer();
     assert!(layer.attribute(&in_variant)?.is_some());
     assert!(layer.attribute("/Mat/Source.outputs:out")?.is_none());
-    drop(layer);
     assert_eq!(
         material.surface_output().connections()?,
         [sdf::path("/Mat/Source.outputs:out")?]

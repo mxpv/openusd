@@ -41,7 +41,7 @@ pub enum Error {
 
     /// A layer registry refused a read or a lookup.
     #[error(transparent)]
-    Layer(#[from] sdf::LayerError),
+    Layer(sdf::LayerError),
 
     /// A value does not cast to the requested type.
     #[error(transparent)]
@@ -143,6 +143,19 @@ impl From<Infallible> for Error {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(mem::size_of::<usda::ParseError>() > INLINE_ERROR_BUDGET);
+
+/// A field that fails to decode and a write that fails keep their
+/// [`Data`](Error::Data) and [`Export`](Error::Export) variants; the
+/// registry's refusals are [`Layer`](Error::Layer).
+impl From<sdf::LayerError> for Error {
+    fn from(error: sdf::LayerError) -> Self {
+        match error {
+            sdf::LayerError::Data(e) => Self::Data(e),
+            sdf::LayerError::Export(e) => Self::Export(e),
+            other => Self::Layer(other),
+        }
+    }
+}
 
 impl From<usda::ParseError> for Error {
     fn from(error: usda::ParseError) -> Self {

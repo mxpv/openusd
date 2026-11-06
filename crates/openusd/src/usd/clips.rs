@@ -691,9 +691,8 @@ def "Model" (
         let clips = ClipsAPI::from_prim_unchecked(stage.prim("/Model")?);
         clips.set_clip_prim_path("default", "/Geo")?;
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));
-        let root_layer = stage.root_layer();
-        let over = root_layer.prim("/Model")?.expect("an over on the edit target");
-        assert_eq!(over.specifier(), Some(sdf::Specifier::Over));
+        let over = stage.root_layer().prim("/Model")?.expect("an over on the edit target");
+        assert_eq!(over.specifier()?, Some(sdf::Specifier::Over));
         Ok(())
     }
 }

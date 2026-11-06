@@ -42,6 +42,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::iter;
 use std::mem;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
@@ -672,7 +673,7 @@ pub enum StageAuthoringError {
 
     /// A composed-stage query needed to route or validate the authoring call failed.
     #[error(transparent)]
-    Composition(#[from] pcp::QueryError),
+    Composition(pcp::QueryError),
 
     /// The prim's schemas reject the API schema being applied.
     #[error(transparent)]
@@ -834,9 +835,10 @@ pub enum StageAuthoringError {
         layer: String,
     },
 
-    /// The layers' store refused the edit, most often because a read or an
-    /// edit of the stage's layers was already in progress
-    /// ([`sdf::LayerError::Busy`]). An edit's own failure is not this variant.
+    /// The layers' store refused the edit, or a read it made, most often
+    /// because an edit of the stage's layers was already in progress or a
+    /// [`sdf::LayerGuard`] borrows the layer ([`sdf::LayerError::Busy`]). An
+    /// edit's own failure is not this variant.
     #[error(transparent)]
     Registry(sdf::LayerError),
 }
@@ -886,44 +888,30 @@ impl From<sdf::EditError> for StageAuthoringError {
     }
 }
 
-/// An edit's own failure keeps its stage variant; the layer registry's
-/// refusal of the edit is [`Registry`](StageAuthoringError::Registry).
-impl From<sdf::LayerError> for StageAuthoringError {
-    fn from(error: sdf::LayerError) -> Self {
+/// A query's store refusal is [`Registry`](StageAuthoringError::Registry), as
+/// an edit's is, and a field it fails to decode is
+/// [`Layer`](StageAuthoringError::Layer), as a direct read's is; its other
+/// failures are [`Composition`](StageAuthoringError::Composition).
+impl From<pcp::QueryError> for StageAuthoringError {
+    fn from(error: pcp::QueryError) -> Self {
         match error {
-            sdf::LayerError::Edit(e) => Self::from(e),
-            other => Self::Registry(other),
+            pcp::QueryError::Layer(e) => Self::from(*e),
+            pcp::QueryError::Data(e) => Self::from(*e),
+            other => Self::Composition(other),
         }
     }
 }
 
-/// A borrow of one of a [`Stage`]'s layers, as [`Stage::root_layer`],
-/// [`Stage::layer`] and [`Stage::session_layer`] hand it out. It derefs to the
-/// [`sdf::Layer`].
-///
-/// It holds the stage's layers borrowed for its lifetime. An authoring call
-/// made while one is live (`insert_layer`, `define_prim`, …) panics with a
-/// `RefCell` double borrow. Taking one from inside a
-/// [`LayerHandle::edit`](sdf::LayerHandle::edit) closure on one of the
-/// stage's layers panics too, as the edit holds the layers' content.
-pub struct LayerRef<'a> {
-    /// The stage's layers.
-    view: pcp::LayerView<'a>,
-    /// The layer.
-    id: pcp::LayerId,
-}
-
-impl Deref for LayerRef<'_> {
-    type Target = sdf::Layer;
-
-    fn deref(&self) -> &sdf::Layer {
-        self.view.layer(self.id)
-    }
-}
-
-impl fmt::Debug for LayerRef<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
+/// An edit's own failure and a field that fails to decode keep their stage
+/// variants; the layer registry's refusal of the edit is
+/// [`Registry`](StageAuthoringError::Registry).
+impl From<sdf::LayerError> for StageAuthoringError {
+    fn from(error: sdf::LayerError) -> Self {
+        match error {
+            sdf::LayerError::Edit(e) => Self::from(e),
+            sdf::LayerError::Data(e) => Self::from(e),
+            other => Self::Registry(other),
+        }
     }
 }
 
@@ -939,6 +927,12 @@ impl fmt::Debug for LayerRef<'_> {
 /// private and this type is not re-exported, so it is not externally
 /// nameable, and all its fields are private.
 pub struct StageInner {
+    /// The root layer. Declared ahead of `composition`, so it drops first and
+    /// the sweep the graph runs as it drops frees the layer.
+    root_layer: sdf::LayerHandle,
+    /// The strongest session layer, if one was provided. Declared ahead of
+    /// `composition` for the same reason as `root_layer`.
+    session_layer: Option<sdf::LayerHandle>,
     /// The composed state — layer graph, composition cache, and the queue of
     /// edits awaiting a recompose — behind the operations that name which side
     /// of the pending drain each access sits on.
@@ -1087,14 +1081,21 @@ impl PrimTypeMemo {
 /// The stage's sinks hear each transaction, then what settling the snapshot
 /// found; what a read finds waits for the next drained edit, the next
 /// mutation or [`flush`](Self::flush), since a read delivers nothing. An edit
-/// made while a read or an edit of the stage's layers holds them leaves its
-/// prims to settle at the next drain, or as they are read.
+/// committed by user code a layer load runs (a resolver, a file format)
+/// leaves its prims to settle at the next drain, or as they are read.
 ///
 /// A layer that no live layer stack, no prim still to settle and no cached
 /// clip set uses is released as an edit, a mute or a load-rules change
 /// ends, outside every read and delivery, unless it is the root or a
 /// session layer, holds unsaved edits, has no file to read it from again,
 /// or the edit target, an edit context or the undo history names it.
+///
+/// Inside an [`edit`](sdf::LayerHandle::edit) of a layer on the stage's
+/// registry, which borrows the registry's layers whole, a composed read that
+/// can fail returns [`sdf::LayerError::Busy`], one that folds a failure into
+/// a default (such as [`default_prim`](Self::default_prim)) returns the
+/// default, and one that cannot fail panics while an earlier edit is still
+/// queued.
 ///
 /// Composition runs user code: a resolver or a file format, reached while
 /// layers are read and while their composition is rebuilt. A panic out of it
@@ -1264,7 +1265,7 @@ impl Hash for Stage {
     }
 }
 
-impl std::ops::Deref for Stage {
+impl Deref for Stage {
     type Target = StageInner;
 
     fn deref(&self) -> &Self::Target {
@@ -1657,9 +1658,8 @@ impl Stage {
         scene_path: &sdf::Path,
         read: impl FnOnce(&sdf::Layer, &sdf::Path) -> T,
     ) -> Result<T, StageAuthoringError> {
-        self.settle()?;
         let (id, spec_path) = self.target_site(scene_path)?;
-        Ok(read(self.layer_view().layer(id), &spec_path))
+        Ok(read(self.layer_view()?.layer(id), &spec_path))
     }
 
     /// The current edit target's layer and the spec path `scene_path` maps to
@@ -1719,22 +1719,14 @@ impl Stage {
     /// Edit target for the stage's root layer, with an identity mapping. The
     /// target installed by default when a stage is opened.
     pub fn edit_target_root(&self) -> EditTarget {
-        let identifier = {
-            let layers = self.layers();
-            layers
-                .root_id()
-                .map(|id| layers.identifier(id).to_string())
-                .unwrap_or_default()
-        };
-        self.bound_target(identifier, pcp::MapFunction::identity())
+        self.bound_target(self.root_layer.identifier().to_string(), pcp::MapFunction::identity())
     }
 
     /// Edit target for the stage's strongest session layer, or `None` when the
     /// stage has no session layer.
     pub fn edit_target_session(&self) -> Option<EditTarget> {
-        let layers = self.layers();
-        let &id = layers.session_layers().first()?;
-        Some(self.bound_target(layers.identifier(id).to_string(), pcp::MapFunction::identity()))
+        let identifier = self.session_layer.as_ref()?.identifier().to_string();
+        Some(self.bound_target(identifier, pcp::MapFunction::identity()))
     }
 
     /// Edit target for `identifier`, a layer of the stage's root layer stack,
@@ -2161,14 +2153,13 @@ impl Stage {
     ///
     /// Fails with [`sdf::LayerError::Busy`], installing nothing, where what
     /// is pending cannot be delivered to the sinks already installed first
-    /// ([`flush`](Self::flush)): inside a read or an edit of a layer on the
-    /// stage's registry, a [`LayerRef`] held included, or from user code
-    /// composition runs.
+    /// ([`flush`](Self::flush)): inside an edit of a layer on the stage's
+    /// registry, or from user code composition runs.
     pub fn add_sink<S: StageSink + 'static>(&self, sink: S) -> Result<StageSinkId> {
-        // Any edit already committed (e.g. a direct `layer_handle` commit
-        // awaiting drain), and what reads found, go to the current set before
-        // this sink joins, so a sink only ever observes what happened after
-        // it was installed.
+        // Any edit already committed (e.g. a direct commit through a `layer`
+        // handle awaiting drain), and what reads found, go to the current set
+        // before this sink joins, so a sink only ever observes what happened
+        // after it was installed.
         self.flush_sinks()?;
         Ok(self.sinks.borrow_mut().add(Rc::new(sink)))
     }
@@ -2211,11 +2202,10 @@ impl Stage {
     /// the next drain of an edit, or this call.
     ///
     /// Fails with [`sdf::LayerError::Busy`], delivering nothing, where it
-    /// could not deliver everything: inside a read or an edit of a layer on
-    /// the stage's registry, a [`LayerRef`] held included, or from user code
-    /// composition runs. Fails with [`pcp::QueryError::Poisoned`] on a
-    /// poisoned stage. Called from a sink, the notice follows the ones being
-    /// delivered.
+    /// could not deliver everything: inside an edit of a layer on the stage's
+    /// registry, or from user code composition runs. Fails with
+    /// [`pcp::QueryError::Poisoned`] on a poisoned stage. Called from a sink,
+    /// the notice follows the ones being delivered.
     pub fn flush(&self) -> Result<()> {
         Ok(self.composition.flush(self)?)
     }
@@ -2230,9 +2220,9 @@ impl Stage {
     /// Install `observer` to hear each transaction outcome as it is
     /// reconciled.
     pub(super) fn add_observer(&self, observer: Rc<dyn TxnObserver>) -> sdf::sink::Id<dyn TxnObserver> {
-        // The observer hears only of later edits, unless a read or an edit
-        // of the stage's layers holds them: what it keeps queued then
-        // reconciles after the observer joins.
+        // The observer hears only of later edits, unless an edit of the
+        // stage's layers holds them: what it keeps queued then reconciles
+        // after the observer joins.
         // TODO: refuse with `Busy` there, as `add_sink` does, once
         // `UndoStage` and `ReplayStage` construct fallibly.
         self.process_pending();
@@ -2242,8 +2232,8 @@ impl Stage {
     /// Remove the observer with `id`.
     pub(super) fn remove_observer(&self, id: sdf::sink::Id<dyn TxnObserver>) {
         // The observer hears of every edit made while it was installed,
-        // unless a read or an edit of the stage's layers holds them; it is
-        // removed regardless, since a wrapper's drop removes it.
+        // unless an edit of the stage's layers holds them; it is removed
+        // regardless, since a wrapper's drop removes it.
         self.process_pending();
         self.observers.borrow_mut().remove(id);
     }
@@ -2456,9 +2446,7 @@ impl Stage {
             .composition
             .authoring_graph()
             .root_id()
-            .ok_or(StageAuthoringError::OutsideEditTarget {
-                path: sdf::Path::abs_root(),
-            })?;
+            .expect("every stage has a root layer");
         self.author_on_layer(layer_id, None, f)
     }
 
@@ -2765,8 +2753,8 @@ impl Stage {
     /// is: a number that changes whenever the index is built again. Useful
     /// for verifying surgical invalidation, since a prim an edit invalidates
     /// is composed again before the edit returns, or retired (`None`) when it
-    /// no longer exists, unless its settling failed or a read or an edit of
-    /// the stage's layers held the layers.
+    /// no longer exists, unless its settling failed or an edit of the stage's
+    /// layers held the layers.
     pub fn index_revision(&self, path: &sdf::Path) -> Option<u64> {
         self.cache().built_revision(path).map(pcp::PrimRevision::get)
     }
@@ -2813,38 +2801,35 @@ impl Stage {
 
     /// Returns `true` if the stage has a session layer.
     pub fn has_session_layer(&self) -> bool {
-        self.layers().session_layer_count() > 0
+        self.session_layer.is_some()
     }
 
-    /// Borrows the stage's root layer (C++ `UsdStage::GetRootLayer`). Panics if
-    /// the stage has no root layer (only possible for a degenerate empty graph,
-    /// which `StageBuilder` never produces).
+    /// A handle to the stage's root layer (C++ `UsdStage::GetRootLayer`). The
+    /// root layer is fixed for the stage's lifetime, so this reads no composed
+    /// state and leaves pending edits queued.
     ///
-    /// The returned [`LayerRef`] borrows the stage's layers (see its borrow
-    /// rules). In particular `stage.insert_layer(stage.root_layer().identifier(),
-    /// …)` panics because the temporary lives to the end of the statement.
-    /// Bind the identifier first so the borrow is released:
+    /// Holding the handle stops no load, traversal or edit; see
+    /// [`sdf::LayerHandle`] for how its reads and the spec handles it gives
+    /// out borrow the layer.
     ///
     /// ```no_run
-    /// # use openusd::{sdf, usd};
-    /// # fn f(stage: &usd::Stage, layer: sdf::Layer) {
-    /// let id = stage.root_layer().identifier().to_owned();
-    /// stage.insert_layer(&id, 0, layer, sdf::LayerOffset::IDENTITY).unwrap();
+    /// # use openusd::usd;
+    /// # fn f(stage: &usd::Stage) -> openusd::Result<()> {
+    /// let root = stage.root_layer();
+    /// let relocates = root.relocates()?;
+    /// if let Some(world) = root.prim("/World")? {
+    ///     let kind = world.kind()?;
+    /// }
+    ///
+    /// // Several reads of one unchanged layer.
+    /// let guard = root.try_borrow()?;
+    /// let start = guard.start_time_code();
+    /// let end = guard.end_time_code();
+    /// # Ok(())
     /// # }
     /// ```
-    pub fn root_layer(&self) -> LayerRef<'_> {
-        let view = self.layer_view();
-        let id = view.root_id().expect("stage has a root layer");
-        LayerRef { view, id }
-    }
-
-    /// Borrow the stage's layer named `identifier`, or `None` if no such layer is
-    /// in the stage. `identifier` is matched by canonical identifier. The
-    /// [`LayerRef`] borrows the stage's layers (see its borrow rules).
-    pub fn layer(&self, identifier: &str) -> Option<LayerRef<'_>> {
-        let view = self.layer_view();
-        let id = view.id_of(identifier)?;
-        Some(LayerRef { view, id })
+    pub fn root_layer(&self) -> sdf::LayerHandle {
+        self.root_layer.clone()
     }
 
     /// Edit the stage's layer named `identifier` directly, as one atomic
@@ -2871,23 +2856,35 @@ impl Stage {
     }
 
     /// A handle to the stage's layer named `identifier`, or `None` if no such
-    /// layer is in the stage. An edit through the handle is not attributed to
-    /// the stage: the stage integrates it like any direct layer edit, flagged
-    /// [`Provenance::DirectLayerEdit`](super::Provenance::DirectLayerEdit)
-    /// on a non-local layer.
+    /// layer is in the stage. `identifier` is matched by canonical identifier,
+    /// or by the real path the layer was read from. An edit through the handle
+    /// is not attributed to the stage: the stage integrates it like any direct
+    /// layer edit, flagged
+    /// [`Provenance::DirectLayerEdit`](super::Provenance::DirectLayerEdit) on a
+    /// non-local layer. The layer is read through live queries or a borrow (see
+    /// [`root_layer`](Self::root_layer)).
     ///
-    /// From inside a [`read`](sdf::LayerHandle::read) or an
-    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry, while
-    /// an earlier edit of them is still queued, a fallible stage read fails
-    /// with [`sdf::LayerError::Busy`], and one that cannot fail (such as
-    /// [`sub_layers`](Self::sub_layers)) panics. A read can also demand a
-    /// load: one that first reaches a reference or payload target, a `${VAR}`
-    /// sublayer, or a value clip the stage has not loaded fails there with
-    /// `Busy` too, since loading adds the layer to the registry, while a read
-    /// of loaded layers succeeds.
-    pub fn layer_handle(&self, identifier: &str) -> Option<sdf::LayerHandle> {
-        let layers = self.layers();
-        Some(layers.handle(layers.id_of(identifier)?).clone())
+    /// The root and session layers, fixed for the stage's lifetime, are found
+    /// by their identifier or real path without reading the layer graph. Any
+    /// other lookup, another spelling of those two included, first applies
+    /// the edits queued for composition. It fails with
+    /// [`pcp::QueryError::Poisoned`] on a poisoned stage, and with
+    /// [`sdf::LayerError::Busy`] where it cannot apply them: from inside an
+    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's
+    /// registry while an earlier edit of them is still queued (the layer it
+    /// names may be one that edit adds or removes), and from user code (a
+    /// resolver, a file format) composition runs while the stage is
+    /// part-composed.
+    pub fn layer(&self, identifier: &str) -> Result<Option<sdf::LayerHandle>, pcp::QueryError> {
+        let mut fixed = iter::once(&self.root_layer).chain(&self.session_layer);
+        if let Some(layer) =
+            fixed.find(|layer| layer.identifier() == identifier || layer.resolved_path() == Some(identifier))
+        {
+            return Ok(Some(layer.clone()));
+        }
+        self.settle()?;
+        let layers = self.composition.settled_graph();
+        Ok(layers.id_of(identifier).map(|id| layers.handle(id).clone()))
     }
 
     /// Edit several of the stage's layers as one atomic transaction, then drive a
@@ -2959,10 +2956,11 @@ impl Stage {
     /// asset fixed on disk otherwise loads here, or at
     /// [`reload`](Self::reload).
     ///
-    /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
-    /// a layer on the stage's registry, retrying nothing.
+    /// Fails with [`sdf::LayerError::Busy`] from inside an edit of a layer on
+    /// the stage's registry, or from user code (a resolver, a file format) a
+    /// stage's composition runs, retrying nothing.
     pub fn retry_loads(&self) -> Result<()> {
-        // A retry loads, so it cannot run inside a read of the registry's
+        // A retry loads, so it cannot run inside an edit of the registry's
         // layers.
         self.settle()?;
         self.composition.ensure_writable()?;
@@ -2986,14 +2984,15 @@ impl Stage {
     /// steps touching a reloaded layer are dropped. Every layer is tried; the
     /// first failure is returned.
     ///
-    /// Fails with [`sdf::LayerError::Busy`] from inside a read or an edit of
-    /// a layer on the stage's registry, and while a layer the reload would
-    /// change is borrowed ([`sdf::LayerHandle::try_borrow`]), with nothing
-    /// reloaded or retried. A borrowed layer the reload would leave as it is
-    /// does not stop it.
+    /// Fails with [`sdf::LayerError::Busy`] from inside an edit of a layer on
+    /// the stage's registry, or from user code (a resolver, a file format) a
+    /// stage's composition runs, and while a layer the reload would change is
+    /// borrowed ([`sdf::LayerHandle::try_borrow`]), with nothing reloaded or
+    /// retried. A borrowed layer the reload would leave as it is does not stop
+    /// it.
     pub fn reload(&self) -> Result<()> {
         // A retry loads, and the drain a reload runs recomposes, so neither
-        // can run inside a read of the registry's layers.
+        // can run inside an edit of the registry's layers.
         self.settle()?;
         self.composition.ensure_writable()?;
         let handles: Vec<sdf::LayerHandle> = {
@@ -3057,8 +3056,9 @@ impl Stage {
     /// (`SdfLayer::SetMuted`, a process-global data swap) is a separate feature
     /// and is not implemented.
     ///
-    /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
-    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry.
+    /// Panics from inside an [`edit`](sdf::LayerHandle::edit) of a layer on
+    /// the stage's registry, and from user code (a resolver, a file format)
+    /// composition runs while it reads the stage's layers.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
         self.composition
             .apply_mute(|graph| graph.mute_layer(identifier.into()), true, self);
@@ -3067,8 +3067,9 @@ impl Stage {
     /// Unmutes the layer with the given identifier, restoring its opinions to
     /// composition (C++ `UsdStage::UnmuteLayer`).
     ///
-    /// Panics from inside a [`read`](sdf::LayerHandle::read) or an
-    /// [`edit`](sdf::LayerHandle::edit) of a layer on the stage's registry.
+    /// Panics from inside an [`edit`](sdf::LayerHandle::edit) of a layer on
+    /// the stage's registry, and from user code (a resolver, a file format)
+    /// composition runs while it reads the stage's layers.
     pub fn unmute_layer(&self, identifier: &str) {
         self.composition
             .apply_mute(|graph| graph.unmute_layer(identifier), false, self);
@@ -3346,15 +3347,13 @@ impl Stage {
         self.cache().population_mask().clone()
     }
 
-    /// Borrows the stage's strongest session layer, if one was provided (C++
-    /// `UsdStage::GetSessionLayer`).
-    ///
-    /// The returned [`LayerRef`] borrows the stage's layers (see its borrow
-    /// rules).
-    pub fn session_layer(&self) -> Option<LayerRef<'_>> {
-        let view = self.layer_view();
-        let id = *view.session_layers().first()?;
-        Some(LayerRef { view, id })
+    /// A handle to the stage's strongest session layer, if one was provided
+    /// (C++ `UsdStage::GetSessionLayer`). The layer is read through live
+    /// queries or a borrow (see [`root_layer`](Self::root_layer)). The
+    /// strongest session layer is fixed for the stage's lifetime, so this
+    /// reads no composed state and leaves pending edits queued.
+    pub fn session_layer(&self) -> Option<sdf::LayerHandle> {
+        self.session_layer.clone()
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
@@ -4308,7 +4307,10 @@ impl Stage {
     /// [`StageAuthoringError::Layer`] if `parent` is read-only, and
     /// [`StageAuthoringError::Registry`] with
     /// [`sdf::LayerError::Duplicate`] when the registry already holds a layer
-    /// with `layer`'s identifier or read from its file. In
+    /// with `layer`'s identifier or read from its file, or with
+    /// [`sdf::LayerError::Busy`] when `parent` cannot be edited now (a
+    /// [`LayerGuard`](sdf::LayerGuard) borrows it, or an edit of the
+    /// registry's layers is in progress). In
     /// every case the graph is left untouched — `layer` only joins it once the
     /// parent edit succeeds, so a failed insert never leaves an orphan node —
     /// and `layer` is dropped.
@@ -4436,11 +4438,13 @@ impl Stage {
     }
 
     /// [`layers`](Self::layers) with the layers' content borrowed beside the
-    /// graph. Panics from inside a [`LayerHandle::edit`](sdf::LayerHandle::edit)
-    /// closure on one of the stage's layers, which holds the content.
-    pub(crate) fn layer_view(&self) -> pcp::LayerView<'_> {
-        self.process_pending();
-        self.composition.settled_view()
+    /// graph, after a [`settle`](Self::settle) and failing as it does. Also
+    /// fails with [`sdf::LayerError::Busy`] from inside a
+    /// [`LayerHandle::edit`](sdf::LayerHandle::edit) closure on one of the
+    /// stage's layers.
+    pub(crate) fn layer_view(&self) -> Result<pcp::LayerView<'_>, pcp::QueryError> {
+        self.settle()?;
+        Ok(self.composition.settled_view()?)
     }
 
     /// Drains, then runs a composed query against the settled stage through
@@ -4612,8 +4616,9 @@ impl StageBuilder {
     /// layer one of them holds is read once, and an edit through any of them
     /// reaches the others.
     ///
-    /// Opening a stage from inside a read or an edit of the registry's layers
-    /// fails with [`sdf::LayerError::Busy`].
+    /// Opening a stage from inside an edit of the registry's layers, or from
+    /// user code (a resolver, a file format) a stage's composition runs, fails
+    /// with [`sdf::LayerError::Busy`].
     pub fn registry(mut self, registry: sdf::LayerRegistry) -> Self {
         self.registry = registry;
         self
@@ -4932,16 +4937,14 @@ impl StageBuilder {
         // the first non-session layer, the session layer the first of any. The
         // graph below is populated layer by layer, so this is read from the inputs
         // rather than the (initially empty) graph.
+        let root_layer = layers[session_layer_count].handle.clone();
+        let session_layer = (session_layer_count > 0).then(|| layers[0].handle.clone());
         let layer_stack_id = pcp::LayerStackIdentifier {
-            root_layer: layers
-                .get(session_layer_count)
-                .map(|l| l.handle.identifier().to_string())
-                .unwrap_or_default(),
-            session_layer: (session_layer_count > 0).then(|| layers[0].handle.identifier().to_string()),
+            root_layer: root_layer.identifier().to_string(),
+            session_layer: session_layer.as_ref().map(|l| l.identifier().to_string()),
             resolver: self.registry.identity(),
         };
-        // The root layer is the strongest authoring target by default; an empty
-        // stack names no layer, so the target resolves to nothing at author time.
+        // The root layer is the strongest authoring target by default.
         let edit_target = EditTarget {
             layer_stack: Some(layer_stack_id.clone()),
             ..EditTarget::for_layer(layer_stack_id.root_layer.clone())
@@ -4950,6 +4953,8 @@ impl StageBuilder {
         // invalid relocates); the cache holds only the one-shot collection errors.
         // `Stage::composition_errors` concatenates the two.
         let stage = Stage(Rc::new(StageInner {
+            root_layer,
+            session_layer,
             composition: StageComposition::new(
                 pcp::LayerGraph::new(self.registry),
                 pcp::IndexCache::new(
@@ -5073,12 +5078,18 @@ pub(crate) mod tests {
     }
 
     /// The field `key` as `layer` authors it at `path`, read as `T`.
-    pub(crate) fn authored<T: TryFrom<vt::Value>>(layer: &sdf::Layer, path: &str, key: sdf::FieldKey) -> Option<T> {
+    pub(crate) fn authored<T: TryFrom<vt::Value>>(
+        layer: &sdf::LayerHandle,
+        path: &str,
+        key: sdf::FieldKey,
+    ) -> Option<T> {
         let value = layer
+            .borrow()
             .data()
             .try_field(&sdf::Path::new(path).ok()?, key.as_str())
-            .ok()??;
-        T::try_from(value.into_owned()).ok()
+            .ok()??
+            .into_owned();
+        T::try_from(value).ok()
     }
 
     /// Author through a layer's `edit` API and commit, for building test fixtures
@@ -5294,7 +5305,7 @@ pub(crate) mod tests {
 
         let mid1 = identifier_by_leaf(stage, "mid1.usda");
         stage
-            .layer_handle(&mid1)
+            .layer(&mid1)?
             .expect("mid1 is live")
             .edit(|e| e.set_expression_variables(HashMap::new()))?;
         // The drain seam drops /M1's index — the stack's only owner — and the
@@ -5322,7 +5333,7 @@ pub(crate) mod tests {
 
         let mid1 = identifier_by_leaf(&stage, "mid1.usda");
         stage
-            .layer_handle(&mid1)
+            .layer(&mid1)?
             .expect("mid1 is live")
             .edit(|e| e.set_expression_variables(HashMap::new()))?;
         assert!(stage.layers().stack_is_live(stack), "the pin keeps the stack");
@@ -5486,7 +5497,7 @@ pub(crate) mod tests {
         // whole fan, and the sweep at the end of the edit reclaims it.
         let mid = identifier_by_leaf(&stage, "mid.usda");
         stage
-            .layer_handle(&mid)
+            .layer(&mid)?
             .expect("mid is live")
             .edit(|e| e.set_expression_variables(HashMap::new()))?;
         assert!(stage.prim("/P0")?.is_defined()?);
@@ -5743,7 +5754,7 @@ pub(crate) mod tests {
         let root_id = identifier_by_leaf(&stage, "root.usda");
         let d_path = sdf::Path::new("/D")?;
         stage
-            .layer_handle(&root_id)
+            .layer(&root_id)?
             .expect("root is live")
             .edit(|e| e.remove_spec(&d_path).map(|_| ()))?;
         assert!(
@@ -5842,7 +5853,7 @@ pub(crate) mod tests {
             .root_layer()
             .attribute(input.clone())?
             .expect("delete authored on the root layer")
-            .connection_path_list()
+            .connection_path_list()?
             .unwrap();
         assert_eq!(op.deleted_items(), vec![target]);
         Ok(())
@@ -5893,7 +5904,7 @@ pub(crate) mod tests {
             .root_layer()
             .attribute(input)?
             .expect("authored on the root layer")
-            .connection_path_list()
+            .connection_path_list()?
             .expect("connections");
         assert_eq!(op.prepended_items(), vec![target]);
         Ok(())
@@ -5947,7 +5958,7 @@ pub(crate) mod tests {
             .root_layer()
             .attribute(input.clone())?
             .expect("authored on the root layer")
-            .connection_path_list()
+            .connection_path_list()?
             .unwrap();
         assert_eq!(op.deleted_items(), vec![target.clone()]);
         assert_eq!(op.prepended_items(), vec![target]);
@@ -5972,7 +5983,7 @@ pub(crate) mod tests {
         stage.define_prim("/Prim/child")?;
 
         let landed = {
-            let layers = stage.layer_view();
+            let layers = stage.layer_view()?;
             let root_id = layers.id_of(&root).unwrap();
             layers
                 .layer(root_id)
@@ -5997,7 +6008,7 @@ pub(crate) mod tests {
         stage.create_attribute("/Prim.size", "double")?;
 
         let landed = {
-            let layers = stage.layer_view();
+            let layers = stage.layer_view()?;
             let root_id = layers.id_of(&root).unwrap();
             layers
                 .layer(root_id)
@@ -6024,7 +6035,7 @@ pub(crate) mod tests {
 
     /// The parent layer's authored `subLayers` asset paths.
     fn authored_sublayers(stage: &Stage) -> Vec<String> {
-        let root = stage.root_layer();
+        let root = stage.root_layer().borrow();
         root.pseudo_root().and_then(|pr| pr.sublayers()).unwrap_or_default()
     }
 
@@ -6092,10 +6103,13 @@ pub(crate) mod tests {
         assert_eq!(target.map_to_spec_time(30.0), 10.0);
         stage.set_edit_target(target)?;
         stage.attribute("/A.x")?.set_at(2.0, usd::TimeCode::new(30.0))?;
-        let layer = stage.layer(&sub_id).expect("sub is loaded");
-        let samples = layer.attribute("/A.x")?.expect("spec").time_samples();
+        let samples = stage
+            .layer(&sub_id)?
+            .expect("sub is loaded")
+            .attribute("/A.x")?
+            .expect("spec")
+            .time_samples()?;
         assert_eq!(samples, Some(vec![(10.0, vt::Value::Double(2.0))]));
-        drop(layer);
         assert_eq!(
             stage.attribute("/A.x")?.get_at::<f64>(usd::TimeCode::new(30.0))?,
             Some(2.0)
@@ -7118,7 +7132,7 @@ def \"Sub\" {}
         assert!(stage.prim("/P/C")?.is_valid()?);
         let read = Rc::new(Cell::new(None));
         stage
-            .layer_handle(&identifier_by_leaf(&stage, "payload.usda"))
+            .layer(&identifier_by_leaf(&stage, "payload.usda"))?
             .expect("the payload layer")
             .add_sink(Reader {
                 stage: stage.downgrade(),
@@ -7245,7 +7259,7 @@ def \"Sub\" {}
             sdf::PrimSpec::new(e.data_mut(), "/M/Saved", sdf::Specifier::Def, "")?;
             Ok(())
         })?;
-        stage.layer_handle(&identifier).expect("loaded").save()?;
+        stage.layer(&identifier)?.expect("loaded").save()?;
         stage.define_prim("/Newer")?;
         assert_eq!(stage.undo_depth(), 2);
         stage.unload("/P")?;
@@ -7293,7 +7307,7 @@ def \"Sub\" {}
             sdf::PrimSpec::new(e.data_mut(), "/M/Saved", sdf::Specifier::Def, "")?;
             Ok(())
         })?;
-        stage.layer_handle(&identifier).expect("loaded").save()?;
+        stage.layer(&identifier)?.expect("loaded").save()?;
         let root_layer = stage.root_layer().identifier().to_owned();
         stage.edit_layer(&root_layer, |e| {
             e.remove_spec(&sdf::path("/P")?)?;
@@ -7416,8 +7430,7 @@ def "M" (
         let (root, _) = payload_fixture(dir.path())?;
         let stage = Stage::open(&root)?;
         assert!(stage.prim("/P/C")?.is_valid()?);
-        let identifier = stage.root_layer().identifier().to_string();
-        let handle = stage.layer_handle(&identifier).expect("the root layer");
+        let handle = stage.root_layer();
         handle.edit(|_| {
             stage.unload("/P").expect("a valid path");
             Ok(())
@@ -7495,7 +7508,7 @@ def "M" (
         })?;
         stage.unload("/P")?;
         assert_eq!(stage.layer_count(), 2, "the dirty layer stays");
-        stage.layer_handle(&payload).expect("held").save()?;
+        stage.layer(&payload)?.expect("held").save()?;
         assert_eq!(stage.layer_count(), 2, "a save edits nothing on the stage");
         stage.define_prim("/T")?;
         assert_eq!(stage.layer_count(), 1, "saved, it leaves");
@@ -7793,8 +7806,8 @@ def "P" (payload = @./clip.usda@</M>) {}
     }
 
     /// A value read that must load a clip fails with
-    /// [`sdf::LayerError::Busy`] from inside a read of the registry's layers,
-    /// as an arc load does, and reads a clip already loaded there.
+    /// [`sdf::LayerError::Busy`] from inside an edit of the registry's layers,
+    /// as an arc load does. A borrowed layer leaves the clip free to load.
     #[test]
     fn clip_load_busy() -> Result<()> {
         let busy = |result: &Result<Option<f64>>| match result {
@@ -7803,13 +7816,17 @@ def "P" (payload = @./clip.usda@</M>) {}
         };
         let dir = tempfile::tempdir()?;
         let stage = Stage::open(&clip_fixture(dir.path(), "clip.usda")?)?;
-        let root = stage
-            .layer_handle(stage.root_layer().identifier())
-            .expect("the stage holds its root");
-        let unloaded = root.read(|_| clip_x(&stage))?;
+        let root = stage.root_layer();
+        let unloaded = sdf::layer_store::tests::inside_edit(&root, || clip_x(&stage));
         assert!(busy(&unloaded), "{unloaded:?}");
-        assert_eq!(clip_x(&stage)?, Some(5.0), "outside the read, the clip loads");
-        assert_eq!(root.read(|_| clip_x(&stage))??, Some(5.0), "a loaded clip reads");
+        let guard = root.try_borrow()?;
+        assert_eq!(clip_x(&stage)?, Some(5.0), "beside a borrow, the clip loads");
+        drop(guard);
+        let loaded = sdf::layer_store::tests::inside_edit(&root, || clip_x(&stage));
+        assert!(
+            busy(&loaded),
+            "inside an edit, a loaded clip is not read either: {loaded:?}"
+        );
         Ok(())
     }
 
@@ -7950,18 +7967,16 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// A flush inside a read of the stage's layers fails with `Busy`, and
+    /// A flush inside an edit of the stage's layers fails with `Busy`, and
     /// what reads found waits for the next one.
     #[test]
-    fn flush_busy_in_read() -> Result<()> {
+    fn flush_busy_in_edit() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (stage, heard) = clip_missing(dir.path())?;
         assert_eq!(clip_x(&stage)?, Some(5.0));
-        let handle = stage
-            .layer_handle(stage.root_layer().identifier())
-            .expect("the root layer");
+        let handle = stage.root_layer();
 
-        let inside = handle.read(|_| stage.flush())?;
+        let inside = sdf::layer_store::tests::inside_edit(&handle, || stage.flush());
         assert!(
             matches!(
                 inside,
@@ -7980,36 +7995,24 @@ def "P" (payload = @./clip.usda@</M>) {}
         matches!(result, Err(crate::Error::Query(pcp::QueryError::Layer(error))) if matches!(**error, sdf::LayerError::Busy))
     }
 
-    /// Where what reads found cannot be delivered — inside a read or an edit
-    /// of the stage's layers, or with a layer reference held — neither
-    /// adding nor removing a sink changes the set: a new sink would hear
-    /// what predates it, and a leaving one would miss what it was installed
-    /// for.
+    /// Where what reads found cannot be delivered — inside an edit of the
+    /// stage's layers — neither adding nor removing a sink changes the set: a
+    /// new sink would hear what predates it, and a leaving one would miss what
+    /// it was installed for.
     #[test]
-    fn sink_busy_in_read() -> Result<()> {
+    fn sink_busy_in_edit() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (stage, first) = clip_missing(dir.path())?;
         let second: Heard = Rc::default();
         let id = stage.add_sink(Recomposed(Rc::clone(&second)))?;
         assert_eq!(clip_x(&stage)?, Some(5.0));
-        let handle = stage
-            .layer_handle(stage.root_layer().identifier())
-            .expect("the root layer");
+        let handle = stage.root_layer();
 
         let third: Heard = Rc::default();
-        let added = handle.read(|_| stage.add_sink(Recomposed(Rc::clone(&third))))?;
-        assert!(is_busy(&added), "{added:?}");
-        let removed = handle.read(|_| stage.remove_sink(id))?;
-        assert!(is_busy(&removed), "{removed:?}");
-        let in_edit = Cell::new(false);
-        handle.edit(|_| {
-            in_edit.set(is_busy(&stage.add_sink(Recomposed(Rc::clone(&third)))));
-            Ok(())
-        })?;
-        assert!(in_edit.get(), "an edit holds the layers too");
-        let root = stage.root_layer();
-        assert!(is_busy(&stage.add_sink(Recomposed(Rc::clone(&third)))));
-        drop(root);
+        let in_edit = sdf::layer_store::tests::inside_edit(&handle, || {
+            is_busy(&stage.add_sink(Recomposed(Rc::clone(&third)))) && is_busy(&stage.remove_sink(id))
+        });
+        assert!(in_edit, "an edit holds the layers too");
 
         stage.flush()?;
         let heard = [vec![sdf::path("/A")?]];
@@ -8018,7 +8021,11 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(third.borrow().is_empty(), "the sink was never installed");
         stage.remove_sink(id)?;
         stage.remove_sink(id)?;
-        handle.read(|_| stage.remove_sink(id))??;
+        let removed = sdf::layer_store::tests::inside_edit(&handle, || stage.remove_sink(id));
+        assert!(
+            removed.is_ok(),
+            "removing an id no longer installed needs nothing delivered: {removed:?}"
+        );
         Ok(())
     }
 
@@ -8142,7 +8149,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(stage.prim("/P")?.is_valid()?);
         let payload = layer_named(&stage, "payload.usda");
         let dropped = Rc::new(Cell::new(false));
-        stage.layer_handle(&payload).expect("held").add_sink(Probe {
+        stage.layer(&payload)?.expect("held").add_sink(Probe {
             stage: stage.downgrade(),
             dropped: Rc::clone(&dropped),
         })?;
@@ -8201,7 +8208,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             sdf::PrimSpec::new(e.data_mut(), "/Saved", sdf::Specifier::Def, "")?;
             Ok(())
         })?;
-        stage.layer_handle(&weak).expect("loaded").save()?;
+        stage.layer(&weak)?.expect("loaded").save()?;
         assert!(stage.can_undo());
         stage.mute_layer(weak.as_str());
         assert_eq!(stage.layer_count(), 2, "the undo step keeps the muted layer");
@@ -8253,7 +8260,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(stage.undo_depth(), 2);
         // The edit is saved, and the file changes elsewhere: the reload
         // touches nothing the step did, yet sets a new baseline for its layer.
-        let handle = stage.layer_handle(&sub).expect("loaded");
+        let handle = stage.layer(&sub)?.expect("loaded");
         handle.save()?;
         sdf::layer::tests::append(&dir.path().join("sub.usda"), "def \"Elsewhere\" {}\n")?;
         assert!(handle.reload(false)?);
@@ -8290,7 +8297,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             })
         })?;
         assert_eq!(stage.undo_depth(), 2);
-        let handle = stage.layer_handle(&sub).expect("loaded");
+        let handle = stage.layer(&sub)?.expect("loaded");
         handle.save()?;
         sdf::layer::tests::append(&dir.path().join("sub.usda"), "def \"Elsewhere\" {}\n")?;
         assert!(handle.reload(false)?);
@@ -8310,7 +8317,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             sdf::PrimSpec::new(e.data_mut(), "/OnSub", sdf::Specifier::Def, "")?;
             Ok(())
         })?;
-        let handle = stage.layer_handle(&sub).expect("loaded");
+        let handle = stage.layer(&sub)?.expect("loaded");
         handle.save()?;
         assert!(handle.reload(true)?, "a forced reload reads the file");
         assert_eq!(stage.undo_depth(), 1);
@@ -8330,7 +8337,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             Ok(())
         })?;
         assert_eq!(stage.undo_depth(), 1);
-        let handle = stage.layer_handle(&sub).expect("loaded");
+        let handle = stage.layer(&sub)?.expect("loaded");
         assert!(handle.reload(false)?, "the unsaved edit is discarded");
         assert_eq!(stage.undo_depth(), 0);
         assert!(stage.prim("/OnRoot")?.is_valid()?, "the root's half stays authored");
@@ -8355,7 +8362,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             Ok(())
         })?;
         assert_eq!(stage.undo_depth(), 2);
-        let handle = stage.layer_handle(&sub).expect("loaded");
+        let handle = stage.layer(&sub)?.expect("loaded");
         assert!(handle.reload(false)?);
         assert_eq!(stage.undo_depth(), 0, "undoing /P would take the kept /P/C with it");
         assert!(stage.prim("/P/C")?.is_valid()?);
@@ -8378,7 +8385,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             Ok(())
         })?;
         assert_eq!(b.undo_depth(), 1);
-        let handle = a.layer_handle(&sub).expect("A holds the sublayer");
+        let handle = a.layer(&sub)?.expect("A holds the sublayer");
         let seen = Rc::new(Cell::new(None));
         let (record, held) = (Rc::clone(&seen), Rc::clone(&b));
         handle.add_sink(move |_: &str, changes: &sdf::ChangeList| {
@@ -8408,7 +8415,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             sink.borrow_mut().extend(change.resynced.iter().cloned());
         })?;
         sdf::layer::tests::append(FsPath::new(&root), "def \"Added\" {}\n")?;
-        let handle = a.layer_handle(a.root_layer().identifier()).expect("A holds its root");
+        let handle = a.root_layer();
         assert!(handle.reload(false)?);
         assert!(b.prim("/Added")?.is_valid()?, "the other stage reads the reload");
         let resynced = resynced.borrow();
@@ -8666,7 +8673,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     }
 
     /// A stage reload that must reload a layer fails with
-    /// [`sdf::LayerError::Busy`] from inside a read of its registry's layers.
+    /// [`sdf::LayerError::Busy`] from inside an edit of its registry's layers.
     #[test]
     fn stage_reload_busy() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -8675,10 +8682,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             sdf::PrimSpec::new(e.data_mut(), "/Unsaved", sdf::Specifier::Def, "")?;
             Ok(())
         })?;
-        let root = stage
-            .layer_handle(stage.root_layer().identifier())
-            .expect("the stage holds its root");
-        let reloaded = root.read(|_| stage.reload())?;
+        let reloaded = sdf::layer_store::tests::inside_edit(&stage.root_layer(), || stage.reload());
         assert!(
             matches!(reloaded, Err(crate::Error::Layer(sdf::LayerError::Busy))),
             "{reloaded:?}"
@@ -8697,10 +8701,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(!stage.prim("/Sub")?.is_valid()?);
         fs::write(dir.path().join("sub.usda"), "#usda 1.0\ndef \"Sub\" {}\n")?;
         sdf::layer::tests::append(FsPath::new(&root), "def \"Added\" {}\n")?;
-        let handle = stage
-            .layer_handle(stage.root_layer().identifier())
-            .expect("the stage holds its root");
-
+        let handle = stage.root_layer();
         let guard = handle.borrow();
         let reloaded = stage.reload();
         assert!(
@@ -8966,7 +8967,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         );
         assert!(b.prim("/A/B")?.is_valid()?, "B composes A's edit");
 
-        let sub = b.layer_handle(&b.sub_layers(b.root_layer().identifier())[0]);
+        let sub = b.layer(&b.sub_layers(b.root_layer().identifier())[0])?;
         sub.expect("B holds the sublayer").edit(|e| {
             sdf::PrimSpec::new(e.data_mut(), "/Direct", sdf::Specifier::Def, "")?;
             Ok(())
@@ -9015,16 +9016,17 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// A stage opened from inside a read of its registry's layers fails with
+    /// A stage opened from inside an edit of its registry's layers fails with
     /// [`sdf::LayerError::Busy`].
     #[test]
-    fn open_inside_read_busy() -> Result<()> {
+    fn open_inside_edit_busy() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = shared_fixture(dir.path())?;
         let registry = sdf::LayerRegistry::default();
         let a = Stage::builder().registry(registry.clone()).open(&path)?;
-        let root = a.layer_handle(a.root_layer().identifier()).expect("A holds its root");
-        let opened = root.read(|_| Stage::builder().registry(registry.clone()).open(&path).map(drop))?;
+        let opened = sdf::layer_store::tests::inside_edit(&a.root_layer(), || {
+            Stage::builder().registry(registry.clone()).open(&path).map(drop)
+        });
         assert!(
             matches!(opened, Err(crate::Error::Layer(sdf::LayerError::Busy))),
             "{opened:?}"
@@ -9509,7 +9511,7 @@ def "P" (payload = @./clip.usda@</M>) {}
 
         assert_eq!(stage.start_time_code(), 1.0);
         assert_eq!(stage.end_time_code(), 48.0);
-        assert_eq!(stage.root_layer().start_time_code(), 1.0);
+        assert_eq!(stage.root_layer().start_time_code()?, 1.0);
         assert!(stage.has_authored_time_code_range());
         Ok(())
     }
@@ -9573,9 +9575,9 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// A direct `layer_handle` edit to `subLayers` rebuilds the graph's edges before
-    /// any graph query observes it: `sub_layers` reflects the removal with no
-    /// intervening composed read to trigger the flush.
+    /// A direct edit through a `layer` handle to `subLayers` rebuilds the
+    /// graph's edges before any graph query observes it: `sub_layers` reflects
+    /// the removal with no intervening composed read to trigger the flush.
     #[test]
     fn raw_sublayer_edit_current() -> Result<()> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
@@ -9597,7 +9599,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         );
 
         {
-            let root = stage.layer_handle("root.usda").expect("root layer");
+            let root = stage.layer("root.usda")?.expect("root layer");
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set_sublayers(["weak2.usda"]);
                 Ok(())
@@ -9647,7 +9649,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(seen.get(), Some("local"), "a local stage edit reports LocalStack");
 
         {
-            let target = stage.layer_handle("target.usda").expect("target layer");
+            let target = stage.layer("target.usda")?.expect("target layer");
             target.edit(|e| {
                 sdf::PrimSpec::new(e.data_mut(), "/Target/Child", sdf::Specifier::Def, "").unwrap();
                 Ok(())
@@ -9803,7 +9805,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1))?;
         }
         let seen = Rc::new(Cell::new(None));
-        let layer = stage.layer_handle("root.usda").expect("root layer");
+        let layer = stage.layer("root.usda")?.expect("root layer");
         let sink = {
             let (stage, seen) = (stage.clone(), seen.clone());
             layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
@@ -9838,15 +9840,12 @@ def "P" (payload = @./clip.usda@</M>) {}
         let seen = Rc::new(Cell::new(None));
         let sink = {
             let (stage, seen) = (stage.clone(), seen.clone());
-            stage
-                .layer_handle(&root)
-                .expect("root layer")
-                .add_sink(move |_: &str, _: &sdf::ChangeList| {
-                    seen.set(Some(stage.root_layer().identifier().to_owned()));
-                })?
+            stage.root_layer().add_sink(move |_: &str, _: &sdf::ChangeList| {
+                seen.set(Some(stage.root_layer().identifier().to_owned()));
+            })?
         };
         stage.define_prim("/Outer")?;
-        stage.layer_handle(&root).expect("root layer").remove_sink(sink)?;
+        stage.root_layer().remove_sink(sink)?;
         assert_eq!(seen.take().as_deref(), Some(root.as_str()));
         Ok(())
     }
@@ -9857,8 +9856,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     #[test]
     fn query_inside_edit_busy() -> Result<()> {
         let stage = Stage::builder().in_memory("root.usda")?;
-        let root = stage.root_layer().identifier().to_string();
-        let layer = stage.layer_handle(&root).expect("root layer");
+        let layer = stage.root_layer();
         layer.edit(|e| {
             sdf::PrimSpec::new(e.data_mut(), "/First", sdf::Specifier::Def, "")?;
             Ok(())
@@ -9892,8 +9890,7 @@ def "P" (payload = @./clip.usda@</M>) {}
                 }
             }
         }
-        let root = stage.root_layer().identifier().to_string();
-        let layer = stage.layer_handle(&root).expect("root layer");
+        let layer = stage.root_layer();
         let sink = layer.add_sink(Run(stage.downgrade(), f))?;
         let edited = layer.edit(|e| {
             sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
@@ -9904,7 +9901,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// Cached reads made from inside a read of the stage's layer, with an
+    /// Cached reads made from inside an edit of the stage's layer, with an
     /// earlier direct edit still queued, fail with `Busy` as composed queries
     /// do: a warmed attribute query and a prim's type.
     #[test]
@@ -9915,14 +9912,14 @@ def "P" (payload = @./clip.usda@</M>) {}
         let query = usd::AttributeQuery::new(&attribute);
         assert_eq!(query.get_at::<f32>(None)?, None);
         stage.prim_type_info("/A")?;
-        let root = stage.root_layer().identifier().to_string();
-        let layer = stage.layer_handle(&root).expect("root layer");
+        let layer = stage.root_layer();
         let failed = Rc::new(Cell::new(None));
         while_queued(&stage, {
             let failed = Rc::clone(&failed);
             move |stage| {
-                let read = layer.read(|_| (query.get_at::<f32>(None).is_err(), stage.prim_type_info("/A").is_err()));
-                failed.set(Some(read.expect("a read beside the sink's own")));
+                failed.set(Some(sdf::layer_store::tests::inside_edit(&layer, || {
+                    (query.get_at::<f32>(None).is_err(), stage.prim_type_info("/A").is_err())
+                })));
             }
         })?;
         assert_eq!(failed.get(), Some((true, true)), "the value and type reads fail");
@@ -9931,11 +9928,11 @@ def "P" (payload = @./clip.usda@</M>) {}
         Ok(())
     }
 
-    /// A composed query made from inside a read of the stage's layer that
+    /// A composed query made from inside an edit of the stage's layer that
     /// reaches an unloaded reference fails with `Busy`, and a later query
     /// loads the reference.
     #[test]
-    fn query_inside_read_busy() -> Result<()> {
+    fn load_inside_edit_busy() -> Result<()> {
         let dir = tempfile::tempdir()?;
         fs::write(
             dir.path().join("root.usda"),
@@ -9946,9 +9943,9 @@ def "P" (payload = @./clip.usda@</M>) {}
             "#usda 1.0\ndef \"Model\" {\n    def \"Child\" {}\n}\n",
         )?;
         let stage = Stage::open(dir.path().join("root.usda").to_str().expect("utf-8 path"))?;
-        let root = stage.root_layer().identifier().to_string();
-        let layer = stage.layer_handle(&root).expect("root layer");
-        let inside = layer.read(|_| stage.prim("/Ref/Child").expect("a valid path").is_valid())?;
+        let layer = stage.root_layer();
+        let inside =
+            sdf::layer_store::tests::inside_edit(&layer, || stage.prim("/Ref/Child").expect("a valid path").is_valid());
         assert!(
             inside.as_ref().is_err_and(|error| error.to_string().contains("in use")),
             "{inside:?}"
@@ -9957,6 +9954,25 @@ def "P" (payload = @./clip.usda@</M>) {}
             stage.prim("/Ref/Child")?.is_valid()?,
             "a later query loads the reference"
         );
+        Ok(())
+    }
+
+    /// Looking up a layer from inside an edit of another, with no earlier
+    /// edit queued, answers.
+    #[test]
+    fn layer_lookup_inside_edit() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("weak.usda", 1.0)?],
+            0,
+            pcp::Diagnostics::default(),
+        );
+        let weak = stage.layer("weak.usda")?.expect("weak layer");
+        let inside = sdf::layer_store::tests::inside_edit(&stage.root_layer(), || stage.layer("weak.usda"));
+        assert_eq!(inside?, Some(weak));
         Ok(())
     }
 
@@ -9976,22 +9992,22 @@ def "P" (payload = @./clip.usda@</M>) {}
         let sentinel = Rc::new(());
         let freed = Rc::downgrade(&sentinel);
         stage
-            .layer_handle("weak.usda")
+            .layer("weak.usda")?
             .expect("weak layer")
             .add_sink(move |_: &str, _: &sdf::ChangeList| {
                 let _ = &sentinel;
             })?;
-        let root = stage.layer_handle("root.usda").expect("root layer");
+        let root = stage.layer("root.usda")?.expect("root layer");
         drop(stage);
         assert!(freed.upgrade().is_none(), "the unheld sublayer is freed");
-        assert_eq!(root.read(|layer| layer.identifier().to_owned())?, "root.usda");
+        assert_eq!(root.try_borrow()?.identifier(), "root.usda", "the kept layer reads");
         Ok(())
     }
 
-    /// A stage dropped inside a read of a handle it gave out frees its other
-    /// layers once the read ends.
+    /// A stage dropped while one of its layers is borrowed frees its other
+    /// layers, and the borrowed layer stays readable.
     #[test]
-    fn drop_inside_read_frees() -> Result<()> {
+    fn drop_while_borrowed_frees() -> Result<()> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
@@ -10004,18 +10020,38 @@ def "P" (payload = @./clip.usda@</M>) {}
         let sentinel = Rc::new(());
         let freed = Rc::downgrade(&sentinel);
         stage
-            .layer_handle("weak.usda")
+            .layer("weak.usda")?
             .expect("weak layer")
             .add_sink(move |_: &str, _: &sdf::ChangeList| {
                 let _ = &sentinel;
             })?;
-        let root = stage.layer_handle("root.usda").expect("root layer");
-        let held = root.read(|_| {
-            drop(stage);
-            freed.upgrade().is_some()
+        let root = stage.layer("root.usda")?.expect("root layer").try_borrow()?;
+        drop(stage);
+        assert!(freed.upgrade().is_none(), "the unheld sublayer is freed");
+        assert_eq!(root.identifier(), "root.usda", "the borrowed layer reads");
+        Ok(())
+    }
+
+    /// Dropping a stage frees its root layer even while another handle keeps
+    /// the registry's store alive.
+    #[test]
+    fn drop_frees_root() -> Result<()> {
+        let registry = sdf::LayerRegistry::default();
+        let other = registry
+            .adopt(sdf::Layer::new_in_memory("other.usda"))
+            .expect("adopted");
+        let stage = Stage::builder()
+            .registry(registry.clone())
+            .open_layer(sdf::Layer::new_in_memory("root.usda"))?;
+        let sentinel = Rc::new(());
+        let freed = Rc::downgrade(&sentinel);
+        stage.root_layer().add_sink(move |_: &str, _: &sdf::ChangeList| {
+            let _ = &sentinel;
         })?;
-        assert!(held, "the read holds the store while the stage drops");
-        assert!(freed.upgrade().is_none(), "the read's end frees the unheld sublayer");
+        drop(stage);
+        assert!(freed.upgrade().is_none(), "the root layer is freed");
+        assert!(registry.find("other.usda")?.is_some(), "the other layer stays");
+        assert!(!other.is_dirty()?, "the other layer reads");
         Ok(())
     }
 
@@ -10038,7 +10074,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             let events = events.clone();
             stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| events.set(events.get() + 1))?;
         }
-        let layer = stage.layer_handle("root.usda").expect("root layer");
+        let layer = stage.layer("root.usda")?.expect("root layer");
         let nested = layer.clone();
         let fired = Rc::new(Cell::new(false));
         let once = fired.clone();
@@ -10268,7 +10304,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn read_reconciles_load_commit() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         hook.replace(Some(Box::new(move || define_raw(&root, "/Late"))));
         let resyncs = record_resyncs(&stage);
 
@@ -10290,7 +10326,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn taken_fixpoint_interrupts() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         hook.replace(Some(Box::new(move || define_raw(&root, "/Late"))));
 
         let inner = sdf::path("/P/Inner")?;
@@ -10325,7 +10361,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             });
             record.set(Some((busy, panicked)));
         })));
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         sublayer_raw(&root);
 
         stage.process_pending();
@@ -10340,7 +10376,7 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn drain_load_commit_ordered() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         let late = root.clone();
         hook.replace(Some(Box::new(move || define_raw(&late, "/C"))));
         let resyncs = record_resyncs(&stage);
@@ -10426,7 +10462,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let stage = Stage::builder()
             .resolver(resolver)
             .open(&dir.path().join("root.usda").to_string_lossy())?;
-        root.replace(stage.layer_handle(stage.root_layer().identifier()));
+        root.replace(Some(stage.root_layer()));
 
         assert!(stage.prim("/P")?.is_valid()?);
         assert_eq!(opens.get(), 1);
@@ -10471,7 +10507,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         }
         let dir = tempfile::tempdir()?;
         let (stage, _hook) = hooked_stage(dir.path(), PLAIN, &[], "none.usda")?;
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
 
         let message = panic_message(|| {
             let _edit = EditOnDrop(root.clone());
@@ -10531,7 +10567,7 @@ def "P" (payload = @./clip.usda@</M>) {}
             },
         )?;
         let resyncs = record_resyncs(&stage);
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         {
             let _layers = stage.layers();
             root.edit(|e| {
@@ -10593,7 +10629,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
         hook.replace(Some(Box::new(|| panic!("the resolver failed"))));
         let resyncs = record_resyncs(&stage);
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         {
             let _layers = stage.layers();
             sublayer_raw(&root);
@@ -10752,7 +10788,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         define_raw(&root, "/Late");
         assert_eq!(heard.get(), 0);
         let late = sdf::path("/Late")?;
-        assert!(root.read(|layer| layer.data().has_spec(&late))?);
+        assert!(root.try_borrow()?.data().has_spec(&late));
         Ok(())
     }
 
@@ -10786,7 +10822,7 @@ def "P" (payload = @./clip.usda@</M>) {}
                 assert!(asset_path != "poison.usda", "the resolver failed");
             },
         )?;
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
 
         let message = panic_message(|| {
             let _edit = EditOnDrop(root.clone());
@@ -10833,7 +10869,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         let after = Rc::new(Cell::new(0));
         let later = Rc::clone(&after);
         stage.add_sink(move |_: &Stage, _: &usd::CommittedChange<'_>| later.set(later.get() + 1))?;
-        let root = stage.layer_handle(stage.root_layer().identifier()).expect("the root");
+        let root = stage.root_layer();
         {
             let _layers = stage.layers();
             define_raw(&root, "/X");
@@ -10942,9 +10978,8 @@ def "P" (payload = @./clip.usda@</M>) {}
     fn handle_delete_frees() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (stage, _) = payload_pair(dir.path())?;
-        let root = stage.root_layer().identifier().to_owned();
         let layers = stage.layer_count();
-        stage.layer_handle(&root).expect("the root layer").edit(|e| {
+        stage.root_layer().edit(|e| {
             e.remove_spec(&sdf::path("/P")?)?;
             Ok(())
         })?;

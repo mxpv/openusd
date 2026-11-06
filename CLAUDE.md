@@ -52,7 +52,9 @@ source of truth for specifics.
   loads) and holds layers shared through `LayerHandle`s, each lending its one
   layer to read as a `LayerGuard` (C++
   `SdfLayer::FindOrOpen`, `sdf/layer_store.rs`, with the commit protocol its
-  edits run in `sdf/commit.rs`), the variable-expression engine (`sdf/expr.rs`), the asset-path
+  edits run in `sdf/commit.rs`), the live spec handles over them
+  (`sdf/handle.rs`, C++ `SdfPrimSpecHandle` and friends), the
+  variable-expression engine (`sdf/expr.rs`), the asset-path
   resolution tail that anchors an `asset` value against its authoring layer and
   evaluates any expression in it (`sdf/asset_path.rs`, C++
   `SdfResolveAssetPaths`; `pcp` and `usd` each supply their own anchor and

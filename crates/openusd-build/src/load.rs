@@ -113,20 +113,27 @@ pub fn open_stage(builder: &Builder, path: &Path) -> Result<usd::Stage, Error> {
 }
 
 /// Where every layer `stage` has loaded was found, root first: what a build
-/// script watches so an edit to any of them regenerates.
+/// script watches so an edit to any of them regenerates. Fails as
+/// [`usd::Stage::layer`] does.
 ///
 /// A layer across a reference or payload loads when a prim reaching it is
 /// composed, so this is asked once the reader has composed what it reads. A
 /// layer reached through a search path is watched where it was found, not by
 /// the relative path it was asked for by. An anonymous layer was read from
 /// nowhere and so is watched nowhere.
-pub fn watched_layers(stage: &usd::Stage) -> Vec<PathBuf> {
+pub fn watched_layers(stage: &usd::Stage) -> Result<Vec<PathBuf>, Error> {
     let root = stage.root_layer().identifier().to_owned();
     let identifiers = stage.layer_identifiers();
-    iter::once(&root)
-        .chain(identifiers.iter().filter(|id| **id != root))
-        .filter_map(|identifier| stage.layer(identifier)?.resolved_path().map(watched_path))
-        .collect()
+    let mut watched = Vec::new();
+    for identifier in iter::once(&root).chain(identifiers.iter().filter(|id| **id != root)) {
+        if let Some(path) = stage
+            .layer(identifier)?
+            .and_then(|layer| layer.resolved_path().map(watched_path))
+        {
+            watched.push(path);
+        }
+    }
+    Ok(watched)
 }
 
 /// Opens `schema` and reads every declaration its layers carry.
@@ -139,38 +146,39 @@ pub fn open(builder: &Builder, schema: &Path) -> Result<Source, Error> {
     // The root layer first, so what this run generates leads the list.
     let mut globals = Vec::new();
     for identifier in iter::once(&root).chain(identifiers.iter().filter(|id| **id != root)) {
-        let Some(layer) = stage.layer(identifier) else {
+        let Some(layer) = stage.layer(identifier)? else {
             continue;
         };
-        globals.push((identifier, read_global(&layer)));
+        let layer = layer.try_borrow()?;
+        let global = read_global(&layer);
+        globals.push((identifier, layer, global));
     }
 
-    let skip_code_generation = globals.iter().any(|(_, global)| global.skip_code_generation);
-    let use_literal_identifiers = globals.first().is_none_or(|(_, global)| global.use_literal_identifiers);
+    let skip_code_generation = globals.iter().any(|(_, _, global)| global.skip_code_generation);
+    let use_literal_identifiers = globals
+        .first()
+        .is_none_or(|(_, _, global)| global.use_literal_identifiers);
     // Only the root layer's, the library being generated being the one whose
     // tokens this run declares.
     let tokens = globals
         .first()
-        .map(|(_, global)| global.tokens.clone())
+        .map(|(_, _, global)| global.tokens.clone())
         .unwrap_or_default();
 
     // A layer with no `/GLOBAL` of its own belongs to whichever library
     // sublayered it; only its class prims matter.
     let owners: HashMap<&String, Owner<'_>> = globals
         .iter()
-        .filter_map(|(identifier, global)| Some((*identifier, global.owner()?)))
+        .filter_map(|(identifier, _, global)| Some((*identifier, global.owner()?)))
         .collect();
     let root_owner = owners.get(&root).ok_or_else(|| Error::NoLibraryName {
         schema: schema.to_path_buf(),
     })?;
 
     let mut declarations = Vec::new();
-    for (identifier, _) in &globals {
-        let Some(layer) = stage.layer(identifier) else {
-            continue;
-        };
+    for (identifier, layer, _) in &globals {
         let owner = owners.get(identifier).unwrap_or(root_owner);
-        declarations.extend(read_classes(&layer, identifier, owner, **identifier == root));
+        declarations.extend(read_classes(layer, identifier, owner, **identifier == root));
     }
 
     Ok(Source {

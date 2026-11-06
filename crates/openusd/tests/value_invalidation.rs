@@ -158,7 +158,7 @@ def "Model" (
     // must be looking at one layer for this to be visible at all.
     let clip_identifier = layer_by_leaf(&stage, "clip.usda");
     stage
-        .layer_handle(&clip_identifier)
+        .layer(&clip_identifier)?
         .expect("just found in the layer stack")
         .edit(|edit| {
             edit.attribute_mut(&sdf::path("/Clip.size")?)
@@ -225,7 +225,7 @@ def "Model" (
 
     let clip_identifier = layer_by_leaf(&stage, "clip.usda");
     stage
-        .layer_handle(&clip_identifier)
+        .layer(&clip_identifier)?
         .expect("just found in the layer stack")
         .edit(|edit| {
             sdf::AttributeSpec::new(
@@ -373,8 +373,7 @@ def "P" (
     let query = stage.attribute_query("/P/Child.size")?;
     assert_eq!(agreed(&stage, &query, "/P/Child.size", 0.0)?, None);
 
-    let root = stage.root_layer().identifier().to_owned();
-    stage.layer_handle(&root).expect("loaded").edit(|edit| {
+    stage.root_layer().edit(|edit| {
         edit.attribute_mut(&sdf::path("/P{v=x}Child.size")?)
             .expect("the root layer parsed")
             .expect("the variant declares the attribute")
@@ -526,7 +525,7 @@ fn unculled_dependent_resyncs() -> Result<()> {
         .map(|site| site.layer)
         .find(|id| FsPath::new(id).ends_with("source.usda"))
         .expect("the reference target contributes a spec");
-    stage.layer_handle(&source).expect("loaded").edit(|edit| {
+    stage.layer(&source)?.expect("loaded").edit(|edit| {
         sdf::PrimSpec::new(edit.data_mut(), "/Source/Child", sdf::Specifier::Over, "")?;
         Ok(())
     })?;
@@ -579,7 +578,7 @@ def "Ref" (
 
     // An inert `over` in the sublayer: the spec tier refreshes rather than drops.
     let weak = layer_by_leaf(&stage, "weak.usda");
-    stage.layer_handle(&weak).expect("loaded").edit(|edit| {
+    stage.layer(&weak)?.expect("loaded").edit(|edit| {
         sdf::PrimSpec::new(edit.data_mut(), "/Ref", sdf::Specifier::Over, "")?;
         Ok(())
     })?;
@@ -595,7 +594,7 @@ def "Ref" (
 
     // The same content composed from scratch. The edit lives in memory until the
     // layer is saved, so the reopened stage would otherwise read the old file.
-    stage.layer_handle(&weak).expect("loaded").save()?;
+    stage.layer(&weak)?.expect("loaded").save()?;
     let reopened = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
     let fresh = sites(&reopened)?;
 
@@ -682,7 +681,7 @@ def "Inst" (
         .map(|site| site.layer)
         .find(|id| leaf_of(id) == "source.usda")
         .expect("the reference target contributes a spec");
-    stage.layer_handle(&source).expect("loaded").edit(|edit| {
+    stage.layer(&source)?.expect("loaded").edit(|edit| {
         edit.attribute_mut(&sdf::path("/Source/Inner.x")?)
             .expect("the source layer parsed")
             .expect("the attribute is authored there")

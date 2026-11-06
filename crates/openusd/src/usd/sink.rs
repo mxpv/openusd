@@ -12,7 +12,8 @@
 //! Install with [`Stage::add_sink`](super::Stage::add_sink), which returns a
 //! [`StageSinkId`] to later [`Stage::remove_sink`](super::Stage::remove_sink).
 //! Both fail with `Busy`, changing nothing, where what is pending cannot be
-//! delivered first: inside a read or an edit of the stage's layers. A plain
+//! delivered first: inside an edit of the stage's layers, and from user code
+//! (a resolver, a file format) the stage's composition runs. A plain
 //! `Fn(&Stage, &CommittedChange)` closure is itself a `StageSink`, so
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
@@ -180,7 +181,7 @@ pub trait StageSink {
 pub enum Provenance {
     /// An edit to layers of the local (root) layer stack: stage authoring
     /// through the root edit target, a [`Stage::batch_edit`](super::Stage::batch_edit)
-    /// of local layers, or a direct [`Stage::layer_handle`](super::Stage::layer_handle)
+    /// of local layers, or a direct [`Stage::layer`](super::Stage::layer)
     /// edit to a local layer. The local layer stack shares the stage's
     /// namespace, so paths are already composed (stage) paths.
     LocalStack,
@@ -193,7 +194,7 @@ pub enum Provenance {
     /// instead [`LocalStack`](Self::LocalStack) or [`DirectLayerEdit`](Self::DirectLayerEdit).
     EditTarget(pcp::MapFunction),
     /// An edit reaching a non-local (referenced or payload) layer through no
-    /// edit target: a direct [`Stage::layer_handle`](super::Stage::layer_handle)
+    /// edit target: a direct [`Stage::layer`](super::Stage::layer)
     /// edit, or a [`Stage::batch_edit`](super::Stage::batch_edit) or reload
     /// that includes one. No mapping translates it ([`mapping`](Self::mapping)
     /// is `None`): a non-local layer's authored paths stay in that layer's own

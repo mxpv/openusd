@@ -71,7 +71,7 @@ impl AssetPreviewsAPI {
         let layer = registry
             .find_or_open(layer_path)?
             .ok_or_else(|| openusd::Error::UnresolvedAsset(layer_path.to_owned()))?;
-        let Some(default_prim) = layer.read(default_prim)? else {
+        let Some(default_prim) = layer.default_prim_path()? else {
             return Ok(None);
         };
         // The stage finds the layer the handle holds open.
@@ -88,20 +88,12 @@ impl AssetPreviewsAPI {
     /// ancestors, which the view keeps open. `layer` moves into that stage, and
     /// an edit through the view changes it there.
     pub fn layer_default_previews(layer: sdf::Layer) -> Result<Option<Self>> {
-        let Some(default_prim) = default_prim(&layer) else {
+        let Some(default_prim) = layer.default_prim_path() else {
             return Ok(None);
         };
         let stage = masked(&default_prim)?.open_layer(layer)?;
         Self::from_prim(stage.prim(default_prim)?)
     }
-}
-
-/// The path of the default prim `layer` names, if any.
-fn default_prim(layer: &sdf::Layer) -> Option<sdf::Path> {
-    layer
-        .pseudo_root()
-        .and_then(|root| root.default_prim())
-        .and_then(|name| sdf::default_prim_path(&name))
 }
 
 /// A stage builder over the domain schemas, masked to `default_prim` and its

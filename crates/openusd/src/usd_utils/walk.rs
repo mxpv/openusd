@@ -28,9 +28,9 @@ use crate::{Error, Result, ar};
 /// one is dropped as a duplicate. C++ 25.05 drops every sublayer offset once
 /// a sublayer path changes; here the offsets stay with their sublayers.
 ///
-/// `modify` runs while the layer's registry is read (see
-/// [`sdf::LayerHandle::read`]), and the rewrite commits as one edit of the
-/// layer.
+/// `modify` runs while the layer is borrowed (see
+/// [`sdf::LayerHandle::try_borrow`]), and the rewrite commits as one edit of
+/// the layer once it is released.
 pub fn modify_asset_paths(
     layer: &sdf::LayerHandle,
     mut modify: impl FnMut(&str) -> String,
@@ -42,15 +42,16 @@ pub fn modify_asset_paths(
         keep_empty_paths_in_arrays,
     };
     let mut modified: HashMap<String, String> = HashMap::new();
-    let edits = layer.read(|layer| {
+    let edits = {
+        let layer = layer.try_borrow()?;
         visit_asset_paths(layer.data(), layer.identifier(), mode, |asset| {
             if !modified.contains_key(asset.path) {
                 modified.insert(asset.path.to_owned(), modify(asset.path));
             }
             let path = &modified[asset.path];
             Ok((path != asset.path).then(|| path.clone()))
-        })
-    })??;
+        })?
+    };
     if edits.is_empty() {
         return Ok(());
     }
@@ -577,7 +578,7 @@ def "I" (
                 ]
             );
 
-            let text = layer.read(sdf::Layer::export_to_string)??;
+            let text = layer.export_to_string()?;
             for path in [
                 "@./moved/a.usda@ (offset = 1",
                 "@./moved/b.usda@ (offset = 3",
@@ -654,7 +655,7 @@ def "B" (
                 path => path.to_owned(),
             };
             modify_asset_paths(&layer, modify, keep_empty)?;
-            let text = layer.read(sdf::Layer::export_to_string)??;
+            let text = layer.export_to_string()?;
             assert!(text.contains("@./a.usda@ (offset = 1)"), "{text}");
             assert!(text.contains("string note = \"kept\""), "{text}");
             assert!(text.contains("2: @./keep.png@"), "{text}");
@@ -683,7 +684,7 @@ def "B" (
             }
         };
         modify_asset_paths(&layer, modify, true)?;
-        let text = layer.read(sdf::Layer::export_to_string)??;
+        let text = layer.export_to_string()?;
         assert!(!text.contains("templateAssetPath"), "{text}");
         assert!(text.contains("manifestAssetPath"), "{text}");
         Ok(())
@@ -707,7 +708,7 @@ def "B" (
             Ok(())
         })?;
         modify_asset_paths(&layer, |_| String::new(), true)?;
-        assert!(!layer.read(|layer| layer.data().has_field(&prim, payload))?);
+        assert!(!layer.try_borrow()?.data().has_field(&prim, payload));
         Ok(())
     }
 }

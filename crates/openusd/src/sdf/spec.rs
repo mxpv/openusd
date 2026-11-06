@@ -370,7 +370,15 @@ impl<'a> PrimSpecRef<'a> {
     /// prim spec exists there. A variant spec (`/Prim{set=sel}`) is viewed as
     /// a prim spec too, as C++ `SdfVariantSpec::GetPrimSpec` views it.
     pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
-        holds_prim(data, &path).then(|| Self(Spec::wrap(data, path)))
+        holds_prim(data, &path).then(|| Self::at(data, path))
+    }
+
+    /// A read-only view of `path` in `data`, checking no spec kind: for data
+    /// holding no spec at `path`, where every accessor answers as for an
+    /// unauthored field. Over a spec of another kind it would read that
+    /// spec's fields; [`get`](Self::get) is the checked constructor.
+    pub(crate) fn at(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Self {
+        Self(Spec::wrap(data, path))
     }
 }
 
@@ -681,8 +689,14 @@ impl<'a> PseudoRootSpecRef<'a> {
     /// Returns a read-only view of the pseudo-root spec, or `None` if the
     /// layer has no pseudo-root spec.
     pub(crate) fn get(data: &'a dyn sdf::AbstractData) -> Option<Self> {
-        let path = sdf::Path::abs_root();
-        matches!(data.spec_type(&path), Some(sdf::SpecType::PseudoRoot)).then(|| Self(Spec::wrap(data, path)))
+        matches!(data.spec_type(&sdf::Path::abs_root()), Some(sdf::SpecType::PseudoRoot)).then(|| Self::at(data))
+    }
+
+    /// A read-only view of the pseudo-root path in `data`, checking no spec
+    /// kind: for data holding no spec there; [`get`](Self::get) is the
+    /// checked constructor.
+    pub(crate) fn at(data: &'a dyn sdf::AbstractData) -> Self {
+        Self(Spec::wrap(data, sdf::Path::abs_root()))
     }
 }
 
@@ -953,8 +967,15 @@ impl<'a> AttributeSpecRef<'a> {
     /// Returns a read-only view of the attribute spec at `path`, or `None` if
     /// no attribute spec exists there.
     pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
-        matches!(data.spec_type(&path), Some(sdf::SpecType::Attribute))
-            .then(|| Self(PropertySpec(Spec::wrap(data, path))))
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Attribute)).then(|| Self::at(data, path))
+    }
+
+    /// A read-only view of `path` in `data`, checking no spec kind: for data
+    /// holding no spec at `path`, where every accessor answers as for an
+    /// unauthored field. Over a spec of another kind it would read that
+    /// spec's fields; [`get`](Self::get) is the checked constructor.
+    pub(crate) fn at(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Self {
+        Self(PropertySpec(Spec::wrap(data, path)))
     }
 }
 
@@ -1297,8 +1318,15 @@ impl<'a> RelationshipSpecRef<'a> {
     /// Returns a read-only view of the relationship spec at `path`, or `None`
     /// if no relationship spec exists there.
     pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
-        matches!(data.spec_type(&path), Some(sdf::SpecType::Relationship))
-            .then(|| Self(PropertySpec(Spec::wrap(data, path))))
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Relationship)).then(|| Self::at(data, path))
+    }
+
+    /// A read-only view of `path` in `data`, checking no spec kind: for data
+    /// holding no spec at `path`, where every accessor answers as for an
+    /// unauthored field. Over a spec of another kind it would read that
+    /// spec's fields; [`get`](Self::get) is the checked constructor.
+    pub(crate) fn at(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Self {
+        Self(PropertySpec(Spec::wrap(data, path)))
     }
 }
 

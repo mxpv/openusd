@@ -2210,9 +2210,8 @@ mod tests {
         // No registry knows `MyStudioLight`, so it resolves nothing on its own.
         assert!(stage.prim("/Sun")?.prim_definition()?.is_empty());
 
-        let root_id = stage.root_layer().identifier().to_owned();
         {
-            let root = stage.layer_handle(&root_id).expect("root layer");
+            let root = stage.root_layer();
             root.edit(|e| {
                 e.pseudo_root_mut().unwrap().set(
                     "fallbackPrimTypes",
@@ -2416,11 +2415,10 @@ mod tests {
         stage.prim("/Sun")?.apply_api("LightAPI")?.set_kind("component")?;
         assert!(stage.prim("/Sun")?.has_api_schema("LightAPI")?);
         assert_eq!(stage.prim("/Sun")?.kind()?.as_deref(), Some("component"));
-        let root_layer = stage.root_layer();
-        let over = root_layer.prim("/Sun")?.expect("an over on the edit target");
-        assert_eq!(over.specifier(), Some(sdf::Specifier::Over));
-        assert_eq!(over.type_name(), None, "the over adds no type of its own");
-        assert_eq!(over.kind().as_deref(), Some("component"));
+        let over = stage.root_layer().prim("/Sun")?.expect("an over on the edit target");
+        assert_eq!(over.specifier()?, Some(sdf::Specifier::Over));
+        assert_eq!(over.type_name()?, None, "the over adds no type of its own");
+        assert_eq!(over.kind()?.as_deref(), Some("component"));
         Ok(())
     }
 
@@ -2869,7 +2867,7 @@ mod tests {
             .root_layer()
             .prim("/World")?
             .expect("authored on the root layer")
-            .api_schemas()
+            .api_schemas()?
             .expect("apiSchemas authored");
         assert_eq!(op.appended_items(), [Token::from("ExistingAPI")]);
         assert_eq!(op.prepended_items(), [Token::from("NewAPI")]);

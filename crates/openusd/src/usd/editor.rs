@@ -169,7 +169,7 @@ pub enum NamespaceEditError {
 
     /// A composed-stage query needed to validate or apply an edit failed.
     #[error(transparent)]
-    Composition(#[from] pcp::QueryError),
+    Composition(pcp::QueryError),
 
     /// Authoring the edit onto a layer failed.
     #[error(transparent)]
@@ -179,6 +179,17 @@ pub enum NamespaceEditError {
 impl From<sdf::sink::Error> for NamespaceEditError {
     fn from(error: sdf::sink::Error) -> Self {
         NamespaceEditError::Stage(StageAuthoringError::Rejected(error))
+    }
+}
+
+/// A query's store refusal and a field it fails to decode take the stage's
+/// variants, as an edit's do (see [`StageAuthoringError`]'s conversion).
+impl From<pcp::QueryError> for NamespaceEditError {
+    fn from(error: pcp::QueryError) -> Self {
+        match error {
+            pcp::QueryError::Layer(_) | pcp::QueryError::Data(_) => Self::Stage(error.into()),
+            other => Self::Composition(other),
+        }
     }
 }
 
@@ -366,6 +377,10 @@ impl NamespaceEditor {
     ) -> Result<(), NamespaceEditError> {
         let resolved = relocate_plan.resolve(seeds)?;
 
+        // TODO: the transaction takes every root-stack layer, so a
+        // `LayerGuard` on one the batch leaves unchanged fails it with
+        // `Busy`. Naming only the layers the plan writes needs the embedded
+        // path fixup planned ahead of the commit.
         self.stage
             .author_layers_txn(&layer_ids, None, commit, |ids, edits| {
                 for (edit, plan) in self.edits.iter().zip(&plan) {
@@ -459,11 +474,10 @@ impl NamespaceEditor {
         layer_ids: Vec<pcp::LayerId>,
         edit_target: pcp::LayerId,
     ) -> Result<BatchPlan, NamespaceEditError> {
-        self.stage.settle()?;
         // `seeds` (per layer) is the baseline each layer's final list is compared
         // against; the plan tracks per-occurrence freshness so validation blames
         // only the pairs this batch created or changed.
-        let seeds = seed_relocates(&self.stage.layer_view(), &layer_ids);
+        let seeds = seed_relocates(&self.stage.layer_view()?, &layer_ids);
         let projection = NamespaceProjection::new(&self.stage);
         let mut relocates = RelocateStackPlan::new(&layer_ids, &seeds, edit_target);
         let mut per_edit: Vec<EditPlan> = Vec::with_capacity(self.edits.len());
@@ -542,7 +556,7 @@ impl NamespaceEditor {
             .map_err(NamespaceEditError::Stage)?;
         let stack_id = pin.id();
         let (stack_layer_ids, seeds) = {
-            let layers = self.stage.layer_view();
+            let layers = self.stage.layer_view()?;
             let ids: Vec<pcp::LayerId> = layers.layer_stack(stack_id).iter().map(|&(id, _)| id).collect();
             let seeds = seed_relocates(&layers, &ids);
             (ids, seeds)
@@ -667,8 +681,7 @@ impl NamespaceEditor {
         sources: &[&sdf::Path],
         rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
     ) -> Result<Vec<String>, NamespaceEditError> {
-        self.stage.settle()?;
-        let layers = self.stage.layer_view();
+        let layers = self.stage.layer_view()?;
         let mut result = Vec::new();
         for id in layer_ids {
             let Some(layer) = layers.try_layer(*id) else { continue };
@@ -1775,6 +1788,11 @@ mod tests {
         stage.prim(path(p).unwrap()).unwrap().is_valid().unwrap()
     }
 
+    /// A layer's relocates, read now.
+    fn layer_relocates(layer: &sdf::LayerHandle) -> sdf::RelocateList {
+        layer.relocates().expect("a live read")
+    }
+
     fn rel_targets(stage: &Stage, p: &str) -> Vec<String> {
         stage
             .relationship(path(p).unwrap())
@@ -1872,6 +1890,7 @@ mod tests {
 
         let references = stage
             .root_layer()
+            .borrow()
             .data()
             .try_field(&path("/Other").unwrap(), FieldKey::References.as_str())
             .unwrap()
@@ -1906,6 +1925,7 @@ mod tests {
 
         let op = stage
             .root_layer()
+            .borrow()
             .data()
             .try_field(&path("/Other.rel").unwrap(), FieldKey::TargetPaths.as_str())
             .unwrap()
@@ -2001,10 +2021,10 @@ mod tests {
 
         assert!(valid(&stage, "/B"));
         assert!(!valid(&stage, "/A/Child"));
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
-            stage.root_layer().relocates().is_empty(),
-            "local spec move should not author relocates: {:?}",
-            stage.root_layer().relocates()
+            relocates.is_empty(),
+            "local spec move should not author relocates: {relocates:?}"
         );
     }
 
@@ -2087,7 +2107,7 @@ mod tests {
             .unwrap();
 
         // The relocate is authored on the local layer stack...
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -2107,7 +2127,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -2262,7 +2282,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let layer = stage.root_layer();
+        let layer = stage.root_layer().borrow();
         let data = layer.data();
         assert_eq!(
             data.spec_type(&path("/Prim{set=sel}renamed").unwrap()),
@@ -2303,7 +2323,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let layer = stage.root_layer();
+        let layer = stage.root_layer().borrow();
         let data = layer.data();
         assert_eq!(
             data.spec_type(&path("/Prim{set=sel}sibling/child").unwrap()),
@@ -2322,7 +2342,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let layer = stage.root_layer();
+        let layer = stage.root_layer().borrow();
         let data = layer.data();
         assert!(!data.has_spec(&path("/Prim{set=sel}child").unwrap()));
         assert!(!data.has_spec(&path("/Prim{set=sel}child.out").unwrap()));
@@ -2417,18 +2437,24 @@ mod tests {
             .apply()
             .unwrap();
 
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer").borrow();
         assert_eq!(
             model.data().spec_type(&path("/Model/Renamed").unwrap()),
             Some(sdf::SpecType::Prim)
         );
         assert!(!model.data().has_spec(&path("/Model/A").unwrap()));
         // The edit landed in the source layer, not the root.
-        assert!(!stage.root_layer().data().has_spec(&path("/Ref/Renamed").unwrap()));
+        assert!(
+            !stage
+                .root_layer()
+                .borrow()
+                .data()
+                .has_spec(&path("/Ref/Renamed").unwrap())
+        );
         assert!(valid(&stage, "/Ref/Renamed"));
         assert!(!valid(&stage, "/Ref/A"));
         // No relocate is authored: the move is a direct edit of the source.
-        assert!(stage.root_layer().relocates().is_empty());
+        assert!(layer_relocates(&stage.root_layer()).is_empty());
     }
 
     /// A cross-arc delete removes the spec from the arc source layer, so the prim
@@ -2442,7 +2468,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer").borrow();
         assert!(!model.data().has_spec(&path("/Model/A").unwrap()));
         assert!(!valid(&stage, "/Ref/A"));
         assert!(valid(&stage, "/Ref/B"));
@@ -2490,19 +2516,18 @@ mod tests {
             .apply()
             .unwrap();
 
-        // Scoped: the layer guard borrows the graph, and the composed reads
-        // below may re-mint a reclaimed target stack through the load barrier,
-        // which needs the graph mutably.
-        {
-            let model = stage.layer("model.usda").expect("model layer");
-            assert_eq!(
-                model.data().spec_type(&path("/Model/Renamed").unwrap()),
-                Some(sdf::SpecType::Prim)
-            );
-        }
+        assert!(
+            stage
+                .layer("model.usda")
+                .unwrap()
+                .expect("model layer")
+                .prim("/Model/Renamed")
+                .unwrap()
+                .is_some()
+        );
         assert!(valid(&stage, "/Ref/Renamed"));
         assert!(!valid(&stage, "/Ref/A"));
-        assert!(stage.root_layer().relocates().is_empty());
+        assert!(layer_relocates(&stage.root_layer()).is_empty());
     }
 
     /// A cross-arc move follows an external relationship target authored in the
@@ -2549,7 +2574,7 @@ mod tests {
 
         // The sibling relationship target follows the move, in the source layer's
         // namespace, and composes back through the arc.
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer").borrow();
         let op = model
             .data()
             .try_field(&path("/Model/B.rel").unwrap(), FieldKey::TargetPaths.as_str())
@@ -2654,15 +2679,14 @@ mod tests {
             .unwrap();
 
         // The relocate lands in the target's stack, in the target's namespace.
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer");
         assert!(
-            model
-                .relocates()
+            layer_relocates(&model)
                 .iter()
                 .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap())
         );
         // Not in the consuming root stack — a relocate there would be dropped.
-        assert!(stage.root_layer().relocates().is_empty());
+        assert!(layer_relocates(&stage.root_layer()).is_empty());
         // The deeper-arc content composes back at the moved path.
         assert!(valid(&stage, "/Ref/Moved"));
         assert!(!valid(&stage, "/Ref/Inner"));
@@ -2682,14 +2706,13 @@ mod tests {
             .apply()
             .unwrap();
 
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer");
         assert!(
-            model
-                .relocates()
+            layer_relocates(&model)
                 .iter()
                 .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t.is_empty())
         );
-        assert!(stage.root_layer().relocates().is_empty());
+        assert!(layer_relocates(&stage.root_layer()).is_empty());
         assert!(!valid(&stage, "/Ref/Inner"));
     }
 
@@ -2742,10 +2765,9 @@ mod tests {
             .apply()
             .unwrap();
 
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer");
         assert!(
-            model
-                .relocates()
+            layer_relocates(&model)
                 .iter()
                 .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap())
         );
@@ -2802,8 +2824,12 @@ mod tests {
             .unwrap();
 
         // Both stack layers moved their spec; no residue lingers in the sublayer.
-        let model = stage.layer("model.usda").expect("model layer");
-        let model_sub = stage.layer("model_sub.usda").expect("model_sub layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer").borrow();
+        let model_sub = stage
+            .layer("model_sub.usda")
+            .unwrap()
+            .expect("model_sub layer")
+            .borrow();
         assert_eq!(
             model.data().spec_type(&path("/Model/Renamed").unwrap()),
             Some(sdf::SpecType::Prim)
@@ -2901,8 +2927,8 @@ mod tests {
             .unwrap();
         assert!(editor.apply().is_err());
 
-        let model = stage.layer("model.usda").expect("model layer");
-        assert!(model.relocates().is_empty());
+        let model = stage.layer("model.usda").unwrap().expect("model layer");
+        assert!(layer_relocates(&model).is_empty());
         assert!(valid(&stage, "/Ref/Inner"));
         assert!(!valid(&stage, "/Ref/Moved"));
     }
@@ -2977,7 +3003,7 @@ mod tests {
             .unwrap();
         assert!(editor.apply().is_err());
 
-        let model = stage.layer("model.usda").expect("model layer");
+        let model = stage.layer("model.usda").unwrap().expect("model layer").borrow();
         assert!(model.data().has_spec(&path("/Model/A").unwrap()));
         assert!(!model.data().has_spec(&path("/Model/Moved").unwrap()));
         assert!(valid(&stage, "/Ref/A"));
@@ -3107,6 +3133,8 @@ mod tests {
             !stage
                 .layer("model.usda")
                 .unwrap()
+                .unwrap()
+                .borrow()
                 .data()
                 .has_spec(&path("/Model/B").unwrap())
         );
@@ -3254,7 +3282,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         // Moving the live target /Ref/Geom retargets the existing pair to
         // (/Ref/Orig, /Ref/Final); the original source /Ref/Orig is preserved and
         // no transient (/Ref/Geom, /Ref/Final) pair is authored.
@@ -3315,7 +3343,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         // Deleting /Ref/Geom re-roots (/Ref/B, /Ref/Geom/Sub) onto the sentinel.
         assert!(
             relocates
@@ -3344,7 +3372,7 @@ mod tests {
             .unwrap();
         editor.apply().unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         // The chain collapses to a single delete on the original cross-arc
         // source: (/Ref/Geom, '').
         assert!(
@@ -3371,7 +3399,7 @@ mod tests {
             .unwrap();
         editor.apply().unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         // The two-hop chain collapses into a single pair targeting the final
         // destination: (/Ref/Geom, /Ref/Final).
         assert!(
@@ -3428,7 +3456,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -3479,7 +3507,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -3542,7 +3570,9 @@ mod tests {
             .unwrap();
         assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
         assert!(
-            !stage.root_layer().relocates().iter().any(|(s, _)| s.is_property()),
+            !layer_relocates(&stage.root_layer())
+                .iter()
+                .any(|(s, _)| s.is_property()),
             "no property relocate must be authored"
         );
     }
@@ -3607,7 +3637,7 @@ mod tests {
             .unwrap();
         editor.apply().unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -3702,7 +3732,7 @@ mod tests {
         assert!(valid(&stage, "/Ref2/Geom"));
         assert!(!valid(&stage, "/Ref"));
         assert!(
-            stage.root_layer().relocates().is_empty(),
+            layer_relocates(&stage.root_layer()).is_empty(),
             "rename should author no relocate"
         );
     }
@@ -3778,7 +3808,7 @@ mod tests {
             .unwrap()
             .apply()
             .unwrap();
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(relocates.is_empty(), "stale relocate left authored: {relocates:?}");
         assert!(valid(&stage, "/Ref/Orig"), "prim should be back at /Ref/Orig");
         assert!(!valid(&stage, "/Ref/Geom"), "prim should no longer be at /Ref/Geom");
@@ -3820,7 +3850,7 @@ mod tests {
             .unwrap()
             .apply()
             .unwrap();
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -3877,7 +3907,7 @@ mod tests {
         assert!(valid(&stage, "/A"));
         assert!(!valid(&stage, "/C"));
         assert_eq!(
-            stage.root_layer().relocates(),
+            layer_relocates(&stage.root_layer()),
             vec![(path("/A/X").unwrap(), path("/A").unwrap())]
         );
     }
@@ -3927,11 +3957,8 @@ mod tests {
         assert!(valid(&stage, "/Ref/Final"), "relocated prim should move to /Ref/Final");
         assert!(!valid(&stage, "/Ref/Geom"));
         // No conflicting duplicate authored on the root edit target.
-        assert!(
-            stage.root_layer().relocates().is_empty(),
-            "root should author no relocate: {:?}",
-            stage.root_layer().relocates()
-        );
+        let relocates = layer_relocates(&stage.root_layer());
+        assert!(relocates.is_empty(), "root should author no relocate: {relocates:?}");
     }
 
     /// The synthesized relocate must be validated against the whole local stack,
@@ -4049,7 +4076,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -4092,7 +4119,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.root_layer().relocates();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
             relocates
                 .iter()
@@ -4154,7 +4181,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let root_relocates = stage.root_layer().relocates();
+        let root_relocates = layer_relocates(&stage.root_layer());
         assert!(
             root_relocates
                 .iter()
@@ -4389,7 +4416,7 @@ mod tests {
         assert!(valid(&stage, "/Ref2"));
         assert!(!valid(&stage, "/Ref"));
         assert!(
-            stage.root_layer().relocates().is_empty(),
+            layer_relocates(&stage.root_layer()).is_empty(),
             "rename should author no relocate"
         );
     }
@@ -4418,6 +4445,7 @@ mod tests {
 
         let value = stage
             .root_layer()
+            .borrow()
             .data()
             .try_field(&path("/Moved").unwrap(), FieldKey::Relocates.as_str())
             .unwrap()
@@ -4448,14 +4476,12 @@ mod tests {
             .unwrap()
             .apply()
             .unwrap();
+        let relocates = layer_relocates(&stage.root_layer());
         assert!(
-            stage
-                .root_layer()
-                .relocates()
+            relocates
                 .iter()
                 .any(|(s, t)| s == &path("/X/Keep").unwrap() && t == &path("/X/Keep").unwrap()),
-            "untouched no-op relocate must be preserved: {:?}",
-            stage.root_layer().relocates()
+            "untouched no-op relocate must be preserved: {relocates:?}"
         );
     }
 
@@ -4475,7 +4501,7 @@ mod tests {
             .apply()
             .unwrap();
         assert_eq!(
-            stage.root_layer().relocates(),
+            layer_relocates(&stage.root_layer()),
             vec![(path("/B/X").unwrap(), path("/B/X").unwrap())],
             "moved no-op relocate metadata follows the namespace edit"
         );
@@ -4508,7 +4534,7 @@ mod tests {
             .apply()
             .unwrap();
 
-        let relocates = stage.layer("sub.usda").expect("sub layer").relocates();
+        let relocates = layer_relocates(&stage.layer("sub.usda").unwrap().expect("sub layer"));
         assert_eq!(
             relocates,
             vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())],

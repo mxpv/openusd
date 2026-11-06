@@ -537,7 +537,8 @@ pub enum QueryError {
     ClipLoad(Box<ClipLoad>),
 
     /// The stage's layers could not be read, or a layer could not be added to
-    /// them because a read or an edit of them was in progress.
+    /// them: the layers' store refused it, most often because they were in use
+    /// ([`sdf::LayerError::Busy`]).
     #[error(transparent)]
     Layer(Box<sdf::LayerError>),
 
@@ -552,17 +553,24 @@ pub enum QueryError {
 }
 
 impl QueryError {
-    /// Whether this is a layer store refusing a read or an edit in progress
-    /// ([`sdf::LayerError::Busy`]): the query can be asked again once that
-    /// read or edit ends.
+    /// Whether this is a layer store refusing access while its layers are in
+    /// use ([`sdf::LayerError::Busy`]): from inside an edit of them, or from
+    /// user code (a resolver, a file format) composition runs while the stage
+    /// is part-composed. The query can be asked again once that edit or
+    /// composition step ends.
     pub fn is_busy(&self) -> bool {
         matches!(self, Self::Layer(error) if matches!(**error, sdf::LayerError::Busy))
     }
 }
 
+/// A field that fails to decode keeps its [`Data`](QueryError::Data)
+/// variant; the store's refusals are [`Layer`](QueryError::Layer).
 impl From<sdf::LayerError> for QueryError {
     fn from(error: sdf::LayerError) -> Self {
-        Self::Layer(Box::new(error))
+        match error {
+            sdf::LayerError::Data(e) => Self::from(e),
+            other => Self::Layer(Box::new(other)),
+        }
     }
 }
 

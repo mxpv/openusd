@@ -182,11 +182,7 @@ fn main() -> Result<()> {
             edit.attribute_builder(path, "int").set(1).build()?;
             Ok(())
         })?;
-        let identifier = stage.root_layer().identifier().to_owned();
-        stage
-            .layer_handle(&identifier)
-            .expect("the root layer is live")
-            .save()?;
+        stage.root_layer().save()?;
         phase.end(&tally_delta(before, stage.tally()));
     }
 

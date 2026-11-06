@@ -141,7 +141,7 @@ pub fn library(source: &Source) -> Result<Library, Error> {
         foreign,
         // Asked after the flatten above, which composed every prim and so
         // loaded every layer an arc reaches.
-        source_layers: load::watched_layers(&source.stage),
+        source_layers: load::watched_layers(&source.stage)?,
         declared_tokens: source.tokens.clone(),
         metadata: Vec::new(),
         kinds: Vec::new(),

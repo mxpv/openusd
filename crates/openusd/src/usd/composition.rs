@@ -305,7 +305,7 @@ pub(super) struct StageComposition {
     /// - Batching. A multi-layer edit (a namespace edit across the local stack)
     ///   commits N layers, each recording one entry, so N records accumulate
     ///   and the drain drives one recompose for the whole batch instead of N.
-    /// - One path for every editor. A direct edit through `Stage::layer_handle`
+    /// - One path for every editor. A direct edit through `Stage::layer`
     ///   reaches the same recorder with no stage borrow held, so it records
     ///   uniformly and the recompose happens on the next composed read
     ///   (drain-on-read). Stage-routed and raw layer edits flow through the
@@ -409,15 +409,14 @@ impl StageComposition {
     }
 
     /// The layer graph with its layers' content, for a caller that has
-    /// completed `process_pending`. Panics while an edit of the stage's layers
-    /// is in progress, as a borrow of the graph itself does.
-    pub(super) fn settled_view(&self) -> pcp::LayerView<'_> {
+    /// completed `process_pending`. Fails with [`sdf::LayerError::Busy`]
+    /// while an edit of the stage's layers is in progress.
+    pub(super) fn settled_view(&self) -> Result<pcp::LayerView<'_>, sdf::LayerError> {
         pcp::LayerView::of(self.settled_graph(), &self.store)
-            .expect("the stage's layers are not read from inside an edit of one of them")
     }
 
-    /// Fails with [`sdf::LayerError::Busy`] while a read or an edit of one of
-    /// the stage's layers holds them, before a caller loads one.
+    /// Fails with [`sdf::LayerError::Busy`] while a composition read or an edit
+    /// of one of the stage's layers holds them, before a caller loads one.
     pub(super) fn ensure_writable(&self) -> Result<(), sdf::LayerError> {
         self.store.ensure_writable()
     }
@@ -577,11 +576,11 @@ impl StageComposition {
     }
 
     /// [`process_pending`](Self::process_pending) for a fallible read. Fails
-    /// with [`sdf::LayerError::Busy`] from inside a read or an edit of one of
-    /// the stage's layers while edits of them are queued, which stay queued
-    /// for the next drain, and from user code a layer load runs (a resolver,
-    /// a file format), while the load or the drain it serves has the stage
-    /// part-composed, or user code an index build or a mute runs (a
+    /// with [`sdf::LayerError::Busy`] from inside a composition read or an edit
+    /// of one of the stage's layers while edits of them are queued, which stay
+    /// queued for the next drain, and from user code a layer load runs (a
+    /// resolver, a file format), while the load or the drain it serves has the
+    /// stage part-composed, or user code an index build or a mute runs (a
     /// resolver), while it borrows the composition. Fails with
     /// [`pcp::QueryError::Poisoned`] on a poisoned stage.
     pub(super) fn settle(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
@@ -824,10 +823,11 @@ impl StageComposition {
         let mut retry = outer;
         while !self.pending_is_empty() {
             // A drain reads, and may load, the stage's layers. From inside a
-            // read or an edit of one of them it would find the store held, so
-            // the edits stay queued for a later drain: a fallible read then
-            // fails with `Busy` (`Stage::settle`), and a settled access panics
-            // (`assert_settled`) before it answers from stale composition.
+            // composition read or an edit of one of them it would find the
+            // store held, so the edits stay queued for a later drain: a
+            // fallible read then fails with `Busy` (`Stage::settle`), and a
+            // settled access panics (`assert_settled`) before it answers from
+            // stale composition.
             self.store.ensure_writable()?;
             let mut drained: VecDeque<Pending> = self.take_pending().into();
             self.snapshots.set(self.snapshots.get() + 1);
@@ -918,9 +918,9 @@ impl StageComposition {
 
     /// Settles the work set: each prim an invalidation dropped is composed
     /// again or shown to be gone ([`pcp::IndexCache::settle_pass`]), in the
-    /// current round, loading what that demands. A store a read or an edit
-    /// holds leaves the rest for a later settlement; a failure settling a
-    /// prim is recorded on it. Does nothing while
+    /// current round, loading what that demands. A store a composition read or
+    /// an edit holds leaves the rest for a later settlement; a failure settling
+    /// a prim is recorded on it. Does nothing while
     /// [suspended](Self::suspend_settling).
     ///
     /// Under [`Settled::Taken`] it stops for edits its loads commit
@@ -967,11 +967,11 @@ impl StageComposition {
     /// a boundary the stage's caller chooses. Inside a delivery the notice
     /// waits behind the ones being delivered.
     ///
-    /// Fails with [`sdf::LayerError::Busy`], doing nothing, where it could
-    /// not deliver everything: while a read or an edit holds the layers'
-    /// store, a mutation, a drain or a layer load runs, or the composition is
-    /// borrowed. Fails with [`pcp::QueryError::Poisoned`] on a poisoned
-    /// stage, which delivers nothing.
+    /// Fails with [`sdf::LayerError::Busy`], doing nothing, where it could not
+    /// deliver everything: while a composition read or an edit holds the
+    /// layers' store, a mutation, a drain or a layer load runs, or the
+    /// composition is borrowed. Fails with [`pcp::QueryError::Poisoned`] on a
+    /// poisoned stage, which delivers nothing.
     pub(super) fn flush(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         if let Some(poisoned) = self.poisoned.get() {
             return Err(poisoned.error());
@@ -1372,16 +1372,15 @@ impl StageComposition {
     /// set a cached prim holds names it. Also kept is a layer with no file to
     /// read it from again, anonymous or built in memory.
     ///
-    /// Kept besides are a layer with unsaved edits and the edit target's
-    /// layer, the layers open edit contexts restore included, and a layer
-    /// the stage's recorded history names
-    /// ([`held_layers`](CompositionHooks::held_layers)), so a reclaim never
-    /// costs an undo step. C++ frees a dirty layer nothing holds, holds the
-    /// edit target's weakly, and leaves an undo step on a freed layer
-    /// without effect. A prim an
-    /// edit dropped and settlement has not decided (its settling failed, or a
-    /// store a read or an edit held stopped it) keeps the stacks it used, and
-    /// with them their layers.
+    /// Kept besides are a layer with unsaved edits and the edit target's layer,
+    /// the layers open edit contexts restore included, and a layer the stage's
+    /// recorded history names ([`held_layers`](CompositionHooks::held_layers)),
+    /// so a reclaim never costs an undo step. C++ frees a dirty layer nothing
+    /// holds, holds the edit target's weakly, and leaves an undo step on a
+    /// freed layer without effect. A prim an edit dropped and settlement has
+    /// not decided (its settling failed, or a store a composition read or an
+    /// edit held stopped it) keeps the stacks it used, and with them their
+    /// layers.
     ///
     /// Away from a [boundary](Self::at_boundary) the reclaim waits for the
     /// end of the next drain that reaches one.
@@ -1986,8 +1985,8 @@ impl StageComposition {
     /// [`Interrupted::NewWork`], for the drain it runs inside to apply them
     /// in commit order. User code that commits on every load never lets a
     /// [`Settled::Required`] fixpoint return. A pass that fails, a store a
-    /// read or an edit holds, or a reconcile that is blocked or finds the
-    /// stage poisoned stops it with [`Interrupted::Failed`].
+    /// composition read or an edit holds, or a reconcile that is blocked or
+    /// finds the stage poisoned stops it with [`Interrupted::Failed`].
     pub(super) fn fixpoint<T>(
         &self,
         mut pass: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
@@ -2022,10 +2021,10 @@ impl StageComposition {
             if pending.is_empty() && clips.is_empty() {
                 return result.map_err(Interrupted::Failed);
             }
-            // Opening a layer adds it to the store, which a read or an edit of
-            // any layer of the stage's registry holds. The demands go back to the
-            // cache, for the next query to load; a clip read names its layer
-            // again.
+            // Opening a layer adds it to the store, which a composition read or
+            // an edit of any layer of the stage's registry holds. The demands
+            // go back to the cache, for the next query to load; a clip read
+            // names its layer again.
             if let Err(busy) = self.store.ensure_writable() {
                 self.cache.borrow_mut().swap_pending_loads(&mut pending);
                 return Err(Interrupted::Failed(busy.into()));
@@ -2043,8 +2042,8 @@ impl StageComposition {
                         // Reconciled without a delivery, which the next drain
                         // makes, and with the demands the cache's, so a sweep
                         // keeps the stacks this read's loads minted. A store a
-                        // read or an edit holds keeps the edits queued, and
-                        // the read fails as `settle` would.
+                        // composition read or an edit holds keeps the edits
+                        // queued, and the read fails as `settle` would.
                         let mut cache = self.cache.borrow_mut();
                         cache.swap_pending_loads(&mut pending);
                         drop(cache);
@@ -2078,11 +2077,11 @@ impl StageComposition {
         muted: bool,
         hooks: &dyn CompositionHooks,
     ) {
-        // A mute rebuilds and may load the stage's layers, which a read or an
-        // edit of one of them holds.
+        // A mute rebuilds and may load the stage's layers, which a
+        // composition read or an edit of one of them holds.
         assert!(
             self.store.ensure_writable().is_ok(),
-            "a layer of the stage is muted from inside a read or an edit of its registry's layers"
+            "a layer of the stage is muted from inside a composition read or an edit of its registry's layers"
         );
         self.process_pending(hooks);
         if !self.sound() {
@@ -2433,7 +2432,7 @@ impl StageComposition {
         }
         assert!(
             self.store.ensure_writable().is_ok(),
-            "the stage is read from inside a read or an edit of its registry's layers, with edits queued"
+            "the stage is read from inside a composition read or an edit of its registry's layers, with edits queued"
         );
         panic!("settled composition access with edits still queued: drain through Stage::process_pending first");
     }
@@ -2526,10 +2525,10 @@ enum Group {
 /// record together, and the id increases across transactions — so grouping by
 /// adjacent equal id carves the queue into per-transaction groups. Each group
 /// applies as its own composed change, so unrelated edits (a direct
-/// `layer_handle` commit sitting pending when the next stage edit lands) stay
-/// separate rather than merging into one event. An aborted transaction leaves
-/// one entry per layer it reached, and reports once, in its place among the
-/// commits.
+/// commit through a `Stage::layer` handle, sitting pending when the next
+/// stage edit lands) stay separate rather than merging into one event. An
+/// aborted transaction leaves one entry per layer it reached, and reports
+/// once, in its place among the commits.
 fn next_group(queue: &mut VecDeque<Pending>) -> Option<Group> {
     Some(match queue.pop_front()? {
         Pending::Aborted(generation) => {

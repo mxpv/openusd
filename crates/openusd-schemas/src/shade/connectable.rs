@@ -317,22 +317,23 @@ pub(super) fn define_source(source: &usd::Attribute, consumer: &usd::Attribute) 
 /// holding it came through one, or was implied from one.
 pub(super) fn source_from_base_material(attribute: &usd::Attribute) -> Result<bool> {
     let stage = attribute.stage();
-    let Some(site) = attribute.property_stack()?.into_iter().find(|site| {
-        stage.layer(&site.layer).is_some_and(|layer| {
-            layer
-                .attribute(&site.path)
-                .ok()
-                .flatten()
-                .is_some_and(|spec| spec.has_connection_paths())
-        })
-    }) else {
-        return Ok(false);
-    };
-    attribute.prim().prim_index().with(|index| {
-        index
-            .node_providing_spec(&site.layer, &site.path.prim_path())
-            .is_some_and(|node| within_base_material(index, node.id()))
-    })
+    for site in attribute.property_stack()? {
+        let Some(layer) = stage.layer(&site.layer)? else {
+            continue;
+        };
+        let authored = layer
+            .try_borrow()?
+            .attribute(&site.path)?
+            .is_some_and(|spec| spec.has_connection_paths());
+        if authored {
+            return attribute.prim().prim_index().with(|index| {
+                index
+                    .node_providing_spec(&site.layer, &site.path.prim_path())
+                    .is_some_and(|node| within_base_material(index, node.id()))
+            });
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `node` lies within a base material: it, or a node it was

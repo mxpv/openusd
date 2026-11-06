@@ -645,7 +645,7 @@ mod tests {
         stage.set_edit_target(usd::EditTarget::for_layer(&weak_id))?;
         shader.node_def().set_shader_id("Example")?;
 
-        let weak = stage.layer(&weak_id).expect("weak layer").export_to_string()?;
+        let weak = stage.layer(&weak_id)?.expect("weak layer").export_to_string()?;
         assert!(!weak.contains(tokens::SOURCE_CODE));
         Ok(())
     }

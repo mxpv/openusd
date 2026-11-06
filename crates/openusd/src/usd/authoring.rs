@@ -641,7 +641,7 @@ impl PlanState {
             return Err(StageAuthoringError::PlannedTypeChanged { path: prim });
         }
         let (layer, spec_path) = stage.target_site(&prim)?;
-        if !self.overlay.holds_spec(&stage.layer_view(), layer, &spec_path) {
+        if !self.overlay.holds_spec(&stage.layer_view()?, layer, &spec_path) {
             let mut overlay = self.overlay.clone();
             write_spec(stage, &mut overlay, &prim, &SpecWrite::default())?;
             self.revalidate(stage, &overlay)?;
@@ -860,7 +860,7 @@ fn write_spec(
     spec: &SpecWrite,
 ) -> Result<(), StageAuthoringError> {
     let (layer, spec_path) = stage.target_site(path)?;
-    let graph = stage.layer_view();
+    let graph = stage.layer_view()?;
     // Leaf first: a spec the layer or the overlay already holds has every
     // spec above it.
     for (site, kind) in sdf::prim_chain(&spec_path)?.rev() {
@@ -1449,8 +1449,9 @@ fn declaration_at(
     site: &SpecSite,
     wanted: sdf::SpecType,
 ) -> Result<PropertyDeclaration, StageAuthoringError> {
-    let layer = stage
-        .layer(&site.layer)
+    let view = stage.layer_view()?;
+    let layer = view
+        .find(&site.layer)
         .ok_or_else(|| StageAuthoringError::LayerNotFound {
             layer: site.layer.clone(),
         })?;
@@ -2006,7 +2007,7 @@ mod tests {
             edit.define_typed_prim("/A", "DistantLight").map(|_| ())
         })?;
 
-        let layer = stage.layer(&weak).expect("the weak layer");
+        let layer = stage.layer(&weak)?.expect("the weak layer");
         assert_eq!(
             authored::<tf::Token>(&layer, "/A", sdf::FieldKey::TypeName),
             Some(tf::Token::new("DomeLight"))
@@ -2250,7 +2251,7 @@ mod tests {
         ])?;
         assert!(stage.override_prim("/A")?.is_valid()?);
         stage.edit(|edit| edit.override_prim("/A").map(|_| ()))?;
-        assert!(!stage.root_layer().data().has_spec(&sdf::Path::new("/A")?));
+        assert!(stage.root_layer().prim("/A")?.is_none());
 
         stage.override_prim("/New")?;
         let specifier: Option<sdf::Specifier> = authored(&stage.root_layer(), "/New", sdf::FieldKey::Specifier);
@@ -2279,7 +2280,7 @@ mod tests {
         assert!(stage.prim("/P/A")?.is_valid()? && stage.prim("/P/B")?.is_valid()?);
 
         stage.define_prim("/Off/Child")?;
-        assert!(stage.root_layer().data().has_spec(&sdf::Path::new("/Off/Child")?));
+        assert!(stage.root_layer().prim("/Off/Child")?.is_some());
         assert!(!stage.prim("/Off/Child")?.is_valid()?);
         Ok(())
     }
@@ -2303,8 +2304,7 @@ mod tests {
         let failed = stage.edit(|edit| {
             let a = edit.prim("/A")?;
             a.attribute_builder("inputs:angle", "double").set(1.0_f32).build()?;
-            let root = stage.root_layer().identifier().to_owned();
-            stage.layer_handle(&root).expect("the root layer").edit(|layer| {
+            stage.root_layer().edit(|layer| {
                 layer.pseudo_root_mut().expect("a pseudo-root").set(
                     "fallbackPrimTypes",
                     vt::Value::Dictionary(vt::Dictionary::from([(

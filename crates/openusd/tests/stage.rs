@@ -232,6 +232,226 @@ fn identifier_by_leaf(stage: &Stage, leaf: &str) -> String {
 
 // --- Basic stage opening (vendor/usd-wg-assets) ---
 
+/// Holding a stage's root layer, as a handle, a live spec handle or a
+/// borrow, does not stop a traversal from loading the layers its references
+/// and payloads target, and each stays readable inside it (issue #184).
+#[test]
+fn layer_held_across_loads() -> Result<()> {
+    let path = concat!(
+        env!("CARGO_WORKSPACE_DIR"),
+        "vendor/usd-wg-assets/docs/CompositionPuzzles/PayloadAndReference/solution/shot.usda"
+    );
+    let expected = {
+        let stage = Stage::open(path)?;
+        let mut prims = Vec::new();
+        stage.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.to_string()))?;
+        prims
+    };
+    assert!(expected.iter().any(|p| p == "/World/Character"), "{expected:?}");
+
+    let stage = Stage::open(path)?;
+    let loaded = stage.layer_identifiers().len();
+    let root = stage.root_layer();
+    let world = root.prim("/World")?.expect("authored on the root layer");
+    let guard = root.try_borrow()?;
+    let mut prims = Vec::new();
+    stage.traverse(PrimPredicate::DEFAULT, |p| {
+        assert!(world.specifier().expect("a live read").is_some());
+        assert!(guard.prim("/World").expect("a prim path").is_some());
+        prims.push(p.to_string());
+    })?;
+    assert_eq!(prims, expected);
+    assert!(
+        stage.layer_identifiers().len() > loaded,
+        "the traversal loads the arc targets"
+    );
+    assert_eq!(root.default_prim()?.as_deref(), Some("World"));
+    Ok(())
+}
+
+/// A live handle to a stage's layer reads the layer as it is at each query:
+/// holding it stops no authoring, and a value read before an edit keeps
+/// what it read.
+#[test]
+fn layer_held_handle_reads() -> Result<()> {
+    let stage = Stage::builder().in_memory("root.usda")?;
+    stage.define_prim("/P")?;
+    stage.create_attribute("/P.x", sdf::ValueTypeName::DOUBLE)?.set(1.0)?;
+    let root = stage.root_layer();
+    let attr = root.attribute("/P.x")?.expect("authored on the root layer");
+
+    let before = attr.default()?;
+    stage.attribute("/P.x")?.set(42.0)?;
+    let after = attr.default()?;
+    let double = |value: Option<vt::Value>| value.map(|value| value.try_as_double().expect("a double"));
+    assert_eq!(double(before), Some(1.0));
+    assert_eq!(double(after), Some(42.0));
+
+    stage.remove_prim("/P")?;
+    assert_eq!(attr.spec_type()?, None, "the removed attribute reads as absent");
+    assert_eq!(attr.default()?, None);
+    Ok(())
+}
+
+/// A root layer with a sublayer and a reference, written to `dir`.
+fn borrow_fixture(dir: &FsPath) -> Result<String> {
+    fs::write(
+        dir.join("sub.usda"),
+        "#usda 1.0
+",
+    )?;
+    fs::write(
+        dir.join("ref.usda"),
+        "#usda 1.0
+def \"Model\" {
+    def \"Child\" {}
+}
+",
+    )?;
+    let root = dir.join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+(
+    subLayers = [@./sub.usda@]
+)
+def \"Ref\" (references = @./ref.usda@</Model>) {}
+",
+    )?;
+    Ok(root.to_string_lossy().into_owned())
+}
+
+/// Whether `result` failed because a layer it would change is borrowed.
+fn borrowed<T>(result: &Result<T, StageAuthoringError>) -> bool {
+    matches!(result, Err(StageAuthoringError::Registry(sdf::LayerError::Busy)))
+}
+
+/// Authoring on a borrowed layer fails with `Busy` and composes nothing,
+/// while authoring on another layer of the stage succeeds. Once the guard
+/// drops, the first edit lands.
+#[test]
+fn layer_held_blocks_edit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = Stage::open(&borrow_fixture(dir.path())?)?;
+    let root = stage.root_layer();
+    let sub = identifier_by_leaf(&stage, "sub.usda");
+
+    let guard = root.try_borrow()?;
+    let defined = stage.define_prim("/Blocked");
+    assert!(borrowed(&defined), "{defined:?}");
+    assert!(
+        !stage.prim("/Blocked")?.is_valid()?,
+        "the refused edit composes nothing"
+    );
+    stage.set_edit_target(stage.edit_target_for_local_layer(&sub).expect("sub is local"))?;
+    stage.define_prim("/OnSub")?;
+    assert!(stage.prim("/OnSub")?.is_valid()?);
+    drop(guard);
+
+    let target = stage
+        .edit_target_for_local_layer(root.identifier())
+        .expect("root is local");
+    stage.set_edit_target(target)?;
+    stage.define_prim("/Blocked")?;
+    assert!(stage.prim("/Blocked")?.is_valid()?);
+    Ok(())
+}
+
+/// A batch edit naming a borrowed layer fails as a whole, leaving its other
+/// layers as they were.
+#[test]
+fn layer_held_batch_edit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = Stage::open(&borrow_fixture(dir.path())?)?;
+    let root = stage.root_layer();
+    let sub = identifier_by_leaf(&stage, "sub.usda");
+
+    let guard = root.try_borrow()?;
+    let edited = stage.batch_edit(&[&sub, root.identifier()], |edits| {
+        for edit in edits.iter_mut() {
+            sdf::PrimSpec::new(edit.data_mut(), "/Batch", sdf::Specifier::Def, "")?;
+        }
+        Ok(())
+    });
+    assert!(borrowed(&edited), "{edited:?}");
+    drop(guard);
+    let sub = stage.layer(&sub)?.expect("sub is loaded");
+    assert!(sub.prim("/Batch")?.is_none(), "the sublayer is unchanged");
+    assert!(!stage.prim("/Batch")?.is_valid()?);
+    Ok(())
+}
+
+/// A borrowed layer the stage stops composing leaves the stage at once and
+/// stays readable through its guard. The registry frees it once the guard
+/// drops.
+#[test]
+fn layer_held_reclaim() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = sdf::LayerRegistry::default();
+    let stage = Stage::builder()
+        .registry(registry.clone())
+        .open(&borrow_fixture(dir.path())?)?;
+    assert!(stage.prim("/Ref/Child")?.is_valid()?);
+    let reference = identifier_by_leaf(&stage, "ref.usda");
+    let layer = stage.layer(&reference)?.expect("the reference is loaded");
+    let sentinel = Rc::new(());
+    let freed = Rc::downgrade(&sentinel);
+    layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
+        let _ = &sentinel;
+    })?;
+    let guard = layer.try_borrow()?;
+    drop(layer);
+
+    assert!(stage.remove_prim("/Ref")?);
+    assert!(!stage.prim("/Ref/Child")?.is_valid()?);
+    assert!(stage.layer(&reference)?.is_none(), "the layer left the stage");
+    assert!(guard.prim("/Model/Child")?.is_some(), "the guard still reads its layer");
+    assert!(registry.find(&reference)?.is_some(), "the guard keeps the layer open");
+    assert!(freed.upgrade().is_some(), "the guard keeps the layer in memory");
+    drop(guard);
+    registry.sweep();
+    assert!(registry.find(&reference)?.is_none(), "the layer left the registry");
+    assert!(freed.upgrade().is_none(), "the registry freed the layer");
+    Ok(())
+}
+
+/// `Stage::layer` finds the root and session layers by identifier, and a
+/// session sublayer through the layer graph.
+#[test]
+fn layer_lookup_spellings() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+",
+    )?;
+    fs::write(
+        &session,
+        "#usda 1.0
+(
+    subLayers = [@./extra.usda@]
+)
+",
+    )?;
+    fs::write(
+        dir.path().join("extra.usda"),
+        "#usda 1.0
+",
+    )?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    for layer in [stage.root_layer(), stage.session_layer().expect("session layer")] {
+        assert_eq!(stage.layer(layer.identifier())?.as_ref(), Some(&layer));
+    }
+    let extra = identifier_by_leaf(&stage, "extra.usda");
+    assert_eq!(stage.layer(&extra)?.expect("sublayer is loaded").identifier(), extra);
+    assert!(stage.layer("missing.usda")?.is_none());
+    Ok(())
+}
+
 /// A reference or payload to a prim missing from the stage's own root layer
 /// names that root layer as the target layer, not the session layer ahead of
 /// it in the root stack.
@@ -847,7 +1067,7 @@ fn mute_names_other_referrers() -> Result<()> {
     Ok(())
 }
 
-/// A retry from inside a read of the registry's layers fails with `Busy`
+/// A retry from inside an edit of the registry's layers fails with `Busy`
 /// and keeps the failures, so a later retry loads the repaired sublayer.
 #[test]
 fn busy_retry_keeps_failures() -> Result<()> {
@@ -859,10 +1079,12 @@ fn busy_retry_keeps_failures() -> Result<()> {
     assert!(!stage.prim("/L")?.is_valid()?);
     fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"L\" {}\n")?;
 
-    let handle = stage
-        .layer_handle(stage.root_layer().identifier())
-        .expect("the root layer");
-    let inside = handle.read(|_| stage.retry_loads())?;
+    let mut inside = None;
+    stage.root_layer().edit(|_| {
+        inside = Some(stage.retry_loads());
+        Ok(())
+    })?;
+    let inside = inside.expect("the edit ran");
     assert!(
         matches!(inside, Err(openusd::Error::Layer(sdf::LayerError::Busy))),
         "{inside:?}"
@@ -1046,7 +1268,7 @@ fn sublayer_retry_recomposes_referrer() -> Result<()> {
         .into_iter()
         .find(|id| id.ends_with("e.usda"))
         .expect("e.usda is loaded");
-    stage.layer_handle(&e).expect("loaded").edit(|e| {
+    stage.layer(&e)?.expect("loaded").edit(|e| {
         e.pseudo_root_mut().unwrap().set_sublayers(["./t.usda"]);
         Ok(())
     })?;
@@ -1357,8 +1579,7 @@ def "World" (
     assert_eq!(stage.attribute("/World.x")?.get::<f64>()?, Some(1.0));
     assert_eq!(stage.attribute("/World/Child.y")?.get::<f64>()?, Some(1.0));
 
-    let root = stage.root_layer().identifier().to_owned();
-    stage.layer_handle(&root).expect("the root layer is live").edit(|e| {
+    stage.root_layer().edit(|e| {
         e.set_expression_variables(HashMap::from([(
             "SEL".to_string(),
             vt::Value::String("lo".to_string()),
@@ -1408,15 +1629,12 @@ fn session_var_edit_loads() -> Result<()> {
     assert_eq!(stage.attribute("/B.y")?.get::<f64>()?, None, "b.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
-    stage
-        .layer_handle(&session_id)
-        .expect("session layer is live")
-        .edit(|e| {
-            e.set_expression_variables(HashMap::from([(
-                "WHICH".to_string(),
-                vt::Value::String("b".to_string()),
-            )]))
-        })?;
+    stage.layer(&session_id)?.expect("session layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([(
+            "WHICH".to_string(),
+            vt::Value::String("b".to_string()),
+        )]))
+    })?;
     assert_eq!(
         stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
@@ -1460,7 +1678,7 @@ fn target_var_edit_loads() -> Result<()> {
         .find(|id| FsPath::new(id).ends_with("t.usda"))
         .expect("t.usda is loaded");
     stage
-        .layer_handle(&target_id)
+        .layer(&target_id)?
         .expect("target layer is live")
         .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("b".to_string()))])))?;
     assert_eq!(
@@ -1551,7 +1769,7 @@ fn sublayer_vars_no_notice() -> Result<()> {
     let notices = capture_notices(&stage);
     let sub_id = identifier_by_leaf(&stage, "sub.usda");
     stage
-        .layer_handle(&sub_id)
+        .layer(&sub_id)?
         .expect("sublayer is live")
         .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".to_string()))])))?;
 
@@ -1615,15 +1833,12 @@ def "P" {
 
     let notices = capture_notices(&stage);
     let target_id = identifier_by_leaf(&stage, "t.usda");
-    stage
-        .layer_handle(&target_id)
-        .expect("target layer is live")
-        .edit(|e| {
-            e.set_expression_variables(HashMap::from([(
-                "NAME".to_string(),
-                vt::Value::String("b".to_string()),
-            )]))
-        })?;
+    stage.layer(&target_id)?.expect("target layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([(
+            "NAME".to_string(),
+            vt::Value::String("b".to_string()),
+        )]))
+    })?;
 
     assert_eq!(
         evaluated(&stage)?.as_deref(),
@@ -1700,15 +1915,12 @@ def "Q" {
     // Set `NAME` on `t.usda`, whose stack both instances compose against.
     let edit_target_vars = |stage: &Stage| -> Result<()> {
         let target_id = identifier_by_leaf(stage, "t.usda");
-        stage
-            .layer_handle(&target_id)
-            .expect("target layer is live")
-            .edit(|e| {
-                e.set_expression_variables(HashMap::from([(
-                    "NAME".to_string(),
-                    vt::Value::String("b".to_string()),
-                )]))
-            })?;
+        stage.layer(&target_id)?.expect("target layer is live").edit(|e| {
+            e.set_expression_variables(HashMap::from([(
+                "NAME".to_string(),
+                vt::Value::String("b".to_string()),
+            )]))
+        })?;
         Ok(())
     };
 
@@ -1772,12 +1984,9 @@ fn session_var_swap_loads() -> Result<()> {
     assert_eq!(stage.attribute("/SB.b")?.get::<f64>()?, None, "sb.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
-    stage
-        .layer_handle(&session_id)
-        .expect("session layer is live")
-        .edit(|e| {
-            e.set_expression_variables(HashMap::from([("S".to_string(), vt::Value::String("sb".to_string()))]))
-        })?;
+    stage.layer(&session_id)?.expect("session layer is live").edit(|e| {
+        e.set_expression_variables(HashMap::from([("S".to_string(), vt::Value::String("sb".to_string()))]))
+    })?;
 
     assert_eq!(
         stage.attribute("/SB.b")?.get::<f64>()?,
@@ -1970,8 +2179,7 @@ fn literal_sublayer_edit_loads() -> Result<()> {
     )?;
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    let root_id = stage.root_layer().identifier().to_string();
-    stage.layer_handle(&root_id).expect("root layer is live").edit(|e| {
+    stage.root_layer().edit(|e| {
         e.pseudo_root_mut()
             .expect("pseudo-root")
             .insert_sublayer(0, "extra.usda", sdf::LayerOffset::IDENTITY);
@@ -2072,17 +2280,14 @@ fn shared_missing_per_referrer() -> Result<()> {
             .expect("sublayer is loaded")
     };
     for name in ["p1.usda", "p2.usda"] {
-        stage
-            .layer_handle(&layer_named(name))
-            .expect("layer is live")
-            .edit(|e| {
-                e.pseudo_root_mut().expect("pseudo-root").insert_sublayer(
-                    0,
-                    "shared_missing.usda",
-                    sdf::LayerOffset::IDENTITY,
-                );
-                Ok(())
-            })?;
+        stage.layer(&layer_named(name))?.expect("layer is live").edit(|e| {
+            e.pseudo_root_mut().expect("pseudo-root").insert_sublayer(
+                0,
+                "shared_missing.usda",
+                sdf::LayerOffset::IDENTITY,
+            );
+            Ok(())
+        })?;
     }
     let referrers = |stage: &Stage| -> Vec<String> {
         stage
@@ -5221,10 +5426,8 @@ fn define_leaves_defined() -> Result<()> {
     stage.define_prim("/A/B")?;
     // The chain to `/A/B` holds `/A` as an `over`, as the layer tier creates
     // it; the weaker layer's def is left to define it.
-    assert_ne!(
-        stage.root_layer().prim("/A")?.expect("the chain to /A/B").specifier(),
-        Some(sdf::Specifier::Def)
-    );
+    let specifier = stage.root_layer().prim("/A")?.expect("the chain to /A/B").specifier()?;
+    assert_ne!(specifier, Some(sdf::Specifier::Def));
     assert!(stage.prim("/A/B")?.is_defined()?);
 
     stage.define_prim("/Rig")?;
@@ -5364,8 +5567,8 @@ fn edit_under_variant_target() -> Result<()> {
 
     let layer = stage.root_layer();
     let variant = layer.prim("/Mat{v=a}")?.expect("the variant spec");
-    assert_eq!(variant.kind().as_deref(), Some("component"));
-    assert_eq!(layer.prim("/Mat")?.expect("the prim spec").kind(), None);
+    assert_eq!(variant.kind()?.as_deref(), Some("component"));
+    assert_eq!(layer.prim("/Mat")?.expect("the prim spec").kind()?, None);
     Ok(())
 }
 
@@ -5382,16 +5585,12 @@ fn variant_selection_states() -> Result<()> {
     let root = dir.path().join("root.usda");
     fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./weak.usda@]\n)\n")?;
     let stage = Stage::open(root.to_str().unwrap())?;
-    let root_id = stage.root_layer().identifier().to_string();
     let selection = || -> Result<Vec<(String, String)>> { stage.prim("/Mat")?.variant_sets().selections() };
     let author = |f: fn(&mut sdf::PrimSpecMut<'_>) -> Result<(), sdf::AuthoringError>| -> Result<()> {
-        stage
-            .layer_handle(&root_id)
-            .expect("the root layer is live")
-            .edit(|e| {
-                f(&mut sdf::PrimSpec::over(e.data_mut(), "/Mat")?)?;
-                Ok(())
-            })?;
+        stage.root_layer().edit(|e| {
+            f(&mut sdf::PrimSpec::over(e.data_mut(), "/Mat")?)?;
+            Ok(())
+        })?;
         Ok(())
     };
 
@@ -5686,9 +5885,8 @@ fn malformed_active_fails_reads() -> Result<()> {
         &dir,
         "#usda 1.0\ndef \"P\" {\n    def \"C\" {\n        double y = 2\n    }\n}\n",
     )?;
-    let root = stage.root_layer().identifier().to_string();
     let set_active = |value: vt::Value| -> Result<()> {
-        stage.layer_handle(&root).expect("root layer").edit(|e| {
+        stage.root_layer().edit(|e| {
             e.data_mut()
                 .set_field(&sdf::path("/P")?, sdf::FieldKey::Active.as_str(), value);
             Ok(())
@@ -5893,7 +6091,7 @@ def \"A\" {}
     assert!(child_names(&stage, "/A")?.is_empty(), "nothing below /A yet");
 
     let extra_id = identifier_by_leaf(&stage, "extra.usda");
-    stage.layer_handle(&extra_id).expect("the sublayer is live").edit(|e| {
+    stage.layer(&extra_id)?.expect("the sublayer is live").edit(|e| {
         sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Over, "")?;
         sdf::PrimSpec::new(e.data_mut(), "/A/B", sdf::Specifier::Def, "")?;
         Ok(())
@@ -7439,8 +7637,7 @@ fn custom_predicate() -> Result<()> {
 /// malformed field is authored the way a text layer would carry it.
 fn author_raw_field(attr: &usd::Attribute, field: &str, value: vt::Value) -> Result<()> {
     let stage = attr.stage();
-    let root_id = stage.root_layer().identifier().to_string();
-    stage.layer_handle(&root_id).expect("root layer is live").edit(|e| {
+    stage.root_layer().edit(|e| {
         e.attribute_mut(attr.path())?
             .expect("the attribute spec is on the root layer")
             .set(field, value);
@@ -7568,8 +7765,8 @@ fn define_prim_at_variant_leaf() -> Result<()> {
     stage.define_typed_prim("/Prim", "Scope")?;
     let layer = stage.root_layer();
     let variant = layer.prim("/Prim{set=sel}")?.expect("the variant spec");
-    assert_eq!(variant.type_name().as_deref(), Some("Scope"));
-    assert_eq!(variant.specifier(), Some(sdf::Specifier::Def));
+    assert_eq!(variant.type_name()?.as_deref(), Some("Scope"));
+    assert_eq!(variant.specifier()?, Some(sdf::Specifier::Def));
     Ok(())
 }
 
@@ -7792,8 +7989,9 @@ fn edit_target_authors_into_class() -> Result<()> {
         stage.define_prim("/Prim/Child")?;
     }
     assert!(stage.prim("/Prim/Child")?.is_valid()?);
-    assert!(stage.root_layer().data().has_spec(&sdf::path("/_Class/Child")?));
-    assert!(!stage.root_layer().data().has_spec(&sdf::path("/Prim/Child")?));
+    let root = stage.root_layer();
+    assert!(root.prim("/_Class/Child")?.is_some());
+    assert!(root.prim("/Prim/Child")?.is_none());
     Ok(())
 }
 
@@ -10015,8 +10213,7 @@ fn time_sample_times_masked() -> Result<()> {
         .in_memory("anon.usda")?;
     // The stage composes nothing at `/A`, so a stage-tier write there has no
     // declaration to validate against; the samples go onto the layer.
-    let root_id = stage.root_layer().identifier().to_string();
-    stage.layer_handle(&root_id).expect("root layer is live").edit(|e| {
+    stage.root_layer().edit(|e| {
         sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "")?;
         let mut x = sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?;
         x.set_time_sample(0.0, vt::Value::Double(1.0))?;
@@ -11944,8 +12141,12 @@ fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
 
 /// The parent layer's authored `subLayers` asset paths.
 fn authored_sublayers(stage: &Stage) -> Vec<String> {
-    let root = stage.root_layer();
-    root.pseudo_root().and_then(|pr| pr.sublayers()).unwrap_or_default()
+    stage
+        .root_layer()
+        .borrow()
+        .pseudo_root()
+        .and_then(|pr| pr.sublayers())
+        .unwrap_or_default()
 }
 
 /// `insert_layer` both composes the new layer's opinion and authors the
@@ -12038,6 +12239,33 @@ fn insert_layer_missing_parent() -> Result<()> {
 
     assert!(matches!(err, StageAuthoringError::LayerNotFound { .. }));
     assert_eq!(stage.layer_count(), 1, "no node added for a missing parent");
+    Ok(())
+}
+
+/// Inserting under a parent a guard borrows fails with `Busy`, leaving the
+/// parent's sublayers and the stage's layers as they were.
+#[test]
+fn insert_layer_borrowed_parent() -> Result<()> {
+    let stage = Stage::builder().in_memory("root.usda")?;
+    let root = stage.root_layer();
+    let guard = root.try_borrow()?;
+
+    let err = stage
+        .insert_layer(
+            root.identifier(),
+            0,
+            opinion_layer("weak.usda", 5.0)?,
+            sdf::LayerOffset::IDENTITY,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(err, StageAuthoringError::Registry(sdf::LayerError::Busy)),
+        "{err:?}"
+    );
+    drop(guard);
+    assert_eq!(stage.layer_count(), 1, "no node added for a borrowed parent");
+    assert_eq!(root.pseudo_root()?.expect("root").sublayers()?, None);
     Ok(())
 }
 
@@ -12135,12 +12363,12 @@ fn define_typed_prim() -> Result<()> {
     assert!(!stage.define_typed_prim("/Drop", "Scope")?.is_valid()?);
     let layer = stage.root_layer();
     assert_eq!(
-        layer.prim("/Keep")?.expect("upgraded").specifier(),
+        layer.prim("/Keep")?.expect("upgraded").specifier()?,
         Some(sdf::Specifier::Def)
     );
     let drop = layer.prim("/Drop")?.expect("authored outside the mask");
-    assert_eq!(drop.specifier(), Some(sdf::Specifier::Def));
-    assert_eq!(drop.type_name().as_deref(), Some("Scope"));
+    assert_eq!(drop.specifier()?, Some(sdf::Specifier::Def));
+    assert_eq!(drop.type_name()?.as_deref(), Some("Scope"));
     Ok(())
 }
 
@@ -12334,12 +12562,11 @@ def "Inst" (
     assert_eq!(child_names(&stage, "/Inst")?, vec!["Child".to_string()]);
     assert!(!stage.is_indexed(&sdf::path("/_Class")?), "nothing asked for the class");
 
-    let root = stage.root_layer().identifier().to_owned();
     let reference = vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
         prim_path: sdf::path("/Lib")?,
         ..Default::default()
     }]));
-    stage.layer_handle(&root).expect("the root layer is live").edit(|e| {
+    stage.root_layer().edit(|e| {
         e.data_mut()
             .set_field(&sdf::path("/_Class")?, sdf::FieldKey::References.as_str(), reference);
         Ok(())
@@ -13190,7 +13417,7 @@ fn listener_info_under_variant_target() -> Result<()> {
     // `set` below, and so the attribute composes: the value write validates
     // against its declaration.
     let attr = stage.create_attribute("/Prim.size", "double")?;
-    stage.layer_handle(&root).expect("root layer is live").edit(|e| {
+    stage.layer(&root)?.expect("root layer is live").edit(|e| {
         let mut prim = e.prim_mut("/Prim")?.expect("the prim spec is on the root layer");
         prim.set(
             sdf::FieldKey::VariantSetNames.as_str(),
@@ -13319,9 +13546,8 @@ def \"MyPrim\" (
 fn local_variant_resync_stripped() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/Prim")?;
-    let root = stage.root_layer().identifier().to_string();
     let notices = capture_notices(&stage);
-    stage.layer_handle(&root).expect("the root layer is live").edit(|e| {
+    stage.root_layer().edit(|e| {
         sdf::PrimSpec::new(
             e.data_mut(),
             sdf::path("/Prim{set=sel}child").expect("valid path"),
@@ -13507,7 +13733,7 @@ fn vars_edit_reports_prototypes() -> Result<()> {
     let notices = capture_notices(&stage);
     let model = identifier_by_leaf(&stage, "model.usda");
     stage
-        .layer_handle(&model)
+        .layer(&model)?
         .expect("the referenced layer is live")
         .edit(|e| e.set_expression_variables(HashMap::from([("V".to_string(), vt::Value::String("x".into()))])))?;
     // A direct layer edit is queued; the composed notice lands on the next drain.
@@ -13569,19 +13795,16 @@ fn layer_sink_sees_staged() -> Result<()> {
     let staged = Rc::new(Cell::new(false));
     {
         let (seen, staged) = (seen.clone(), staged.clone());
-        stage
-            .layer_handle(&root)
-            .expect("root layer")
-            .add_sink(RecordingLayerSink {
-                before: Some(Box::new(move |change| {
-                    seen.replace(change.layer_identifier.to_string());
-                    if !change.overlay.is_empty() && !change.change_list.is_empty() {
-                        staged.set(true);
-                    }
-                    Ok(())
-                })),
-                ..Default::default()
-            })?;
+        stage.root_layer().add_sink(RecordingLayerSink {
+            before: Some(Box::new(move |change| {
+                seen.replace(change.layer_identifier.to_string());
+                if !change.overlay.is_empty() && !change.change_list.is_empty() {
+                    staged.set(true);
+                }
+                Ok(())
+            })),
+            ..Default::default()
+        })?;
     }
     stage.define_prim("/World")?;
     assert_eq!(*seen.borrow(), root, "before_commit saw the edited layer");
@@ -13598,16 +13821,12 @@ fn layer_sink_sees_staged() -> Result<()> {
 #[test]
 fn layer_sink_veto_rolls_back() -> Result<()> {
     let stage = in_memory_stage()?;
-    let root = stage.root_layer().identifier().to_string();
-    stage
-        .layer_handle(&root)
-        .expect("root layer")
-        .add_sink(RecordingLayerSink {
-            before: Some(Box::new(|_change| {
-                Err(sdf::sink::Error::new("policy forbids this edit"))
-            })),
-            ..Default::default()
-        })?;
+    stage.root_layer().add_sink(RecordingLayerSink {
+        before: Some(Box::new(|_change| {
+            Err(sdf::sink::Error::new("policy forbids this edit"))
+        })),
+        ..Default::default()
+    })?;
     let result = stage.define_prim("/World");
     assert!(matches!(result, Err(StageAuthoringError::Rejected(_))));
     assert!(!stage.prim("/World")?.is_valid()?, "the rejected edit rolled back");
@@ -13642,9 +13861,8 @@ fn namespace_edit_fires_sink() -> Result<()> {
 #[test]
 fn can_apply_queued_edit() -> Result<()> {
     let stage = in_memory_stage()?;
-    let root = stage.root_layer().identifier().to_string();
     // Author directly and take no composed read, so the edit is still queued.
-    stage.layer_handle(&root).expect("root layer").edit(|e| {
+    stage.root_layer().edit(|e| {
         sdf::PrimSpec::new(e.data_mut(), "/Queued", sdf::Specifier::Def, "")?;
         Ok(())
     })?;
@@ -13666,14 +13884,10 @@ fn can_apply_queued_edit() -> Result<()> {
 fn namespace_edit_veto_atomic() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A/B")?;
-    let root = stage.root_layer().identifier().to_string();
-    stage
-        .layer_handle(&root)
-        .expect("root layer")
-        .add_sink(RecordingLayerSink {
-            before: Some(Box::new(|_| Err(sdf::sink::Error::new("locked")))),
-            ..Default::default()
-        })?;
+    stage.root_layer().add_sink(RecordingLayerSink {
+        before: Some(Box::new(|_| Err(sdf::sink::Error::new("locked")))),
+        ..Default::default()
+    })?;
     let mut editor = usd::NamespaceEditor::new(&stage);
     editor.delete_prim("/A/B").unwrap();
     assert!(matches!(
@@ -13797,17 +14011,15 @@ fn two_sink_reentrant_order() -> Result<()> {
 
     // Direct: the nested edit waits for the quiescence loop.
     let stage = in_memory_stage()?;
-    let root_id = stage.root_layer().identifier().to_string();
     let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let _first = {
-        let (log, root_id) = (log.clone(), root_id.clone());
+        let log = log.clone();
         let done = Cell::new(false);
         stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
             record("s1", &log, change);
             if !done.replace(true) {
                 stage
-                    .layer_handle(&root_id)
-                    .expect("root layer is live")
+                    .root_layer()
                     .edit(|e| {
                         sdf::PrimSpec::new(e.data_mut(), "/Nested", sdf::Specifier::Def, "")?;
                         Ok(())
@@ -13864,15 +14076,12 @@ def \"P\" {
         .into_iter()
         .find(|id| FsPath::new(id).ends_with("payload.usda"))
         .expect("the payload layer loaded");
-    stage
-        .layer_handle(&payload_id)
-        .expect("payload layer is live")
-        .edit(|e| {
-            e.attribute_mut("/P.v")?
-                .expect("authored attribute")
-                .set_default(vt::Value::Double(7.0))?;
-            Ok(())
-        })?;
+    stage.layer(&payload_id)?.expect("payload layer is live").edit(|e| {
+        e.attribute_mut("/P.v")?
+            .expect("authored attribute")
+            .set_default(vt::Value::Double(7.0))?;
+        Ok(())
+    })?;
     assert_eq!(
         stage.attribute("/A.v")?.get::<f64>()?,
         Some(7.0),
@@ -13881,20 +14090,20 @@ def \"P\" {
     Ok(())
 }
 
-/// A composed query that needs no layer loading runs while a shared layer
-/// reference is alive: the graph and cache are separate cells, so a live `Ref`
-/// into the graph does not block the query's mutable cache borrow. A query that
-/// demands a layer needs the graph mutably to open it, so it must not be taken
-/// under such a reference.
+/// A composed query runs while handles to the root, a named and the session
+/// layer are held: a handle borrows nothing.
 #[test]
-fn query_under_layer_ref() -> Result<()> {
+fn query_under_layer_handle() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A")?;
 
     let root = stage.root_layer();
-    assert!(stage.prim("/A")?.is_valid()?, "composed query under a root_layer ref");
-    let named = stage.layer(root.identifier()).expect("layer by identifier");
-    assert!(stage.prim("/A")?.is_valid()?, "composed query under a layer ref");
+    assert!(
+        stage.prim("/A")?.is_valid()?,
+        "composed query under a root_layer handle"
+    );
+    let named = stage.layer(root.identifier())?.expect("layer by identifier");
+    assert!(stage.prim("/A")?.is_valid()?, "composed query under a layer handle");
     drop(named);
     drop(root);
 
@@ -13917,7 +14126,7 @@ def \"B\" {}
     let session = stage.session_layer().expect("session layer");
     assert!(
         stage.prim("/B")?.is_valid()?,
-        "composed query under a session_layer ref"
+        "composed query under a session_layer handle"
     );
     drop(session);
     Ok(())
@@ -14192,8 +14401,9 @@ fn instancing_edits_refused() -> Result<()> {
     stage.prim("/Inst")?.set_kind("component")?;
     stage.prim("/Source/Child")?.apply_api("SomeAPI")?;
     assert!(stage.remove_prim("/Inst/Stale")?, "the stale local spec is removable");
+    let layer = stage.root_layer();
     assert!(
-        stage.root_layer().prim("/Inst/Child")?.is_none() && stage.root_layer().prim("/Inst/Stale")?.is_none(),
+        layer.prim("/Inst/Child")?.is_none() && layer.prim("/Inst/Stale")?.is_none(),
         "nothing was authored under the instance"
     );
 
@@ -14205,15 +14415,12 @@ fn instancing_edits_refused() -> Result<()> {
             .edit_target_for_arc(usd::EditTargetArc::Reference)?,
     )?;
     proxy.set_kind("component")?;
-    assert_eq!(
-        stage
-            .root_layer()
-            .prim("/Source/Child")?
-            .expect("the source prim")
-            .kind()
-            .as_deref(),
-        Some("component")
-    );
+    let kind = stage
+        .root_layer()
+        .prim("/Source/Child")?
+        .expect("the source prim")
+        .kind()?;
+    assert_eq!(kind.as_deref(), Some("component"));
     Ok(())
 }
 
@@ -14270,9 +14477,8 @@ fn quiet_save(stage: Stage, root: &str) -> Result<()> {
         ..Default::default()
     })?;
     let layer_fired = Rc::new(Cell::new(0));
-    let identifier = stage.root_layer().identifier().to_owned();
     {
-        let layer = stage.layer_handle(&identifier).expect("the root layer is live");
+        let layer = stage.root_layer();
         let fired = layer_fired.clone();
         layer.add_sink(move |_: &str, _: &sdf::ChangeList| fired.set(fired.get() + 1))?;
         layer.save()?;
@@ -14744,8 +14950,7 @@ fn load_skips_siblings() -> Result<()> {
 
 /// Sets each `(path, field, value)` in `stage`'s root layer in one edit.
 fn set_root_fields(stage: &Stage, fields: &[(&str, &str, vt::Value)]) -> Result<()> {
-    let root = stage.root_layer().identifier().to_owned();
-    stage.layer_handle(&root).expect("root layer").edit(|e| {
+    stage.root_layer().edit(|e| {
         for (path, field, value) in fields {
             e.data_mut().set_field(&sdf::path(*path)?, field, value.clone());
         }

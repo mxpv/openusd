@@ -133,7 +133,7 @@ pub fn read(builder: &Builder, name: &str, path: &Path) -> Result<NodeLibrary, E
     Ok(NodeLibrary {
         name: name.to_owned(),
         path: path.to_path_buf(),
-        layers: load::watched_layers(&stage),
+        layers: load::watched_layers(&stage)?,
         nodes,
     })
 }

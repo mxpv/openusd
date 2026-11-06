@@ -75,8 +75,7 @@ impl<'a> From<&'a sdf::Layer> for Root<'a> {
 /// unevaluated and reports unresolved, return
 /// [`DependencyError`](super::DependencyError).
 pub fn all_dependencies<'a>(stage: &Stage, root: impl Into<Root<'a>>) -> Result<Dependencies> {
-    stage.settle()?;
-    let graph = stage.layer_view();
+    let graph = stage.layer_view()?;
     let policy = Discover {
         inactive: false,
         open_packages: true,
@@ -923,8 +922,9 @@ def "N" (
         write(dir.path(), "root.usda", "#usda 1.0\ndef \"A\" {\n}\n");
         write(dir.path(), "extra.usda", "#usda 1.0\ndef \"E\" {\n}\n");
         let (_, stage) = open(dir.path(), "root.usda")?;
-        let identifier = stage.root_layer().identifier().to_owned();
-        stage.layer_handle(&identifier).unwrap().edit(|edit| {
+        let root = stage.root_layer();
+        let identifier = root.identifier().to_owned();
+        root.edit(|edit| {
             edit.data_mut().set_field(
                 &sdf::Path::abs_root(),
                 FieldKey::SubLayers.as_str(),
@@ -986,7 +986,7 @@ def "N" (
 
         let mut seen = Vec::new();
         modify_asset_paths(
-            &stage.layer_handle(&dependencies.layers[0]).unwrap(),
+            &stage.layer(&dependencies.layers[0])?.unwrap(),
             |path| {
                 seen.push(path.to_owned());
                 path.to_owned()

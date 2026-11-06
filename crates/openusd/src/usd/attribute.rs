@@ -2574,7 +2574,7 @@ class Marker "Marker"
             .root_layer()
             .attribute(attr.path().clone())?
             .expect("authored on the root layer")
-            .connection_path_list()
+            .connection_path_list()?
             .unwrap();
         assert!(
             !op.is_explicit(),
@@ -2600,7 +2600,7 @@ class Marker "Marker"
             .root_layer()
             .attribute(attr.path().clone())?
             .expect("authored on the root layer")
-            .connection_path_list()
+            .connection_path_list()?
             .unwrap();
         assert!(!op.is_explicit());
         assert_eq!(op.appended_items(), [target]);
@@ -2626,7 +2626,7 @@ class Marker "Marker"
             .root_layer()
             .attribute(attr.path().clone())?
             .expect("authored on the root layer")
-            .connection_path_list()
+            .connection_path_list()?
             .unwrap();
         assert!(op.is_explicit());
         assert_eq!(op.explicit_items(), [b, a]);
@@ -2938,15 +2938,19 @@ class Marker "Marker"
         stage: &Stage,
         f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     ) -> Result<()> {
-        let root_id = stage.root_layer().identifier().to_string();
-        stage.layer_handle(&root_id).expect("root layer is live").edit(f)?;
+        stage.root_layer().edit(f)?;
         Ok(())
     }
 
-    /// The raw `field` of the spec at `path` on the layer `layer_id`.
-    fn layer_field(stage: &Stage, layer_id: &str, path: &str, field: &str) -> Option<vt::Value> {
-        let layer = stage.layer(layer_id).expect("layer is live");
+    /// The stage's layer `layer_id`, which the test holds live.
+    fn live_layer(stage: &Stage, layer_id: &str) -> sdf::LayerHandle {
+        stage.layer(layer_id).unwrap().expect("layer is live")
+    }
+
+    /// The raw `field` of the spec at `path` on `layer`.
+    fn layer_field(layer: &sdf::LayerHandle, path: &str, field: &str) -> Option<vt::Value> {
         layer
+            .borrow()
             .data()
             .try_field(&sdf::path(path).expect("valid path"), field)
             .expect("readable")
@@ -2955,13 +2959,13 @@ class Marker "Marker"
 
     /// The raw `field` of the spec at `path` on the root layer.
     fn root_field(stage: &Stage, path: &str, field: &str) -> Option<vt::Value> {
-        let root_id = stage.root_layer().identifier().to_string();
-        layer_field(stage, &root_id, path, field)
+        layer_field(&stage.root_layer(), path, field)
     }
 
     fn root_has_spec(stage: &Stage, path: &str) -> bool {
         stage
             .root_layer()
+            .borrow()
             .data()
             .has_spec(&sdf::path(path).expect("valid path"))
     }
@@ -3772,12 +3776,11 @@ class Marker "Marker"
         let stage = schema_stage()?;
         stage.define_prim("/Sun")?.set_type_name("DistantLight")?;
         let rel = stage.create_relationship("/Sun.collection:lightLink:includes")?;
-        assert_eq!(
+        assert!(
             stage
                 .root_layer()
-                .data()
-                .spec_type(&sdf::path("/Sun.collection:lightLink:includes")?),
-            Some(sdf::SpecType::Relationship),
+                .relationship("/Sun.collection:lightLink:includes")?
+                .is_some(),
             "the schema declaration is stamped"
         );
         assert!(!rel.is_custom()?);
@@ -3788,10 +3791,7 @@ class Marker "Marker"
     fn create_relationship_strongest() -> Result<()> {
         let (_dir, stage) = stack("", "", "rel r")?;
         stage.create_relationship("/A.r")?;
-        assert_eq!(
-            stage.root_layer().data().spec_type(&sdf::path("/A.r")?),
-            Some(sdf::SpecType::Relationship)
-        );
+        assert!(stage.root_layer().relationship("/A.r")?.is_some());
         assert_eq!(root_field(&stage, "/A.r", "custom"), None, "absent means not custom");
         assert!(!stage.relationship("/A.r")?.is_custom()?);
         Ok(())
@@ -3972,8 +3972,9 @@ class Marker "Marker"
             }
             assert!(
                 !stage
-                    .layer(&session_id)
+                    .layer(&session_id)?
                     .expect("session layer")
+                    .try_borrow()?
                     .data()
                     .has_spec(&sdf::path("/A.x")?),
                 "{kind}: no spec is stamped"
@@ -4202,7 +4203,7 @@ class Marker "Marker"
     }
 
     fn expr_field(stage: &Stage, layer_id: &str, path: &str, field: &str) -> String {
-        layer_field(stage, layer_id, path, field)
+        layer_field(&live_layer(stage, layer_id), path, field)
             .expect("field authored")
             .try_as_path_expression()
             .expect("a path expression")
@@ -4271,7 +4272,7 @@ class Marker "Marker"
                 sdf::PathExpression::parse("Child"),
                 sdf::PathExpression::parse("/World/MyPrim"),
             ]))?;
-        let exprs = layer_field(&stage, &layer_id, "/Source.exprs", "default")
+        let exprs = layer_field(&live_layer(&stage, &layer_id), "/Source.exprs", "default")
             .expect("authored")
             .try_as_path_expression_vec()
             .expect("an expression array");
@@ -4336,7 +4337,7 @@ class Marker "Marker"
                 vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
             )])),
         )?;
-        let dict = layer_field(&stage, &layer_id, "/Source", "customData").expect("authored");
+        let dict = layer_field(&live_layer(&stage, &layer_id), "/Source", "customData").expect("authored");
         let entries = dict.try_as_dictionary().expect("a dictionary");
         let expr = entries["expr"]
             .clone()
@@ -4355,7 +4356,7 @@ class Marker "Marker"
                 vt::Value::PathExpression(sdf::PathExpression::parse("Child")),
                 TimeCode::new(1.0),
             )?;
-        let samples = layer_field(&stage, &layer_id, "/Source.expr", "timeSamples").expect("authored");
+        let samples = layer_field(&live_layer(&stage, &layer_id), "/Source.expr", "timeSamples").expect("authored");
         let samples = samples.try_as_time_samples().expect("a sample map");
         let expr = samples[0]
             .1
@@ -4806,7 +4807,7 @@ def \"P\" (
             .into_iter()
             .find(|id| file_name(id) == "strong.usda")
             .expect("the layer is on the stage");
-        stage.layer_handle(&strong).expect("the layer is live").edit(|edit| {
+        stage.layer(&strong)?.expect("the layer is live").edit(|edit| {
             edit.attribute_mut(&path)?
                 .expect("the attribute spec is on the layer")
                 .set(sdf::FieldKey::TimeSamples.as_str(), vt::Value::ValueBlock);
@@ -5045,7 +5046,7 @@ class Thing "Thing" (
         let attr = child.attribute("a");
         attr.clone().set_connections(["/Child.b"])?.add_connection("/Child.c")?;
         assert!(attr.remove_connection("/Child.c")?);
-        let layer = stage.layer(target.layer_identifier()).expect("the referenced layer");
+        let layer = stage.layer(target.layer_identifier())?.expect("the referenced layer");
         let op: sdf::PathListOp = authored(&layer, "/R.a", sdf::FieldKey::ConnectionPaths).expect("authored");
         assert_eq!(strings(op.explicit_items()), ["/R.b"]);
         let refused = attr.add_connection("/Elsewhere.x");

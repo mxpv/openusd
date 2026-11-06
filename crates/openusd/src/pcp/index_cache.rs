@@ -1086,6 +1086,11 @@ pub struct Tally {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpecSiteRecord {
     /// Canonical identifier of the layer holding the spec.
+    // TODO: hand out the layer's `sdf::LayerHandle` (C++ property and prim
+    // stacks hand out spec handles), so a consumer reads the spec without
+    // looking the layer up again by this identifier. A record the cache keeps
+    // must not hold a handle, which would keep the layer from being
+    // reclaimed: the handle is attached where the stack leaves the cache.
     pub layer: String,
     /// The spec's path within that layer, which under a reference or variant
     /// differs from the composed stage path.

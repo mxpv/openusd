@@ -699,7 +699,7 @@ mod tests {
             .set_targets(["/Child/Sibling"])?
             .add_target("/Child/Sibling.attr")?;
         assert!(rel.remove_target("/Child/Sibling.attr")?);
-        let layer = stage.layer(target.layer_identifier()).expect("the referenced layer");
+        let layer = stage.layer(target.layer_identifier())?.expect("the referenced layer");
         let op: sdf::PathListOp = authored(&layer, "/R.r", sdf::FieldKey::TargetPaths).expect("authored");
         assert_eq!(strings(op.explicit_items()), ["/R/Sibling"]);
         let refused = rel.add_target("/Elsewhere");

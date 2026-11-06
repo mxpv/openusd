@@ -1214,10 +1214,8 @@ fn clip_expression_reevaluated() {
             .unwrap()
     };
 
-    let root = stage.root_layer().identifier().to_string();
     stage
-        .layer_handle(&root)
-        .expect("the root layer is live")
+        .root_layer()
         .edit(|e| {
             e.set_expression_variables(HashMap::from([(
                 "SHOT".to_string(),
@@ -1363,10 +1361,8 @@ fn clip_expression_remanifests() {
     );
     assert_eq!(value_at(&stage, "/P.a", 1.0), Some(7.0));
 
-    let root = stage.root_layer().identifier().to_string();
     stage
-        .layer_handle(&root)
-        .expect("the root layer is live")
+        .root_layer()
         .edit(|e| {
             e.set_expression_variables(HashMap::from([(
                 "SHOT".to_string(),
@@ -2013,6 +2009,32 @@ fn sublayer_via_search_path() {
     );
 }
 
+/// A root layer and a sublayer found through a search directory keep the
+/// search path as their identifier, and `Stage::layer` finds each by that
+/// identifier and by the real path it was read from.
+#[test]
+fn layer_by_real_path() -> openusd::Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_, library) = search_path_dirs(&dir, "");
+    fs::write(library.join("lib/root.usda"), SUBLAYER_ROOT).expect("write root");
+    fs::write(library.join("lib/sub.usda"), SUBLAYER).expect("write sublayer");
+    let stage = Stage::builder()
+        .resolver(ar::DefaultResolver::with_search_paths([library.as_path()]))
+        .open("lib/root.usda")?;
+
+    let root = stage.root_layer();
+    for (identifier, layer) in [
+        ("lib/root.usda", root.clone()),
+        ("lib/sub.usda", stage.layer("lib/sub.usda")?.expect("sub")),
+    ] {
+        assert_eq!(layer.identifier(), identifier);
+        let real = layer.resolved_path().expect("read from a file");
+        assert_ne!(real, identifier, "the real path is another spelling");
+        assert_eq!(stage.layer(real)?.as_ref(), Some(&layer), "{identifier} by real path");
+    }
+    Ok(())
+}
+
 /// A reference and a payload authored as search paths open through the search
 /// directories too: the arc's canonical identifier is the search path, and
 /// the barrier opens it as is.
@@ -2388,7 +2410,11 @@ fn insert_layer_incompatible_identifier() {
             "{identifier}: {error}"
         );
     }
-    let authored = stage.root_layer().pseudo_root().and_then(|root| root.sublayers());
+    let authored = stage
+        .root_layer()
+        .borrow()
+        .pseudo_root()
+        .and_then(|root| root.sublayers());
     assert!(authored.unwrap_or_default().is_empty(), "nothing was authored");
     assert_eq!(stage.layer_count(), 1, "nothing joined the stage");
     assert_eq!(double_at(&stage, "/P.y"), None);

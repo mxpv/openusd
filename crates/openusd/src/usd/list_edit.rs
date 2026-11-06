@@ -234,7 +234,7 @@ mod tests {
         let (_dir, stage, child, target) =
             reference_scene("def \"Base\"\n{\n}\n\n", "    def \"Sibling\"\n    {\n    }\n")?;
         child.specializes().set(["/Child/Sibling", "/Base"])?;
-        let layer = stage.layer(target.layer_identifier()).expect("the referenced layer");
+        let layer = stage.layer(target.layer_identifier())?.expect("the referenced layer");
         let op: sdf::PathListOp = authored(&layer, "/R", sdf::FieldKey::Specializes).expect("authored");
         assert_eq!(strings(op.explicit_items()), ["/R/Sibling", "/Base"]);
 
@@ -340,7 +340,7 @@ mod tests {
         };
         child.references().set([internal, external.clone()])?;
         child.references().add(sdf::Reference::default())?;
-        let layer = stage.layer(target.layer_identifier()).expect("the referenced layer");
+        let layer = stage.layer(target.layer_identifier())?.expect("the referenced layer");
         let op: sdf::ReferenceListOp = authored(&layer, "/R", sdf::FieldKey::References).expect("authored");
         assert_eq!(
             op.explicit_items(),

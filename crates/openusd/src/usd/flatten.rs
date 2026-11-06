@@ -141,7 +141,7 @@ fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim, assets: pcp::AssetM
         data,
         prim.path(),
         spec_fields(
-            site_fields(stage, &prim.prim_stack()?),
+            site_fields(stage, &prim.prim_stack()?)?,
             &[],
             composed(stage, prim.path(), assets),
         )?,
@@ -183,10 +183,13 @@ fn write_property(
                 attribute.variability()?.unwrap_or_default(),
                 attribute.is_custom()?,
             )?;
+            // TODO(perf): `site_fields` and `held` each take a layer view over
+            // the same sites; one view could read the field names and the raw
+            // samples and default before the composed reads.
             write_fields(
                 data,
                 &path,
-                spec_fields(site_fields(stage, &sites), &[], composed(stage, &path, assets))?,
+                spec_fields(site_fields(stage, &sites)?, &[], composed(stage, &path, assets))?,
             );
 
             let held = held(stage, &attribute, &sites, assets)?;
@@ -218,7 +221,7 @@ fn write_property(
                 data,
                 &path,
                 spec_fields(
-                    site_fields(stage, &relationship.property_stack()?),
+                    site_fields(stage, &relationship.property_stack()?)?,
                     &[],
                     composed(stage, &path, assets),
                 )?,
@@ -241,10 +244,9 @@ fn write_property(
 /// C++ keeps `expressionVariables`. A flattened layer holds every expression
 /// already evaluated, so here it is dropped with the other stack fields.
 fn stage_fields(stage: &Stage, assets: pcp::AssetMode) -> Result<Vec<(String, vt::Value)>> {
-    stage.settle()?;
     let names = {
         let root = sdf::Path::abs_root();
-        let layers = stage.layer_view();
+        let layers = stage.layer_view()?;
         layers
             .stage_metadata_layers()
             .flat_map(|id| layers.layer(id).data().list_fields(&root).unwrap_or_default())
@@ -254,15 +256,16 @@ fn stage_fields(stage: &Stage, assets: pcp::AssetMode) -> Result<Vec<(String, vt
 }
 
 /// The field names every site in `sites` authors.
-fn site_fields(stage: &Stage, sites: &[SpecSite]) -> BTreeSet<String> {
+fn site_fields(stage: &Stage, sites: &[SpecSite]) -> Result<BTreeSet<String>> {
+    let view = stage.layer_view()?;
     let mut names = BTreeSet::new();
     for site in sites {
-        let Some(layer) = stage.layer(&site.layer) else {
+        let Some(layer) = view.find(&site.layer) else {
             continue;
         };
         names.extend(layer.data().list_fields(&site.path).unwrap_or_default());
     }
-    names
+    Ok(names)
 }
 
 /// The fields one composed spec carries, less what flattening resolved and
@@ -322,14 +325,27 @@ struct Held {
 /// block, which resolves to no value and would otherwise be lost along with
 /// the weaker opinion it hides.
 fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], assets: pcp::AssetMode) -> Result<Held> {
-    let numeric = sites
-        .iter()
-        .find(|site| holds(stage, site, sdf::FieldKey::TimeSamples) || holds(stage, site, sdf::FieldKey::Default));
+    // The sites are read under one view, dropped before the composed reads
+    // below, which need the graph free.
+    // TODO(perf): the raw samples and default are copied for every attribute
+    // and used only when composition reports none; noting which site holds
+    // them and reading the raw value only then would spare the copies.
+    let (raw_samples, raw_default) = {
+        let view = stage.layer_view()?;
+        let numeric = sites
+            .iter()
+            .find(|site| holds(&view, site, sdf::FieldKey::TimeSamples) || holds(&view, site, sdf::FieldKey::Default));
+        let samples = numeric
+            .and_then(|site| Some((site, authored(&view, site, sdf::FieldKey::TimeSamples)?)))
+            .and_then(|(site, value)| Some((site, value.try_as_time_samples()?)));
+        let default = sites
+            .iter()
+            .find(|site| holds(&view, site, sdf::FieldKey::Default))
+            .and_then(|site| authored(&view, site, sdf::FieldKey::Default));
+        (samples, default)
+    };
 
-    let samples = match numeric
-        .and_then(|site| Some((site, authored(stage, site, sdf::FieldKey::TimeSamples)?)))
-        .and_then(|(site, value)| Some((site, value.try_as_time_samples()?)))
-    {
+    let samples = match raw_samples {
         Some((site, mut raw)) => {
             site.offset.apply_to_samples(&mut raw);
             // The composed map is what a read would use, and is retimed the
@@ -340,11 +356,7 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], assets: pcp::A
         None => None,
     };
 
-    let default = match sites
-        .iter()
-        .find(|site| holds(stage, site, sdf::FieldKey::Default))
-        .and_then(|site| authored(stage, site, sdf::FieldKey::Default))
-    {
+    let default = match raw_default {
         Some(raw) => Some(attribute.value_with(None, assets)?.unwrap_or(raw)),
         None => None,
     };
@@ -354,16 +366,18 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], assets: pcp::A
 
 /// Whether a site authors `key` at all, without copying what it holds — a
 /// sample map is answer enough to `is_some` and expensive to clone.
-fn holds(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> bool {
-    stage
-        .layer(&site.layer)
+fn holds(view: &pcp::LayerView<'_>, site: &SpecSite, key: sdf::FieldKey) -> bool {
+    view.find(&site.layer)
         .is_some_and(|layer| layer.data().has_field(&site.path, key.as_str()))
 }
 
 /// One field as a single site authored it.
-fn authored(stage: &Stage, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Value> {
-    let layer = stage.layer(&site.layer)?;
-    let value = layer.data().try_field(&site.path, key.as_str()).ok()??;
+fn authored(view: &pcp::LayerView<'_>, site: &SpecSite, key: sdf::FieldKey) -> Option<vt::Value> {
+    let value = view
+        .find(&site.layer)?
+        .data()
+        .try_field(&site.path, key.as_str())
+        .ok()??;
     Some(value.into_owned())
 }
 
@@ -398,6 +412,19 @@ mod tests {
     use super::*;
     use crate::usd::stage::tests::MakeStage;
     use crate::{pcp, usd};
+
+    /// Flattening inside an edit of the stage's layers fails with `Busy`.
+    #[test]
+    fn flatten_inside_edit_busy() -> Result<()> {
+        let stage = Stage::builder().make_stage(vec![size_layer("root.usda", 1.0)], 0, pcp::Diagnostics::default());
+        let flattened = sdf::layer_store::tests::inside_edit(&stage.root_layer(), || stage.flatten());
+        assert!(
+            matches!(&flattened, Err(crate::Error::Query(error)) if error.is_busy()),
+            "{flattened:?}"
+        );
+        assert!(stage.flatten().is_ok(), "outside the edit, the stage flattens");
+        Ok(())
+    }
 
     /// Authors one layer, since every test here builds its input by hand.
     fn layer(name: &str, author: impl FnOnce(&mut dyn sdf::AbstractData)) -> sdf::Layer {

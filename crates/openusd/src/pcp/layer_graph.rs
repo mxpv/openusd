@@ -2439,11 +2439,6 @@ impl LayerGraph {
         self.nodes.is_empty()
     }
 
-    /// Number of session layers.
-    pub(crate) fn session_layer_count(&self) -> usize {
-        self.session_layer_count
-    }
-
     /// The open-time session-layer ids in strength order; the session root is
     /// first. The session region's composed membership is a sublayer walk from
     /// that root (see `rebuild_sublayer_stacks`), so a session sublayer loaded
@@ -3426,8 +3421,8 @@ impl LayerGraph {
 }
 
 /// The graph releases its layers when it drops: a handle kept past it (one
-/// [`Stage::layer_handle`](crate::usd::Stage::layer_handle) gave out) holds
-/// only its own layer, not every layer the graph loaded.
+/// a stage gave out, such as [`Stage::layer`](crate::usd::Stage::layer)'s)
+/// holds only its own layer, not every layer the graph loaded.
 impl Drop for LayerGraph {
     fn drop(&mut self) {
         self.nodes.clear();
@@ -3511,6 +3506,12 @@ impl LayerView<'_> {
         Some(self.store.layer(&self.nodes.get(&id)?.handle))
     }
 
+    /// The layer named `identifier`, by identifier or real path, or `None`
+    /// when no layer here answers to it.
+    pub(crate) fn find(&self, identifier: &str) -> Option<&sdf::Layer> {
+        self.try_layer(self.id_of(identifier)?)
+    }
+
     /// The root layer (the first non-session layer), if any. Per spec 12.2.7,
     /// pseudo-root layer metadata resolves from this layer alone.
     pub(crate) fn root_layer(&self) -> Option<&sdf::Layer> {
@@ -3542,7 +3543,7 @@ impl LayerView<'_> {
     /// [`try_identifier`](LayerGraph::try_identifier): a queued edit reaches
     /// this holding an id that may have outlived its layer.
     pub(crate) fn default_prim_token(&self, layer: LayerId) -> Option<tf::Token> {
-        self.try_layer(layer)?.pseudo_root()?.default_prim()
+        self.try_layer(layer)?.default_prim()
     }
 
     /// The `defaultPrim` metadata from the root layer, if set.

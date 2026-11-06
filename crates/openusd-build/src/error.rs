@@ -3,6 +3,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use openusd::{pcp, sdf};
+
 use crate::validate::Violation;
 
 /// What a configured [`TokenEnum`](crate::TokenEnum) asked for that could not
@@ -336,32 +338,40 @@ impl Error {
 /// other core failure. Its own variant would let one failure arrive two ways —
 /// as itself, or nested in a `Core` — and leave a caller matching in two
 /// places for it. `openusd::Error` already tells them apart.
-impl From<openusd::sdf::PathParseError> for Error {
-    fn from(source: openusd::sdf::PathParseError) -> Self {
+impl From<sdf::PathParseError> for Error {
+    fn from(source: sdf::PathParseError) -> Self {
+        Error::Core(source.into())
+    }
+}
+
+/// A layer the registry could not lend, for the same reason as a malformed
+/// path: it belongs in [`Error::Core`].
+impl From<sdf::LayerError> for Error {
+    fn from(source: sdf::LayerError) -> Self {
         Error::Core(source.into())
     }
 }
 
 /// Authoring the layers this crate writes goes through the same door every
 /// other edit does. Written out for the reason above.
-impl From<openusd::sdf::EditError> for Error {
-    fn from(source: openusd::sdf::EditError) -> Self {
+impl From<sdf::EditError> for Error {
+    fn from(source: sdf::EditError) -> Self {
         Error::Core(source.into())
     }
 }
 
 /// A composed query a reader asks of a stage. Written out for the reason
 /// above.
-impl From<openusd::pcp::QueryError> for Error {
-    fn from(source: openusd::pcp::QueryError) -> Self {
+impl From<pcp::QueryError> for Error {
+    fn from(source: pcp::QueryError) -> Self {
         Error::Core(source.into())
     }
 }
 
 /// A field that will not decode is schema data this crate cannot use. Written
 /// out for the reason above.
-impl From<openusd::sdf::DataError> for Error {
-    fn from(source: openusd::sdf::DataError) -> Self {
+impl From<sdf::DataError> for Error {
+    fn from(source: sdf::DataError) -> Self {
         Error::Core(source.into())
     }
 }

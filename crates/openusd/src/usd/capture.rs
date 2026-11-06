@@ -144,7 +144,8 @@ impl UndoStage {
     /// The revert is itself an edit but is not recorded: its replays carry
     /// its identity, which this stage's recorder skips, so the undone step
     /// leaves the stack and no step of the replays joins it. Each transaction
-    /// reverts atomically; one that fails leaves the transactions not yet
+    /// reverts atomically; one that fails, a veto or a borrowed layer
+    /// ([`sdf::LayerError::Busy`]) included, leaves the transactions not yet
     /// reverted on the stack, the failed one to be retried first, beneath
     /// whatever a sink recorded during the undo. An
     /// edit made elsewhere while the step replays, overlapping one of its
@@ -1157,11 +1158,7 @@ mod tests {
     #[test]
     fn handle_edit_not_undoable() -> Result<()> {
         let stage = UndoStage::from(in_memory_stage()?);
-        let root = stage.root_layer().identifier().to_string();
-        stage
-            .layer_handle(&root)
-            .expect("root layer")
-            .edit(|l| author_prim(l, "/Direct"))?;
+        stage.root_layer().edit(|l| author_prim(l, "/Direct"))?;
         stage.define_prim("/Staged")?;
         assert_eq!(stage.undo_depth(), 1);
 
@@ -1221,8 +1218,8 @@ mod tests {
     #[test]
     fn nested_stage_edits_undo() -> Result<()> {
         let stage = UndoStage::from(in_memory_stage()?);
-        let root = stage.root_layer().identifier().to_string();
-        let layer = stage.layer_handle(&root).expect("root layer");
+        let layer = stage.root_layer();
+        let root = layer.identifier().to_string();
         let nested = (*stage).clone();
         let fired = Rc::new(Cell::new(false));
         let once = Rc::clone(&fired);
@@ -1278,6 +1275,49 @@ mod tests {
         Ok(())
     }
 
+    /// An undo that reaches a borrowed layer stops there with `Busy`, as at
+    /// any failed transaction: the step's newer transaction reverts, and the
+    /// older one, on the borrowed layer, stays on the stack. Once the guard
+    /// drops, the next undo finishes the step.
+    #[test]
+    fn undo_borrowed_resumes() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        let root = stage.root_layer().identifier().to_owned();
+        stage.insert_layer(
+            &root,
+            0,
+            sdf::Layer::new_anonymous("sub.usda"),
+            sdf::LayerOffset::IDENTITY,
+        )?;
+        let sub = stage
+            .layer_stack()
+            .into_iter()
+            .find(|id| *id != root)
+            .expect("the sublayer is in the stack");
+        let depth = stage.undo_depth();
+        stage.group(|stage| {
+            stage.edit_layer(&root, |e| author_prim(e, "/A"))?;
+            stage.edit_layer(&sub, |e| author_prim(e, "/B"))?;
+            Ok::<_, crate::Error>(())
+        })?;
+        assert_eq!(stage.undo_depth(), depth + 1);
+
+        let guard = stage.root_layer().try_borrow()?;
+        let undone = stage.undo();
+        assert!(
+            matches!(undone, Err(StageAuthoringError::Registry(sdf::LayerError::Busy))),
+            "{undone:?}"
+        );
+        drop(guard);
+        assert_eq!(stage.undo_depth(), depth + 1, "the rest of the step stays");
+        assert!(stage.prim("/A")?.is_valid()?, "the borrowed layer's edit stays");
+        assert!(!stage.prim("/B")?.is_valid()?, "the newer transaction reverted");
+        assert!(stage.undo()?);
+        assert!(!stage.prim("/A")?.is_valid()?);
+        assert!(!stage.prim("/B")?.is_valid()?);
+        Ok(())
+    }
+
     /// The transactions of a group are one step, undone together; edits
     /// outside a group stay one step each, and a group that commits nothing
     /// records no step.
@@ -1329,8 +1369,7 @@ mod tests {
             panicked: Cell::new(false),
             events: Rc::clone(&events),
         })?;
-        let root = stage.root_layer().identifier().to_string();
-        let layer = stage.layer_handle(&root).expect("root layer");
+        let layer = stage.root_layer();
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| layer.edit(|l| author_prim(l, "/Lost"))));
         assert!(unwound.is_err());
         layer.edit(|l| author_prim(l, "/Kept"))?;
@@ -1486,8 +1525,7 @@ mod tests {
 
         let undo = UndoStage::with_capacity(in_memory_stage()?, 1);
         undo.define_prim("/Kept")?;
-        let root = undo.root_layer().identifier().to_string();
-        let sink = undo.layer_handle(&root).expect("root layer").add_sink(Veto)?;
+        let sink = undo.root_layer().add_sink(Veto)?;
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
             undo.group(|stage| -> Result<()> {
                 assert!(stage.define_prim("/Vetoed").is_err());
@@ -1495,7 +1533,7 @@ mod tests {
             })
         }));
         assert!(unwound.is_err());
-        undo.layer_handle(&root).expect("root layer").remove_sink(sink)?;
+        undo.root_layer().remove_sink(sink)?;
 
         assert_eq!(undo.undo_depth(), 1);
         assert!(undo.undo()?);
@@ -1605,8 +1643,7 @@ mod tests {
         let source = ReplayStage::from(in_memory_stage()?);
         source.define_prim("/A")?;
         let x = source.create_attribute("/A.x", "double")?;
-        let root = source.root_layer().identifier().to_string();
-        let layer = source.layer_handle(&root).expect("root layer");
+        let layer = source.root_layer();
         let nested = layer.clone();
         let fired = Cell::new(false);
         let sink = layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
@@ -1878,8 +1915,7 @@ mod tests {
     fn handle_edit_drops_step() -> Result<()> {
         let (_dir, a, _b) = shared_pair()?;
         a.attribute("/P.x")?.set(1.0)?;
-        let root = a.root_layer().identifier().to_string();
-        a.layer_handle(&root).expect("root layer").edit(|e| {
+        a.root_layer().edit(|e| {
             e.data_mut().set_field(
                 &sdf::path("/P.x")?,
                 sdf::FieldKey::Default.as_str(),
@@ -2404,12 +2440,8 @@ mod tests {
     fn veto_keeps_order() -> Result<()> {
         let undo = scene()?;
         three_step(&undo)?;
-        let root = undo.root_layer().identifier().to_string();
         let veto = Rc::new(Cell::new(true));
-        let vetoing = undo
-            .layer_handle(&root)
-            .expect("root layer")
-            .add_sink(VetoB(Rc::clone(&veto)))?;
+        let vetoing = undo.root_layer().add_sink(VetoB(Rc::clone(&veto)))?;
         let order = Rc::new(RefCell::new(Vec::new()));
         undo.add_sink(Order(Rc::clone(&order)))?;
         let (slot, countdown) = hooked(undo, |undo| set(undo, "/O.x", 9.0).expect("the sink's edit"))?;
@@ -2426,7 +2458,7 @@ mod tests {
             order.borrow_mut().clear();
             assert!(undo.undo()?);
             assert_eq!(*order.borrow(), ["/B.x", "/A.x"], "the vetoed one first");
-            undo.layer_handle(&root).expect("root layer").remove_sink(vetoing)?;
+            undo.root_layer().remove_sink(vetoing)?;
         }
         slot.take();
         Ok(())

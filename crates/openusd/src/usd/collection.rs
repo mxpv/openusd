@@ -835,9 +835,8 @@ mod tests {
         coll.set_include_root(true)?;
         coll.set_membership_expression(sdf::PathExpression::parse("/W//"))?;
 
-        let root = stage.root_layer().identifier().to_string();
         let overwrite = |attr: Attribute, value: Value| -> Result<()> {
-            stage.layer_handle(&root).expect("root layer is live").edit(|e| {
+            stage.root_layer().edit(|e| {
                 e.attribute_mut(attr.path())?
                     .expect("authored above")
                     .set("default", value);

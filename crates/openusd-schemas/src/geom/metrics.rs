@@ -223,8 +223,9 @@ mod tests {
         assert_eq!(
             stage
                 .root_layer()
-                .pseudo_root()
-                .and_then(|root| root.get::<f64>(tokens::METERS_PER_UNIT)),
+                .pseudo_root()?
+                .expect("the root layer's pseudo-root")
+                .get::<f64>(tokens::METERS_PER_UNIT)?,
             Some(1.0)
         );
 

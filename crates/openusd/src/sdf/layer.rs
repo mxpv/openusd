@@ -1088,6 +1088,19 @@ impl Layer {
         PseudoRootSpecRef::get(self.data())
     }
 
+    /// The layer's `defaultPrim` metadata, `None` when unauthored (C++
+    /// `SdfLayer::GetDefaultPrim`).
+    pub fn default_prim(&self) -> Option<tf::Token> {
+        self.pseudo_root()?.default_prim()
+    }
+
+    /// The prim path the layer's `defaultPrim` names, `None` when unauthored
+    /// or when it names no prim (C++ `SdfLayer::GetDefaultPrimAsPath`; see
+    /// [`default_prim_path`]).
+    pub fn default_prim_path(&self) -> Option<Path> {
+        default_prim_path(&self.default_prim()?)
+    }
+
     /// The list of namespace relocations authored in this layer's metadata,
     /// or an empty list when none are authored. Mirrors C++
     /// `SdfLayer::GetRelocates`. Reads through the backing [`AbstractData`], so

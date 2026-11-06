@@ -614,6 +614,13 @@ impl From<openusd::pcp::QueryError> for SchemaError {
     }
 }
 
+/// Layer read failures route through [`SchemaError::Core`] likewise.
+impl From<sdf::LayerError> for SchemaError {
+    fn from(error: sdf::LayerError) -> Self {
+        Self::Core(error.into())
+    }
+}
+
 /// Path-parse failures route through [`SchemaError::Core`] likewise.
 impl From<sdf::PathParseError> for SchemaError {
     fn from(error: sdf::PathParseError) -> Self {
@@ -946,7 +953,7 @@ pub(crate) mod tests {
         reason = "which families' tests reach for it depends on the features enabled"
     )]
     pub(crate) fn layer_text(stage: &Stage, identifier: &str) -> String {
-        let layer = stage.layer(identifier).expect("the layer is on the stage");
+        let layer = stage.layer(identifier).unwrap().expect("the layer is on the stage");
         layer.export_to_string().expect("the layer exports")
     }
 }

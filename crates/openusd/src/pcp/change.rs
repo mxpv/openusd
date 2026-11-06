@@ -1260,10 +1260,7 @@ fn apply_default_prim_edits(
     let mut victims: BTreeSet<Path> = BTreeSet::new();
     for (layer, prior) in edits {
         let old = prior.as_deref().and_then(sdf::default_prim_path);
-        let current = graph
-            .default_prim_token(*layer)
-            .as_deref()
-            .and_then(sdf::default_prim_path);
+        let current = graph.try_layer(*layer).and_then(sdf::Layer::default_prim_path);
         // The composed default did not move, so no index composes differently and
         // no dependent resyncs — C++'s equality skip. The value-diff in
         // `ChangeList` already suppresses an identical re-author, so what reaches

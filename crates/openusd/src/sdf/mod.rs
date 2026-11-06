@@ -20,9 +20,10 @@ mod copy;
 mod data;
 pub mod expr;
 mod file_format;
+mod handle;
 pub(crate) mod layer;
 pub(crate) mod layer_registry;
-mod layer_store;
+pub(crate) mod layer_store;
 mod ordering;
 pub(crate) mod path;
 pub mod path_expr;
@@ -51,6 +52,7 @@ pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, FormatError, WriteSeek, Written};
+pub use handle::{AttributeHandle, PrimHandle, PseudoRootHandle, RelationshipHandle};
 pub use layer::{
     AuthoringError, CommittedLayerChange, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId,
     PendingLayerChange, default_prim_path,

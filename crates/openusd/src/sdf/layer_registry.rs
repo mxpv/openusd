@@ -167,8 +167,8 @@ impl From<LoadError> for crate::Error {
 /// handle into the registry remains. The registry itself refers to its layers
 /// weakly, as C++ `Sdf_LayerRegistry` does. A registry kept by a layer it
 /// holds, as that layer's resolver, therefore does not keep the layer alive.
-/// The registry holds its layers behind one borrow: a read or an edit through
-/// one handle conflicts with any other (see [`sdf::LayerHandle`]).
+/// An edit through one handle borrows the registry's layers whole, so it
+/// conflicts with any other access to them (see [`sdf::LayerHandle`]).
 #[derive(Clone)]
 pub struct LayerRegistry {
     resolver: Rc<dyn ar::Resolver>,
@@ -328,15 +328,15 @@ impl LayerRegistry {
         })
     }
 
-    /// The layer open in this registry at `asset_path`, or else that layer
-    /// read and held here, or `None` when the path does not resolve (C++
-    /// `SdfLayer::FindOrOpen`). A layer already open is returned as it is,
-    /// with any edits not yet saved; a changed file is read again only by a
-    /// reload. Only the layer itself is opened: the sublayers, references and
-    /// payloads it declares stay the asset paths it authored. Fails with
+    /// The layer open in this registry at `asset_path`, or else that layer read
+    /// and held here, or `None` when the path does not resolve (C++
+    /// `SdfLayer::FindOrOpen`). A layer already open is returned as it is, with
+    /// any edits not yet saved; a changed file is read again only by a reload.
+    /// Only the layer itself is opened: the sublayers, references and payloads
+    /// it declares stay the asset paths it authored. Fails with
     /// [`LayerError::Busy`](sdf::LayerError::Busy), before reading anything,
-    /// when it would have to open a layer from inside a read or an edit on
-    /// this registry.
+    /// when it would have to open a layer from inside an edit on this registry,
+    /// or from a resolver a stage calls while it reads the registry's layers.
     pub fn find_or_open(&self, asset_path: &str) -> crate::Result<Option<sdf::LayerHandle>> {
         let _scope = ar::CacheScope::begin();
         let identifier = self.create_identifier(asset_path, None);
@@ -375,10 +375,10 @@ impl LayerRegistry {
         store
     }
 
-    /// Fails with [`LayerError::Busy`](sdf::LayerError::Busy) while a read or
-    /// an edit holds the registry's layers. A load that joins its layers to a
-    /// stage checks first, as the stage subscribes to each layer, held already
-    /// or not.
+    /// Fails with [`LayerError::Busy`](sdf::LayerError::Busy) while a
+    /// composition read or an edit holds the registry's layers. A load that
+    /// joins its layers to a stage checks first, as the stage subscribes to
+    /// each layer, held already or not.
     fn ensure_writable(&self) -> Result<(), sdf::LayerError> {
         self.held().map_or(Ok(()), |store| store.ensure_writable())
     }
@@ -395,23 +395,26 @@ impl LayerRegistry {
     /// Hold `layer` here, where [`find`](Self::find) returns it, and return a
     /// handle to it. Any edit it has staged is committed, without notifying its
     /// sinks, and the registry's resolver anchors, reads and saves it from then
-    /// on, as it does a layer the registry reads. Fails, handing the layer back in the [`sdf::AdoptError`], with
+    /// on, as it does a layer the registry reads. Fails, handing the layer back
+    /// in the [`sdf::AdoptError`], with
     /// [`LayerError::Duplicate`](sdf::LayerError::Duplicate) when a layer with
     /// its identifier, or read from its file, is already open here, and with
-    /// [`LayerError::Busy`](sdf::LayerError::Busy) from inside a read or an
-    /// edit on this registry.
+    /// [`LayerError::Busy`](sdf::LayerError::Busy) from inside an edit on this
+    /// registry, or from a resolver a stage calls while it reads the registry's
+    /// layers.
     pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
         layer.set_resolver(Rc::clone(&self.resolver));
         self.store().insert(layer)
     }
 
     /// Free the layers whose last handle has dropped. A dropped handle leaves
-    /// its layer in memory until a sweep, which [`find_or_open`](Self::find_or_open)
-    /// and [`adopt`](Self::adopt) run before they add a layer, unless it was the
-    /// last handle into the registry, which frees every layer it held. A no-op
-    /// while a read or an edit on this registry is in progress, or while a
-    /// stage on it holds its composition borrowed or is delivering its
-    /// notifications, the end of which sweeps.
+    /// its layer in memory until a sweep, which
+    /// [`find_or_open`](Self::find_or_open) and [`adopt`](Self::adopt) run
+    /// before they add a layer, unless it was the last handle into the
+    /// registry, which frees every layer it held. A no-op while an edit on this
+    /// registry is in progress, while a resolver a stage calls as it reads the
+    /// registry's layers runs, or while a stage on it holds its composition
+    /// borrowed or is delivering its notifications, the end of which sweeps.
     pub fn sweep(&self) {
         if let Some(store) = self.held() {
             store.sweep();
@@ -567,11 +570,11 @@ impl LayerRegistry {
     }
 
     /// The layer the registry holds under the canonical `identifier` or read
-    /// from the file it resolves to, unsaved edits included, or else that
-    /// layer read and held from then on, or `None` when it does not resolve.
-    /// Fails with [`LayerError::Busy`](sdf::LayerError::Busy), before reading
-    /// anything, when it would have to hold a layer from inside a read or an
-    /// edit on this registry.
+    /// from the file it resolves to, unsaved edits included, or else that layer
+    /// read and held from then on, or `None` when it does not resolve. Fails
+    /// with [`LayerError::Busy`](sdf::LayerError::Busy), before reading
+    /// anything, when it would have to hold a layer from inside a composition
+    /// read or an edit on this registry.
     pub(crate) fn find_or_read(&self, identifier: &str) -> Result<Option<LoadedLayer>, LoadError> {
         let _scope = ar::CacheScope::begin();
         let handle = match self.locate(identifier.to_owned())? {

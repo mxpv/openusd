@@ -408,7 +408,7 @@ fn layer_texts(stage: &Stage) -> Result<[String; 2]> {
         .into_iter()
         .find(|id| id.ends_with("weak.usda"))
         .expect("the weak layer is on the stage");
-    let weak = stage.layer(&weak).expect("the weak layer").export_to_string()?;
+    let weak = stage.layer(&weak)?.expect("the weak layer").export_to_string()?;
     Ok([root_text(stage)?, weak])
 }
 
