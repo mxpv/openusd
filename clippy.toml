@@ -6,6 +6,7 @@ msrv = "1.96"
 # should not ask for backticks around them. Rust identifiers stay off this list
 # so the lint keeps flagging unlinked references to our own API.
 doc-valid-idents = [
+    "ACEScg",
     "AnimMapper",
     "BlendShape",
     "DenoisePass",

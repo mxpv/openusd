@@ -87,6 +87,18 @@ impl Vec2f {
     pub fn lerp(self, other: Self, t: f32) -> Self {
         self + (other - self) * t
     }
+
+    /// The dot product of `self` and `other`.
+    pub fn dot(self, other: Vec2f) -> f32 {
+        self.x * other.x + self.y * other.y
+    }
+
+    /// Whether `self` is within `tolerance` of `other`: their difference
+    /// is at most `tolerance` long (C++ `GfIsClose`).
+    pub fn is_close(self, other: Vec2f, tolerance: f32) -> bool {
+        let delta = self - other;
+        delta.dot(delta) <= tolerance * tolerance
+    }
 }
 
 /// 2-component double-precision float vector (`GfVec2d`).
@@ -392,6 +404,13 @@ impl IndexMut<usize> for Vec3f {
 impl Vec3f {
     pub fn dot(self, other: Vec3f) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    /// Whether `self` is within `tolerance` of `other`: their difference
+    /// is at most `tolerance` long (C++ `GfIsClose`).
+    pub fn is_close(self, other: Vec3f, tolerance: f32) -> bool {
+        let delta = self - other;
+        delta.dot(delta) <= tolerance * tolerance
     }
 
     /// The lesser of this vector and `other` along each axis. A component

@@ -1,0 +1,33 @@
+#usda 1.0
+(
+    doc = "AOUSD core spec 14.4.3: color space inheritance and resolution."
+)
+
+def Xform "Root" (
+    prepend apiSchemas = ["ColorSpaceAPI"]
+)
+{
+    uniform token colorSpace:name = "lin_rec709_scene"
+
+    def Material "Material1" (
+        prepend apiSchemas = ["ColorSpaceAPI"]
+    )
+    {
+        uniform token colorSpace:name = "srgb_p3d65_scene"
+        color3f inputs:diffuseColor = (0.2, 0.5, 0.8)
+    }
+
+    def Material "Material2"
+    {
+        # Authored without ColorSpaceAPI applied, so resolution ignores it.
+        uniform token colorSpace:name = "g22_ap1_scene"
+        color3f inputs:diffuseColor = (0.2, 0.5, 0.8)
+    }
+
+    def Material "Material3"
+    {
+        color3f inputs:diffuseColor = (0.2, 0.5, 0.8) (
+            colorSpace = "srgb_rec709_scene"
+        )
+    }
+}

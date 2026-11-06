@@ -1173,6 +1173,34 @@ impl Layer {
         self.has_root_field(FieldKey::FramesPerSecond)
     }
 
+    /// The layer's `colorConfiguration`, the asset path of the color
+    /// configuration (an OCIO config, say) pipeline tools read the layer's
+    /// display colors with, or `None` when unauthored. Mirrors C++
+    /// `SdfLayer::GetColorConfiguration`.
+    pub fn color_configuration(&self) -> Option<sdf::AssetPath> {
+        self.pseudo_root().and_then(|root| root.color_configuration())
+    }
+
+    /// Whether this layer authors a `colorConfiguration` opinion. Mirrors C++
+    /// `SdfLayer::HasColorConfiguration`.
+    pub fn has_color_configuration(&self) -> bool {
+        self.has_root_field(FieldKey::ColorConfiguration)
+    }
+
+    /// The layer's `colorManagementSystem`, the name of the system that reads
+    /// [`color_configuration`](Self::color_configuration) (`OpenColorIO`, say),
+    /// or `None` when unauthored. Mirrors C++
+    /// `SdfLayer::GetColorManagementSystem`.
+    pub fn color_management_system(&self) -> Option<tf::Token> {
+        self.pseudo_root().and_then(|root| root.color_management_system())
+    }
+
+    /// Whether this layer authors a `colorManagementSystem` opinion. Mirrors
+    /// C++ `SdfLayer::HasColorManagementSystem`.
+    pub fn has_color_management_system(&self) -> bool {
+        self.has_root_field(FieldKey::ColorManagementSystem)
+    }
+
     /// The layer's `framePrecision`, or `3` when unauthored. Mirrors C++
     /// `SdfLayer::GetFramePrecision`.
     pub fn frame_precision(&self) -> i32 {
@@ -1389,6 +1417,34 @@ impl LayerEdit<'_> {
     /// Clear the layer's `framePrecision` opinion. No-op when no pseudo-root spec exists.
     pub fn clear_frame_precision(&mut self) -> Result<(), AuthoringError> {
         self.clear_root_field(FieldKey::FramePrecision)
+    }
+
+    /// Set the layer's `colorConfiguration`. Mirrors C++
+    /// `SdfLayer::SetColorConfiguration`.
+    pub fn set_color_configuration(&mut self, config: impl Into<sdf::AssetPath>) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_color_configuration(config);
+        Ok(())
+    }
+
+    /// Clear the layer's `colorConfiguration` opinion. No-op when no
+    /// pseudo-root spec exists. Mirrors C++
+    /// `SdfLayer::ClearColorConfiguration`.
+    pub fn clear_color_configuration(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::ColorConfiguration)
+    }
+
+    /// Set the layer's `colorManagementSystem`. Mirrors C++
+    /// `SdfLayer::SetColorManagementSystem`.
+    pub fn set_color_management_system(&mut self, cms: impl Into<tf::Token>) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_color_management_system(cms);
+        Ok(())
+    }
+
+    /// Clear the layer's `colorManagementSystem` opinion. No-op when no
+    /// pseudo-root spec exists. Mirrors C++
+    /// `SdfLayer::ClearColorManagementSystem`.
+    pub fn clear_color_management_system(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::ColorManagementSystem)
     }
 
     /// Remove a metadata field from the pseudo-root spec, if that spec exists. No-op

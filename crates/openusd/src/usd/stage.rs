@@ -989,6 +989,18 @@ pub struct StageInner {
     /// definitions themselves; this only remembers which one each path resolved
     /// to, and is dropped wholesale when composition moves on.
     prim_types: RefCell<PrimTypeMemo>,
+    /// The site's `colorConfiguration` and `colorManagementSystem`, which
+    /// the stage reports where its layers author neither (C++
+    /// `UsdColorConfigFallbacks`).
+    color_config_fallbacks: ColorConfigFallbacks,
+}
+
+/// The site's color configuration fallbacks a [`StageBuilder`] gives its
+/// stage.
+#[derive(Debug, Clone, Default)]
+struct ColorConfigFallbacks {
+    configuration: Option<sdf::AssetPath>,
+    management_system: Option<Token>,
 }
 
 /// Which of a prim's composed answers a stage query reads. C++ keeps a
@@ -2346,6 +2358,22 @@ impl Stage {
         })
     }
 
+    /// Authors `colorConfiguration` on the current edit target's layer,
+    /// which must be the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`]. Mirrors C++
+    /// `UsdStage::SetColorConfiguration`.
+    pub fn set_color_configuration(&self, config: impl Into<sdf::AssetPath>) -> Result<(), StageAuthoringError> {
+        self.with_stage_metadata_layer(|layer| layer.set_color_configuration(config))
+    }
+
+    /// Authors `colorManagementSystem` on the current edit target's layer,
+    /// which must be the root or session layer; any other target fails with
+    /// [`StageAuthoringError::StageMetadataTarget`]. Mirrors C++
+    /// `UsdStage::SetColorManagementSystem`.
+    pub fn set_color_management_system(&self, cms: impl Into<Token>) -> Result<(), StageAuthoringError> {
+        self.with_stage_metadata_layer(|layer| layer.set_color_management_system(cms))
+    }
+
     /// Authors `framesPerSecond` on the current edit target's layer, which
     /// must be the root or session layer; any other target fails with
     /// [`StageAuthoringError::StageMetadataTarget`].
@@ -3434,13 +3462,13 @@ impl Stage {
     /// layer's opinion wins over the root layer (via [`Stage::stage_metadata`]).
     /// Mirrors C++ `UsdStage::GetStartTimeCode`.
     pub fn start_time_code(&self) -> f64 {
-        self.metadata_double(sdf::FieldKey::StartTimeCode).unwrap_or(0.0)
+        self.metadata_as::<f64>(sdf::FieldKey::StartTimeCode).unwrap_or(0.0)
     }
 
     /// The stage's `endTimeCode`, or `0.0` when unauthored. The session layer's
     /// opinion wins over the root layer. Mirrors C++ `UsdStage::GetEndTimeCode`.
     pub fn end_time_code(&self) -> f64 {
-        self.metadata_double(sdf::FieldKey::EndTimeCode).unwrap_or(0.0)
+        self.metadata_as::<f64>(sdf::FieldKey::EndTimeCode).unwrap_or(0.0)
     }
 
     /// Whether the stage authors both `startTimeCode` and `endTimeCode`.
@@ -3456,26 +3484,61 @@ impl Stage {
     /// opinion wins over the root layer. Mirrors C++
     /// `UsdStage::GetTimeCodesPerSecond`.
     pub fn time_codes_per_second(&self) -> f64 {
-        self.metadata_double(sdf::FieldKey::TimeCodesPerSecond)
-            .or_else(|| self.metadata_double(sdf::FieldKey::FramesPerSecond))
+        self.metadata_as::<f64>(sdf::FieldKey::TimeCodesPerSecond)
+            .or_else(|| self.metadata_as::<f64>(sdf::FieldKey::FramesPerSecond))
             .unwrap_or(24.0)
+    }
+
+    /// The stage's `colorConfiguration`: the asset path of the color
+    /// configuration pipeline tools read the stage's display colors with,
+    /// unrelated to the color spaces of its attributes, resolved against the
+    /// layer that authors it. The session layer's opinion wins over the root
+    /// layer's; where neither authors a non-empty
+    /// path, this is the
+    /// [`color_configuration_fallback`](StageBuilder::color_configuration_fallback)
+    /// the stage was built with. Mirrors C++
+    /// `UsdStage::GetColorConfiguration`.
+    pub fn color_configuration(&self) -> Option<sdf::AssetPath> {
+        self.metadata_as::<sdf::AssetPath>(sdf::FieldKey::ColorConfiguration)
+            .filter(|config| !config.authored_path.is_empty())
+            .or_else(|| self.color_config_fallbacks.configuration.clone())
+    }
+
+    /// The stage's `colorManagementSystem`, the system that reads its
+    /// [`color_configuration`](Self::color_configuration). The session layer's
+    /// opinion wins over the root layer's; where neither authors a non-empty
+    /// name, this is the
+    /// [`color_management_system_fallback`](StageBuilder::color_management_system_fallback)
+    /// the stage was built with. Mirrors C++
+    /// `UsdStage::GetColorManagementSystem`.
+    pub fn color_management_system(&self) -> Option<Token> {
+        self.metadata_as::<Token>(sdf::FieldKey::ColorManagementSystem)
+            .filter(|cms| !cms.is_empty())
+            .or_else(|| self.color_config_fallbacks.management_system.clone())
+    }
+
+    /// The color configuration and management system the stage was built to
+    /// fall back to (C++ `UsdStage::GetColorConfigFallbacks`).
+    pub fn color_config_fallbacks(&self) -> (Option<&sdf::AssetPath>, Option<&Token>) {
+        let fallbacks = &self.color_config_fallbacks;
+        (fallbacks.configuration.as_ref(), fallbacks.management_system.as_ref())
     }
 
     /// The stage's `framesPerSecond`, or `24.0` when unauthored. The session
     /// layer's opinion wins over the root layer. Mirrors C++
     /// `UsdStage::GetFramesPerSecond`.
     pub fn frames_per_second(&self) -> f64 {
-        self.metadata_double(sdf::FieldKey::FramesPerSecond).unwrap_or(24.0)
+        self.metadata_as::<f64>(sdf::FieldKey::FramesPerSecond).unwrap_or(24.0)
     }
 
-    /// Reads a composed stage-metadata field as a `double`, honoring the
+    /// Reads a composed stage-metadata field as a `T`, honoring the
     /// session-over-root resolution of [`Stage::stage_metadata`]. `None` when
-    /// unauthored or stored with a non-`double` value.
-    fn metadata_double(&self, field: sdf::FieldKey) -> Option<f64> {
+    /// unauthored or stored as another type.
+    fn metadata_as<T: TryFrom<vt::Value>>(&self, field: sdf::FieldKey) -> Option<T> {
         self.stage_metadata(field.as_str())
             .ok()
             .flatten()
-            .and_then(|v| v.try_as_double())
+            .and_then(|value| T::try_from(value).ok())
     }
 
     /// Returns the stage-level interpolation mode applied when resolving a
@@ -4612,6 +4675,7 @@ pub struct StageBuilder {
     interpolation: InterpolationType,
     muted: HashSet<String>,
     schema_registry: Option<Arc<SchemaRegistry>>,
+    color_config_fallbacks: ColorConfigFallbacks,
 }
 
 /// What a stack open collected: its layers, the diagnostics of the
@@ -4635,6 +4699,7 @@ impl StageBuilder {
             interpolation: InterpolationType::default(),
             muted: HashSet::new(),
             schema_registry: None,
+            color_config_fallbacks: ColorConfigFallbacks::default(),
         }
     }
 
@@ -4754,6 +4819,34 @@ impl StageBuilder {
     /// ```
     pub fn variant_fallbacks(mut self, fallbacks: pcp::VariantFallbackMap) -> Self {
         self.variant_fallbacks = fallbacks;
+        self
+    }
+
+    /// The site's color configuration, which
+    /// [`Stage::color_configuration`] reports where the stage's layers author
+    /// none (C++ `UsdStage::SetColorConfigFallbacks`, the
+    /// `UsdColorConfigFallbacks` entry of a `plugInfo.json`). Unset by
+    /// default; an empty path leaves it as it was, as in C++.
+    // TODO: read the site's fallbacks from a `plugInfo.json`
+    // `UsdColorConfigFallbacks` entry. `usd::SchemaRegistry` reads only each
+    // schema's own plug info, and has no site-wide plugin info to hold it.
+    pub fn color_configuration_fallback(mut self, config: impl Into<sdf::AssetPath>) -> Self {
+        let config = config.into();
+        if !config.authored_path.is_empty() {
+            self.color_config_fallbacks.configuration = Some(config);
+        }
+        self
+    }
+
+    /// The site's color management system, which
+    /// [`Stage::color_management_system`] reports where the stage's layers
+    /// author none (C++ `UsdStage::SetColorConfigFallbacks`). Unset by
+    /// default; an empty name leaves it as it was, as in C++.
+    pub fn color_management_system_fallback(mut self, cms: impl Into<Token>) -> Self {
+        let cms = cms.into();
+        if !cms.is_empty() {
+            self.color_config_fallbacks.management_system = Some(cms);
+        }
         self
     }
 
@@ -5003,6 +5096,7 @@ impl StageBuilder {
             editor: sdf::EditorId::next(),
             schema_registry: self.schema_registry.unwrap_or_else(|| SchemaRegistry::global().clone()),
             prim_types: RefCell::default(),
+            color_config_fallbacks: self.color_config_fallbacks,
         }));
         stage
             .composition
