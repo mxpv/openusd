@@ -1,0 +1,14 @@
+[package]
+name = "openusd-imaging"
+description = "Placeholder for the openusd project's Hydra-style imaging layer"
+keywords = ["usd", "openusd", "hydra", "imaging"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
