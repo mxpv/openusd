@@ -20,7 +20,7 @@ use crate::sdf::{self, Path};
 #[cfg(test)]
 use super::VariantFallbackMap;
 use super::index_cache::IndexCache;
-use super::instancing::is_prototype_namespace;
+use super::instancing::{Prototype, is_prototype_namespace};
 
 /// A payload-inclusion policy authored at one path (C++
 /// `UsdStageLoadRules::Rule`).
@@ -532,7 +532,7 @@ impl IndexCache {
     /// The load rules governing `path`, in `path`'s scope — see
     /// [`IndexCache::scoped`](Self::scoped).
     pub(super) fn scoped_load_rules<'a>(&'a self, path: &'a Path) -> (&'a LoadRules, Cow<'a, Path>) {
-        self.scoped(path, &self.load_rules, |p| &p.relative_load_rules)
+        self.scoped(path, &self.load_rules, Prototype::relative_load_rules)
     }
 }
 

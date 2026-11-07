@@ -4034,14 +4034,11 @@ impl IndexCache {
     /// again in it. A busy store stops the pass, every prim it had not
     /// reached kept. A prim retired, or served from elsewhere, forgets its
     /// clip sets, which resolve afresh when it next composes; a rebuilt one
-    /// keeps them until the refresh.
+    /// keeps them until the refresh. A pass that ends with no retired
+    /// prototype waiting forgets the retired roots, so a key that
+    /// returns after it mints a fresh prototype.
     pub(crate) fn settle_pass(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
         self.transfer_prototypes(graph)?;
-        // Every retired prototype's instances are placed, so a retired root
-        // their keys did not take back has no instance left.
-        if !self.store.has_retired() {
-            self.prototypes.forget_retired();
-        }
         // TODO(rayon): siblings settle independently once their parent has,
         // so each level of the work set could be decided in parallel.
         for path in self.store.work() {
@@ -4075,6 +4072,24 @@ impl IndexCache {
                 Err(error) if error.is_busy() => return Err(error),
                 Err(error) => self.store.fail(&path, error.to_string()),
             }
+        }
+        // Every instance this pass registered has taken its root back, so a
+        // root still retired has none, unless a transfer still waiting on a
+        // load claims it later.
+        //
+        // TODO: an instance of a retired key that no settlement registers,
+        // because nothing has queried it yet, finds its root forgotten: one
+        // edit that removes `/A` and defines an unqueried `/Z` with the same
+        // arcs leaves `/Z` on a fresh `/__Prototype_N`, and the retired root's
+        // cached work and diagnostics are dropped
+        // (`tests/stage.rs::prototype_late_instance`). C++ `Usd_InstanceCache`
+        // keeps the root because `UsdStage` composes every prim within
+        // `ProcessChanges`. Closing it needs a rule for when a key is
+        // abandoned rather than not yet rediscovered, deciding identity
+        // lifetime, diagnostic retention, invalidation and reclamation of the
+        // parked work together.
+        if !self.store.has_retired() {
+            self.prototypes.forget_retired();
         }
         // The anchors this pass rebuilt refresh against their new indices.
         self.refresh_clip_sources(graph)
@@ -4173,7 +4188,12 @@ impl IndexCache {
                     }
                 }
             };
-            if let Some(targets) = targets {
+            if let Some(mut targets) = targets {
+                // A root an instance took back is that prototype's again,
+                // and keeps its work.
+                if self.prototypes.is_root(&record.root) && !targets.contains(&record.root) {
+                    targets.push(record.root.clone());
+                }
                 // The prototype's anchors leave with its work.
                 for anchor in self.store.transfer_work(&record.root, &targets) {
                     self.clip_cache.forget_prim(&anchor);

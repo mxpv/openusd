@@ -154,6 +154,15 @@ fn unresolved_sublayer_count(stage: &Stage, asset_path: &str) -> usize {
         .count()
 }
 
+/// How many unresolved-layer errors the stage reports for `asset_path`.
+fn unresolved_layer_count(stage: &Stage, asset_path: &str) -> usize {
+    stage
+        .composition_errors()
+        .iter()
+        .filter(|e| matches!(e, pcp::CompositionDiagnostic::UnresolvedLayer { asset_path: a, .. } if a == asset_path))
+        .count()
+}
+
 /// Whether the stage reports an `UnresolvedSublayer` for `asset_path`.
 fn reports_unresolved_sublayer(stage: &Stage, asset_path: &str) -> bool {
     unresolved_sublayer_count(stage, asset_path) > 0
@@ -1140,7 +1149,7 @@ fn stack_diagnostic_lifetime() -> Result<()> {
 /// for the instances left (C++ `Usd_InstanceCache` assigns it a new source):
 /// they stay on `/__Prototype_1`, and the notice resyncs the prototype.
 #[test]
-fn prototype_outlives_its_source_instance() -> Result<()> {
+fn prototype_outlives_source() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
@@ -1180,6 +1189,175 @@ def "Source" {
         Some(vt::Value::Double(1.0))
     );
     assert!(resynced.borrow().contains(&prototype), "{:?}", resynced.borrow());
+    Ok(())
+}
+
+/// An instance moving onto a prototype whose own source goes in the same edit
+/// keeps that prototype's work: the moved instance takes the root back, and
+/// the work the retired prototype held there settles, so its composition
+/// errors stay reported without a query.
+#[test]
+fn prototype_root_taken_back() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+def "A" (
+    references = </S1>
+    instanceable = true
+) {}
+def "B" (
+    references = </S2>
+    instanceable = true
+) {}
+def "S1" {
+    def "C" {}
+}
+def "S2" {
+    def "C" (
+        references = @missing.usda@</X>
+    ) {}
+}
+"#,
+    )?;
+    assert!(stage.prim("/A/C")?.is_valid()?);
+    assert!(stage.prim("/B/C")?.is_valid()?);
+    let kept = stage.prim("/B")?.prototype()?.expect("an instance");
+    assert_eq!(unresolved_layer_count(&stage, "missing.usda"), 1);
+
+    let root_id = stage.root_layer().identifier().to_owned();
+    stage.edit_layer(&root_id, |e| {
+        let references = sdf::ReferenceListOp::explicit([sdf::Reference {
+            prim_path: sdf::Path::new("/S2")?,
+            ..Default::default()
+        }]);
+        e.prim_mut("/A")?
+            .expect("/A is authored")
+            .set("references", vt::Value::ReferenceListOp(references));
+        e.remove_spec(&sdf::Path::new("/B")?)?;
+        Ok(())
+    })?;
+
+    assert_eq!(
+        unresolved_layer_count(&stage, "missing.usda"),
+        1,
+        "the prototype's work settles where it was"
+    );
+    assert_eq!(stage.prim("/A")?.prototype()?, Some(kept));
+    Ok(())
+}
+
+/// The same move onto the first prototype, whose source holds the error: the
+/// root taken back is the one whose instance goes, and its work still
+/// settles.
+#[test]
+fn prototype_root_kept_reversed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+def "A" (
+    references = </S1>
+    instanceable = true
+) {}
+def "B" (
+    references = </S2>
+    instanceable = true
+) {}
+def "S1" {
+    def "C" (
+        references = @missing.usda@</X>
+    ) {}
+}
+def "S2" {
+    def "C" {}
+}
+"#,
+    )?;
+    assert!(stage.prim("/A/C")?.is_valid()?);
+    assert!(stage.prim("/B/C")?.is_valid()?);
+    let kept = stage.prim("/A")?.prototype()?.expect("an instance");
+    assert_eq!(unresolved_layer_count(&stage, "missing.usda"), 1);
+
+    let root_id = stage.root_layer().identifier().to_owned();
+    stage.edit_layer(&root_id, |e| {
+        let references = sdf::ReferenceListOp::explicit([sdf::Reference {
+            prim_path: sdf::Path::new("/S1")?,
+            ..Default::default()
+        }]);
+        e.prim_mut("/B")?
+            .expect("/B is authored")
+            .set("references", vt::Value::ReferenceListOp(references));
+        e.remove_spec(&sdf::Path::new("/A")?)?;
+        Ok(())
+    })?;
+
+    assert_eq!(
+        unresolved_layer_count(&stage, "missing.usda"),
+        1,
+        "the prototype's work settles where it was"
+    );
+    assert_eq!(stage.prim("/B")?.prototype()?, Some(kept));
+    Ok(())
+}
+
+/// An instance of a removed prototype's key that nothing has queried yet
+/// does not take the root back: settlement registers only the instances it
+/// knows, so `/Z` gets a fresh prototype and the old one's cached error goes
+/// until `/Z`'s descendant composes. C++ keeps the root, composing every prim
+/// within the change (see the `TODO` in `IndexCache::settle_pass`).
+#[test]
+fn prototype_late_instance() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+def "A" (
+    references = </S1>
+    instanceable = true
+) {}
+def "S1" {
+    def "C" (
+        references = @missing.usda@</X>
+    ) {}
+}
+"#,
+    )?;
+    assert!(stage.prim("/A/C")?.is_valid()?);
+    let first = stage.prim("/A")?.prototype()?.expect("an instance");
+    assert_eq!(unresolved_layer_count(&stage, "missing.usda"), 1);
+
+    let root_id = stage.root_layer().identifier().to_owned();
+    stage.edit_layer(&root_id, |e| {
+        e.remove_spec(&sdf::Path::new("/A")?)?;
+        let mut z = sdf::PrimSpec::new(e.data_mut(), "/Z", sdf::Specifier::Def, "")?;
+        z.set(
+            "references",
+            vt::Value::ReferenceListOp(sdf::ReferenceListOp::explicit([sdf::Reference {
+                prim_path: sdf::Path::new("/S1")?,
+                ..Default::default()
+            }])),
+        );
+        z.set("instanceable", true);
+        Ok(())
+    })?;
+
+    assert_eq!(
+        unresolved_layer_count(&stage, "missing.usda"),
+        0,
+        "the retired root's error goes with it"
+    );
+    assert_ne!(
+        stage.prim("/Z")?.prototype()?,
+        Some(first),
+        "/Z mints a fresh prototype"
+    );
+    assert!(stage.prim("/Z/C")?.is_valid()?);
+    assert_eq!(
+        unresolved_layer_count(&stage, "missing.usda"),
+        1,
+        "composing /Z's descendant reports the error again"
+    );
     Ok(())
 }
 

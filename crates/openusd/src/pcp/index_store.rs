@@ -70,6 +70,9 @@ pub(super) struct IndexStore {
     /// them, kept with the work set until settlement transfers their
     /// descendants' work.
     retired: Vec<RetiredPrototype>,
+    /// Each retired record's position in [`retired`](Self::retired), by its
+    /// root.
+    retired_at: sdf::PathMap<usize>,
     /// The settlement round: a prim whose settling failed is not tried again
     /// in the round it failed in ([`begin_round`](Self::begin_round)).
     round: u64,
@@ -859,8 +862,29 @@ impl IndexStore {
 
     /// Keeps `records` with the work set, for settlement to transfer their
     /// descendants' work.
+    ///
+    /// A record whose root the work set holds a record for already joins it,
+    /// its instances added: an instance can take a retired root back, and
+    /// the prototype be retired again before settlement places the first.
     pub(super) fn retire_prototypes(&mut self, records: impl IntoIterator<Item = RetiredPrototype>) {
-        self.retired.extend(records);
+        for record in records {
+            if let Some(&at) = self.retired_at.get(&record.root) {
+                let merged = &mut self.retired[at];
+                let mut known: sdf::PathSet = merged.instances.iter().cloned().collect();
+                merged.instances.extend(
+                    record
+                        .instances
+                        .into_iter()
+                        .filter(|instance| known.insert(instance.clone())),
+                );
+                // Instances no round has tried yet make the merged record
+                // worth trying again.
+                merged.failed_in = merged.failed_in.min(record.failed_in);
+                continue;
+            }
+            self.retired_at.insert(record.root.clone(), self.retired.len());
+            self.retired.push(record);
+        }
     }
 
     /// Whether the work set keeps a retired-prototype record.
@@ -870,6 +894,7 @@ impl IndexStore {
 
     /// Takes the retired-prototype records out for settlement to transfer.
     pub(super) fn take_retired(&mut self) -> Vec<RetiredPrototype> {
+        self.retired_at.clear();
         mem::take(&mut self.retired)
     }
 
@@ -878,7 +903,8 @@ impl IndexStore {
     /// work leaves the work set. A copy landing on a path the work set holds
     /// already merges into that entry, which owns each stack once; one
     /// landing on a cached prim is dropped, since that prim composed already.
-    /// Returns the paths the work left, under `root`.
+    /// Returns the paths the work left, under `root`; none when `targets`
+    /// holds `root` itself, since each path keeps its work there.
     pub(super) fn transfer_work(&mut self, root: &Path, targets: &[Path]) -> Vec<Path> {
         let taken = self.evicted.remove_subtree(root);
         for target in targets {
@@ -922,6 +948,10 @@ impl IndexStore {
         for (path, unsettled) in taken {
             self.release_stacks(unsettled.stacks.iter().copied());
             left.push(path);
+        }
+        // A copy placed back at `root` itself kept its path.
+        if targets.contains(root) {
+            left.clear();
         }
         left
     }
@@ -1263,5 +1293,22 @@ pub(crate) mod tests {
         assert_eq!(store.stack_owners[&stack], 2);
         store.retire(&Path::abs_root());
         assert!(!store.stack_owners.contains_key(&stack));
+    }
+
+    /// A retired record for a root the work set holds one for joins it, so
+    /// each root keeps one record.
+    #[test]
+    fn retired_roots_merge() {
+        let record = |instances: &[&str], failed_in| RetiredPrototype {
+            root: p("/__Prototype_1"),
+            instances: instances.iter().map(|instance| p(instance)).collect(),
+            failed_in,
+        };
+        let mut store = IndexStore::default();
+        store.retire_prototypes([record(&["/A", "/B"], None), record(&["/B", "/C"], Some(2))]);
+        let records = store.take_retired();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].instances, [p("/A"), p("/B"), p("/C")]);
+        assert_eq!(records[0].failed_in, None, "the new instances are tried again");
     }
 }

@@ -61,14 +61,24 @@ pub(super) struct PrototypeRegistry {
     /// `/__Prototype_N` identity is never reused for a different composition
     /// within a session.
     count: usize,
-    /// The root and registration order of each prototype
-    /// [`remove_affected`](Self::remove_affected) retired, by its key, until
-    /// settlement places its instances
-    /// ([`forget_retired`](Self::forget_retired)). An instance registering
-    /// under a retired key takes the retired root back, as C++
-    /// `Usd_InstanceCache` keeps a prototype whose key still has instances
-    /// and only assigns it a new source.
-    retired: HashMap<InstanceKey, (Path, usize)>,
+    /// Each prototype [`remove_affected`](Self::remove_affected) retired, by
+    /// its key. An instance registering under a retired key during
+    /// settlement takes the root back, as C++ `Usd_InstanceCache` keeps a
+    /// prototype whose key still has instances and only assigns it a new
+    /// source; one first registered by a later query does not (see the
+    /// `TODO` in `IndexCache::settle_pass`). Once settlement has placed
+    /// every retired root's work, they are forgotten
+    /// ([`forget_retired`](Self::forget_retired)), as C++ drops a prototype
+    /// its round left with no instance (`_RemovePrototypeIfNoInstances`).
+    retired: HashMap<InstanceKey, RetiredRoot>,
+}
+
+/// A retired prototype's root, kept for an instance of its key to take back.
+#[derive(Debug)]
+struct RetiredRoot {
+    root: Path,
+    /// The prototype's registration order.
+    index: usize,
 }
 
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
@@ -86,6 +96,8 @@ pub(super) struct PrototypeRegistry {
 /// overrides (spec 11.3.3 permits overriding property values at an instance
 /// root).
 pub(super) struct Prototype {
+    /// The instancing key its instances share.
+    key: InstanceKey,
     /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
     /// be returned in mint order without parsing the path.
     index: usize,
@@ -94,20 +106,28 @@ pub(super) struct Prototype {
     /// however many proxies stand for it. The first is the canonical instance,
     /// whose composed subtree seeded the materialization.
     instances: Vec<Path>,
-    /// The canonical instance's load rules, re-rooted onto the path it composes
-    /// at (`LoadRules::make_relative_to`), so a `/__Prototype_N` descendant
-    /// build resolves its own payload-inclusion decision against the
-    /// instance's authored rules (see `IndexCache::scoped_load_rules`). For a
-    /// nested instance that path lies inside the enclosing prototype, so the
-    /// rules are already that prototype's relative table.
-    pub(super) relative_load_rules: LoadRules,
+}
+
+impl Prototype {
+    /// The canonical instance's load rules, re-rooted onto the path it
+    /// composes at (`LoadRules::make_relative_to`), so a `/__Prototype_N`
+    /// descendant build resolves its own payload-inclusion decision against
+    /// the instance's authored rules (see `IndexCache::scoped_load_rules`).
+    /// For a nested instance that path lies inside the enclosing prototype,
+    /// so the rules are already that prototype's relative table.
+    pub(super) fn relative_load_rules(&self) -> &LoadRules {
+        &self.key.load_rules
+    }
+
     /// The canonical instance's population mask, re-rooted onto the path it
-    /// composes at (`PopulationMask::make_relative_to`), so a query inside this
-    /// prototype's namespace resolves against the mask in the instance
-    /// namespace its author wrote it in (see `IndexCache::scoped_mask`). Every
-    /// instance sharing this prototype has the same one, because it is part of
-    /// the [`InstanceKey`].
-    pub(super) relative_mask: PopulationMask,
+    /// composes at (`PopulationMask::make_relative_to`), so a query inside
+    /// this prototype's namespace resolves against the mask in the instance
+    /// namespace its author wrote it in (see `IndexCache::scoped_mask`).
+    /// Every instance sharing this prototype has the same one, because it is
+    /// part of the [`InstanceKey`].
+    pub(super) fn relative_mask(&self) -> &PopulationMask {
+        &self.key.mask
+    }
 }
 
 /// Identity of an instance prim's shared composition (spec 11.3.3, C++
@@ -197,10 +217,9 @@ impl PrototypeRegistry {
     /// the instance the first time a key is seen and minting `/__Prototype_N`.
     /// Returns the prototype path and whether this call minted it (so the caller
     /// knows to materialize its index, seeding from the `composed` that minted
-    /// it — the prototype's canonical instance). `key.load_rules` and
-    /// `key.mask` are stored as the prototype's relative load rules and mask
-    /// only on the minting call — a cache hit's existing entry is already
-    /// guaranteed identical, since both were part of the matched key.
+    /// it — the prototype's canonical instance). The minting call stores
+    /// `key`, whose load rules and mask are the prototype's relative ones; a
+    /// cache hit's existing entry already holds an identical key.
     ///
     /// `composed` is the path whose index composes the instance
     /// ([`IndexCache::effective_path`]), which is the instance's identity here:
@@ -219,22 +238,23 @@ impl PrototypeRegistry {
             return (root, false);
         }
 
-        let (path, index) = self.retired.remove(&key).unwrap_or_else(|| {
-            self.count += 1;
-            let path =
-                Path::new(&format!("/{PROTOTYPE_PREFIX}{}", self.count)).expect("synthetic prototype path is valid");
-            (path, self.count)
-        });
-        let relative_load_rules = key.load_rules.clone();
-        let relative_mask = key.mask.clone();
-        self.by_key.insert(key, path.clone());
+        let (path, index) = self
+            .retired
+            .remove(&key)
+            .map(|retired| (retired.root, retired.index))
+            .unwrap_or_else(|| {
+                self.count += 1;
+                let path = Path::new(&format!("/{PROTOTYPE_PREFIX}{}", self.count))
+                    .expect("synthetic prototype path is valid");
+                (path, self.count)
+            });
+        self.by_key.insert(key.clone(), path.clone());
         self.by_root.insert(
             path.clone(),
             Prototype {
+                key,
                 index,
                 instances: vec![composed.clone()],
-                relative_load_rules,
-                relative_mask,
             },
         );
         self.by_instance.insert(composed.clone(), path.clone());
@@ -276,7 +296,7 @@ impl PrototypeRegistry {
     }
 
     /// Whether `path` is a registered `/__Prototype_N` root.
-    fn is_root(&self, path: &Path) -> bool {
+    pub(super) fn is_root(&self, path: &Path) -> bool {
         // The stage's opinion reads ask about ordinary paths on every query.
         // The syntactic test answers those without a registry lookup.
         is_prototype_namespace(path) && self.by_root.contains_key(path)
@@ -348,23 +368,24 @@ impl PrototypeRegistry {
             }
         }
         let mut retired = Vec::with_capacity(affected.len());
-        let mut indices = HashMap::new();
         for root in &affected {
             if let Some(prototype) = self.by_root.remove(root) {
                 for instance in &prototype.instances {
                     self.by_instance.remove(instance);
                 }
-                indices.insert(root.clone(), prototype.index);
+                self.by_key.remove(&prototype.key);
+                self.retired.insert(
+                    prototype.key,
+                    RetiredRoot {
+                        root: root.clone(),
+                        index: prototype.index,
+                    },
+                );
                 retired.push(RetiredPrototype {
                     root: root.clone(),
                     instances: prototype.instances,
                     failed_in: None,
                 });
-            }
-        }
-        for (key, root) in self.by_key.extract_if(|_, root| affected.contains(root)) {
-            if let Some(&index) = indices.get(&root) {
-                self.retired.insert(key, (root, index));
             }
         }
         // Sorted so a cascade returns its roots in a stable order, whatever the
@@ -373,9 +394,8 @@ impl PrototypeRegistry {
         retired
     }
 
-    /// Forgets the roots of the prototypes retired since settlement last
-    /// placed every instance, so a key that comes back later mints a fresh
-    /// identity, as C++ removes a prototype left with no instance.
+    /// Forgets the retired roots, so a key that comes back later mints a
+    /// fresh identity.
     pub(super) fn forget_retired(&mut self) {
         self.retired.clear();
     }
@@ -898,7 +918,7 @@ impl IndexCache {
         if self.population_mask.is_all() {
             return (&self.population_mask, Cow::Borrowed(path));
         }
-        self.scoped(path, &self.population_mask, |p| &p.relative_mask)
+        self.scoped(path, &self.population_mask, Prototype::relative_mask)
     }
 
     /// Whether the stage's population exposes `path` (the mask test C++ makes
