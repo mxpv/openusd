@@ -174,6 +174,10 @@ impl sdf::FileFormat for UsdzFileFormat {
         Some(sdf::PackageMeta { entries })
     }
 
+    fn forget_package(&self, resolver: &dyn ar::Resolver, package: &str) {
+        package::forget_package(resolver, package);
+    }
+
     /// The first entry stored, of any type, as C++ reads it from the
     /// archive's local headers (`_GetFirstFileInZipFile`).
     fn package_root<'m>(&self, meta: &'m sdf::PackageMeta) -> Option<&'m str> {
@@ -740,6 +744,41 @@ pub(crate) mod tests {
             let meta = self.registry.package_meta(&self.package).expect("the store is free");
             self.entries.replace(meta.map(|meta| meta.entries).unwrap_or_default());
         }
+    }
+
+    /// A reload inside a cache scope that already opened the package reads
+    /// the package as it is now.
+    #[test]
+    fn reload_under_outer_scope() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        fs::write(&path, package(&[("root.usda", b"#usda 1.0\ndef \"Old\" {}\n")]))?;
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let _outer = ar::CacheScope::begin();
+        let root = registry
+            .find_or_open(path.to_str().unwrap())?
+            .expect("the package opens");
+
+        fs::write(
+            &path,
+            package(&[
+                ("root.usda", b"#usda 1.0\ndef \"New\" {}\n"),
+                ("x.usda", b"#usda 1.0\n"),
+            ]),
+        )?;
+        assert!(root.reload(true)?);
+        assert!(root.read(|layer| layer.data().has_spec(&sdf::path("/New").unwrap()))?);
+        let meta = registry.package_meta(&path.canonicalize()?.to_string_lossy())?;
+        assert_eq!(
+            meta.expect("the layer holds its package").entries,
+            ["root.usda", "x.usda"]
+        );
+        let entry = ar::join_package_relative_path(path.to_str().unwrap(), "x.usda");
+        assert!(
+            registry.find_or_open(&entry)?.is_some(),
+            "the outer scope reads the new package"
+        );
+        Ok(())
     }
 
     /// A reload that reads a packaged layer again lists its package anew,

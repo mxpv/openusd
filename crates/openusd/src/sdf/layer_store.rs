@@ -27,8 +27,8 @@ use crate::ar;
 
 use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
 use super::{
-    AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, PackageMeta,
-    ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
+    AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerRegistry, LayerSink, LayerSinkId,
+    PackageMeta, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
 };
 
 /// A failure to read, edit or add a layer of a
@@ -434,6 +434,12 @@ impl LayerHandle {
         let mut due = Vec::new();
         {
             let read = store.read()?;
+            for handle in &unique {
+                let layer = read.layer(handle);
+                if let Some(resolver) = layer.resolver() {
+                    LayerRegistry::forget_packages(resolver.as_ref(), layer.real_path());
+                }
+            }
             for (at, handle) in unique.into_iter().enumerate() {
                 match read.layer(handle).reload_due(force) {
                     Ok(Some(reload)) => due.push((at, handle, reload)),

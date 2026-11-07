@@ -95,8 +95,8 @@ type PackageSlot = Arc<OnceLock<Result<Package, PackageError>>>;
 ///
 /// A cached package is answered for as long as the scope is open: one
 /// replaced meanwhile is still read as it was opened, and one that failed
-/// to open still fails. A caller that rewrites a package ends the scope
-/// first.
+/// to open still fails, until a reload of a layer read from it reads it
+/// again. A caller that rewrites a package ends the scope first.
 pub fn open_package(resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Result<Package, PackageError> {
     let path = package.to_string_lossy();
     let open = || -> Result<Package, PackageError> {
@@ -192,6 +192,21 @@ thread_local! {
             cache_hits: 0,
         })
     };
+}
+
+/// Drops what the calling thread's cache scope keeps of the package at
+/// `package`, opened through `resolver`, and of every package nested in it,
+/// so the scope's next [`open_package`] of them opens them as they are now.
+pub(crate) fn forget_package(resolver: &dyn ar::Resolver, package: &str) {
+    let (Some(scope), Some(resolver_id)) = (ar::CacheScope::current(), resolver.cache_id()) else {
+        return;
+    };
+    let cache = scope.cache::<PackageCache>();
+    let mut slots = tf::lock(&cache.slots);
+    if let Some(of_resolver) = slots.get_mut(&resolver_id) {
+        of_resolver
+            .retain(|path, _| path != package && !ar::enclosing_packages(path).iter().any(|outer| outer == package));
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +317,30 @@ mod tests {
         }
         read_entry(&resolver, &outer, "root.usda").unwrap();
         assert_eq!(work(), (1, 2));
+    }
+
+    /// Forgetting a nested package drops it and the packages nested in it
+    /// from the scope, and keeps the package around it.
+    #[test]
+    fn forget_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = package(&[("a.usda", b"#usda 1.0\n")]);
+        let inner = package(&[("deep.usdz", &deep)]);
+        let path = dir.path().join("outer.usdz");
+        fs::write(&path, package(&[("root.usda", b"#usda 1.0\n"), ("inner.usdz", &inner)])).unwrap();
+        let outer = canonical(&path);
+        let resolver = ar::DefaultResolver::new();
+        let _scope = ar::CacheScope::begin();
+        read_entry(&resolver, &outer, "inner.usdz[deep.usdz[a.usda]]").unwrap();
+        assert_eq!(work(), (1, 3));
+
+        forget_package(&resolver, &ar::join_package_relative_path(&outer, "inner.usdz"));
+        read_entry(&resolver, &outer, "inner.usdz[deep.usdz[a.usda]]").unwrap();
+        assert_eq!(
+            work(),
+            (1, 5),
+            "the inner and deep packages open again, the outer one stays"
+        );
     }
 
     /// With no scope held, a path into a nested package still opens the

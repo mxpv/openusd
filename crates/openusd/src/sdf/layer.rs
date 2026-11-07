@@ -692,6 +692,9 @@ impl Layer {
     /// cannot be read is an error, and the layer is left as it is.
     pub fn reload(&mut self, force: bool) -> crate::Result<bool> {
         let _scope = ar::CacheScope::begin();
+        if let Some(resolver) = &self.resolver {
+            super::LayerRegistry::forget_packages(resolver.as_ref(), self.real_path());
+        }
         let Some(due) = self.reload_due(force)? else {
             return Ok(false);
         };

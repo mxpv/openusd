@@ -213,6 +213,12 @@ pub trait FileFormat: Sync {
         None
     }
 
+    /// Drops what the calling thread's [`ar::CacheScope`] keeps of the
+    /// package at `package`, read through `resolver`, and of the packages
+    /// nested in it, so the scope's next read of them opens them as they are
+    /// now. The default keeps nothing in a scope.
+    fn forget_package(&self, _resolver: &dyn ar::Resolver, _package: &str) {}
+
     /// The entry of the package `meta` lists that is its root layer (C++
     /// `SdfFileFormat::GetPackageRootLayerPath`), or `None` for a format
     /// that is no package or a package with no entries.

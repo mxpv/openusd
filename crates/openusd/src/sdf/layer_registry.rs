@@ -603,6 +603,22 @@ impl LayerRegistry {
         )
     }
 
+    /// Drops what the calling thread's cache scope keeps of the packages a
+    /// layer read from `real_path` lies in, those nested in them included
+    /// ([`FileFormat::forget_package`](sdf::FileFormat::forget_package)), so
+    /// the scope's next read of them opens them as they are now.
+    pub(crate) fn forget_packages(resolver: &dyn ar::Resolver, real_path: &str) {
+        let outermost = ar::enclosing_packages(real_path)
+            .into_iter()
+            .next()
+            .or_else(|| Self::is_package(resolver.extension(real_path)).then(|| real_path.to_owned()));
+        if let Some(package) = outermost
+            && let Some(format) = Self::find_by_extension(resolver.extension(&package))
+        {
+            format.forget_package(resolver, &package);
+        }
+    }
+
     /// Whether the format claiming `ext` reads packages
     /// ([`FileFormat::is_package`](sdf::FileFormat::is_package)).
     pub(crate) fn is_package(ext: &str) -> bool {
