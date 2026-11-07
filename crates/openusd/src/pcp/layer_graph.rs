@@ -2997,14 +2997,18 @@ impl LayerGraph {
     /// re-materializes the interned muted ids).
     pub(crate) fn mute_layer(&mut self, identifier: String) -> Option<MuteChange> {
         let canonical = self.canonical_muted_id(&identifier, self.anchor_location(self.root));
-        if self.is_root_identifier(&canonical) {
+        let named = self.named_layer(&canonical, self.anchor_location(self.root));
+        if self.is_root(named) {
             return None;
         }
-        let changed = if let Some(id) = self.id_of(&canonical) {
+        let changed = if let Some(id) = named {
             // The muted layer leaves every stack, and the graph at the mute's
             // reclaim.
             self.muted.insert(id).then(|| self.identity(id))?
         } else {
+            if self.pending_of(&canonical, self.anchor_location(self.root)).is_some() {
+                return None;
+            }
             let key = self.pending_key(&canonical).to_owned();
             self.pending_mutes.insert(key.clone()).then_some(key)?
         };
@@ -3017,14 +3021,15 @@ impl LayerGraph {
     /// muting canonicalized it and resolved to the layer's identity, so any
     /// spelling of one layer unmutes it, whichever spelling muted it.
     pub(crate) fn unmute_layer(&mut self, identifier: &str) -> Option<MuteChange> {
-        let canonical = self.canonical_muted_id(identifier, self.anchor_location(self.root));
-        let changed = match self.id_of(&canonical) {
+        let anchor = self.anchor_location(self.root);
+        let canonical = self.canonical_muted_id(identifier, anchor);
+        let changed = match self.named_layer(&canonical, anchor) {
             Some(id) if self.muted.remove(&id) => self.identity(id),
             _ => {
-                let key = self.pending_key(&canonical).to_owned();
-                let changed = self.pending_mutes.take(&key)?;
-                self.forget_aliases(&changed);
-                changed
+                let key = self.pending_of(&canonical, self.anchor_location(self.root))?;
+                self.pending_mutes.remove(&key);
+                self.forget_aliases(&key);
+                key
             }
         };
         Some(self.recompose_for_mute_with_fanout(changed))
@@ -3188,16 +3193,18 @@ impl LayerGraph {
         let root_anchor = self.anchor_location(self.root).cloned();
         for identifier in identifiers {
             let canonical = self.canonical_muted_id(&identifier, root_anchor.as_ref());
-            if self.is_root_identifier(&canonical) {
+            let named = self.named_layer(&canonical, root_anchor.as_ref());
+            if self.is_root(named) {
                 continue;
             }
-            match self.id_of(&canonical) {
+            match named {
                 Some(id) => {
                     self.muted.insert(id);
                 }
-                None => {
+                None if self.pending_of(&canonical, root_anchor.as_ref()).is_none() => {
                     self.pending_mutes.insert(canonical);
                 }
+                None => {}
             }
         }
         self.recompose_for_mute();
@@ -3210,15 +3217,61 @@ impl LayerGraph {
     pub(crate) fn is_layer_muted(&self, identifier: &str) -> bool {
         self.has_muted_layers()
             && self
-                .muted_entry(&self.canonical_muted_id(identifier, self.anchor_location(self.root)))
+                .muted_identity(identifier, self.anchor_location(self.root))
                 .is_some()
+    }
+
+    /// The muted-set entry the layer `path`, authored at `anchor`, names (see
+    /// [`mute_keys`](Self::mute_keys)), or `None` when it names no muted
+    /// layer.
+    fn muted_identity(&self, path: &str, anchor: Option<&ResolvedPath>) -> Option<String> {
+        let canonical = self.canonical_muted_id(path, anchor);
+        self.mute_keys(&canonical, anchor)
+            .iter()
+            .find_map(|key| self.muted_entry(key))
+    }
+
+    /// The loaded layer a mute keyed `canonical`, anchored at `anchor`,
+    /// names (see [`mute_keys`](Self::mute_keys)).
+    fn named_layer(&self, canonical: &str, anchor: Option<&ResolvedPath>) -> Option<LayerId> {
+        self.mute_keys(canonical, anchor).iter().find_map(|key| self.id_of(key))
+    }
+
+    /// The pending mute a mute keyed `canonical`, anchored at `anchor`, names
+    /// (see [`mute_keys`](Self::mute_keys)), by the key it is kept under.
+    fn pending_of(&self, canonical: &str, anchor: Option<&ResolvedPath>) -> Option<String> {
+        self.mute_keys(canonical, anchor)
+            .iter()
+            .map(|key| self.pending_key(key))
+            .find(|key| self.pending_mutes.contains(*key))
+            .map(str::to_owned)
+    }
+
+    /// The identifiers a mute keyed `canonical`, anchored at `anchor`, names
+    /// a layer by, in the order they are tried: `canonical`, and for a mute
+    /// with no anchor, an anonymous root's, keyed by the path as spelled,
+    /// the identifier the registry loads that spelling as, anchored where a
+    /// path with no anchor is.
+    fn mute_keys(&self, canonical: &str, anchor: Option<&ResolvedPath>) -> Vec<String> {
+        let mut keys = vec![canonical.to_owned()];
+        // TODO(perf): the identifier is derived again on every mute query of
+        // an anonymous root's stage, a filesystem canonicalize apiece; it is
+        // fixed per spelling and could be kept beside the pending mute.
+        if anchor.is_none() {
+            let view = self.read_view();
+            let loaded = sdf::absolute_path_with(&self.registry, None, canonical, &mut sdf::HeldListing(&view.store));
+            if loaded != canonical {
+                keys.push(loaded);
+            }
+        }
+        keys
     }
 
     /// The identity under which the layer with canonical identifier `canonical`
     /// is muted — a loaded layer's interned identifier, or the pending canonical
-    /// identifier of one not yet loaded — or `None` when it is not muted. Every
-    /// mute query resolves through here, so the identifier and real-path
-    /// spellings of a loaded layer (see [`id_of`](Self::id_of)) read alike.
+    /// identifier of one not yet loaded — or `None` when it is not muted. The
+    /// identifier and real-path spellings of a loaded layer (see
+    /// [`id_of`](Self::id_of)) read alike.
     fn muted_entry(&self, canonical: &str) -> Option<String> {
         let loaded = self.id_of(canonical).filter(|id| self.muted.contains(id));
         let pending = self.pending_key(canonical);
@@ -3248,21 +3301,34 @@ impl LayerGraph {
         }
     }
 
-    /// The muted-set identifier matched by the reference/payload target
-    /// `asset_path`, anchored against `anchor` (the layer that authored the arc),
-    /// or `None` when it names no muted layer. Matched by the canonical identifier
-    /// the target would be interned under (C++ `Pcp_MutedLayers::IsLayerMuted`,
-    /// anchored against the containing layer; see
-    /// [`Indexer::arc_target_muted`](super::prim_indexer)). Unlike
-    /// [`is_muted`](Self::is_muted), this matches before the layer is interned, so
-    /// the on-demand loader can recognize a muted target and skip opening it, and
-    /// the returned identifier is the muted-set entry an unmute toggles, so a
-    /// not-yet-loaded target can record it as its unmute-fanout trace.
+    /// The muted-set identifier the sublayer entry `asset_path`, authored in
+    /// the layer anchored at `anchor`, names (see
+    /// [`muted_identity`](Self::muted_identity); C++
+    /// `Pcp_MutedLayers::IsLayerMuted`), or `None` when it names no muted
+    /// layer. Unlike [`is_muted`](Self::is_muted), this matches before the
+    /// layer is interned, so the on-demand loader can recognize a muted
+    /// sublayer and skip opening it.
     pub(crate) fn muted_asset_id(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> Option<String> {
         if !self.has_muted_layers() {
             return None;
         }
-        self.muted_entry(&self.canonical_muted_id(asset_path, anchor))
+        self.muted_identity(asset_path, anchor)
+    }
+
+    /// The muted-set entry the reference or payload target `identifier`
+    /// names, or `None` when it names no muted layer. `identifier` is the
+    /// target as composition anchored it against the arc's authoring layer,
+    /// the one a build looks the target up under, so the mute matches the
+    /// layer the arc would load (C++ `_EvalRefOrPayloadArcs` checks the
+    /// authoring `srcLayer`).
+    ///
+    /// The entry is the one an unmute toggles, so a target not yet loaded
+    /// records it as the trace an unmute fans out through.
+    pub(crate) fn muted_target(&self, identifier: &str) -> Option<String> {
+        if !self.has_muted_layers() {
+            return None;
+        }
+        self.muted_entry(identifier)
     }
 
     /// The layers of every composed stack — the effectively-present set the stage
@@ -3378,7 +3444,7 @@ impl LayerGraph {
     /// [`muted`](Self::muted), at the start of every stack rebuild, so a layer
     /// muted before it was loaded takes effect the moment a later edit interns
     /// it. The root is never present: its identifier is rejected before any
-    /// entry is recorded (see [`is_root_identifier`](Self::is_root_identifier)).
+    /// entry is recorded (see [`is_root`](Self::is_root)).
     fn resolve_muted_ids(&mut self) {
         if self.pending_mutes.is_empty() {
             return;
@@ -3399,22 +3465,27 @@ impl LayerGraph {
         }
     }
 
-    /// Whether `canonical` names the root layer, which cannot be muted ("would
-    /// lead to empty layer stacks"). The single authority for rejecting a request
-    /// to mute the root, regardless of the spelling the caller supplied.
-    fn is_root_identifier(&self, canonical: &str) -> bool {
-        self.root.is_some_and(|root| self.id_of(canonical) == Some(root))
+    /// Whether `named`, the layer a mute names ([`named_layer`](Self::named_layer)),
+    /// is the root layer, which cannot be muted ("would lead to empty layer
+    /// stacks"). The single authority for rejecting a request to mute the
+    /// root, regardless of the spelling the caller supplied.
+    fn is_root(&self, named: Option<LayerId>) -> bool {
+        self.root.is_some_and(|root| named == Some(root))
     }
 
     /// The canonical identifier a muted-layer path resolves to (C++
-    /// `Pcp_MutedLayers::_GetCanonicalLayerId`). A path is reduced to the
-    /// identifier its layer is interned under (see [`ensure_layer`](Self::ensure_layer)): with
-    /// no filesystem `anchor` — an in-memory or anonymous root — a relative path
-    /// has nothing to resolve against and an added layer keeps its bare
-    /// identifier, so the path passes through. Every other path is canonicalized
-    /// through the registry against `anchor`, the form a filesystem asset is
-    /// interned under; an anonymous identifier passes through there too (the
-    /// registry keeps an `anon:` id as its own canonical form).
+    /// `Pcp_MutedLayers::_GetCanonicalLayerId`): the identifier composition
+    /// anchors the path to, the one its layer is interned under (see
+    /// [`ensure_layer`](Self::ensure_layer)). With no `anchor`, an anonymous
+    /// root's, the path keeps its spelling: an in-memory layer is interned
+    /// under it, and the layer it loads as from the filesystem is found by
+    /// [`named_layer`](Self::named_layer).
+    ///
+    /// C++ keys a mute by the resolver's identifier for the path instead,
+    /// which for a path authored inside a package names a location beside
+    /// the package file, so one mute there can match the layers several
+    /// packaged layers name by one path. Keyed by the composition
+    /// identifier, a mute names the one layer the path loads.
     ///
     /// `anchor` is the layer the path is anchored against: the root layer for the
     /// mute/unmute/query API, the arc's authoring layer for a reference/payload

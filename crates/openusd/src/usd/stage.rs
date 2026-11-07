@@ -5003,9 +5003,10 @@ impl StageBuilder {
 
     /// Whether the builder's requested mutes name `identifier`, each spelling
     /// anchored against `root`, the root layer's anchor, by
-    /// [`sdf::absolute_path_at`]: resolved to the identifier its layer interns
-    /// under. Any spelling of one layer therefore matches. Lets collection
-    /// test an interned identifier for muting before the graph exists.
+    /// [`LayerRegistry::absolute_path`](sdf::LayerRegistry::absolute_path):
+    /// resolved to the identifier its layer interns under. Any spelling of
+    /// one layer therefore matches. Lets collection test an interned
+    /// identifier for muting before the graph exists.
     fn mutes(&self, root: Option<&ar::ResolvedPath>, identifier: &str) -> bool {
         self.muted
             .iter()
@@ -6598,6 +6599,28 @@ def "T" {
         stage.unmute_layer("strong.usda");
         assert!(!stage.is_layer_muted("strong.usda"));
         assert_eq!(read_ax(&stage)?, Some(9.0), "unmuting restores the stronger opinion");
+        Ok(())
+    }
+
+    /// An anonymous root's mute of an in-memory sublayer's bare name, made
+    /// once the sublayer is loaded, names that layer, as the sublayer entry
+    /// names it.
+    #[test]
+    fn mute_bare_loaded() -> Result<()> {
+        let mut layers = sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?;
+        let mut root = sdf::Layer::new_anonymous("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["strong.usda", "weak.usda"]);
+        });
+        layers[0] = root;
+        let stage = Stage::builder().make_stage(layers, 0, pcp::Diagnostics::default());
+        assert_eq!(read_ax(&stage)?, Some(9.0));
+
+        stage.mute_layer("strong.usda");
+        assert!(stage.is_layer_muted("strong.usda"));
+        assert_eq!(read_ax(&stage)?, Some(5.0), "the bare name mutes the loaded layer");
+        stage.unmute_layer("strong.usda");
+        assert_eq!(read_ax(&stage)?, Some(9.0));
         Ok(())
     }
 

@@ -108,13 +108,6 @@ pub(crate) fn absolute_path_at(
 // TODO: format arguments (`:SDF_FORMAT_ARGS:`) are not split from the path
 // before it is anchored, nor joined back after.
 //
-// TODO: mute keys (`LayerGraph::canonical_muted_id`) anchor the authored
-// path by these rules too, and the graph matches them against interned
-// identifiers. C++ keys mutes with `ArResolver::CreateIdentifier`, which
-// anchors at a packaged anchor's outer package, and checks them on the
-// authored path before loading (`IsLayerMuted`). Check mutes that way, or a
-// muted layer loads once a search path falls back to another identifier.
-//
 // TODO(perf): the default resolver canonicalizes through the filesystem, so
 // each call runs a `canonicalize`. Cache identifiers per `(anchor location,
 // asset_path)` within an `ar::CacheScope`; `PackageMeta::entries` is

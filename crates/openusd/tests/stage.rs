@@ -3757,6 +3757,83 @@ fn packaged_root_mute_anchor() -> Result<()> {
     Ok(())
 }
 
+/// A mute keys the layer a search path names as composition anchors it: a
+/// sublayer whose search path falls back beside the package's root layer is
+/// the layer the root's mute of that path names.
+#[test]
+fn muted_search_path_in_package() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let package = dir.path().join("package.usdz");
+    {
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer(
+            "dir/root.usda",
+            b"#usda 1.0\n(\n    subLayers = [@sub/a.usda@, @weak.usda@]\n)\n",
+        )?;
+        writer.add_layer("dir/sub/a.usda", b"#usda 1.0\n(\n    subLayers = [@x.usda@]\n)\n")?;
+        writer.add_layer("dir/x.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 2\n}\n")?;
+        writer.add_layer("dir/weak.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n")?;
+        writer.finish()?;
+    }
+    let package = package.to_string_lossy();
+
+    let stage = Stage::open(&package)?;
+    assert_eq!(
+        stage.attribute("/A.x")?.get::<f64>()?,
+        Some(2.0),
+        "x.usda falls back to dir/"
+    );
+    let stage = Stage::builder().mute(["x.usda"]).open(&package)?;
+    assert_eq!(
+        stage.attribute("/A.x")?.get::<f64>()?,
+        Some(1.0),
+        "the open-time mute drops x"
+    );
+    let stage = Stage::open(&package)?;
+    stage.mute_layer("x.usda");
+    assert_eq!(
+        stage.attribute("/A.x")?.get::<f64>()?,
+        Some(1.0),
+        "the runtime mute drops x"
+    );
+    Ok(())
+}
+
+/// An anonymous root has no location, so a sublayer it names relatively
+/// loads from the working directory; a mute of that path, at open or later,
+/// names the same layer.
+#[test]
+fn mute_unanchored_relative() -> Result<()> {
+    let sublayer = "./fixtures/collections_weak.usda";
+    let root = || -> Result<sdf::Layer> {
+        let mut layer = sdf::Layer::new_anonymous("root.usda");
+        layer.edit(|e| {
+            e.pseudo_root_mut()?.set_sublayers([sublayer]);
+            Ok(())
+        })?;
+        Ok(layer)
+    };
+
+    let stage = Stage::builder().open_layer(root()?)?;
+    assert!(stage.prim("/Sets")?.is_valid()?, "the sublayer composes");
+    stage.mute_layer(sublayer);
+    assert!(stage.is_layer_muted(sublayer));
+    assert!(!stage.prim("/Sets")?.is_valid()?, "the runtime mute drops the sublayer");
+    stage.mute_layer(sublayer);
+    assert_eq!(stage.muted_layers().len(), 1, "a second mute adds nothing");
+    stage.unmute_layer(sublayer);
+    assert!(!stage.is_layer_muted(sublayer));
+    assert!(stage.prim("/Sets")?.is_valid()?, "one unmute restores the sublayer");
+
+    let stage = Stage::builder().mute([sublayer]).open_layer(root()?)?;
+    assert!(stage.is_layer_muted(sublayer));
+    assert!(
+        !stage.prim("/Sets")?.is_valid()?,
+        "the open-time mute drops the sublayer"
+    );
+    Ok(())
+}
+
 /// A stage opened without a session layer should report no session layer.
 #[test]
 fn no_session_layer_by_default() -> Result<()> {

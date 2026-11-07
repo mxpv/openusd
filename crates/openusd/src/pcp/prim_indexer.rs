@@ -2857,7 +2857,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // unlike a loaded target whose muted root empties its stack).
                 // Checked before the load demand so a muted target's file is not
                 // read.
-                if let Some(canonical) = self.arc_target_muted(parent, asset_path) {
+                if let Some(canonical) = self.inputs.stack.muted_target(asset_path) {
                     self.output.non_site_deps_mut().muted_unloaded.push(canonical);
                     self.errors.report(CompositionDiagnostic::MutedAssetPath {
                         asset_path: asset_path.to_string(),
@@ -3153,37 +3153,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .layer(self.node(node).layer_id())
             .identifier()
             .to_owned()
-    }
-
-    /// The canonical identifier the muted set matched for the reference/payload
-    /// target `asset_path`, or `None` when it names no muted layer. A reference may
-    /// be authored on any member of `node`'s layer stack — a sublayer in a
-    /// different directory than the node's representative — so the target is
-    /// canonicalized against each member's location and looked up in the muted set
-    /// (C++ `_EvalRefOrPayloadArcs` checks the specific authoring `srcLayer`). The
-    /// muted set is keyed by identifiers anchored against the stage root, so a
-    /// nested target is muted by the path that resolves from the root to its
-    /// identifier. Guarded by [`has_muted_layers`](LayerGraph::has_muted_layers) so
-    /// the common unmuted stage does no anchoring work.
-    ///
-    /// The returned identifier is the muted-set entry an unmute toggles, so a
-    /// not-yet-loaded target records it (`NonSiteDeps::muted_unloaded`) as the trace an
-    /// unmute fans out through — it never interns, so there is no `LayerId` to key on.
-    ///
-    /// TODO(perf): on a muted stage this resolves each member's anchor and
-    /// canonicalizes `asset_path` against it (a filesystem syscall apiece) for
-    /// every not-yet-loaded reference/payload arc. Cache the per-member anchors, or
-    /// track the specific authoring layer per arc entry so only one canonicalize
-    /// runs (the `srcLayer` C++ uses).
-    fn arc_target_muted(&self, node: NodeId, asset_path: &str) -> Option<String> {
-        let graph = self.inputs.stack;
-        if !graph.has_muted_layers() {
-            return None;
-        }
-        graph
-            .layer_stack(self.node(node).layer_stack_id())
-            .iter()
-            .find_map(|&(layer, _)| graph.muted_asset_id(asset_path, graph.anchor_location(Some(layer))))
     }
 
     /// Builds the cycle chain for a [`CompositionDiagnostic::ArcCycle`]: the arcs from the
