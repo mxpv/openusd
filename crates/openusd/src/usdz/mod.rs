@@ -167,6 +167,15 @@ impl sdf::FileFormat for UsdzFileFormat {
         true
     }
 
+    fn package_meta(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<sdf::PackageMeta> {
+        open_package(resolver, package).ok()?.with(|archive| {
+            Some(sdf::PackageMeta {
+                entries: archive.entry_names().ok()?,
+                root: archive.root_entry().ok()?,
+            })
+        })
+    }
+
     fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
         // A package is anchored to its root layer, its first entry, followed
         // into a package nested there (`pkg.usdz[inner.usdz[root.usdc]]`, C++
@@ -261,8 +270,10 @@ pub(crate) mod tests {
     use crate::sdf::FileFormat;
     use crate::usd::{PrimPredicate, Stage, TimeCode};
     use crate::vt;
+    use std::cell::RefCell;
     use std::fs;
     use std::io::Write;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -642,6 +653,161 @@ pub(crate) mod tests {
         };
         assert!(matches!(innermost(&error), ArchiveError::NoRootLayer), "{error:?}");
         assert!(Stage::open(path.to_str().unwrap()).is_err());
+        Ok(())
+    }
+
+    /// An outer package whose root is the nested `inner.usdz`, each level
+    /// holding a second entry, and the outer package's canonical path.
+    fn nested_with_siblings() -> Result<(tempfile::TempDir, String)> {
+        let inner = package(&[("root.usda", b"#usda 1.0\n"), ("tex.png", b"png")]);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("outer.usdz");
+        fs::write(
+            &path,
+            package(&[("inner.usdz", &inner), ("other.usda", b"#usda 1.0\n")]),
+        )?;
+        let outer = path.canonicalize()?.to_string_lossy().into_owned();
+        Ok((dir, outer))
+    }
+
+    /// Reading a packaged layer holds what each package around it holds, a
+    /// nested package keyed by its own packaged path, from the one directory
+    /// parse per package the read does.
+    #[test]
+    fn package_index_filled() -> Result<()> {
+        let (_dir, outer) = nested_with_siblings()?;
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let parses = package_stats().directory_parses;
+        let _root = registry.find_or_open(&outer)?.expect("the package opens");
+        assert_eq!(package_stats().directory_parses - parses, 2);
+
+        let meta = |entries: &[&str], root: &str| sdf::PackageMeta {
+            entries: entries.iter().map(|&entry| entry.to_owned()).collect(),
+            root: Some(root.to_owned()),
+        };
+        assert_eq!(
+            registry.package_meta(&outer)?,
+            Some(meta(&["inner.usdz", "other.usda"], "inner.usdz"))
+        );
+        let inner = ar::join_package_relative_path(&outer, "inner.usdz");
+        assert_eq!(
+            registry.package_meta(&inner)?,
+            Some(meta(&["root.usda", "tex.png"], "root.usda"))
+        );
+        Ok(())
+    }
+
+    /// A package's meta lives while any live layer lies in it.
+    #[test]
+    fn package_index_dropped() -> Result<()> {
+        let (_dir, outer) = nested_with_siblings()?;
+        let inner = ar::join_package_relative_path(&outer, "inner.usdz");
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let root = registry.find_or_open(&outer)?.expect("the package opens");
+        let other = registry
+            .find_or_open(&ar::join_package_relative_path(&outer, "other.usda"))?
+            .expect("the sibling opens");
+
+        drop(root);
+        registry.sweep();
+        assert!(
+            registry.package_meta(&outer)?.is_some(),
+            "the sibling holds the outer package"
+        );
+        assert_eq!(registry.package_meta(&inner)?, None);
+
+        drop(other);
+        registry.sweep();
+        assert_eq!(registry.package_meta(&outer)?, None);
+        Ok(())
+    }
+
+    /// The entries a package held when the layer this sink is on last
+    /// committed.
+    struct SeenEntries {
+        registry: Rc<sdf::LayerRegistry>,
+        package: String,
+        entries: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl sdf::LayerSink for SeenEntries {
+        fn after_commit(&self, _change: &sdf::CommittedLayerChange<'_>) {
+            let meta = self.registry.package_meta(&self.package).expect("the store is free");
+            self.entries.replace(meta.map(|meta| meta.entries).unwrap_or_default());
+        }
+    }
+
+    /// A reload that reads a packaged layer again lists its package anew,
+    /// before its observers run.
+    #[test]
+    fn package_index_reloaded() -> Result<()> {
+        let (dir, outer) = nested_with_siblings()?;
+        let registry = Rc::new(sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new())));
+        let other = registry
+            .find_or_open(&ar::join_package_relative_path(&outer, "other.usda"))?
+            .expect("the sibling opens");
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        other.add_sink(SeenEntries {
+            registry: Rc::clone(&registry),
+            package: outer.clone(),
+            entries: Rc::clone(&seen),
+        })?;
+        fs::write(
+            dir.path().join("outer.usdz"),
+            package(&[
+                ("other.usda", b"#usda 1.0\ndef \"New\" {}\n"),
+                ("added.usda", b"#usda 1.0\n"),
+            ]),
+        )?;
+        assert!(other.reload(true)?);
+        let meta = registry.package_meta(&outer)?.expect("the sibling holds its package");
+        assert_eq!(meta.entries, ["other.usda", "added.usda"]);
+        assert_eq!(meta.root.as_deref(), Some("other.usda"));
+        assert_eq!(*seen.borrow(), ["other.usda", "added.usda"]);
+        Ok(())
+    }
+
+    /// A package reopened after its last layer died is listed anew, whatever
+    /// a dead, unswept layer of it held.
+    #[test]
+    fn package_index_reopened() -> Result<()> {
+        let (dir, outer) = nested_with_siblings()?;
+        let plain = dir.path().join("plain.usda");
+        fs::write(&plain, "#usda 1.0\n")?;
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let _keep = registry
+            .find_or_open(plain.to_str().unwrap())?
+            .expect("the layer opens");
+        let other = ar::join_package_relative_path(&outer, "other.usda");
+        drop(registry.find_or_open(&other)?.expect("the sibling opens"));
+        assert_eq!(registry.package_meta(&outer)?, None, "a dead layer holds no package");
+        fs::write(
+            dir.path().join("outer.usdz"),
+            package(&[("other.usda", b"#usda 1.0\n"), ("added.usda", b"#usda 1.0\n")]),
+        )?;
+        let _other = registry.find_or_open(&other)?.expect("the sibling opens again");
+        let meta = registry.package_meta(&outer)?.expect("the sibling holds its package");
+        assert_eq!(meta.entries, ["other.usda", "added.usda"]);
+        Ok(())
+    }
+
+    /// A layer opened beside a dead, unswept layer of its package holds the
+    /// package's meta once the dead layer is freed.
+    #[test]
+    fn package_index_survives_sweep() -> Result<()> {
+        let (dir, outer) = nested_with_siblings()?;
+        let plain = dir.path().join("plain.usda");
+        fs::write(&plain, "#usda 1.0\n")?;
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let _keep = registry
+            .find_or_open(plain.to_str().unwrap())?
+            .expect("the layer opens");
+        drop(registry.find_or_open(&outer)?.expect("the package opens"));
+        let _other = registry
+            .find_or_open(&ar::join_package_relative_path(&outer, "other.usda"))?
+            .expect("the sibling opens");
+        registry.sweep();
+        assert!(registry.package_meta(&outer)?.is_some());
         Ok(())
     }
 

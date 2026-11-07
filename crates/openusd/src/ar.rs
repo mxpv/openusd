@@ -34,6 +34,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek};
+use std::iter;
 use std::marker::PhantomData;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::path::{Component, Path, PathBuf};
@@ -1366,6 +1367,16 @@ pub fn split_package_relative_path_inner(path: &str) -> Option<(String, String)>
     outer.push_str(remainder);
 
     Some((outer, inner.to_string()))
+}
+
+/// The packages `path` lies in, outermost first: `outer.usdz[inner.usdz[a]]`
+/// lies in `outer.usdz` and `outer.usdz[inner.usdz]`. Empty for a path that
+/// is not package-relative.
+pub(crate) fn enclosing_packages(path: &str) -> Vec<String> {
+    let outer = |path: &str| split_package_relative_path_inner(path).map(|(package, _)| package);
+    let mut packages: Vec<_> = iter::successors(outer(path), |package| outer(package)).collect();
+    packages.reverse();
+    packages
 }
 
 /// Joins a package path and an inner path into a package-relative path.

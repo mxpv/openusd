@@ -24,9 +24,9 @@ pub struct Archive {
     /// The package's bytes when the asset shares them, which entry views
     /// slice.
     bytes: Option<ar::SharedBuffer>,
-    /// The index of the entry stored first, the package's root, as C++
-    /// walks local file headers from the start. The central directory may
-    /// list entries in another order, and records where each is stored.
+    /// The index of the entry stored first, the package's root, as C++ walks
+    /// local file headers from the start. The central directory may list
+    /// entries in another order, and records where each is stored.
     first: Option<usize>,
 }
 
@@ -50,8 +50,10 @@ impl Archive {
             archive_offset: ArchiveOffset::Known(0),
         };
         let archive = ZipArchive::with_config(config, asset)?;
-        let first = (0..archive.len())
-            .filter_map(|index| Some((archive.by_index_data(index).ok()?.header_start(), index)))
+        // An entry whose record does not decode is not the root: its read
+        // reports the failure.
+        let first = header_starts(&archive)
+            .filter_map(Result::ok)
             .min()
             .map(|(_, index)| index);
         Ok(Archive { archive, bytes, first })
@@ -82,9 +84,21 @@ impl Archive {
         let Some(index) = self.first else {
             return Ok(None);
         };
-        let name = self.archive.by_index_data(index)?.name()?.into_owned();
-        let reads = sdf::LayerRegistry::find_by_extension(ar::extension(&name)).is_some();
-        Ok(reads.then_some(name))
+        Ok(Some(self.name(index)?).filter(|name| is_root_name(name)))
+    }
+
+    /// The names of the package's entries, in the order they are stored.
+    ///
+    /// Fails when an entry's record or name cannot be decoded.
+    pub fn entry_names(&self) -> Result<Vec<String>, ArchiveError> {
+        let mut starts = header_starts(&self.archive).collect::<Result<Vec<_>, _>>()?;
+        starts.sort_unstable();
+        starts.into_iter().map(|(_, index)| self.name(index)).collect()
+    }
+
+    /// The name of the entry at `index` in the central directory.
+    fn name(&self, index: usize) -> Result<String, ArchiveError> {
+        Ok(self.archive.by_index_data(index)?.name()?.into_owned())
     }
 
     /// Reads the package's root layer, the [`root_entry`](Self::root_entry),
@@ -220,6 +234,20 @@ impl Archive {
             Ok(Box::new(data))
         }
     }
+}
+
+/// Each entry's local header offset, where it is stored, beside its index
+/// in the central directory, or the failure to decode its record.
+fn header_starts(
+    archive: &ZipArchive<Box<dyn ar::Asset>>,
+) -> impl Iterator<Item = Result<(u64, usize), ArchiveError>> + '_ {
+    (0..archive.len()).map(|index| Ok((archive.by_index_data(index)?.header_start(), index)))
+}
+
+/// Whether an entry `name`, stored first, is the package's root layer: one a
+/// layer format reads, a native USD layer or a nested package.
+fn is_root_name(name: &str) -> bool {
+    sdf::LayerRegistry::find_by_extension(ar::extension(name)).is_some()
 }
 
 /// Whether `name` names a native USD layer, one a non-package format reads

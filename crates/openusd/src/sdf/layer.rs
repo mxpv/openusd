@@ -477,6 +477,12 @@ impl Layer {
         (!self.is_anonymous()).then(|| self.real_path())
     }
 
+    /// The resolver the layer reads and saves through, once a registry or an
+    /// open gave it one.
+    pub(crate) fn resolver(&self) -> Option<&Rc<dyn ar::Resolver>> {
+        self.resolver.as_ref()
+    }
+
     /// The layer's resolved physical location, the anchor for the relative
     /// asset paths it authors. Falls back to the identifier, which is what an
     /// anonymous layer anchors against; [`resolved_path`](Self::resolved_path)

@@ -203,6 +203,16 @@ pub trait FileFormat: Sync {
         Some(resolved.clone())
     }
 
+    /// What the package at `package` holds, for a package format that can
+    /// list it, or `None`: a format that is no package, one that cannot list
+    /// its contents, or a package it cannot open. Opening the asset goes
+    /// through `resolver`, under the caller's cache scope.
+    ///
+    /// The default lists nothing.
+    fn package_meta(&self, _resolver: &dyn ar::Resolver, _package: &ar::ResolvedPath) -> Option<PackageMeta> {
+        None
+    }
+
     /// Whether this format can read an asset whose leading bytes are `prefix`
     /// (C++ `SdfFileFormat::CanRead`). Used to disambiguate an extension claimed
     /// by more than one format — binary vs text `.usd` — by content. The default
@@ -227,6 +237,21 @@ pub trait FileFormat: Sync {
             data: None,
         })
     }
+}
+
+/// What one package holds, at one level of nesting: the names of its
+/// entries, in the order they are stored, and its root entry
+/// ([`FileFormat::package_meta`]).
+///
+/// A package nested in another has a meta of its own, keyed by its
+/// packaged path (`outer.usdz[inner.usdz]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageMeta {
+    /// The entry names, in the order they are stored.
+    pub entries: Vec<String>,
+    /// The entry the package's root layer is, `None` where the first entry
+    /// stored names no layer format.
+    pub root: Option<String>,
 }
 
 /// What [`FileFormat::write_bytes`] produces: the serialized bytes and, for

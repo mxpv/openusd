@@ -3729,7 +3729,10 @@ mod tests {
     /// Adds `layer` to the graph's store and the graph, as a stage does when a
     /// layer joins it.
     fn join(graph: &mut LayerGraph, layer: sdf::Layer) -> (LayerId, bool) {
-        let handle = graph.store.insert(layer).expect("the layer is new to the store");
+        let handle = graph
+            .store
+            .insert(layer, Vec::new())
+            .expect("the layer is new to the store");
         graph.ensure_layer(handle.into())
     }
 

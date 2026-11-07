@@ -411,7 +411,58 @@ impl LayerRegistry {
     /// layers.
     pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
         layer.set_resolver(Rc::clone(&self.resolver));
-        self.store().insert(layer)
+        let packages = self.package_metas(layer.real_path());
+        self.store().insert(layer, packages)
+    }
+
+    /// What the package `package` holds, while a layer open here lies in it,
+    /// a package nested in another named by its packaged path
+    /// (`outer.usdz[inner.usdz]`). Fails with
+    /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
+    /// edit on this registry.
+    pub fn package_meta(&self, package: &str) -> Result<Option<sdf::PackageMeta>, sdf::LayerError> {
+        let Some(store) = self.held() else {
+            return Ok(None);
+        };
+        Ok(store
+            .read()?
+            .package_meta(package)
+            .map(|meta| sdf::PackageMeta::clone(meta)))
+    }
+
+    /// The packages a layer read from `real_path` lies in, outermost first,
+    /// each with what it holds: the meta the store holds, or else the one its
+    /// format lists. Empty while the store is borrowed, where holding the
+    /// layer fails.
+    fn package_metas(&self, real_path: &str) -> Vec<(String, Option<Rc<sdf::PackageMeta>>)> {
+        let packages = ar::enclosing_packages(real_path);
+        let mut packages: Vec<_> = match self.held() {
+            None => packages.into_iter().map(|package| (package, None)).collect(),
+            Some(store) => {
+                // The read ends before the formats run resolver code.
+                let Ok(read) = store.read() else {
+                    return Vec::new();
+                };
+                packages
+                    .into_iter()
+                    .map(|package| {
+                        let held = read.package_meta(&package).cloned();
+                        (package, held)
+                    })
+                    .collect()
+            }
+        };
+        let _scope = ar::CacheScope::begin();
+        for (package, meta) in packages.iter_mut().filter(|(_, meta)| meta.is_none()) {
+            *meta = Self::list_package(&*self.resolver, package).map(Rc::new);
+        }
+        packages
+    }
+
+    /// What the package at `package` holds, listed by the format its
+    /// extension names, or `None` where no format lists it.
+    pub(crate) fn list_package(resolver: &dyn ar::Resolver, package: &str) -> Option<sdf::PackageMeta> {
+        Self::find_by_extension(resolver.extension(package))?.package_meta(resolver, &ar::ResolvedPath::new(package))
     }
 
     /// Free the layers whose last handle has dropped. A dropped handle leaves
@@ -572,7 +623,8 @@ impl LayerRegistry {
             Located::Closed { identifier, resolved } => {
                 self.ensure_writable()?;
                 let layer = self.read_layer(&identifier, resolved)?;
-                self.store().insert(layer).map_err(|refused| refused.error)?
+                let packages = self.package_metas(layer.real_path());
+                self.store().insert(layer, packages).map_err(|refused| refused.error)?
             }
             Located::Unresolved => return Ok(None),
         };
@@ -950,7 +1002,7 @@ pub(crate) mod tests {
     /// onto. It is asked for under `layer`'s identifier.
     pub(crate) fn hold(store: &Rc<sdf::LayerStore>, layer: sdf::Layer) -> LoadedLayer {
         let identifier = layer.identifier().to_owned();
-        let handle = match store.insert(layer) {
+        let handle = match store.insert(layer, Vec::new()) {
             Ok(handle) => handle,
             Err(refused) => store
                 .find(refused.layer.identifier(), Some(refused.layer.real_path()))
