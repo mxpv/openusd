@@ -2144,7 +2144,7 @@ pub(crate) mod tests {
     /// A URI the resolver handles reaches it whole from a packaged layer,
     /// while a relative path there still anchors inside the package.
     #[test]
-    fn uri_in_package_reaches_resolver() {
+    fn package_uri_whole() {
         /// A resolver for `https` URIs that identifies a path as spelled and
         /// resolves only the URIs it owns.
         struct Web;

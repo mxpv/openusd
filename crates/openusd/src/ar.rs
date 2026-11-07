@@ -1426,32 +1426,27 @@ pub(crate) fn split_file_name(path: &str) -> (&str, &str) {
 /// `.` and always emits forward slashes — the spelling
 /// [`zip::ZipArchive::by_name`] matches against. `dir` is the directory of the
 /// anchoring inner layer (empty for a layer at the package root); `rel` is the
-/// relative path it references. A `..` that would climb above the package root
-/// is dropped, since there is nothing above it inside the archive.
+/// relative path it references. A `..` that climbs above the package root is
+/// kept, as C++ `TfNormPath` keeps it, and the path names no entry.
 pub(crate) fn join_packaged_path(dir: &str, rel: &str) -> String {
-    walk_packaged_path(dir, rel).0
+    let mut components: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
+    for part in rel.split(SEPARATORS) {
+        match part {
+            "" | "." => {}
+            ".." if components.last().is_some_and(|last| *last != "..") => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    components.join("/")
 }
 
 /// [`join_packaged_path`] for a reference that must stay inside the package:
 /// `None` when a `..` in `rel` climbs above the package root.
 pub(crate) fn join_within_package(dir: &str, rel: &str) -> Option<String> {
-    let (joined, climbed_out) = walk_packaged_path(dir, rel);
-    (!climbed_out).then_some(joined)
-}
-
-/// The entry name `rel` reaches from the package-internal directory `dir`,
-/// and whether a `..` in it climbed above the package root and was dropped.
-fn walk_packaged_path(dir: &str, rel: &str) -> (String, bool) {
-    let mut components: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
-    let mut climbed_out = false;
-    for part in rel.split(SEPARATORS) {
-        match part {
-            "" | "." => {}
-            ".." => climbed_out |= components.pop().is_none(),
-            other => components.push(other),
-        }
-    }
-    (components.join("/"), climbed_out)
+    let joined = join_packaged_path(dir, rel);
+    (joined != ".." && !joined.starts_with("../")).then_some(joined)
 }
 
 /// Splits the authored package-relative `asset_path` at its outermost
@@ -1464,10 +1459,10 @@ pub(crate) fn split_authored_package(asset_path: &str) -> Option<(String, String
 
 /// The authored packaged path `packaged` as the entry name it reaches from a
 /// package's root, each level of a nested one (`inner.usdz[tex\a.png]`)
-/// normalized on its own. A level that climbs above its package's root
-/// (`../a.png`) names no entry and keeps its spelling.
+/// normalized on its own. A level that climbs above its package's root keeps
+/// its leading `..` (`..\a.png` gives `../a.png`) and names no entry.
 fn normalize_packaged_path(packaged: &str) -> String {
-    let entry = |level: &str| join_within_package("", level).unwrap_or_else(|| level.to_owned());
+    let entry = |level: &str| join_packaged_path("", level);
     match split_authored_package(packaged) {
         Some((package, inner)) => join_package_relative_path(&entry(&package), &inner),
         None => entry(packaged),
@@ -2017,6 +2012,29 @@ pub(crate) mod tests {
         assert_eq!(join_packaged_path("", "geom/mesh.usd"), "geom/mesh.usd");
         // A back-slash spelling is normalized to forward slashes.
         assert_eq!(join_packaged_path("geom", r"sub\mesh.usd"), "geom/sub/mesh.usd");
+    }
+
+    /// A `..` climbing above the package root is kept, as C++ `TfNormPath`
+    /// keeps it, and the path names no entry.
+    #[test]
+    fn dotdot_above_package() {
+        assert_eq!(join_packaged_path("", "../a.usda"), "../a.usda");
+        assert_eq!(join_packaged_path("geom", "../../a.usda"), "../a.usda");
+        assert_eq!(join_packaged_path("a", "../../../b/../c"), "../../c");
+        assert_eq!(join_within_package("geom", "../../a.usda"), None);
+        assert_eq!(join_within_package("geom", "../a.usda").as_deref(), Some("a.usda"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("pkg.usdz");
+        let mut writer = usdz::ArchiveWriter::create(&package).unwrap();
+        writer.add_layer("root.usda", b"#usda 1.0\n").unwrap();
+        writer.add_layer("a.usda", b"#usda 1.0\n").unwrap();
+        writer.finish().unwrap();
+        let resolver = DefaultResolver::new();
+        let package = package.to_string_lossy();
+        let climbed = nest_packaged_path(&package, &join_packaged_path("", "../a.usda"));
+        assert_eq!(climbed, format!("{package}[../a.usda]"));
+        assert!(resolver.resolve(&climbed).is_none(), "{climbed} names no entry");
     }
 
     /// The dispatcher anchors at a packaged anchor's outer package, beside the
