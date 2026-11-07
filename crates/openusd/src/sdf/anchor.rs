@@ -11,14 +11,14 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::{Layer, LayerRegistry, LayerStore, PackageListings, PackageMeta, StoreRead};
+use super::{Layer, LayerRegistry, LayerStore, PackageFiles, PackageListings, StoreRead};
 use crate::{ar, usdz};
 
 /// What the anchoring rules read of a package: its listing.
 pub(crate) trait Listing {
     /// What `package` holds, or `None` for a package that cannot be opened,
     /// which holds nothing to anchor at.
-    fn meta(&mut self, package: &str) -> Option<Rc<PackageMeta>>;
+    fn files(&mut self, package: &str) -> Option<Rc<PackageFiles>>;
 }
 
 /// A [`Listing`] of the packages a layer store holds.
@@ -29,13 +29,13 @@ pub(crate) trait Listing {
 pub(crate) struct HeldListing<'a, 'r>(pub(crate) &'a StoreRead<'r>);
 
 impl Listing for HeldListing<'_, '_> {
-    fn meta(&mut self, package: &str) -> Option<Rc<PackageMeta>> {
+    fn files(&mut self, package: &str) -> Option<Rc<PackageFiles>> {
         let held = self.0.package(package);
         debug_assert!(
             held.is_some(),
             "a live layer holds every package a path it authors is anchored in: {package}"
         );
-        held?.meta().cloned()
+        held?.files().cloned()
     }
 }
 
@@ -45,7 +45,7 @@ impl Listing for HeldListing<'_, '_> {
 pub(crate) struct ReadListing<'a> {
     resolver: &'a dyn ar::Resolver,
     store: Option<&'a LayerStore>,
-    listed: HashMap<String, Option<Rc<PackageMeta>>>,
+    listed: HashMap<String, Option<Rc<PackageFiles>>>,
     /// Shares one open of each package among the listings, begun at the
     /// first that reads an asset.
     scope: Option<ar::CacheScope>,
@@ -64,19 +64,19 @@ impl<'a> ReadListing<'a> {
 }
 
 impl Listing for ReadListing<'_> {
-    fn meta(&mut self, package: &str) -> Option<Rc<PackageMeta>> {
-        if let Some(meta) = self.listed.get(package) {
-            return meta.clone();
+    fn files(&mut self, package: &str) -> Option<Rc<PackageFiles>> {
+        if let Some(files) = self.listed.get(package) {
+            return files.clone();
         }
         let held = self
             .store
-            .and_then(|store| Some(store.read().ok()?.package(package)?.meta().cloned()));
-        let meta = held.unwrap_or_else(|| {
+            .and_then(|store| Some(store.read().ok()?.package(package)?.files().cloned()));
+        let files = held.unwrap_or_else(|| {
             self.scope.get_or_insert_with(ar::CacheScope::begin);
             LayerRegistry::list_package(self.resolver, package).map(Rc::new)
         });
-        self.listed.insert(package.to_owned(), meta.clone());
-        meta
+        self.listed.insert(package.to_owned(), files.clone());
+        files
     }
 }
 
@@ -110,7 +110,7 @@ pub(crate) fn absolute_path_at(
 //
 // TODO(perf): the default resolver canonicalizes through the filesystem, so
 // each call runs a `canonicalize`. Cache identifiers per `(anchor location,
-// asset_path)` within an `ar::CacheScope`; `PackageMeta::entries` is
+// asset_path)` within an `ar::CacheScope`; `PackageFiles::files` is
 // searched linearly per search path.
 pub(crate) fn absolute_path_with(
     resolver: &dyn ar::Resolver,
@@ -181,8 +181,8 @@ pub(crate) fn held_packages(real_path: &str, listing: &mut dyn Listing) -> Packa
     packages
         .into_iter()
         .map(|package| {
-            let meta = listing.meta(&package);
-            (package, meta)
+            let files = listing.files(&package);
+            (package, files)
         })
         .collect()
 }
@@ -206,11 +206,11 @@ fn expand_root(listing: &mut dyn Listing, mut package: String) -> (String, Strin
 /// listing ([`FileFormat::package_root`](super::FileFormat::package_root)),
 /// or empty.
 fn first_entry(listing: &mut dyn Listing, package: &str) -> String {
-    let Some(meta) = listing.meta(package) else {
+    let Some(files) = listing.files(package) else {
         return String::new();
     };
     LayerRegistry::find_by_extension(ar::extension(package))
-        .and_then(|format| format.package_root(&meta))
+        .and_then(|format| format.package_root(&files))
         .unwrap_or_default()
         .to_owned()
 }
@@ -218,8 +218,8 @@ fn first_entry(listing: &mut dyn Listing, package: &str) -> String {
 /// Whether `package` holds `entry`: whether the packaged path resolves.
 fn holds(listing: &mut dyn Listing, package: &str, entry: &str) -> bool {
     listing
-        .meta(package)
-        .is_some_and(|meta| meta.entries.iter().any(|stored| stored == entry))
+        .files(package)
+        .is_some_and(|held| held.files.iter().any(|stored| stored == entry))
 }
 
 /// The directory part of a packaged path, empty at the package's root.

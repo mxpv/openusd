@@ -29,7 +29,7 @@ use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
 use super::layer::{Due, Reload};
 use super::{
     AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerRegistry, LayerSink, LayerSinkId,
-    Listing, PackageMeta, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
+    Listing, PackageFiles, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
 };
 
 /// A failure to read, edit or add a layer of a
@@ -168,7 +168,7 @@ struct Slots {
 /// A package's listing and the slots of the layers that hold it.
 pub(crate) struct HeldPackage {
     /// What the package holds, `None` while no listing of it has succeeded.
-    meta: Option<Rc<PackageMeta>>,
+    files: Option<Rc<PackageFiles>>,
     /// The filled slots whose layers hold the package, live or awaiting a
     /// sweep.
     layers: Vec<u32>,
@@ -176,7 +176,7 @@ pub(crate) struct HeldPackage {
 
 /// The packages a layer holds, each with its listing where one was read
 /// ([`held_packages`]).
-pub(crate) type PackageListings = Vec<(String, Option<Rc<PackageMeta>>)>;
+pub(crate) type PackageListings = Vec<(String, Option<Rc<PackageFiles>>)>;
 
 /// One arena slot: the epoch it is in, and its layer while it is filled.
 #[derive(Default)]
@@ -211,7 +211,7 @@ struct Entry {
     subscribers: sink::Set<dyn Subscriber>,
     /// The token every handle to the layer shares.
     token: Weak<SlotToken>,
-    /// The packages the layer lies in, whose metas it holds.
+    /// The packages the layer holds ([`held_packages`]).
     packages: Vec<String>,
 }
 
@@ -501,8 +501,8 @@ impl LayerHandle {
                             .flat_map(|member| member.packages.iter().map(|(package, _)| package.clone())),
                     )
                     .filter(|package| {
-                        let held = read.package(package).and_then(HeldPackage::meta);
-                        held.map(|held| &**held) != listing.meta(package).as_deref()
+                        let held = read.package(package).and_then(HeldPackage::files);
+                        held.map(|held| &**held) != listing.files(package).as_deref()
                     })
                     .collect();
                 let batch: HashSet<SlotKey> = members.iter().map(|member| member.handle.token.key).collect();
@@ -897,10 +897,9 @@ impl LayerStore {
     /// [`LayerError::Duplicate`] when a live layer already carries its
     /// identifier or, for a layer read from an asset, its real path.
     ///
-    /// `packages` names each package the layer lies in, with its meta where
-    /// one was listed. The store holds each package while a live layer lies
-    /// in it; a package already held keeps the meta it has, or takes this
-    /// one where it has none.
+    /// `packages` names each package the layer lies in, with its files where
+    /// they were listed. The store holds each package while a live layer lies
+    /// in it; a package already held keeps the listing it has.
     pub(crate) fn insert(
         self: &Rc<Self>,
         mut layer: Layer,
@@ -943,8 +942,8 @@ impl LayerStore {
             store: Rc::downgrade(self),
         });
         let mut held = Vec::new();
-        for (package, meta) in packages {
-            slots.hold_package(package.clone(), meta, index, false);
+        for (package, files) in packages {
+            slots.hold_package(package.clone(), files, index, false);
             held.push(package);
         }
         slots.slots[index as usize].entry = Some(Entry {
@@ -993,8 +992,8 @@ impl LayerStore {
                 let listings = held
                     .into_iter()
                     .map(|package| {
-                        let meta = slots.packages.get(&package).and_then(|held| held.meta.clone());
-                        (package, meta)
+                        let files = slots.packages.get(&package).and_then(|held| held.files.clone());
+                        (package, files)
                     })
                     .collect();
                 (key, listings)
@@ -1173,19 +1172,19 @@ impl Slots {
     }
 
     /// Record that the layer in slot `index` holds `package`, listed as
-    /// `meta`, a failed listing included. The listing replaces the one held
+    /// `files`, a failed listing included. The listing replaces the one held
     /// when `fresh`, read anew from the package, and where no live layer
     /// holds the package, whose listing may predate a change. A live
     /// package keeps its listing otherwise: the root chains its layers hold
     /// were read from it.
-    fn hold_package(&mut self, package: String, meta: Option<Rc<PackageMeta>>, index: u32, fresh: bool) {
+    fn hold_package(&mut self, package: String, files: Option<Rc<PackageFiles>>, index: u32, fresh: bool) {
         let replace = fresh || self.package(&package).is_none();
         let held = self.packages.entry(package).or_insert(HeldPackage {
-            meta: None,
+            files: None,
             layers: Vec::new(),
         });
         if replace {
-            held.meta = meta;
+            held.files = files;
         }
         // Only a relist can find the slot holding the package already.
         if !(fresh && held.layers.contains(&index)) {
@@ -1219,8 +1218,8 @@ impl Slots {
                 self.release_package(package, key.index);
             }
         }
-        for (package, meta) in packages {
-            self.hold_package(package, meta, key.index, true);
+        for (package, files) in packages {
+            self.hold_package(package, files, key.index, true);
         }
     }
 
@@ -1314,8 +1313,8 @@ impl Slots {
 impl HeldPackage {
     /// What the package holds, or `None` where no listing of it succeeded:
     /// a package that cannot be opened.
-    pub(crate) fn meta(&self) -> Option<&Rc<PackageMeta>> {
-        self.meta.as_ref()
+    pub(crate) fn files(&self) -> Option<&Rc<PackageFiles>> {
+        self.files.as_ref()
     }
 }
 

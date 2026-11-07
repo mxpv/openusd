@@ -167,11 +167,11 @@ impl sdf::FileFormat for UsdzFileFormat {
         true
     }
 
-    fn package_meta(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<sdf::PackageMeta> {
-        let entries = open_package(resolver, package)
+    fn package_files(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<sdf::PackageFiles> {
+        let files = open_package(resolver, package)
             .ok()?
             .with(|archive| archive.entry_names().ok())?;
-        Some(sdf::PackageMeta { entries })
+        Some(sdf::PackageFiles { files })
     }
 
     fn forget_package(&self, resolver: &dyn ar::Resolver, package: &str) {
@@ -180,8 +180,8 @@ impl sdf::FileFormat for UsdzFileFormat {
 
     /// The first entry stored, of any type, as C++ reads it from the
     /// archive's local headers (`_GetFirstFileInZipFile`).
-    fn package_root<'m>(&self, meta: &'m sdf::PackageMeta) -> Option<&'m str> {
-        meta.entries.first().map(String::as_str)
+    fn package_root<'m>(&self, package: &'m sdf::PackageFiles) -> Option<&'m str> {
+        package.files.first().map(String::as_str)
     }
 
     fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
@@ -690,19 +690,19 @@ pub(crate) mod tests {
         let _root = registry.find_or_open(&outer)?.expect("the package opens");
         assert_eq!(package_stats().directory_parses - parses, 2);
 
-        let meta = |entries: &[&str]| sdf::PackageMeta {
-            entries: entries.iter().map(|&entry| entry.to_owned()).collect(),
+        let held = |files: &[&str]| sdf::PackageFiles {
+            files: files.iter().map(|&file| file.to_owned()).collect(),
         };
         assert_eq!(
-            registry.package_meta(&outer)?,
-            Some(meta(&["inner.usdz", "other.usda"]))
+            registry.package_files(&outer)?,
+            Some(held(&["inner.usdz", "other.usda"]))
         );
         let inner = ar::join_package_relative_path(&outer, "inner.usdz");
-        assert_eq!(registry.package_meta(&inner)?, Some(meta(&["root.usda", "tex.png"])));
+        assert_eq!(registry.package_files(&inner)?, Some(held(&["root.usda", "tex.png"])));
         Ok(())
     }
 
-    /// A package's meta lives while a live layer holds it: one the layer lies
+    /// A package's listing lives while a live layer holds it: one the layer lies
     /// in, or one its package's root descends through.
     #[test]
     fn package_index_dropped() -> Result<()> {
@@ -717,18 +717,18 @@ pub(crate) mod tests {
         drop(root);
         registry.sweep();
         assert!(
-            registry.package_meta(&outer)?.is_some(),
+            registry.package_files(&outer)?.is_some(),
             "the sibling holds the outer package"
         );
         assert!(
-            registry.package_meta(&inner)?.is_some(),
+            registry.package_files(&inner)?.is_some(),
             "the sibling holds the package the outer root descends through"
         );
 
         drop(other);
         registry.sweep();
-        assert_eq!(registry.package_meta(&outer)?, None);
-        assert_eq!(registry.package_meta(&inner)?, None);
+        assert_eq!(registry.package_files(&outer)?, None);
+        assert_eq!(registry.package_files(&inner)?, None);
         Ok(())
     }
 
@@ -742,8 +742,8 @@ pub(crate) mod tests {
 
     impl sdf::LayerSink for SeenEntries {
         fn after_commit(&self, _change: &sdf::CommittedLayerChange<'_>) {
-            let meta = self.registry.package_meta(&self.package).expect("the store is free");
-            self.entries.replace(meta.map(|meta| meta.entries).unwrap_or_default());
+            let held = self.registry.package_files(&self.package).expect("the store is free");
+            self.entries.replace(held.map(|held| held.files).unwrap_or_default());
         }
     }
 
@@ -769,9 +769,9 @@ pub(crate) mod tests {
         )?;
         assert!(root.reload(true)?);
         assert!(root.read(|layer| layer.data().has_spec(&sdf::path("/New").unwrap()))?);
-        let meta = registry.package_meta(&path.canonicalize()?.to_string_lossy())?;
+        let held = registry.package_files(&path.canonicalize()?.to_string_lossy())?;
         assert_eq!(
-            meta.expect("the layer holds its package").entries,
+            held.expect("the layer holds its package").files,
             ["root.usda", "x.usda"]
         );
         let entry = ar::join_package_relative_path(path.to_str().unwrap(), "x.usda");
@@ -966,10 +966,10 @@ pub(crate) mod tests {
             !a.read(|layer| layer.data().has_spec(&sdf::path("/A").unwrap()))?,
             "a is left as it was"
         );
-        let meta = registry
-            .package_meta(&canonical)?
+        let held = registry
+            .package_files(&canonical)?
             .expect("the layers hold their package");
-        assert_eq!(meta.entries, ["a.usda", "b.usda"], "the listing is left as it was");
+        assert_eq!(held.files, ["a.usda", "b.usda"], "the listing is left as it was");
         Ok(())
     }
 
@@ -1000,10 +1000,10 @@ pub(crate) mod tests {
             ]),
         )?;
         assert!(handles[0].reload(false).is_err(), "the sink on b vetoes");
-        let meta = registry
-            .package_meta(&canonical)?
+        let held = registry
+            .package_files(&canonical)?
             .expect("the layers hold their package");
-        assert_eq!(meta.entries, ["a.usda", "b.usda"]);
+        assert_eq!(held.files, ["a.usda", "b.usda"]);
         Ok(())
     }
 
@@ -1030,8 +1030,8 @@ pub(crate) mod tests {
             ]),
         )?;
         assert!(other.reload(true)?);
-        let meta = registry.package_meta(&outer)?.expect("the sibling holds its package");
-        assert_eq!(meta.entries, ["other.usda", "added.usda"]);
+        let held = registry.package_files(&outer)?.expect("the sibling holds its package");
+        assert_eq!(held.files, ["other.usda", "added.usda"]);
         assert_eq!(*seen.borrow(), ["other.usda", "added.usda"]);
         Ok(())
     }
@@ -1049,14 +1049,14 @@ pub(crate) mod tests {
             .expect("the layer opens");
         let other = ar::join_package_relative_path(&outer, "other.usda");
         drop(registry.find_or_open(&other)?.expect("the sibling opens"));
-        assert_eq!(registry.package_meta(&outer)?, None, "a dead layer holds no package");
+        assert_eq!(registry.package_files(&outer)?, None, "a dead layer holds no package");
         fs::write(
             dir.path().join("outer.usdz"),
             package(&[("other.usda", b"#usda 1.0\n"), ("added.usda", b"#usda 1.0\n")]),
         )?;
         let _other = registry.find_or_open(&other)?.expect("the sibling opens again");
-        let meta = registry.package_meta(&outer)?.expect("the sibling holds its package");
-        assert_eq!(meta.entries, ["other.usda", "added.usda"]);
+        let held = registry.package_files(&outer)?.expect("the sibling holds its package");
+        assert_eq!(held.files, ["other.usda", "added.usda"]);
         Ok(())
     }
 
@@ -1103,7 +1103,7 @@ pub(crate) mod tests {
         let other = registry
             .find_or_open(&ar::join_package_relative_path(&outer, "other.usda"))?
             .expect("the sibling opens");
-        assert_eq!(registry.package_meta(&inner)?, None);
+        assert_eq!(registry.package_files(&inner)?, None);
 
         let nested = package(&[("root.usda", b"#usda 1.0\n")]);
         fs::write(
@@ -1111,8 +1111,8 @@ pub(crate) mod tests {
             package(&[("inner.usdz", &nested), ("other.usda", b"#usda 1.0\ndef \"New\" {}\n")]),
         )?;
         assert!(other.reload(true)?);
-        let meta = registry.package_meta(&inner)?.expect("the new root chain is held");
-        assert_eq!(meta.entries, ["root.usda"]);
+        let held = registry.package_files(&inner)?.expect("the new root chain is held");
+        assert_eq!(held.files, ["root.usda"]);
         Ok(())
     }
 
@@ -1149,7 +1149,7 @@ pub(crate) mod tests {
         drop(b);
         registry.sweep();
         assert!(
-            registry.package_meta(&inner)?.is_some(),
+            registry.package_files(&inner)?.is_some(),
             "the layer not reloaded holds the new root chain"
         );
         drop(a);
@@ -1172,7 +1172,7 @@ pub(crate) mod tests {
         let a = registry
             .find_or_open(&ar::join_package_relative_path(&outer, "a.usda"))?
             .expect("the layer opens");
-        assert!(registry.package_meta(&deep)?.is_some());
+        assert!(registry.package_files(&deep)?.is_some());
 
         fs::write(
             &path,
@@ -1182,13 +1182,13 @@ pub(crate) mod tests {
             ]),
         )?;
         assert!(a.reload(true)?);
-        assert_eq!(registry.package_meta(&inner)?, None);
-        assert_eq!(registry.package_meta(&deep)?, None);
+        assert_eq!(registry.package_files(&inner)?, None);
+        assert_eq!(registry.package_files(&deep)?, None);
         Ok(())
     }
 
     /// A layer opened beside a dead, unswept layer of its package holds the
-    /// package's meta once the dead layer is freed.
+    /// package's listing once the dead layer is freed.
     #[test]
     fn package_index_survives_sweep() -> Result<()> {
         let (dir, outer) = nested_with_siblings()?;
@@ -1203,7 +1203,7 @@ pub(crate) mod tests {
             .find_or_open(&ar::join_package_relative_path(&outer, "other.usda"))?
             .expect("the sibling opens");
         registry.sweep();
-        assert!(registry.package_meta(&outer)?.is_some());
+        assert!(registry.package_files(&outer)?.is_some());
         Ok(())
     }
 

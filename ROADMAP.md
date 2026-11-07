@@ -60,7 +60,7 @@ that broader spec behavior can be considered fully covered.
 | Non-anchored identifiers (search paths) | `9.4.2` | :white_check_mark: | `0.2.0` | `DefaultResolver` with search paths |
 | Resolving identifiers to locations | `9.5` | :white_check_mark: | `0.2.0` | `Resolver` trait |
 | Resolving extensions | `9.6` | :white_check_mark: | `0.2.0` | `.usd`/`.usda`/`.usdc`/`.usdz` dispatch |
-| Packaged resources | `9.7` | :white_check_mark: | `main` | `asset.usdz[sublayer.usd]` syntax, nested packages; a search path authored in a package falls back as C++ `SdfComputeAssetPathRelativeToLayer` does; `sdf::PackageMeta`, `sdf::LayerRegistry::package_meta`, `sdf::ChangeList::did_change_package` |
+| Packaged resources | `9.7` | :white_check_mark: | `main` | `asset.usdz[sublayer.usd]` syntax, nested packages; a search path authored in a package falls back as C++ `SdfComputeAssetPathRelativeToLayer` does; `sdf::PackageFiles`, `sdf::LayerRegistry::package_files`, `sdf::ChangeList::did_change_package` |
 | `file` URI scheme ([RFC 8089](https://datatracker.ietf.org/doc/html/rfc8089)) | `9.8` | :construction: | | Filesystem paths accepted but not as `file:///` URIs |
 | `usd-anon` scheme (in-memory resources) | `9.8.1` | :white_check_mark: | `0.4.0` | `sdf::Layer::new_anonymous` / `is_anonymous`; identifiers spelled `anon:<n>:<tag>` as in C++, never used as an anchor |
 

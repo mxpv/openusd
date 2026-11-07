@@ -411,7 +411,7 @@ impl LayerRegistry {
     /// layers.
     pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
         layer.set_resolver(Rc::clone(&self.resolver));
-        let packages = self.package_metas(layer.real_path());
+        let packages = self.package_listings(layer.real_path());
         self.store().insert(layer, packages)
     }
 
@@ -421,22 +421,22 @@ impl LayerRegistry {
     /// Fails with
     /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
     /// edit on this registry.
-    pub fn package_meta(&self, package: &str) -> Result<Option<sdf::PackageMeta>, sdf::LayerError> {
+    pub fn package_files(&self, package: &str) -> Result<Option<sdf::PackageFiles>, sdf::LayerError> {
         let Some(store) = self.held() else {
             return Ok(None);
         };
         Ok(store
             .read()?
             .package(package)
-            .and_then(|held| held.meta())
-            .map(|meta| sdf::PackageMeta::clone(meta)))
+            .and_then(|held| held.files())
+            .map(|files| sdf::PackageFiles::clone(files)))
     }
 
     /// The packages a layer read from `real_path` holds
     /// ([`sdf::held_packages`]), outermost first, each with what it holds:
     /// the listing the store holds, or else the one its format reads. Empty
     /// while the store is borrowed, where holding the layer fails.
-    fn package_metas(&self, real_path: &str) -> sdf::PackageListings {
+    fn package_listings(&self, real_path: &str) -> sdf::PackageListings {
         let store = self.held();
         if store.as_ref().is_some_and(|store| store.read().is_err()) {
             return Vec::new();
@@ -446,8 +446,8 @@ impl LayerRegistry {
 
     /// What the package at `package` holds, listed by the format its
     /// extension names, or `None` where no format lists it.
-    pub(crate) fn list_package(resolver: &dyn ar::Resolver, package: &str) -> Option<sdf::PackageMeta> {
-        Self::find_by_extension(resolver.extension(package))?.package_meta(resolver, &ar::ResolvedPath::new(package))
+    pub(crate) fn list_package(resolver: &dyn ar::Resolver, package: &str) -> Option<sdf::PackageFiles> {
+        Self::find_by_extension(resolver.extension(package))?.package_files(resolver, &ar::ResolvedPath::new(package))
     }
 
     /// Free the layers whose last handle has dropped. A dropped handle leaves
@@ -644,7 +644,7 @@ impl LayerRegistry {
             Located::Closed { identifier, resolved } => {
                 self.ensure_writable()?;
                 let layer = self.read_layer(&identifier, resolved)?;
-                let packages = self.package_metas(layer.real_path());
+                let packages = self.package_listings(layer.real_path());
                 self.store().insert(layer, packages).map_err(|refused| refused.error)?
             }
             Located::Unresolved => return Ok(None),

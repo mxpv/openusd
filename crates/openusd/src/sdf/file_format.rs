@@ -209,7 +209,7 @@ pub trait FileFormat: Sync {
     /// through `resolver`, under the caller's cache scope.
     ///
     /// The default lists nothing.
-    fn package_meta(&self, _resolver: &dyn ar::Resolver, _package: &ar::ResolvedPath) -> Option<PackageMeta> {
+    fn package_files(&self, _resolver: &dyn ar::Resolver, _package: &ar::ResolvedPath) -> Option<PackageFiles> {
         None
     }
 
@@ -219,10 +219,10 @@ pub trait FileFormat: Sync {
     /// now. The default keeps nothing in a scope.
     fn forget_package(&self, _resolver: &dyn ar::Resolver, _package: &str) {}
 
-    /// The entry of the package `meta` lists that is its root layer (C++
+    /// The file of `package` that is its root layer (C++
     /// `SdfFileFormat::GetPackageRootLayerPath`), or `None` for a format
-    /// that is no package or a package with no entries.
-    fn package_root<'m>(&self, _meta: &'m PackageMeta) -> Option<&'m str> {
+    /// that is no package or a package with no files.
+    fn package_root<'m>(&self, _package: &'m PackageFiles) -> Option<&'m str> {
         None
     }
 
@@ -252,15 +252,16 @@ pub trait FileFormat: Sync {
     }
 }
 
-/// What one package holds, at one level of nesting: the names of its
-/// entries, in the order they are stored ([`FileFormat::package_meta`]).
+/// The files one package holds, at one level of nesting, in the order they
+/// are stored ([`FileFormat::package_files`]; C++ iterates an
+/// `SdfZipFile`'s files).
 ///
-/// A package nested in another has a meta of its own, keyed by its
-/// packaged path (`outer.usdz[inner.usdz]`).
+/// A package nested in another has files of its own, keyed by its packaged
+/// path (`outer.usdz[inner.usdz]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageMeta {
-    /// The entry names, in the order they are stored.
-    pub entries: Vec<String>,
+pub struct PackageFiles {
+    /// The file names, in the order they are stored.
+    pub files: Vec<String>,
 }
 
 /// What [`FileFormat::write_bytes`] produces: the serialized bytes and, for
