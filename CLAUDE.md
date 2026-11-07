@@ -27,8 +27,9 @@ source of truth for specifics.
 
 - **`tf/`** - Tools Foundation (C++ `Tf`): low-level utilities, chiefly
   `tf::Token`, the interned-identifier string behind every `TfToken`-equivalent
-  API, and `tf::HashState` (`tf/hash.rs`), C++ `TfHash`'s state over byte
-  strings with the SpookyHash it rests on (C++ `ArchHash64`).
+  API, and `tf::HashState` (`tf/hash.rs`), C++ `Tf_HashState`, the state
+  `TfHash` accumulates over byte strings, for names C++ derives from a hash
+  code.
 
 - **`vt/`** - Value Types (C++ `Vt`): `vt::Value` (C++ `VtValue`), the value
   an attribute or metadata field holds, and `vt::Dictionary` (C++

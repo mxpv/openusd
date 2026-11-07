@@ -1,7 +1,7 @@
 //! Tools Foundation (C++ `Tf`): foundational utility types shared across the
-//! crate. [`Token`], the interned-identifier string (C++ `TfToken`),
-//! [`is_valid_identifier`], the rule a declared name is checked against, and
-//! the crate's own file-replacing writer (C++ `TfSafeOutputFile`), and
+//! crate: [`Token`], the interned-identifier string (C++ `TfToken`);
+//! [`is_valid_identifier`], the rule a declared name is checked against;
+//! the crate's own file-replacing writer (C++ `TfSafeOutputFile`); and
 //! [`HashState`], C++ `TfHash`'s state over byte strings.
 
 mod hash;
