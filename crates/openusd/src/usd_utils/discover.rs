@@ -236,7 +236,7 @@ fn root_identifier(graph: &pcp::LayerGraph, asset_path: &str) -> String {
     if graph.id_of(asset_path).is_some() {
         return asset_path.to_owned();
     }
-    graph.layer_registry().create_identifier(asset_path, None)
+    sdf::absolute_path_at(graph.layer_registry(), None, asset_path)
 }
 
 /// Walks from `roots` over every file they reach, breadth first. In the scope

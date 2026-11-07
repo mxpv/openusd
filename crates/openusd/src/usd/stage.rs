@@ -4908,7 +4908,7 @@ impl StageBuilder {
         let mut muted: HashSet<String> = self
             .muted
             .iter()
-            .map(|m| self.registry.create_identifier(m, anchor))
+            .map(|m| sdf::absolute_path_at(&self.registry, anchor, m))
             .collect();
         muted.remove(&root.identifier);
         muted.remove(root.handle.identifier());
@@ -5002,15 +5002,14 @@ impl StageBuilder {
     }
 
     /// Whether the builder's requested mutes name `identifier`, each spelling
-    /// canonicalized against `root`, the root layer's anchor, the way the graph's
-    /// muted set is (C++ `Pcp_MutedLayers::_GetCanonicalLayerId`): resolved
-    /// to the identifier its layer interns under. Any spelling of one layer
-    /// therefore matches. Lets collection test an interned identifier for
-    /// muting before the graph exists.
+    /// anchored against `root`, the root layer's anchor, by
+    /// [`sdf::absolute_path_at`]: resolved to the identifier its layer interns
+    /// under. Any spelling of one layer therefore matches. Lets collection
+    /// test an interned identifier for muting before the graph exists.
     fn mutes(&self, root: Option<&ar::ResolvedPath>, identifier: &str) -> bool {
         self.muted
             .iter()
-            .any(|m| self.registry.create_identifier(m, root) == identifier)
+            .any(|m| sdf::absolute_path_at(&self.registry, root, m) == identifier)
     }
 
     /// The stage root stack's single expression-variable context (C++

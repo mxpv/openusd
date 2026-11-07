@@ -2162,7 +2162,7 @@ pub(crate) mod tests {
             env!("CARGO_WORKSPACE_DIR")
         );
         let registry = sdf::LayerRegistry::default();
-        let id = registry.create_identifier(&root, None);
+        let id = sdf::absolute_path_at(&registry, None, &root);
         let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
         let mut graph = LayerGraph::from_layers(vec![layer], 0, registry);
         let root_id = graph.root_id().expect("root layer");
@@ -2209,7 +2209,7 @@ pub(crate) mod tests {
             std::env::var("CARGO_MANIFEST_DIR").unwrap()
         );
         let registry = sdf::LayerRegistry::default();
-        let id = registry.create_identifier(&root, None);
+        let id = sdf::absolute_path_at(&registry, None, &root);
         let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
         // A second layer interned under a bare name, as an in-memory layer is.
         let clip = sdf::Layer::new_in_memory("in_memory_clip.usda");
@@ -2245,7 +2245,7 @@ pub(crate) mod tests {
             std::env::var("CARGO_MANIFEST_DIR").unwrap()
         );
         let registry = sdf::LayerRegistry::default();
-        let id = registry.create_identifier(&root, None);
+        let id = sdf::absolute_path_at(&registry, None, &root);
         let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
         let mut graph = LayerGraph::from_layers(vec![layer], 0, registry);
         let root_id = graph.root_id().expect("root layer");

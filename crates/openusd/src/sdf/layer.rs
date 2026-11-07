@@ -207,7 +207,7 @@ impl Layer {
         // Canonicalized first, as every other load path does: the layer is
         // addressed by the identifier it keeps, so a caller's spelling of one
         // file must not become a second identity for it.
-        let identifier = registry.create_identifier(identifier.as_ref(), None);
+        let identifier = sdf::absolute_path_at(&registry, None, identifier.as_ref());
         let layer = registry.open_layer(&identifier)?;
         layer.ok_or(crate::Error::UnresolvedAsset(identifier))
     }
@@ -1654,16 +1654,23 @@ impl Drop for GroupEditGuard<'_, '_> {
 /// rules for search paths inside a package). An empty path and an anonymous
 /// layer identifier are returned as they are, and `anchor` is `None` for an
 /// anonymous layer.
+///
+/// A relative path authored in a packaged layer (`pkg.usdz[dir/layer.usda]`)
+/// stays in the package, beside that layer (`pkg.usdz[dir/asset.usd]`), and
+/// one authored in a package's root (`pkg.usdz`) names an entry at the
+/// package's root. Every other path goes through [`ar::create_identifier`].
 //
-// TODO: port the package rules of C++ `SdfComputeAssetPathRelativeToLayer`
-// (layerUtils.cpp) into this function. A search path (C++: not opening with
-// `.`) authored in a packaged layer is anchored there if that resolves, then
-// at the package's root layer (`GetPackageRootLayerPath`, expanded through
-// nested packages by `_ExpandPackagePath`) if that resolves, then by the
-// plain resolver against the package file. Here the package handling lives
-// in `DefaultResolver::create_identifier`, which keeps every such path inside
-// the package and, with no anchor, joins the current directory where C++
-// returns the normalized path.
+// TODO: port the search-path rules of C++ `SdfComputeAssetPathRelativeToLayer`
+// (layerUtils.cpp). A search path (C++: not opening with `.`) authored in a
+// packaged layer is anchored there if that resolves, then at the package's
+// root layer (`GetPackageRootLayerPath`, expanded through nested packages by
+// `_ExpandPackagePath`) if that resolves, then by the plain resolver against
+// the package file. Here every such path stays inside the package. A path
+// authored against a package itself (an anchor that is the package file)
+// joins the package's root here, where C++ anchors beside its expanded root
+// layer, which may sit in a directory or a nested package. With no anchor,
+// `DefaultResolver` joins the current directory where C++ returns the
+// normalized path.
 //
 // The sites that anchor a path a layer authors to load or resolve it call
 // this function: composition and clips, `LayerRegistry::open_sublayers`,
@@ -1674,11 +1681,14 @@ impl Drop for GroupEditGuard<'_, '_> {
 // prim-index build must not ask the resolver: answer it from the package's
 // entries held as data, deferring to loading where they are not known.
 // `failed_loads` keys must stay stable when a path moves from the authoring
-// layer to the package root. Mute keys anchor the authored path through the
-// resolver alone (`LayerGraph::canonical_muted_id`), while the graph matches
-// them against interned identifiers: once the fallback can move a path,
-// check mutes on the authored path before loading, as C++ `IsLayerMuted`
-// does, or a muted layer loads under its fallback identifier.
+// layer to the package root.
+//
+// TODO: mute keys (`LayerGraph::canonical_muted_id`) anchor the authored
+// path by these rules too, and the graph matches them against interned
+// identifiers. C++ keys mutes with `ArResolver::CreateIdentifier`, which
+// anchors at a packaged anchor's outer package, and checks them on the
+// authored path before loading (`IsLayerMuted`). Check mutes that way, or a
+// muted layer loads once the fallback moves its identifier.
 //
 // TODO(perf): the default resolver canonicalizes through the filesystem, so
 // each call runs a `canonicalize`. Cache identifiers per `(anchor location,
@@ -1691,7 +1701,31 @@ pub(crate) fn absolute_path_at(
     if asset_path.is_empty() || Layer::is_anonymous_identifier(asset_path) {
         return asset_path.to_owned();
     }
-    resolver.create_identifier(asset_path, anchor)
+    // An authored package-relative path anchors its package by these rules
+    // and keeps the entry it names.
+    if let Some((package, entry)) = ar::split_authored_package(asset_path) {
+        return ar::nest_packaged_path(&absolute_path_at(resolver, anchor, &package), &entry);
+    }
+    // A URI the resolver handles names its asset whole, wherever it is
+    // authored: C++ hands it that resolver once the packaged path it would
+    // otherwise name fails to resolve.
+    if let Some(anchor) = anchor.map(|anchor| anchor.to_string_lossy())
+        && ar::is_relative_path(asset_path)
+        && !ar::is_uri(resolver, asset_path)
+    {
+        // C++ `Sdf_IsPackageOrPackagedLayer`: the anchor is a package itself,
+        // whose root layer the path is authored in, a nested one
+        // (`outer.usdz[inner.usdz]`) included, or a layer inside a package.
+        if sdf::LayerRegistry::find_by_extension(resolver.extension(&anchor)).is_some_and(|format| format.is_package())
+        {
+            return ar::nest_packaged_path(&anchor, &ar::join_packaged_path("", asset_path));
+        }
+        if let Some((package, layer)) = ar::split_package_relative_path_inner(&anchor) {
+            let dir = layer.rsplit_once('/').map_or("", |(dir, _)| dir);
+            return ar::nest_packaged_path(&package, &ar::join_packaged_path(dir, asset_path));
+        }
+    }
+    ar::create_identifier(resolver, asset_path, anchor)
 }
 
 impl AssetTime {
@@ -2070,6 +2104,82 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A path climbing out of a packaged layer's directory names a
+    /// `/`-separated, `..`-collapsed entry name, the spelling the archive is
+    /// keyed by.
+    #[test]
+    fn in_package_anchor_crosses_dirs() {
+        let anchor = ar::ResolvedPath::new("pkg.usdz[geom/scene.usda]");
+        assert_eq!(
+            absolute_path_at(&ar::DefaultResolver::new(), Some(&anchor), "../tex/foo.usda"),
+            "pkg.usdz[tex/foo.usda]",
+        );
+    }
+
+    /// The package rules apply whatever the resolver: one that knows nothing
+    /// of packages still has a packaged layer's paths anchored inside its
+    /// package.
+    #[test]
+    fn custom_resolver_nests() {
+        let resolver = ar::tests::TestResolver(|| unreachable!("nothing is opened"));
+        let packaged = ar::ResolvedPath::new("pkg.usdz[geom/scene.usda]");
+        assert_eq!(
+            absolute_path_at(&resolver, Some(&packaged), "tex/a.png"),
+            "pkg.usdz[geom/tex/a.png]"
+        );
+        let package = ar::ResolvedPath::new("pkg.usdz");
+        assert_eq!(
+            absolute_path_at(&resolver, Some(&package), "tex/a.png"),
+            "pkg.usdz[tex/a.png]"
+        );
+        // A package nested in a package is a package too, not a layer inside
+        // the outer one.
+        let nested = ar::ResolvedPath::new("outer.usdz[inner.usdz]");
+        assert_eq!(
+            absolute_path_at(&resolver, Some(&nested), "tex/a.png"),
+            "outer.usdz[inner.usdz[tex/a.png]]"
+        );
+    }
+
+    /// A URI the resolver handles reaches it whole from a packaged layer,
+    /// while a relative path there still anchors inside the package.
+    #[test]
+    fn uri_in_package_reaches_resolver() {
+        /// A resolver for `https` URIs that identifies a path as spelled and
+        /// resolves only the URIs it owns.
+        struct Web;
+        impl ar::Resolver for Web {
+            fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
+                asset_path.to_owned()
+            }
+            fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+                ar::is_uri(self, asset_path).then(|| ar::ResolvedPath::new(asset_path))
+            }
+            fn resolve_for_new_asset(&self, _asset_path: &str) -> Option<ar::ResolvedPath> {
+                None
+            }
+            fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+                Err(io::ErrorKind::NotFound.into())
+            }
+            fn uri_schemes(&self) -> &[&str] {
+                &["https"]
+            }
+        }
+
+        let packaged = ar::ResolvedPath::new("pkg.usdz[dir/root.usda]");
+        let uri = absolute_path_at(&Web, Some(&packaged), "HTTPS://host/tex.png");
+        assert_eq!(uri, "HTTPS://host/tex.png");
+        assert!(ar::Resolver::resolve(&Web, &uri).is_some());
+        assert_eq!(
+            absolute_path_at(&Web, Some(&packaged), "tex.png"),
+            "pkg.usdz[dir/tex.png]"
+        );
+        assert!(
+            !ar::is_uri(&ar::DefaultResolver::new(), "https://host/tex.png"),
+            "the default resolver handles no URI scheme"
+        );
+    }
+
     /// Author through the layer's `edit` API and commit, for tests that build a
     /// layer's content or metadata directly.
     fn edit_layer(layer: &mut Layer, f: impl FnOnce(&mut LayerEdit<'_>)) {
@@ -2258,7 +2368,7 @@ pub(crate) mod tests {
         // file beside it.
         let resolver = unsafe { ar::DefaultResolver::new().map_files() };
         let registry = crate::sdf::LayerRegistry::new(Box::new(resolver));
-        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+        let identifier = sdf::absolute_path_at(&registry, None, &path.to_string_lossy());
         let mut editing = registry.open_layer(&identifier)?.expect("the layer resolves");
         let other = registry.open_layer(&identifier)?.expect("the layer resolves");
         set_component(&mut editing);
@@ -3683,7 +3793,7 @@ pub(crate) mod tests {
         // file beside it.
         let resolver = unsafe { ar::DefaultResolver::new().map_files() };
         let registry = sdf::LayerRegistry::new(Box::new(resolver));
-        let identifier = registry.create_identifier(&path.to_string_lossy(), None);
+        let identifier = sdf::absolute_path_at(&registry, None, &path.to_string_lossy());
         let mut editing = registry.open_layer(&identifier)?.expect("the layer resolves");
         let other = registry.open_layer(&identifier)?.expect("the layer resolves");
         set_component(&mut editing);

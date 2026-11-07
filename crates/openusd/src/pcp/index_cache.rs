@@ -4684,7 +4684,7 @@ def "Unrelated"
     /// so the resolver can anchor clip asset paths relative to it.
     fn single_layer_stack(path: &str) -> (LayerGraph, IndexCache) {
         let registry = sdf::LayerRegistry::default();
-        let id = registry.create_identifier(path, None);
+        let id = sdf::absolute_path_at(&registry, None, path);
         let layer = registry.open_layer(&id).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![layer], 0, registry);
         (graph, fresh_cache())

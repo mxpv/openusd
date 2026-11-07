@@ -247,13 +247,16 @@ impl From<sdf::LayerHandle> for LoadedLayer {
     }
 }
 
-/// The registry as the resolver it fronts. An identifier passes the
-/// registry's own rules (`create_identifier`, `in_memory_identifier`,
-/// `is_context_dependent_path`); every other call reaches the resolver as it
-/// is.
+/// The registry as the resolver it fronts. `create_identifier` passes an
+/// anonymous layer identifier through, and `in_memory_identifier` and
+/// `is_context_dependent_path` pass the registry's own rules; every other
+/// call reaches the resolver as it is.
 impl ar::Resolver for LayerRegistry {
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
-        LayerRegistry::create_identifier(self, asset_path, anchor)
+        if sdf::Layer::is_anonymous_identifier(asset_path) {
+            return asset_path.to_owned();
+        }
+        self.resolver.create_identifier(asset_path, anchor)
     }
 
     fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
@@ -270,6 +273,10 @@ impl ar::Resolver for LayerRegistry {
 
     fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
         self.resolver.extension(asset_path)
+    }
+
+    fn uri_schemes(&self) -> &[&str] {
+        self.resolver.uri_schemes()
     }
 
     fn is_context_dependent_path(&self, asset_path: &str) -> bool {
@@ -322,7 +329,7 @@ impl LayerRegistry {
     /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
     /// edit on this registry.
     pub fn find(&self, asset_path: &str) -> Result<Option<sdf::LayerHandle>, sdf::LayerError> {
-        Ok(match self.locate(self.create_identifier(asset_path, None))? {
+        Ok(match self.locate(sdf::absolute_path_at(self, None, asset_path))? {
             Located::Open(handle) => Some(handle),
             Located::Closed { .. } | Located::Unresolved => None,
         })
@@ -339,7 +346,7 @@ impl LayerRegistry {
     /// or from a resolver a stage calls while it reads the registry's layers.
     pub fn find_or_open(&self, asset_path: &str) -> crate::Result<Option<sdf::LayerHandle>> {
         let _scope = ar::CacheScope::begin();
-        let identifier = self.create_identifier(asset_path, None);
+        let identifier = sdf::absolute_path_at(self, None, asset_path);
         Ok(self.find_or_read(&identifier)?.map(|layer| layer.handle))
     }
 
@@ -421,30 +428,11 @@ impl LayerRegistry {
         }
     }
 
-    /// Canonicalizes `asset_path` into a stable identifier, anchoring a relative
-    /// path against `anchor` (C++ `ArResolver::CreateIdentifier`). Interning a
-    /// layer by a path the caller names and keying the muted set call it
-    /// directly; a path a layer authors is anchored by
-    /// [`sdf::absolute_path_at`], which calls it with the registry as the
-    /// resolver. The underlying [`ar::Resolver`] stays private.
-    ///
-    /// An anonymous layer identifier is its own canonical id: it names no
-    /// asset-resolvable location, so it passes through unchanged (C++
-    /// `SdfLayer::_GetCanonicalLayerId` / `ArResolver::CreateIdentifier`).
-    /// Anchoring it against a layer would corrupt it into a bogus path that no
-    /// interned layer matches.
-    pub(crate) fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
-        if sdf::Layer::is_anonymous_identifier(asset_path) {
-            return asset_path.to_string();
-        }
-        self.resolver.create_identifier(asset_path, anchor)
-    }
-
     /// The identifier an in-memory layer is interned under when `asset_path`
     /// names it, by the resolver's
     /// [`in_memory_identifier`](ar::Resolver::in_memory_identifier). An
     /// anonymous layer identifier is its own, as it is for
-    /// [`create_identifier`](Self::create_identifier).
+    /// [`sdf::absolute_path_at`].
     pub(crate) fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
         if sdf::Layer::is_anonymous_identifier(asset_path) {
             return Cow::Borrowed(asset_path);
@@ -626,7 +614,7 @@ impl LayerRegistry {
     /// propagates.
     pub(crate) fn prepare_root(&self, asset_path: &str) -> Result<LoadedLayer, LoadError> {
         self.ensure_writable()?;
-        let identifier = self.create_identifier(asset_path, None);
+        let identifier = sdf::absolute_path_at(self, None, asset_path);
         let unresolved = || LoadError::Unresolved {
             asset_path: asset_path.to_owned(),
         };
@@ -1200,7 +1188,7 @@ pub(crate) mod tests {
     /// or an unresolvable root.
     fn open_stack(path: &str) -> Result<Vec<LoadedLayer>> {
         let registry = registry();
-        let identifier = registry.create_identifier(path, None);
+        let identifier = sdf::absolute_path_at(&registry, None, path);
         Ok(registry
             .open_stack(&identifier, &HashMap::new(), false, &Err, &|_| Presence::Absent)?
             .expect("root did not resolve"))
@@ -1319,7 +1307,7 @@ pub(crate) mod tests {
         let registry = registry();
         let layers = registry
             .open_stack(
-                &registry.create_identifier(&composition_path("subLayer/sublayer_invalid.usda"), None),
+                &sdf::absolute_path_at(&registry, None, &composition_path("subLayer/sublayer_invalid.usda")),
                 &HashMap::new(),
                 false,
                 &|e| {

@@ -236,8 +236,8 @@ pub(crate) struct LayerGraph {
     /// `Pcp_MutedLayers` keeps every request as a string; here a request that
     /// names a loaded layer goes straight into [`muted`](Self::muted)). A path
     /// is reduced to this canonical form by
-    /// [`canonical_muted_id`](Self::canonical_muted_id) (the resolver, anchored
-    /// against the root layer), so a not-yet-loaded reference/payload target
+    /// [`canonical_muted_id`](Self::canonical_muted_id), anchored against the
+    /// root layer, so a not-yet-loaded reference/payload target
     /// matches the identifier it will be interned under, and the entry moves to
     /// `muted` the moment such a layer is interned
     /// ([`resolve_muted_ids`](Self::resolve_muted_ids)).
@@ -3430,14 +3430,12 @@ impl LayerGraph {
     /// `(path, anchor)`, independent of which layers are currently loaded — so the
     /// same physical layer never keys under different strings by load order.
     ///
-    /// The authored path is anchored through the resolver, as C++
-    /// `Pcp_MutedLayers::_GetCanonicalLayerId` anchors it with
-    /// `ArResolver::CreateIdentifier`.
+    /// The path is anchored by [`sdf::absolute_path_at`].
     fn canonical_muted_id(&self, path: &str, anchor: Option<&ResolvedPath>) -> String {
         if anchor.is_none() {
             return path.to_string();
         }
-        self.registry.create_identifier(path, anchor)
+        sdf::absolute_path_at(&self.registry, anchor, path)
     }
 }
 
