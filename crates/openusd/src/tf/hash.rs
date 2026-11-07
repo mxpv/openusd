@@ -9,15 +9,24 @@
 /// `Tf_HashState`). Each [`append`](Self::append) hashes the bytes with
 /// SpookyHash V2 (C++ `ArchHash64`), seeded with the state so far, and
 /// [`code`](Self::code) is the code `TfHash::Combine` returns. A
-/// `std::string` appends its bytes, and a `std::map` its entries in key
-/// order, each key then its value.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// `std::string` appends its bytes, and a `std::map` of strings its entries
+/// in key order, each key then its value.
+///
+/// C++ holds the state in a `size_t`, so the codes are those of a 64-bit
+/// build.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct HashState {
     state: u64,
 }
 
 impl HashState {
-    /// Appends `bytes` (C++ `Tf_HashState::_AppendBytes`).
+    /// Appends the byte string `bytes` (C++ `Tf_HashState::_AppendBytes`).
+    ///
+    /// This is how C++ appends a string, and a contiguous array of integers
+    /// too, as their bytes in native order. A lone integer it combines into
+    /// the state by a different step,
+    /// so appending one integer's bytes here does not give the code C++ does
+    /// for it.
     pub fn append(&mut self, bytes: impl AsRef<[u8]>) {
         self.state = spooky::hash64(bytes.as_ref(), self.state);
     }
@@ -33,270 +42,204 @@ impl HashState {
 /// carries it: little-endian reads, `Hash64` returning the first half of the
 /// 128-bit hash seeded with `(seed, seed)`.
 mod spooky {
+    use std::array;
+
+    /// The number of 64-bit words of internal state.
     const SC_NUM_VARS: usize = 12;
+    /// The number of bytes one block mixes.
     const SC_BLOCK_SIZE: usize = SC_NUM_VARS * 8;
+    /// The length from which a message takes the long path.
     const SC_BUF_SIZE: usize = 2 * SC_BLOCK_SIZE;
+    /// The constant SpookyHash seeds its unseeded words with.
     const SC_CONST: u64 = 0xdead_beef_dead_beef;
 
-    fn rot(x: u64, k: u32) -> u64 {
-        x.rotate_left(k)
-    }
-
-    /// The little-endian `u64` at byte `at` of `bytes`, zero-padded past the
-    /// end.
+    /// The little-endian `u64` at byte `at` of `bytes`.
     fn u64_at(bytes: &[u8], at: usize) -> u64 {
-        let mut word = [0u8; 8];
-        for (i, b) in word.iter_mut().enumerate() {
-            *b = bytes.get(at + i).copied().unwrap_or(0);
-        }
+        let word: [u8; 8] = bytes[at..at + 8].try_into().expect("an eight-byte slice");
         u64::from_le_bytes(word)
     }
 
-    /// The little-endian `u32` at byte `at` of `bytes`.
-    fn u32_at(bytes: &[u8], at: usize) -> u64 {
-        let mut word = [0u8; 4];
-        for (i, b) in word.iter_mut().enumerate() {
-            *b = bytes.get(at + i).copied().unwrap_or(0);
-        }
-        u64::from(u32::from_le_bytes(word))
-    }
-
-    fn byte(bytes: &[u8], at: usize) -> u64 {
-        u64::from(bytes.get(at).copied().unwrap_or(0))
-    }
-
+    /// `SpookyHash::ShortMix`: mixes the four words of the short hash.
     fn short_mix(h: &mut [u64; 4]) {
         let [h0, h1, h2, h3] = h;
-        *h2 = rot(*h2, 50);
+        *h2 = h2.rotate_left(50);
         *h2 = h2.wrapping_add(*h3);
         *h0 ^= *h2;
-        *h3 = rot(*h3, 52);
+        *h3 = h3.rotate_left(52);
         *h3 = h3.wrapping_add(*h0);
         *h1 ^= *h3;
-        *h0 = rot(*h0, 30);
+        *h0 = h0.rotate_left(30);
         *h0 = h0.wrapping_add(*h1);
         *h2 ^= *h0;
-        *h1 = rot(*h1, 41);
+        *h1 = h1.rotate_left(41);
         *h1 = h1.wrapping_add(*h2);
         *h3 ^= *h1;
-        *h2 = rot(*h2, 54);
+        *h2 = h2.rotate_left(54);
         *h2 = h2.wrapping_add(*h3);
         *h0 ^= *h2;
-        *h3 = rot(*h3, 48);
+        *h3 = h3.rotate_left(48);
         *h3 = h3.wrapping_add(*h0);
         *h1 ^= *h3;
-        *h0 = rot(*h0, 38);
+        *h0 = h0.rotate_left(38);
         *h0 = h0.wrapping_add(*h1);
         *h2 ^= *h0;
-        *h1 = rot(*h1, 37);
+        *h1 = h1.rotate_left(37);
         *h1 = h1.wrapping_add(*h2);
         *h3 ^= *h1;
-        *h2 = rot(*h2, 62);
+        *h2 = h2.rotate_left(62);
         *h2 = h2.wrapping_add(*h3);
         *h0 ^= *h2;
-        *h3 = rot(*h3, 34);
+        *h3 = h3.rotate_left(34);
         *h3 = h3.wrapping_add(*h0);
         *h1 ^= *h3;
-        *h0 = rot(*h0, 5);
+        *h0 = h0.rotate_left(5);
         *h0 = h0.wrapping_add(*h1);
         *h2 ^= *h0;
-        *h1 = rot(*h1, 36);
+        *h1 = h1.rotate_left(36);
         *h1 = h1.wrapping_add(*h2);
         *h3 ^= *h1;
     }
 
+    /// `SpookyHash::ShortEnd`: the final mix of the short hash.
     fn short_end(h: &mut [u64; 4]) {
         let [h0, h1, h2, h3] = h;
         *h3 ^= *h2;
-        *h2 = rot(*h2, 15);
+        *h2 = h2.rotate_left(15);
         *h3 = h3.wrapping_add(*h2);
         *h0 ^= *h3;
-        *h3 = rot(*h3, 52);
+        *h3 = h3.rotate_left(52);
         *h0 = h0.wrapping_add(*h3);
         *h1 ^= *h0;
-        *h0 = rot(*h0, 26);
+        *h0 = h0.rotate_left(26);
         *h1 = h1.wrapping_add(*h0);
         *h2 ^= *h1;
-        *h1 = rot(*h1, 51);
+        *h1 = h1.rotate_left(51);
         *h2 = h2.wrapping_add(*h1);
         *h3 ^= *h2;
-        *h2 = rot(*h2, 28);
+        *h2 = h2.rotate_left(28);
         *h3 = h3.wrapping_add(*h2);
         *h0 ^= *h3;
-        *h3 = rot(*h3, 9);
+        *h3 = h3.rotate_left(9);
         *h0 = h0.wrapping_add(*h3);
         *h1 ^= *h0;
-        *h0 = rot(*h0, 47);
+        *h0 = h0.rotate_left(47);
         *h1 = h1.wrapping_add(*h0);
         *h2 ^= *h1;
-        *h1 = rot(*h1, 54);
+        *h1 = h1.rotate_left(54);
         *h2 = h2.wrapping_add(*h1);
         *h3 ^= *h2;
-        *h2 = rot(*h2, 32);
+        *h2 = h2.rotate_left(32);
         *h3 = h3.wrapping_add(*h2);
         *h0 ^= *h3;
-        *h3 = rot(*h3, 25);
+        *h3 = h3.rotate_left(25);
         *h0 = h0.wrapping_add(*h3);
         *h1 ^= *h0;
-        *h0 = rot(*h0, 63);
+        *h0 = h0.rotate_left(63);
         *h1 = h1.wrapping_add(*h0);
     }
 
-    /// `SpookyHash::Short`, for messages under 192 bytes.
-    fn short(message: &[u8], seed1: u64, seed2: u64) -> u64 {
-        let length = message.len();
-        let mut remainder = length % 32;
-        let mut h = [seed1, seed2, SC_CONST, SC_CONST];
-        let mut at = 0;
-        if length > 15 {
-            let end = (length / 32) * 32;
-            while at < end {
-                h[2] = h[2].wrapping_add(u64_at(message, at));
-                h[3] = h[3].wrapping_add(u64_at(message, at + 8));
-                short_mix(&mut h);
-                h[0] = h[0].wrapping_add(u64_at(message, at + 16));
-                h[1] = h[1].wrapping_add(u64_at(message, at + 24));
-                at += 32;
-            }
-            if remainder >= 16 {
-                h[2] = h[2].wrapping_add(u64_at(message, at));
-                h[3] = h[3].wrapping_add(u64_at(message, at + 8));
-                short_mix(&mut h);
-                at += 16;
-                remainder -= 16;
-            }
+    /// `SpookyHash::Short` seeded with `(seed, seed)`, for messages under
+    /// 192 bytes.
+    fn short(message: &[u8], seed: u64) -> u64 {
+        let mut h = [seed, seed, SC_CONST, SC_CONST];
+        let mut chunks = message.chunks_exact(32);
+        for chunk in &mut chunks {
+            h[2] = h[2].wrapping_add(u64_at(chunk, 0));
+            h[3] = h[3].wrapping_add(u64_at(chunk, 8));
+            short_mix(&mut h);
+            h[0] = h[0].wrapping_add(u64_at(chunk, 16));
+            h[1] = h[1].wrapping_add(u64_at(chunk, 24));
         }
-        // The last 0..15 bytes, and the length. The cases fall through in
-        // C++; each arm here adds what its fall-through would.
-        h[3] = h[3].wrapping_add((length as u64) << 56);
-        let b = |i: usize| byte(message, at + i);
-        let mut c = 0u64;
-        let mut d = 0u64;
-        match remainder {
-            12..=15 => {
-                if remainder >= 15 {
-                    d = d.wrapping_add(b(14) << 48);
-                }
-                if remainder >= 14 {
-                    d = d.wrapping_add(b(13) << 40);
-                }
-                if remainder >= 13 {
-                    d = d.wrapping_add(b(12) << 32);
-                }
-                d = d.wrapping_add(u32_at(message, at + 8));
-                c = c.wrapping_add(u64_at(message, at));
-            }
-            8..=11 => {
-                if remainder >= 11 {
-                    d = d.wrapping_add(b(10) << 16);
-                }
-                if remainder >= 10 {
-                    d = d.wrapping_add(b(9) << 8);
-                }
-                if remainder >= 9 {
-                    d = d.wrapping_add(b(8));
-                }
-                c = c.wrapping_add(u64_at(message, at));
-            }
-            4..=7 => {
-                if remainder >= 7 {
-                    c = c.wrapping_add(b(6) << 48);
-                }
-                if remainder >= 6 {
-                    c = c.wrapping_add(b(5) << 40);
-                }
-                if remainder >= 5 {
-                    c = c.wrapping_add(b(4) << 32);
-                }
-                c = c.wrapping_add(u32_at(message, at));
-            }
-            1..=3 => {
-                if remainder >= 3 {
-                    c = c.wrapping_add(b(2) << 16);
-                }
-                if remainder >= 2 {
-                    c = c.wrapping_add(b(1) << 8);
-                }
-                c = c.wrapping_add(b(0));
-            }
-            _ => {
-                c = c.wrapping_add(SC_CONST);
-                d = d.wrapping_add(SC_CONST);
-            }
+        let mut tail = chunks.remainder();
+        if tail.len() >= 16 {
+            h[2] = h[2].wrapping_add(u64_at(tail, 0));
+            h[3] = h[3].wrapping_add(u64_at(tail, 8));
+            short_mix(&mut h);
+            tail = &tail[16..];
         }
+        // The length, and the last 0..15 bytes as two little-endian words
+        // padded with zeros, or the constant twice when none are left.
+        h[3] = h[3].wrapping_add((message.len() as u64) << 56);
+        let (c, d) = if tail.is_empty() {
+            (SC_CONST, SC_CONST)
+        } else {
+            let mut padded = [0u8; 16];
+            padded[..tail.len()].copy_from_slice(tail);
+            (u64_at(&padded, 0), u64_at(&padded, 8))
+        };
         h[2] = h[2].wrapping_add(c);
         h[3] = h[3].wrapping_add(d);
         short_end(&mut h);
         h[0]
     }
 
+    /// `SpookyHash::Mix`: mixes one block of `data` into the state `s`. Step
+    /// `i` adds word `i`, xors word `i + 10` into word `i + 2`, xors word `i`
+    /// into word `i + 11`, rotates word `i` and adds word `i + 1` into word
+    /// `i + 11`, every index taken modulo the 12 state words.
     fn mix(data: &[u64; SC_NUM_VARS], s: &mut [u64; SC_NUM_VARS]) {
-        // (index added, index xored with s[x10], index xored into, rotation)
-        // spelled out as `SpookyHash::Mix`.
         const ROT: [u32; SC_NUM_VARS] = [11, 32, 43, 31, 17, 28, 39, 57, 55, 54, 22, 46];
-        for i in 0..SC_NUM_VARS {
+        for (i, &r) in ROT.iter().enumerate() {
+            let i1 = (i + 1) % SC_NUM_VARS;
+            let i2 = (i + 2) % SC_NUM_VARS;
+            let i10 = (i + 10) % SC_NUM_VARS;
+            let i11 = (i + 11) % SC_NUM_VARS;
             s[i] = s[i].wrapping_add(data[i]);
-            s[(i + 2) % SC_NUM_VARS] ^= s[(i + 10) % SC_NUM_VARS];
-            s[(i + 11) % SC_NUM_VARS] ^= s[i];
-            s[i] = rot(s[i], ROT[i]);
-            s[(i + 11) % SC_NUM_VARS] = s[(i + 11) % SC_NUM_VARS].wrapping_add(s[(i + 1) % SC_NUM_VARS]);
+            s[i2] ^= s[i10];
+            s[i11] ^= s[i];
+            s[i] = s[i].rotate_left(r);
+            s[i11] = s[i11].wrapping_add(s[i1]);
         }
     }
 
+    /// `SpookyHash::EndPartial`: line `i` adds word `i + 1` into word
+    /// `i + 11`, xors word `i + 11` into word `i + 2` and rotates word
+    /// `i + 1`, every index taken modulo the 12 state words.
     fn end_partial(h: &mut [u64; SC_NUM_VARS]) {
-        // `SpookyHash::EndPartial`: line i adds h[i+1] into h[i-1], xors
-        // h[i-1] into h[i+2] and rotates h[i+1].
         const ROT: [u32; SC_NUM_VARS] = [44, 15, 34, 21, 38, 33, 10, 13, 38, 53, 42, 54];
-        for (i, r) in ROT.iter().enumerate() {
-            let a = (i + 11) % SC_NUM_VARS;
-            let b = (i + 1) % SC_NUM_VARS;
-            let c = (i + 2) % SC_NUM_VARS;
-            h[a] = h[a].wrapping_add(h[b]);
-            h[c] ^= h[a];
-            h[b] = rot(h[b], *r);
+        for (i, &r) in ROT.iter().enumerate() {
+            let i1 = (i + 1) % SC_NUM_VARS;
+            let i2 = (i + 2) % SC_NUM_VARS;
+            let i11 = (i + 11) % SC_NUM_VARS;
+            h[i11] = h[i11].wrapping_add(h[i1]);
+            h[i2] ^= h[i11];
+            h[i1] = h[i1].rotate_left(r);
         }
     }
 
+    /// `SpookyHash::End`: adds the last block and mixes the state three
+    /// times over.
     fn end(data: &[u64; SC_NUM_VARS], h: &mut [u64; SC_NUM_VARS]) {
-        for i in 0..SC_NUM_VARS {
-            h[i] = h[i].wrapping_add(data[i]);
+        for (word, d) in h.iter_mut().zip(data) {
+            *word = word.wrapping_add(*d);
         }
         end_partial(h);
         end_partial(h);
         end_partial(h);
     }
 
-    fn block(message: &[u8], at: usize) -> [u64; SC_NUM_VARS] {
-        let mut out = [0u64; SC_NUM_VARS];
-        for (i, word) in out.iter_mut().enumerate() {
-            *word = u64_at(message, at + i * 8);
-        }
-        out
+    /// The 12 little-endian words of the 96-byte `block`.
+    fn words(block: &[u8]) -> [u64; SC_NUM_VARS] {
+        array::from_fn(|i| u64_at(block, i * 8))
     }
 
     /// `SpookyHash::Hash64(message, length, seed)`.
     pub(super) fn hash64(message: &[u8], seed: u64) -> u64 {
-        let length = message.len();
-        if length < SC_BUF_SIZE {
-            return short(message, seed, seed);
+        if message.len() < SC_BUF_SIZE {
+            return short(message, seed);
         }
         // h0 = h3 = h6 = h9 and h1 = h4 = h7 = h10 are the seeds, the others
         // the constant.
-        let mut h = [0u64; SC_NUM_VARS];
-        for (i, word) in h.iter_mut().enumerate() {
-            *word = if i % 3 == 2 { SC_CONST } else { seed };
+        let mut h: [u64; SC_NUM_VARS] = array::from_fn(|i| if i % 3 == 2 { SC_CONST } else { seed });
+        let mut blocks = message.chunks_exact(SC_BLOCK_SIZE);
+        for block in &mut blocks {
+            mix(&words(block), &mut h);
         }
-        let whole = (length / SC_BLOCK_SIZE) * SC_BLOCK_SIZE;
-        let mut at = 0;
-        while at < whole {
-            mix(&block(message, at), &mut h);
-            at += SC_BLOCK_SIZE;
-        }
-        let remainder = length - whole;
+        let rest = blocks.remainder();
         let mut last = [0u8; SC_BLOCK_SIZE];
-        last[..remainder].copy_from_slice(&message[whole..]);
-        last[SC_BLOCK_SIZE - 1] = remainder as u8;
-        end(&block(&last, 0), &mut h);
+        last[..rest.len()].copy_from_slice(rest);
+        last[SC_BLOCK_SIZE - 1] = rest.len() as u8;
+        end(&words(&last), &mut h);
         h[0]
     }
 }
@@ -314,10 +257,11 @@ mod tests {
         state.code()
     }
 
-    // The expected codes are C++ `TfHash::Combine`'s at OpenUSD 26.08
-    // (`tf/hash.h`, `arch/hash.cpp`).
+    // The expected codes in these tests are C++ `TfHash::Combine`'s at
+    // OpenUSD 26.08 (`tf/hash.h`, `arch/hash.cpp`).
+
     #[test]
-    fn combine_of_two_strings_is_tf_hash() {
+    fn combine_two_strings() {
         let golden: &[(&str, &str, u64)] = &[
             ("/World/Instancer", "/", 0xa61eb064d406b29f),
             ("/Tree/Leaves", "/Trees/tree/ForInstancer1", 0x14855720f51764cd),
@@ -345,8 +289,9 @@ mod tests {
         }
     }
 
+    /// Messages of 192 bytes and more take SpookyHash's long path.
     #[test]
-    fn long_messages_take_spooky_hash_long_path() {
+    fn combine_long_messages() {
         let long192 = format!("/{}", "a".repeat(191));
         let long300: String = (0..30).map(|i| format!("/segment_{i}")).collect();
         assert!(long300.len() >= 192);
@@ -354,16 +299,35 @@ mod tests {
         assert_eq!(combine(&[&long300, &long192]), 0x35ea98eaf50ec046);
     }
 
+    /// Short messages whose last 0..15 bytes are 4, 6, 7, 8, 9, 11, 13 and 15
+    /// long, each combined with `"/"`.
+    #[test]
+    fn combine_tail_lengths() {
+        let golden: &[(&str, u64)] = &[
+            ("abcd", 0xc3386ca72e1db0c6),
+            ("abcdef", 0x1a0d1c9d675149fe),
+            ("abcdefg", 0xe33c6a8806cfb841),
+            ("abcdefgh", 0x644144b55e5c34e7),
+            ("abcdefghijk", 0x870d49a916d7dc63),
+            ("abcdefghijklm", 0xbd0557e374bc449b),
+            ("/World/Instance", 0x9e8c34320a6590c6),
+            ("/World/Instancer/Proto_ab", 0x394c981816874dd4),
+            ("/World/Instancer/Prototype_abcd", 0xa3e710a9e73eb0ea),
+        ];
+        for (a, expected) in golden {
+            assert_eq!(combine(&[a, "/"]), *expected, "Combine({a:?}, \"/\")");
+        }
+    }
+
     /// A `std::map<std::string, std::string>` hashes as its entries in key
     /// order, each key then its value.
     #[test]
-    fn combine_of_a_map_is_tf_hash() {
-        let map = |entries: &[&str]| combine(entries);
-        assert_eq!(map(&["displayColor", "Color"]), 0x2a699f1bd0ef6389);
+    fn combine_map() {
+        assert_eq!(combine(&["displayColor", "Color"]), 0x2a699f1bd0ef6389);
         assert_eq!(
-            map(&["displayColor", "Color", "displayOpacity", "", "st", "TextureCoordinate"]),
+            combine(&["displayColor", "Color", "displayOpacity", "", "st", "TextureCoordinate"]),
             0xde7ff2d00ca8c5c6
         );
-        assert_eq!(map(&["foo", ""]), 0xddc3440b5e101171);
+        assert_eq!(combine(&["foo", ""]), 0xddc3440b5e101171);
     }
 }
