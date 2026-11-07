@@ -26,9 +26,10 @@ use std::thread;
 use crate::ar;
 
 use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
+use super::layer::{Due, Reload};
 use super::{
     AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerRegistry, LayerSink, LayerSinkId,
-    PackageMeta, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
+    Listing, PackageMeta, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
 };
 
 /// A failure to read, edit or add a layer of a
@@ -391,9 +392,15 @@ impl LayerHandle {
     /// [`reload`](Self::reload) does, in one transaction (C++
     /// `SdfLayer::ReloadLayers`), so a stage holding several of them
     /// recomposes once, returning whether any reloaded. A layer named twice
-    /// reloads once. Every layer is tried: one that cannot be read is left as
-    /// it is, and the first such failure is returned once the others have
-    /// reloaded.
+    /// reloads once.
+    ///
+    /// A package whose listing changed brings every live layer in it into
+    /// the batch, reloaded when its asset changed, and the layers holding a
+    /// package in common reload as one group, together with the packages'
+    /// listings. Every group is tried: one with a layer that cannot be read
+    /// is left as it is whole, and the first such failure is returned once
+    /// the other groups have reloaded. A layer in no package is a group of
+    /// its own.
     ///
     /// A borrowed layer the reload would leave as it is (no unsaved edits, and
     /// its asset unchanged unless `force`) does not stop the batch.
@@ -431,7 +438,10 @@ impl LayerHandle {
         // layer may change from here to the commit: every read below keeps
         // each edit of the registry out, one a resolver makes included, and
         // no user code runs between them.
-        let mut due = Vec::new();
+        let mut members = Vec::new();
+        // Whether the packages were listed anew, which a batch with nothing
+        // to read leaves alone.
+        let mut listed = false;
         {
             let read = store.read()?;
             for handle in &unique {
@@ -440,65 +450,153 @@ impl LayerHandle {
                     LayerRegistry::forget_packages(resolver.as_ref(), layer.real_path());
                 }
             }
-            for (at, handle) in unique.into_iter().enumerate() {
-                match read.layer(handle).reload_due(force) {
-                    Ok(Some(reload)) => due.push((at, handle, reload)),
-                    Ok(None) => {}
-                    Err(error) => failed.push((at, error)),
+            for handle in unique {
+                let step = match read.layer(handle).reload_due(force) {
+                    Ok(due) => due.map(Step::Due),
+                    Err(error) => {
+                        failed.push((members.len(), error));
+                        None
+                    }
+                };
+                members.push(Member {
+                    asked: true,
+                    handle: handle.clone(),
+                    held: read.held_by(handle).to_vec(),
+                    packages: Vec::new(),
+                    step,
+                });
+            }
+            let resolver = members
+                .iter()
+                .find_map(|member| read.layer(&member.handle).resolver().cloned());
+            if let Some(resolver) = resolver.filter(|_| members.iter().any(|member| member.step.is_some())) {
+                listed = true;
+                let mut listing = ReadListing::new(resolver.as_ref(), None);
+                for member in &mut members {
+                    member.packages = held_packages(read.layer(&member.handle).real_path(), &mut listing);
+                }
+                // A package whose listing changed, a nested one included,
+                // brings every live layer in it into the batch, so none keeps
+                // content its package no longer matches.
+                let outermost: HashSet<String> = members
+                    .iter()
+                    .flat_map(|member| {
+                        member
+                            .held
+                            .iter()
+                            .chain(member.packages.iter().map(|(package, _)| package))
+                    })
+                    .map(|package| outermost_package(package))
+                    .collect();
+                let changed: HashSet<String> = read
+                    .packages_within(&outermost)
+                    .into_iter()
+                    .chain(
+                        members
+                            .iter()
+                            .flat_map(|member| member.packages.iter().map(|(package, _)| package.clone())),
+                    )
+                    .filter(|package| {
+                        let held = read.package(package).and_then(HeldPackage::meta);
+                        held.map(|held| &**held) != listing.meta(package).as_deref()
+                    })
+                    .collect();
+                let batch: HashSet<SlotKey> = members.iter().map(|member| member.handle.token.key).collect();
+                for token in read.holders(&changed) {
+                    if batch.contains(&token.key) {
+                        continue;
+                    }
+                    let handle = LayerHandle {
+                        token,
+                        store: Rc::clone(store),
+                    };
+                    let layer = read.layer(&handle);
+                    // A layer brought in reloads when its asset changed. One
+                    // with unsaved edits keeps them, and one whose asset no
+                    // longer resolves where it was read stays as it is:
+                    // neither was asked for, so neither stops the batch.
+                    let step = (!layer.is_dirty())
+                        .then(|| layer.reload_due(false).ok().flatten().map(Step::Due))
+                        .flatten();
+                    members.push(Member {
+                        asked: false,
+                        held: read.held_by(&handle).to_vec(),
+                        packages: held_packages(layer.real_path(), &mut listing),
+                        handle,
+                        step,
+                    });
                 }
             }
         }
-        // The first failure in the order `handles` names the layers, whichever
-        // check found it.
-        let first =
-            |failed: Vec<(usize, crate::Error)>| failed.into_iter().min_by_key(|&(at, _)| at).map(|(_, error)| error);
-        if due.is_empty() {
-            return first(failed).map_or(Ok(false), Err);
+        let mut groups = Groups::default();
+        for member in &members {
+            groups.join(
+                member
+                    .held
+                    .iter()
+                    .chain(member.packages.iter().map(|(package, _)| package)),
+            );
         }
-        // A borrowed layer cannot change. A batch that would change one fails
-        // here, before any asset's content is read.
-        let changing: Vec<&LayerHandle> = due.iter().map(|&(_, handle, _)| handle).collect();
+        for &(member, _) in &failed {
+            groups.fail(member);
+        }
+        // The first failure in the order the batch names the layers, whichever
+        // check found it.
+        let first = |failed: Vec<(usize, crate::Error)>| {
+            failed
+                .into_iter()
+                .min_by_key(|&(member, _)| member)
+                .map(|(_, error)| error)
+        };
+        // A layer brought in that is borrowed stays as it is. A batch that
+        // would change a borrowed layer it was asked for fails here, before
+        // any asset's content is read.
+        for member in members
+            .iter_mut()
+            .filter(|member| !member.asked && member.step.is_some())
+        {
+            if store.ensure_editable(&[&member.handle]).is_err() {
+                member.step = None;
+            }
+        }
+        let changing: Vec<&LayerHandle> = members
+            .iter()
+            .enumerate()
+            .filter(|(at, member)| member.step.is_some() && !groups.failed(*at))
+            .map(|(_, member)| &member.handle)
+            .collect();
         store.ensure_editable(&changing)?;
-        let mut targets = Vec::new();
-        let mut reloads = Vec::new();
-        // The packages each reloaded layer holds now (`held_packages`), each
-        // listed anew.
-        let mut relisted = Vec::new();
         {
             let read = store.read()?;
-            // One listing for the batch, so a package several reloaded
-            // layers hold is read once: a store's layers share a resolver.
-            let mut listing = None;
-            // The packages the reloaded layers held and hold.
-            let mut touched = HashSet::new();
             // TODO(rayon): each layer's read and diff is independent of the
             // others'.
-            for (at, handle, due) in due {
-                let layer = read.layer(handle);
-                match layer.read_due(due) {
-                    Ok(reload) => {
-                        if let Some(resolver) = layer.resolver() {
-                            let listing = listing.get_or_insert_with(|| ReadListing::new(&**resolver, None));
-                            let packages = held_packages(layer.real_path(), listing);
-                            touched.extend(read.held_by(handle).iter().cloned());
-                            touched.extend(packages.iter().map(|(package, _)| package.clone()));
-                            relisted.push((handle.token.key, packages));
-                        }
-                        targets.push(handle);
-                        reloads.push(reload);
+            for (at, member) in members.iter_mut().enumerate() {
+                let Some(Step::Due(due)) = member.step.take().filter(|_| !groups.failed(at)) else {
+                    continue;
+                };
+                match read.layer(&member.handle).read_due(due) {
+                    Ok(reload) => member.step = Some(Step::Read(reload)),
+                    Err(error) => {
+                        groups.fail(at);
+                        failed.push((at, error));
                     }
-                    Err(error) => failed.push((at, error)),
                 }
             }
-            // Another live layer in a package listed anew reads its root
-            // chain from the new listing too.
-            if let Some(listing) = listing.as_mut() {
-                let reloaded: HashSet<SlotKey> = relisted.iter().map(|&(key, _)| key).collect();
-                for (key, layer) in read.holders(&touched) {
-                    if !reloaded.contains(&key) {
-                        relisted.push((key, held_packages(layer.real_path(), listing)));
-                    }
-                }
+        }
+        // A group a failure dropped keeps its content and its listings whole.
+        let mut targets = Vec::new();
+        let mut contents = Vec::new();
+        let mut relisted = Vec::new();
+        for (at, member) in members.iter_mut().enumerate() {
+            if groups.failed(at) {
+                continue;
+            }
+            if let Some(Step::Read(reload)) = member.step.take() {
+                targets.push(&member.handle);
+                contents.push(reload);
+            }
+            if listed && (!member.held.is_empty() || !member.packages.is_empty()) {
+                relisted.push((member.handle.token.key, mem::take(&mut member.packages)));
             }
         }
         let failed = first(failed);
@@ -506,7 +604,7 @@ impl LayerHandle {
             return failed.map_or(Ok(false), Err);
         }
         let committed = store.commit(&targets, TxnContext::new(None), |edits| {
-            for (edit, reload) in edits.iter_mut().zip(reloads) {
+            for (edit, reload) in edits.iter_mut().zip(contents) {
                 edit.reload(reload);
             }
             Ok::<_, LayerError>(())
@@ -697,8 +795,20 @@ impl StoreRead<'_> {
             .packages
     }
 
-    /// Each live layer that holds one of `packages`, by its slot.
-    pub(crate) fn holders(&self, packages: &HashSet<String>) -> Vec<(SlotKey, &Layer)> {
+    /// Every package the store holds that is one of `outermost` or lies in
+    /// one of them.
+    fn packages_within(&self, outermost: &HashSet<String>) -> Vec<String> {
+        let slots = self.slots.as_ref().expect("a read holds its borrow until it drops");
+        slots
+            .packages
+            .keys()
+            .filter(|package| outermost.contains(&outermost_package(package)))
+            .cloned()
+            .collect()
+    }
+
+    /// The token of each live layer that holds one of `packages`.
+    fn holders(&self, packages: &HashSet<String>) -> Vec<Rc<SlotToken>> {
         let slots = self.slots.as_ref().expect("a read holds its borrow until it drops");
         let mut seen = HashSet::new();
         packages
@@ -706,17 +816,7 @@ impl StoreRead<'_> {
             .filter_map(|package| slots.packages.get(package))
             .flat_map(|held| &held.layers)
             .filter(|&&index| seen.insert(index))
-            .filter_map(|&index| {
-                let slot = &slots.slots[index as usize];
-                let entry = slot.entry.as_ref().filter(|entry| entry.token.strong_count() > 0)?;
-                Some((
-                    SlotKey {
-                        index,
-                        epoch: slot.epoch,
-                    },
-                    &*entry.layer,
-                ))
-            })
+            .filter_map(|&index| slots.slots[index as usize].entry.as_ref()?.token.upgrade())
             .collect()
     }
 
@@ -1303,6 +1403,88 @@ impl<T: ?Sized> DerefMut for HeldMut<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.value
     }
+}
+
+/// One layer of a reload batch.
+struct Member {
+    /// Whether the layer was asked for, rather than brought in by a package
+    /// that changed.
+    asked: bool,
+    /// The layer.
+    handle: LayerHandle,
+    /// The packages it holds now.
+    held: Vec<String>,
+    /// The packages it holds after the reload, with their listings
+    /// ([`held_packages`]), when the batch lists them.
+    packages: PackageListings,
+    /// How far its reload has come, `None` when it does not reload.
+    step: Option<Step>,
+}
+
+/// How far a reload batch's layer has come.
+enum Step {
+    /// Its reload is due, its asset not yet read.
+    Due(Due),
+    /// Its asset is read, the reload ready to commit.
+    Read(Reload),
+}
+
+/// The groups a reload batch's layers fall in: layers that hold a package in
+/// common reload together, all or none, as do the packages they hold.
+#[derive(Default)]
+struct Groups {
+    /// Each member's parent in the union-find forest.
+    parents: Vec<usize>,
+    /// The first member found holding each package.
+    holder: HashMap<String, usize>,
+    /// The roots of the groups a failure dropped.
+    failed: HashSet<usize>,
+}
+
+impl Groups {
+    /// Adds the next member, holding `packages`, to the group of each member
+    /// holding one of them.
+    fn join<'a>(&mut self, packages: impl IntoIterator<Item = &'a String>) {
+        let member = self.parents.len();
+        self.parents.push(member);
+        for package in packages {
+            match self.holder.get(package) {
+                Some(&other) => {
+                    let (a, b) = (self.of(member), self.of(other));
+                    self.parents[a] = b;
+                }
+                None => {
+                    self.holder.insert(package.clone(), member);
+                }
+            }
+        }
+    }
+
+    /// The group of `member`.
+    fn of(&self, mut member: usize) -> usize {
+        while self.parents[member] != member {
+            member = self.parents[member];
+        }
+        member
+    }
+
+    /// Drops the group of `member`. Every member has joined by then.
+    fn fail(&mut self, member: usize) {
+        self.failed.insert(self.of(member));
+    }
+
+    /// Whether a failure dropped the group of `member`.
+    fn failed(&self, member: usize) -> bool {
+        self.failed.contains(&self.of(member))
+    }
+}
+
+/// The outermost package of `package`, itself when it lies in none.
+fn outermost_package(package: &str) -> String {
+    ar::enclosing_packages(package)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| package.to_owned())
 }
 
 #[cfg(test)]

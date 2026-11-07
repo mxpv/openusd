@@ -35,7 +35,7 @@ mod spec;
 mod unit;
 mod value_type;
 
-pub(crate) use anchor::{HeldListing, ReadListing, absolute_path_at, absolute_path_with, held_packages};
+pub(crate) use anchor::{HeldListing, Listing, ReadListing, absolute_path_at, absolute_path_with, held_packages};
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
     AssetExpressionFailure, AssetOutcome, anchor_asset_paths, evaluate_asset_paths, holds_asset_expression,

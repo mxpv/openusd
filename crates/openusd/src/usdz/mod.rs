@@ -281,6 +281,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::fs;
     use std::io::Write;
+    use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -778,6 +779,184 @@ pub(crate) mod tests {
             registry.find_or_open(&entry)?.is_some(),
             "the outer scope reads the new package"
         );
+        Ok(())
+    }
+
+    /// A reload of one layer in a package whose listing changed reloads the
+    /// package's other live layers with it.
+    #[test]
+    fn reload_sibling_joins() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        fs::write(
+            &path,
+            package(&[("a.usda", b"#usda 1.0\n"), ("b.usda", b"#usda 1.0\n")]),
+        )?;
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let open = |entry: &str| -> Result<sdf::LayerHandle> {
+            let path = ar::join_package_relative_path(path.to_str().unwrap(), entry);
+            Ok(registry.find_or_open(&path)?.expect("the entry opens"))
+        };
+        let (a, b) = (open("a.usda")?, open("b.usda")?);
+
+        fs::write(
+            &path,
+            package(&[
+                ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
+                ("b.usda", b"#usda 1.0\ndef \"B\" {}\n"),
+                ("c.usda", b"#usda 1.0\n"),
+            ]),
+        )?;
+        assert!(a.reload(false)?);
+        assert!(
+            b.read(|layer| layer.data().has_spec(&sdf::path("/B").unwrap()))?,
+            "b reloaded with a"
+        );
+        Ok(())
+    }
+
+    /// The package `pkg.usdz` of `entries` in a new directory, a registry,
+    /// and handles to the entries `open` names.
+    fn package_layers(
+        entries: &[(&str, &[u8])],
+        open: &[&str],
+    ) -> Result<(tempfile::TempDir, PathBuf, sdf::LayerRegistry, Vec<sdf::LayerHandle>)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        fs::write(&path, package(entries))?;
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let handles = open
+            .iter()
+            .map(|entry| {
+                let path = ar::join_package_relative_path(path.to_str().unwrap(), entry);
+                Ok(registry.find_or_open(&path)?.expect("the entry opens"))
+            })
+            .collect::<Result<_>>()?;
+        Ok((dir, path, registry, handles))
+    }
+
+    /// Whether the layer `handle` names defines `path`.
+    fn defines(handle: &sdf::LayerHandle, path: &str) -> Result<bool> {
+        Ok(handle.read(|layer| layer.data().has_spec(&sdf::path(path).unwrap()))?)
+    }
+
+    /// A layer brought into a reload keeps its unsaved edits.
+    #[test]
+    fn reload_sibling_keeps_edits() -> Result<()> {
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (_dir, path, _registry, handles) =
+            package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
+        handles[1].edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Edit", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        fs::write(
+            &path,
+            package(&[
+                ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
+                ("b.usda", b"#usda 1.0\ndef \"B\" {}\n"),
+                ("c.usda", empty),
+            ]),
+        )?;
+        assert!(handles[0].reload(false)?);
+        assert!(defines(&handles[0], "/A")?);
+        assert!(
+            defines(&handles[1], "/Edit")? && !defines(&handles[1], "/B")?,
+            "b keeps its edits"
+        );
+        Ok(())
+    }
+
+    /// A layer brought into a reload that its package no longer holds, or
+    /// that is borrowed, stays as it is and does not stop the reload asked
+    /// for.
+    #[test]
+    fn reload_sibling_skipped() -> Result<()> {
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (_dir, path, _registry, handles) = package_layers(
+            &[("a.usda", empty), ("b.usda", empty), ("c.usda", empty)],
+            &["a.usda", "b.usda", "c.usda"],
+        )?;
+        let _guard = handles[2].borrow();
+        fs::write(
+            &path,
+            package(&[
+                ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
+                ("c.usda", b"#usda 1.0\ndef \"C\" {}\n"),
+            ]),
+        )?;
+        assert!(handles[0].reload(false)?);
+        assert!(defines(&handles[0], "/A")?);
+        Ok(())
+    }
+
+    /// A layer of a package that cannot be read leaves the whole group as it
+    /// was: the layer asked for and the package's listing too.
+    #[test]
+    fn reload_group_fails_whole() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        fs::write(
+            &path,
+            package(&[("a.usda", b"#usda 1.0\n"), ("b.usda", b"#usda 1.0\n")]),
+        )?;
+        let canonical = path.canonicalize()?.to_string_lossy().into_owned();
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let open = |entry: &str| -> Result<sdf::LayerHandle> {
+            let path = ar::join_package_relative_path(path.to_str().unwrap(), entry);
+            Ok(registry.find_or_open(&path)?.expect("the entry opens"))
+        };
+        let (a, _b) = (open("a.usda")?, open("b.usda")?);
+
+        fs::write(
+            &path,
+            package(&[
+                ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
+                ("b.usda", b"#usda 1.0\ndef (\n"),
+                ("c.usda", b"#usda 1.0\n"),
+            ]),
+        )?;
+        assert!(a.reload(false).is_err(), "b cannot be read");
+        assert!(
+            !a.read(|layer| layer.data().has_spec(&sdf::path("/A").unwrap()))?,
+            "a is left as it was"
+        );
+        let meta = registry
+            .package_meta(&canonical)?
+            .expect("the layers hold their package");
+        assert_eq!(meta.entries, ["a.usda", "b.usda"], "the listing is left as it was");
+        Ok(())
+    }
+
+    /// Refuses every commit of the layer it is on.
+    struct Veto;
+
+    impl sdf::LayerSink for Veto {
+        fn before_commit(&self, _change: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+            Err(sdf::sink::Error::new("vetoed"))
+        }
+    }
+
+    /// A vetoed reload leaves the package's listing as it was.
+    #[test]
+    fn reload_veto_keeps_index() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        fs::write(&path, package(&[("a.usda", b"#usda 1.0\n")]))?;
+        let canonical = path.canonicalize()?.to_string_lossy().into_owned();
+        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
+        let a = registry
+            .find_or_open(&ar::join_package_relative_path(path.to_str().unwrap(), "a.usda"))?
+            .expect("the entry opens");
+        a.add_sink(Veto)?;
+
+        fs::write(
+            &path,
+            package(&[("a.usda", b"#usda 1.0\ndef \"A\" {}\n"), ("c.usda", b"#usda 1.0\n")]),
+        )?;
+        assert!(a.reload(false).is_err(), "the sink vetoes");
+        let meta = registry.package_meta(&canonical)?.expect("the layer holds its package");
+        assert_eq!(meta.entries, ["a.usda"]);
         Ok(())
     }
 
