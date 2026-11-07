@@ -571,7 +571,31 @@ impl Changes {
                 let effects = Self::effects_of(path, entry, stage_layer);
                 self.apply_effects(cache, graph, edit, path, effects);
             }
+            // A package the layer lies in changed what it holds, so an asset
+            // path the layer authors may name another entry: its sublayers,
+            // references and payloads anchor anew, and every index reading
+            // a stack it is a member of composes again.
+            //
+            // TODO(perf): only the paths whose anchoring moved need it (C++
+            // `Pcp_NeedToRecomputeDueToAssetPathChange`): anchor each authored
+            // path with the old listings and the new, and drop only where they
+            // differ.
+            if edit.changes.did_change_package() {
+                self.mark_stack(edit.layer, LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT);
+                // A sublayer that failed to load may name an entry the
+                // package holds now.
+                self.retries_sublayers = true;
+            }
         }
+    }
+
+    /// Records the layer-stack-tier `flags` an edit of `layer` raises, with
+    /// the layer behind them so `apply` can scope the invalidation to the
+    /// stacks it is a member of. Each edited layer in a round is attributed
+    /// independently, so a multi-layer edit invalidates every affected stack.
+    fn mark_stack(&mut self, layer: LayerId, flags: LayerStackChanges) {
+        self.layer_stack |= flags;
+        self.layer_stack_layers.insert(layer);
     }
 
     /// What one entry at `path` invalidates.
@@ -795,12 +819,7 @@ impl Changes {
         }
         self.type_opinions |= effects.type_opinion;
         if !effects.stack.is_empty() {
-            self.layer_stack |= effects.stack;
-            // Record the layer behind any layer-stack-tier flag so `apply` can
-            // scope the invalidation to the stacks this layer is a member of.
-            // Each edited layer in a round is attributed independently, so a
-            // multi-layer edit invalidates every affected stack.
-            self.layer_stack_layers.insert(layer);
+            self.mark_stack(layer, effects.stack);
         }
         if let Some(report) = effects.report.filter(|_| self.report) {
             self.report_entry(cache, graph, layer, path, report);

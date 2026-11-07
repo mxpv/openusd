@@ -867,26 +867,71 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A layer brought into a reload that its package no longer holds, or
-    /// that is borrowed, stays as it is and does not stop the reload asked
-    /// for.
+    /// A layer brought into a reload that its package no longer holds stays
+    /// as it is and does not stop the reload asked for.
     #[test]
-    fn reload_sibling_skipped() -> Result<()> {
+    fn reload_sibling_gone() -> Result<()> {
         let empty: &[u8] = b"#usda 1.0\n";
-        let (_dir, path, _registry, handles) = package_layers(
-            &[("a.usda", empty), ("b.usda", empty), ("c.usda", empty)],
-            &["a.usda", "b.usda", "c.usda"],
-        )?;
-        let _guard = handles[2].borrow();
+        let (_dir, path, _registry, handles) =
+            package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
+        fs::write(&path, package(&[("a.usda", b"#usda 1.0\ndef \"A\" {}\n")]))?;
+        assert!(handles[0].reload(false)?);
+        assert!(defines(&handles[0], "/A")?);
+        Ok(())
+    }
+
+    /// A borrowed layer of a package that changed cannot take the report of
+    /// the change, so its group stays as it was and the reload is `Busy`.
+    #[test]
+    fn reload_sibling_borrowed() -> Result<()> {
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (_dir, path, _registry, handles) =
+            package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
+        let guard = handles[1].borrow();
         fs::write(
             &path,
             package(&[
                 ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
-                ("c.usda", b"#usda 1.0\ndef \"C\" {}\n"),
+                ("b.usda", empty),
+                ("c.usda", empty),
             ]),
         )?;
-        assert!(handles[0].reload(false)?);
-        assert!(defines(&handles[0], "/A")?);
+        let reloaded = handles[0].reload(false);
+        assert!(
+            matches!(reloaded, Err(crate::Error::Layer(sdf::LayerError::Busy))),
+            "{reloaded:?}"
+        );
+        drop(guard);
+        assert!(!defines(&handles[0], "/A")?, "a stays as it was");
+        Ok(())
+    }
+
+    /// A borrowed layer asked for in a package that changed fails the whole
+    /// batch with `Busy`, before anything reloads.
+    #[test]
+    fn reload_asked_borrowed() -> Result<()> {
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (dir, path, registry, handles) =
+            package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
+        let plain = dir.path().join("plain.usda");
+        fs::write(&plain, empty)?;
+        let plain = registry
+            .find_or_open(plain.to_str().unwrap())?
+            .expect("the layer opens");
+        fs::write(dir.path().join("plain.usda"), "#usda 1.0\ndef \"Plain\" {}\n")?;
+        fs::write(
+            &path,
+            package(&[("a.usda", empty), ("b.usda", empty), ("c.usda", empty)]),
+        )?;
+
+        let guard = handles[1].borrow();
+        let reloaded = sdf::LayerHandle::reload_all(&[handles[1].clone(), plain.clone()], true);
+        assert!(
+            matches!(reloaded, Err(crate::Error::Layer(sdf::LayerError::Busy))),
+            "{reloaded:?}"
+        );
+        drop(guard);
+        assert!(!defines(&plain, "/Plain")?, "nothing reloaded");
         Ok(())
     }
 
@@ -940,23 +985,25 @@ pub(crate) mod tests {
     /// A vetoed reload leaves the package's listing as it was.
     #[test]
     fn reload_veto_keeps_index() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("pkg.usdz");
-        fs::write(&path, package(&[("a.usda", b"#usda 1.0\n")]))?;
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (_dir, path, registry, handles) =
+            package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
         let canonical = path.canonicalize()?.to_string_lossy().into_owned();
-        let registry = sdf::LayerRegistry::new(Box::new(ar::DefaultResolver::new()));
-        let a = registry
-            .find_or_open(&ar::join_package_relative_path(path.to_str().unwrap(), "a.usda"))?
-            .expect("the entry opens");
-        a.add_sink(Veto)?;
+        handles[1].add_sink(Veto)?;
 
         fs::write(
             &path,
-            package(&[("a.usda", b"#usda 1.0\ndef \"A\" {}\n"), ("c.usda", b"#usda 1.0\n")]),
+            package(&[
+                ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
+                ("b.usda", empty),
+                ("c.usda", empty),
+            ]),
         )?;
-        assert!(a.reload(false).is_err(), "the sink vetoes");
-        let meta = registry.package_meta(&canonical)?.expect("the layer holds its package");
-        assert_eq!(meta.entries, ["a.usda"]);
+        assert!(handles[0].reload(false).is_err(), "the sink on b vetoes");
+        let meta = registry
+            .package_meta(&canonical)?
+            .expect("the layers hold their package");
+        assert_eq!(meta.entries, ["a.usda", "b.usda"]);
         Ok(())
     }
 

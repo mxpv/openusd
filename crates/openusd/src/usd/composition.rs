@@ -840,9 +840,12 @@ impl StageComposition {
             // `expressionVariables` edit (below).
             // Only the first snapshot of a drain the caller starts retries:
             // edits the drain's own loads commit do not.
-            let reloaded = drained
-                .iter()
-                .any(|pending| matches!(pending, Pending::Edit(edit) if edit.changes.did_reload_content()));
+            // A package that changed what it holds may hold an asset that
+            // failed to load before, so it retries as a reload does.
+            let reloaded = drained.iter().any(|pending| {
+                matches!(pending, Pending::Edit(edit)
+                    if edit.changes.did_reload_content() || edit.changes.did_change_package())
+            });
             let retries = mem::take(&mut retry) && reloaded;
             // What operations found since the last drain is reported with
             // what this snapshot finds, after its transactions, less what

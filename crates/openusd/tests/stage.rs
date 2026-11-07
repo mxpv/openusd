@@ -11,6 +11,7 @@ use std::path::Path as FsPath;
 use std::rc::Rc;
 use std::slice;
 use std::sync::Arc;
+use std::time::Duration;
 
 use openusd::Result;
 use openusd::ar::Resolver as _;
@@ -3831,6 +3832,102 @@ fn mute_unanchored_relative() -> Result<()> {
         !stage.prim("/Sets")?.is_valid()?,
         "the open-time mute drops the sublayer"
     );
+    Ok(())
+}
+
+/// `package.usdz` holding `root.usda`, `sub/a.usda` (whose `/P` references
+/// the search path `x.usda`), and the `x.usda` entries `extra` names, each
+/// defining `/X.probe` as its value. A package written over another is
+/// dated after it, so a reload reads it however coarse the file times.
+fn write_search_package(path: &FsPath, extra: &[(&str, i32)]) -> Result<()> {
+    let before = fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let mut writer = ArchiveWriter::create(path)?;
+    writer.add_layer("root.usda", b"#usda 1.0\n")?;
+    writer.add_layer(
+        "sub/a.usda",
+        b"#usda 1.0\ndef \"P\" (\n    references = @x.usda@</X>\n) {}\n",
+    )?;
+    for (name, probe) in extra {
+        let layer = format!("#usda 1.0\ndef \"X\" {{\n    custom int probe = {probe}\n}}\n");
+        writer.add_layer(name, layer.as_bytes())?;
+    }
+    writer.finish()?;
+    if let Some(before) = before {
+        fs::File::options()
+            .write(true)
+            .open(path)?
+            .set_modified(before + Duration::from_secs(2))?;
+    }
+    Ok(())
+}
+
+/// A stage whose `/P` references `/P` of `sub/a.usda` in the package at
+/// `package`.
+fn search_stage(dir: &FsPath, package: &FsPath) -> Result<Stage> {
+    let root = dir.join("root.usda");
+    let reference = ar::join_package_relative_path(&package.to_string_lossy(), "sub/a.usda");
+    fs::write(
+        &root,
+        format!("#usda 1.0\ndef \"P\" (\n    references = @{reference}@</P>\n) {{}}\n"),
+    )?;
+    Stage::open(root.to_str().unwrap())
+}
+
+/// A package that gains the entry a search path prefers retargets the
+/// reference on a reload.
+#[test]
+fn package_entry_added() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let package = dir.path().join("package.usdz");
+    write_search_package(&package, &[("x.usda", 1)])?;
+    let stage = search_stage(dir.path(), &package)?;
+    assert_eq!(
+        stage.attribute("/P.probe")?.get::<i32>()?,
+        Some(1),
+        "beside the root layer"
+    );
+
+    write_search_package(&package, &[("x.usda", 1), ("sub/x.usda", 2)])?;
+    stage.reload()?;
+    assert_eq!(stage.attribute("/P.probe")?.get::<i32>()?, Some(2), "beside the layer");
+    Ok(())
+}
+
+/// A search path no entry of its package answered resolves once a reload
+/// finds the entry added.
+#[test]
+fn missing_candidate_appears() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let package = dir.path().join("package.usdz");
+    write_search_package(&package, &[])?;
+    let stage = search_stage(dir.path(), &package)?;
+    assert_eq!(stage.attribute("/P.probe")?.get::<i32>()?, None, "x.usda is nowhere");
+
+    write_search_package(&package, &[("sub/x.usda", 2)])?;
+    stage.reload()?;
+    assert_eq!(stage.attribute("/P.probe")?.get::<i32>()?, Some(2));
+    Ok(())
+}
+
+/// A package that loses the entry a search path named falls back beside
+/// its root layer on a reload.
+#[test]
+fn package_entry_removed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let package = dir.path().join("package.usdz");
+    write_search_package(&package, &[("x.usda", 1), ("sub/x.usda", 2)])?;
+    let stage = search_stage(dir.path(), &package)?;
+    assert_eq!(stage.attribute("/P.probe")?.get::<i32>()?, Some(2));
+
+    write_search_package(&package, &[("x.usda", 1)])?;
+    // The layer the entry held no longer resolves, which the reload reports
+    // once the rest have reloaded.
+    let reloaded = stage.reload();
+    assert!(
+        matches!(reloaded, Err(openusd::Error::UnresolvedAsset(_))),
+        "{reloaded:?}"
+    );
+    assert_eq!(stage.attribute("/P.probe")?.get::<i32>()?, Some(1));
     Ok(())
 }
 

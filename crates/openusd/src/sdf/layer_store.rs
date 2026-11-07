@@ -397,10 +397,11 @@ impl LayerHandle {
     /// A package whose listing changed brings every live layer in it into
     /// the batch, reloaded when its asset changed, and the layers holding a
     /// package in common reload as one group, together with the packages'
-    /// listings. Every group is tried: one with a layer that cannot be read
-    /// is left as it is whole, and the first such failure is returned once
-    /// the other groups have reloaded. A layer in no package is a group of
-    /// its own.
+    /// listings. Every group is tried: one with a layer whose asset cannot
+    /// be read is left as it is whole, while a layer whose identifier no
+    /// longer resolves is left as it is alone, and the first failure is
+    /// returned once the rest have reloaded. A layer in no package is a group
+    /// of its own.
     ///
     /// A borrowed layer the reload would leave as it is (no unsaved edits, and
     /// its asset unchanged unless `force`) does not stop the batch.
@@ -442,6 +443,8 @@ impl LayerHandle {
         // Whether the packages were listed anew, which a batch with nothing
         // to read leaves alone.
         let mut listed = false;
+        // The packages whose listings changed.
+        let mut changed = HashSet::new();
         {
             let read = store.read()?;
             for handle in &unique {
@@ -464,6 +467,7 @@ impl LayerHandle {
                     held: read.held_by(handle).to_vec(),
                     packages: Vec::new(),
                     step,
+                    package_changed: false,
                 });
             }
             let resolver = members
@@ -488,7 +492,7 @@ impl LayerHandle {
                     })
                     .map(|package| outermost_package(package))
                     .collect();
-                let changed: HashSet<String> = read
+                changed = read
                     .packages_within(&outermost)
                     .into_iter()
                     .chain(
@@ -524,21 +528,27 @@ impl LayerHandle {
                         packages: held_packages(layer.real_path(), &mut listing),
                         handle,
                         step,
+                        package_changed: false,
                     });
                 }
             }
         }
         let mut groups = Groups::default();
-        for member in &members {
-            groups.join(
-                member
-                    .held
-                    .iter()
-                    .chain(member.packages.iter().map(|(package, _)| package)),
-            );
+        for member in &mut members {
+            let packages = member
+                .held
+                .iter()
+                .chain(member.packages.iter().map(|(package, _)| package));
+            member.package_changed = packages.clone().any(|package| changed.contains(package));
+            groups.join(packages);
         }
-        for &(member, _) in &failed {
-            groups.fail(member);
+        // A layer whose identifier no longer resolves is left as it is
+        // alone. Any other failure to tell whether a layer reloads, a moved
+        // asset among them, leaves its group whole.
+        for (member, error) in &failed {
+            if !matches!(error, crate::Error::UnresolvedAsset(_)) {
+                groups.fail(*member);
+            }
         }
         // The first failure in the order the batch names the layers, whichever
         // check found it.
@@ -548,21 +558,26 @@ impl LayerHandle {
                 .min_by_key(|&(member, _)| member)
                 .map(|(_, error)| error)
         };
-        // A layer brought in that is borrowed stays as it is. A batch that
-        // would change a borrowed layer it was asked for fails here, before
-        // any asset's content is read.
-        for member in members
-            .iter_mut()
-            .filter(|member| !member.asked && member.step.is_some())
-        {
-            if store.ensure_editable(&[&member.handle]).is_err() {
+        // A layer brought in that is borrowed stays as it is, unless its
+        // package changed: a layer the report of that cannot reach would
+        // anchor against listings it no longer matches, so its group stays as
+        // it was. A batch that would change a borrowed layer it was asked for
+        // fails here, before any asset's content is read.
+        for (at, member) in members.iter_mut().enumerate() {
+            // A layer asked for is checked with the batch below.
+            let edited = member.step.is_some() || member.package_changed;
+            if !member.asked && edited && store.ensure_editable(&[&member.handle]).is_err() {
                 member.step = None;
+                if member.package_changed {
+                    groups.fail(at);
+                    failed.push((at, LayerError::Busy.into()));
+                }
             }
         }
         let changing: Vec<&LayerHandle> = members
             .iter()
             .enumerate()
-            .filter(|(at, member)| member.step.is_some() && !groups.failed(*at))
+            .filter(|(at, member)| (member.step.is_some() || member.package_changed) && !groups.failed(*at))
             .map(|(_, member)| &member.handle)
             .collect();
         store.ensure_editable(&changing)?;
@@ -591,9 +606,16 @@ impl LayerHandle {
             if groups.failed(at) {
                 continue;
             }
-            if let Some(Step::Read(reload)) = member.step.take() {
+            let reload = if let Some(Step::Read(reload)) = member.step.take() {
+                Some(reload)
+            } else {
+                None
+            };
+            // A layer of a package whose listing changed reports the change,
+            // whether or not its own content changed.
+            if reload.is_some() || member.package_changed {
                 targets.push(&member.handle);
-                contents.push(reload);
+                contents.push((reload, member.package_changed));
             }
             if listed && (!member.held.is_empty() || !member.packages.is_empty()) {
                 relisted.push((member.handle.token.key, mem::take(&mut member.packages)));
@@ -603,20 +625,25 @@ impl LayerHandle {
         if targets.is_empty() {
             return failed.map_or(Ok(false), Err);
         }
+        // A sink offered the commit, and an observer of it, find the packages
+        // listed anew; a commit that fails leaves them as they were.
+        let mut restore = Relisted {
+            store,
+            previous: Some(store.relist(relisted)),
+        };
         let committed = store.commit(&targets, TxnContext::new(None), |edits| {
-            for (edit, reload) in edits.iter_mut().zip(contents) {
-                edit.reload(reload);
+            for (edit, (reload, package_changed)) in edits.iter_mut().zip(contents) {
+                if let Some(reload) = reload {
+                    edit.reload(reload);
+                }
+                if package_changed {
+                    edit.package_changed();
+                }
             }
             Ok::<_, LayerError>(())
-        })?;
-        // An observer of the reload finds its packages listed anew.
-        //
-        // TODO: a listing that changed does not invalidate what composition
-        // anchored from it: a search path a layer in the package authors can
-        // now name another entry. Carry a package change on the change list
-        // of every live layer holding the package, the layers not reloaded
-        // among them, and have composition treat it as significant.
-        store.relist(relisted);
+        });
+        let committed = committed?;
+        restore.previous = None;
         store.deliver(committed);
         failed.map_or(Ok(true), Err)
     }
@@ -951,14 +978,32 @@ impl LayerStore {
     }
 
     /// Have each reloaded layer `relisted` names hold the packages listed
-    /// beside it, in place of those it held (see [`held_packages`]).
-    fn relist(&self, relisted: Vec<(SlotKey, PackageListings)>) {
+    /// beside it, in place of those it held (see [`held_packages`]),
+    /// returning what each held before, which restores it.
+    fn relist(&self, relisted: Vec<(SlotKey, PackageListings)>) -> Vec<(SlotKey, PackageListings)> {
         let Ok(mut slots) = self.slots_mut() else {
-            return;
+            return Vec::new();
         };
+        // Every layer's listings are taken before any changes: layers holding
+        // one package share its listing.
+        let previous = relisted
+            .iter()
+            .map(|&(key, _)| {
+                let held = slots.entry(key).map(|entry| entry.packages.clone()).unwrap_or_default();
+                let listings = held
+                    .into_iter()
+                    .map(|package| {
+                        let meta = slots.packages.get(&package).and_then(|held| held.meta.clone());
+                        (package, meta)
+                    })
+                    .collect();
+                (key, listings)
+            })
+            .collect();
         for (key, packages) in relisted {
             slots.relist(key, packages);
         }
+        previous
     }
 
     /// Hold the store's sweeps until the returned guard drops (see
@@ -1405,6 +1450,23 @@ impl<T: ?Sized> DerefMut for HeldMut<'_, T> {
     }
 }
 
+/// Package listings a reload installed ahead of its commit, restored when
+/// it drops unless the commit landed: a veto, a borrow conflict, or a panic
+/// in a sink leaves the listings as they were.
+struct Relisted<'a> {
+    store: &'a LayerStore,
+    /// What the layers held before, until the commit lands.
+    previous: Option<Vec<(SlotKey, PackageListings)>>,
+}
+
+impl Drop for Relisted<'_> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            self.store.relist(previous);
+        }
+    }
+}
+
 /// One layer of a reload batch.
 struct Member {
     /// Whether the layer was asked for, rather than brought in by a package
@@ -1419,6 +1481,9 @@ struct Member {
     packages: PackageListings,
     /// How far its reload has come, `None` when it does not reload.
     step: Option<Step>,
+    /// Whether a package it holds changed what it holds, which the reload
+    /// reports to it ([`ChangeList::did_change_package`](super::ChangeList::did_change_package)).
+    package_changed: bool,
 }
 
 /// How far a reload batch's layer has come.

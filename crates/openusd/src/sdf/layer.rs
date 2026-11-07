@@ -117,6 +117,9 @@ pub struct Layer {
     /// What the reload being staged read of the asset, applied when its edit
     /// commits ([`LayerEdit::reload`]).
     reloading: Option<Reloaded>,
+    /// Whether the edit being staged reports a change of a package the layer
+    /// lies in ([`LayerEdit::package_changed`]).
+    package_changed: bool,
 }
 
 /// A reload of a layer from its asset ([`Layer::read_due`]): the edits
@@ -299,6 +302,7 @@ impl Layer {
             unsaved: false,
             modified: AssetTime::Unread,
             reloading: None,
+            package_changed: false,
         }
     }
 
@@ -331,6 +335,7 @@ impl Layer {
     fn rollback(&mut self) {
         self.data.rollback();
         self.reloading = None;
+        self.package_changed = false;
     }
 
     /// Author a batch of edits as one atomic unit: run `f` against the layer's
@@ -394,6 +399,7 @@ impl Layer {
     fn veto(&mut self, txn: &TxnContext) -> Result<(), sink::Error> {
         self.changes.update(&self.data);
         self.changes.set_reloaded(self.reloading.is_some());
+        self.changes.set_package_changed(self.package_changed);
         if !self.changes.is_empty() && !self.sinks.is_empty() {
             let change = self.pending_change(txn);
             self.sinks.iter().try_for_each(|sink| sink.before_commit(&change))?;
@@ -1279,6 +1285,12 @@ impl LayerEdit<'_> {
         self.layer.reloading = Some(reload.reloaded);
     }
 
+    /// Report, with this edit, that a package the layer lies in changed
+    /// what it holds ([`ChangeList::did_change_package`]).
+    pub(crate) fn package_changed(&mut self) {
+        self.layer.package_changed = true;
+    }
+
     /// Remove the spec at `path`. Removing a prim also erases its descendant specs
     /// and drops the leaf name from the owning prim's child-name list. Returns
     /// `Ok(true)` when a spec was present and removed.
@@ -1549,7 +1561,10 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
     // handed on, so the whole group's data lands together.
     let changed = guard.targets.iter().any(|target| !target.layer.changes.is_empty());
     for TargetLayer { layer, .. } in guard.targets.iter_mut() {
-        layer.unsaved |= !layer.changes.is_empty();
+        // A change of a package the layer lies in leaves its content as it
+        // was.
+        layer.unsaved |= !layer.changes.entries().is_empty();
+        layer.package_changed = false;
         layer.data.commit();
         // A reload leaves the layer as its asset holds it, so saved.
         if let Some(reloaded) = layer.reloading.take() {

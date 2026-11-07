@@ -40,6 +40,9 @@ pub struct ChangeList {
     /// Whether the edit reloaded the layer's content from its asset
     /// ([`did_reload_content`](Self::did_reload_content)).
     reloaded: bool,
+    /// Whether a package the layer lies in changed what it holds
+    /// ([`did_change_package`](Self::did_change_package)).
+    package_changed: bool,
 }
 
 /// Per-path summary of changes.
@@ -213,10 +216,10 @@ impl ChangeList {
         Self::default()
     }
 
-    /// Returns `true` if no entries were recorded and the layer was not
-    /// reloaded.
+    /// Returns `true` if no entries were recorded, the layer was not
+    /// reloaded, and no package it lies in changed.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && !self.reloaded
+        self.entries.is_empty() && !self.reloaded && !self.package_changed
     }
 
     /// Whether the edit reloaded the layer's content from its asset (C++
@@ -230,6 +233,19 @@ impl ChangeList {
     /// Sets whether the edit is a reload of the layer's content.
     pub(crate) fn set_reloaded(&mut self, reloaded: bool) {
         self.reloaded = reloaded;
+    }
+
+    /// Whether a package the layer lies in, or one its package's root
+    /// layer descends through, changed what it holds: an asset path the
+    /// layer authors may name another entry than before, whether or not the
+    /// layer's own content changed.
+    pub fn did_change_package(&self) -> bool {
+        self.package_changed
+    }
+
+    /// Sets whether a package the layer lies in changed what it holds.
+    pub(crate) fn set_package_changed(&mut self, changed: bool) {
+        self.package_changed = changed;
     }
 
     /// Returns the authored entries in insertion order.
@@ -271,13 +287,15 @@ impl ChangeList {
             }
         }
         self.reloaded |= other.reloaded;
+        self.package_changed |= other.package_changed;
     }
 
-    /// Discard all recorded entries and the reload mark, retaining the
-    /// backing allocation.
+    /// Discard all recorded entries and the reload and package marks,
+    /// retaining the backing allocation.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.reloaded = false;
+        self.package_changed = false;
     }
 
     /// Derive a composition-invalidation record from `cow`'s staged overlay,
