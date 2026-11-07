@@ -2921,10 +2921,11 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
 }
 
 /// A reference authored inside a `.usdz` package targets a sibling layer that
-/// is not present in the archive: the missing entry is unresolved (not merely
-/// unreadable), so composition reports
-/// [`UnresolvedLayer`](pcp::CompositionDiagnostic::UnresolvedLayer) and the rest of the prim
-/// still composes.
+/// is not present in the archive: the search path falls through to the
+/// resolver, as C++ `SdfComputeAssetPathRelativeToLayer` does, finds nothing,
+/// and composition reports
+/// [`UnresolvedLayer`](pcp::CompositionDiagnostic::UnresolvedLayer) while the
+/// rest of the prim still composes.
 #[test]
 fn lazy_ref_inside_usdz_missing() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -2949,7 +2950,7 @@ fn lazy_ref_inside_usdz_missing() -> Result<()> {
     assert!(
         stage.composition_errors().iter().any(|error| matches!(
             error,
-            pcp::CompositionDiagnostic::UnresolvedLayer { asset_path, .. } if asset_path.ends_with("other.usda]")
+            pcp::CompositionDiagnostic::UnresolvedLayer { asset_path, .. } if asset_path == "other.usda"
         )),
         "expected UnresolvedLayer for the missing in-package target, got {:?}",
         stage.composition_errors()

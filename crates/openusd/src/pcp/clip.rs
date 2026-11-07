@@ -2107,7 +2107,7 @@ pub(crate) fn asset_input<'a>(set: &'a HashMap<String, Value>, field: &str) -> O
 /// bare spelling, looked up among every layer the graph holds, settles the
 /// rest: keying such a clip by its anchored form would leave it unreadable, and would key its
 /// registrations under a name no edit to it is ever reported with.
-fn clip_identifier(graph: &LayerGraph, asset_path: &str, anchor_layer: LayerId) -> String {
+fn clip_identifier(graph: &LayerView<'_>, asset_path: &str, anchor_layer: LayerId) -> String {
     let anchored = graph.absolute_path(anchor_layer, asset_path);
     if graph.id_of(&anchored).is_some() {
         return anchored;

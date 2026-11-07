@@ -415,9 +415,10 @@ impl LayerRegistry {
         self.store().insert(layer, packages)
     }
 
-    /// What the package `package` holds, while a layer open here lies in it,
-    /// a package nested in another named by its packaged path
-    /// (`outer.usdz[inner.usdz]`). Fails with
+    /// What the package `package` holds, a package nested in another named
+    /// by its packaged path (`outer.usdz[inner.usdz]`), while a layer open
+    /// here lies in it or in a package whose root layer descends into it.
+    /// Fails with
     /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
     /// edit on this registry.
     pub fn package_meta(&self, package: &str) -> Result<Option<sdf::PackageMeta>, sdf::LayerError> {
@@ -426,37 +427,21 @@ impl LayerRegistry {
         };
         Ok(store
             .read()?
-            .package_meta(package)
+            .package(package)
+            .and_then(|held| held.meta())
             .map(|meta| sdf::PackageMeta::clone(meta)))
     }
 
-    /// The packages a layer read from `real_path` lies in, outermost first,
-    /// each with what it holds: the meta the store holds, or else the one its
-    /// format lists. Empty while the store is borrowed, where holding the
-    /// layer fails.
-    fn package_metas(&self, real_path: &str) -> Vec<(String, Option<Rc<sdf::PackageMeta>>)> {
-        let packages = ar::enclosing_packages(real_path);
-        let mut packages: Vec<_> = match self.held() {
-            None => packages.into_iter().map(|package| (package, None)).collect(),
-            Some(store) => {
-                // The read ends before the formats run resolver code.
-                let Ok(read) = store.read() else {
-                    return Vec::new();
-                };
-                packages
-                    .into_iter()
-                    .map(|package| {
-                        let held = read.package_meta(&package).cloned();
-                        (package, held)
-                    })
-                    .collect()
-            }
-        };
-        let _scope = ar::CacheScope::begin();
-        for (package, meta) in packages.iter_mut().filter(|(_, meta)| meta.is_none()) {
-            *meta = Self::list_package(&*self.resolver, package).map(Rc::new);
+    /// The packages a layer read from `real_path` holds
+    /// ([`sdf::held_packages`]), outermost first, each with what it holds:
+    /// the listing the store holds, or else the one its format reads. Empty
+    /// while the store is borrowed, where holding the layer fails.
+    fn package_metas(&self, real_path: &str) -> sdf::PackageListings {
+        let store = self.held();
+        if store.as_ref().is_some_and(|store| store.read().is_err()) {
+            return Vec::new();
         }
-        packages
+        sdf::held_packages(real_path, &mut sdf::ReadListing::new(&*self.resolver, store.as_deref()))
     }
 
     /// What the package at `package` holds, listed by the format its
@@ -602,6 +587,26 @@ impl LayerRegistry {
             });
         }
         Ok(format)
+    }
+
+    /// `asset_path`, authored in a layer anchored at `anchor`, as an
+    /// identifier through this registry ([`sdf::absolute_path_at`]), the
+    /// packages its rules read listed as the registry holds them, or else
+    /// from their assets.
+    pub(crate) fn absolute_path(&self, anchor: Option<&ar::ResolvedPath>, asset_path: &str) -> String {
+        let store = self.held();
+        sdf::absolute_path_with(
+            self,
+            anchor,
+            asset_path,
+            &mut sdf::ReadListing::new(self, store.as_deref()),
+        )
+    }
+
+    /// Whether the format claiming `ext` reads packages
+    /// ([`FileFormat::is_package`](sdf::FileFormat::is_package)).
+    pub(crate) fn is_package(ext: &str) -> bool {
+        Self::find_by_extension(ext).is_some_and(|format| format.is_package())
     }
 
     /// Find the format with the given [`format_id`](sdf::FileFormat::format_id),
@@ -926,7 +931,7 @@ impl LayerRegistry {
                 sub_path
             };
 
-            let sub_id = sdf::absolute_path_at(self, anchor.as_ref(), &sub_asset);
+            let sub_id = self.absolute_path(anchor.as_ref(), &sub_asset);
             // A sublayer already opened this pass is skipped, and so is one the
             // caller excludes. One the caller holds is skipped too, except in a
             // reload pass, where it is re-walked to reach the `${VAR}` sublayers

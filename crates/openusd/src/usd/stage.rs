@@ -4908,7 +4908,7 @@ impl StageBuilder {
         let mut muted: HashSet<String> = self
             .muted
             .iter()
-            .map(|m| sdf::absolute_path_at(&self.registry, anchor, m))
+            .map(|m| self.registry.absolute_path(anchor, m))
             .collect();
         muted.remove(&root.identifier);
         muted.remove(root.handle.identifier());
@@ -5009,7 +5009,7 @@ impl StageBuilder {
     fn mutes(&self, root: Option<&ar::ResolvedPath>, identifier: &str) -> bool {
         self.muted
             .iter()
-            .any(|m| sdf::absolute_path_at(&self.registry, root, m) == identifier)
+            .any(|m| self.registry.absolute_path(root, m) == identifier)
     }
 
     /// The stage root stack's single expression-variable context (C++

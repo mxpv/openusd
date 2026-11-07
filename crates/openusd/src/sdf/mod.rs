@@ -13,6 +13,7 @@ use strum::FromRepr;
 use crate::tf::Token;
 use crate::vt::{Dictionary, Value};
 
+mod anchor;
 mod asset_path;
 mod change;
 mod commit;
@@ -34,6 +35,7 @@ mod spec;
 mod unit;
 mod value_type;
 
+pub(crate) use anchor::{HeldListing, ReadListing, absolute_path_at, absolute_path_with, held_packages};
 pub use asset_path::AssetPath;
 pub(crate) use asset_path::{
     AssetExpressionFailure, AssetOutcome, anchor_asset_paths, evaluate_asset_paths, holds_asset_expression,
@@ -57,11 +59,13 @@ pub use layer::{
     AuthoringError, CommittedLayerChange, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId,
     PendingLayerChange, default_prim_path,
 };
-pub(crate) use layer::{TargetLayer, absolute_path_at, dry_run_layers, edit_layers};
+pub(crate) use layer::{TargetLayer, dry_run_layers, edit_layers};
 pub use layer_registry::LayerRegistry;
 pub(crate) use layer_registry::{LoadedLayer, PreparedLayer, Presence};
 pub use layer_store::{AdoptError, LayerError, LayerGuard, LayerHandle};
-pub(crate) use layer_store::{Held, HeldCell, HeldMut, LayerStore, StoreRead, Subscription, SweepHold};
+pub(crate) use layer_store::{
+    Held, HeldCell, HeldMut, LayerStore, PackageListings, StoreRead, Subscription, SweepHold,
+};
 pub use ordering::{apply_ordering, element_cmp, order_properties, reorder};
 pub use path::{
     IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,

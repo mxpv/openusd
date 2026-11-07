@@ -1094,7 +1094,7 @@ impl LayerGraph {
                 .anchored_or_bare(anchored, sub_path)
                 .ok_or_else(|| anchored.clone());
         }
-        let anchored = self.absolute_path(parent, sub_path);
+        let anchored = self.read_view().absolute_path(parent, sub_path);
         let Some(resolved) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
@@ -1334,7 +1334,7 @@ impl LayerGraph {
                 // rebuild). A recorded resolve failure is retried once the
                 // resolver finds the asset; any other failure is regenerated
                 // per referrer.
-                let anchored = self.absolute_path(demand.parent, &demand.evaluated);
+                let anchored = self.read_view().absolute_path(demand.parent, &demand.evaluated);
                 match self.failed_loads.get(&anchored) {
                     Some(LoadFailure::Unresolved) if self.registry.resolve(&anchored).is_some() => {
                         self.failed_loads.remove(&anchored);
@@ -1880,12 +1880,6 @@ impl LayerGraph {
         self.nodes[&anchor?].handle.anchor_location()
     }
 
-    /// `asset_path`, authored in the layer `anchor`, as an identifier through
-    /// the graph's registry (C++ `SdfComputeAssetPathRelativeToLayer`).
-    pub(crate) fn absolute_path(&self, anchor: LayerId, asset_path: &str) -> String {
-        sdf::absolute_path_at(&self.registry, self.anchor_location(Some(anchor)), asset_path)
-    }
-
     /// Records that an on-demand open of `asset_path` failed, so composition
     /// stops demanding it and reports it — [`MalformedLayer`](CompositionDiagnostic::MalformedLayer)
     /// at a reference/payload arc, a per-referrer sublayer diagnostic at each
@@ -2404,7 +2398,7 @@ impl LayerGraph {
         let demands = self.requeue_failed_sublayers();
         let mut forgotten = HashSet::new();
         for demand in &demands {
-            let asset = self.absolute_path(demand.parent, &demand.evaluated);
+            let asset = self.read_view().absolute_path(demand.parent, &demand.evaluated);
             if self.failed_loads.remove(&asset).is_some() {
                 forgotten.insert(asset);
             }
@@ -2974,7 +2968,7 @@ impl LayerGraph {
     /// on-demand loader opens a sublayer demand at, and the key load failures
     /// and open attempts are recorded by.
     pub(crate) fn resolve_relative(&self, asset_path: &str, anchor: LayerId) -> Result<LayerId, String> {
-        let anchored = self.absolute_path(anchor, asset_path);
+        let anchored = self.read_view().absolute_path(anchor, asset_path);
         self.anchored_or_bare(&anchored, asset_path)
             .map(|(id, _)| id)
             .ok_or(anchored)
@@ -3430,12 +3424,14 @@ impl LayerGraph {
     /// `(path, anchor)`, independent of which layers are currently loaded — so the
     /// same physical layer never keys under different strings by load order.
     ///
-    /// The path is anchored by [`sdf::absolute_path_at`].
+    /// The path is anchored by [`sdf::absolute_path_with`] over the package
+    /// listings the store holds, as composition anchors.
     fn canonical_muted_id(&self, path: &str, anchor: Option<&ResolvedPath>) -> String {
         if anchor.is_none() {
             return path.to_string();
         }
-        sdf::absolute_path_at(&self.registry, anchor, path)
+        let view = self.read_view();
+        sdf::absolute_path_with(&self.registry, anchor, path, &mut sdf::HeldListing(&view.store))
     }
 }
 
@@ -3501,6 +3497,19 @@ impl<'a> LayerView<'a> {
 }
 
 impl LayerView<'_> {
+    /// `asset_path`, authored in the layer `anchor`, as an identifier through
+    /// the graph's registry (C++ `SdfComputeAssetPathRelativeToLayer`). The
+    /// packages its rules read are those the store holds beside `anchor`, so
+    /// no asset is read.
+    pub(crate) fn absolute_path(&self, anchor: LayerId, asset_path: &str) -> String {
+        sdf::absolute_path_with(
+            &self.registry,
+            self.anchor_location(Some(anchor)),
+            asset_path,
+            &mut sdf::HeldListing(&self.store),
+        )
+    }
+
     /// The layer the graph's registry holds under `identifier`, or, with
     /// `real_path`, the one it read from that location, whether or not the
     /// graph names it.

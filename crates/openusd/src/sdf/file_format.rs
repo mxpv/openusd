@@ -213,6 +213,13 @@ pub trait FileFormat: Sync {
         None
     }
 
+    /// The entry of the package `meta` lists that is its root layer (C++
+    /// `SdfFileFormat::GetPackageRootLayerPath`), or `None` for a format
+    /// that is no package or a package with no entries.
+    fn package_root<'m>(&self, _meta: &'m PackageMeta) -> Option<&'m str> {
+        None
+    }
+
     /// Whether this format can read an asset whose leading bytes are `prefix`
     /// (C++ `SdfFileFormat::CanRead`). Used to disambiguate an extension claimed
     /// by more than one format — binary vs text `.usd` — by content. The default
@@ -240,8 +247,7 @@ pub trait FileFormat: Sync {
 }
 
 /// What one package holds, at one level of nesting: the names of its
-/// entries, in the order they are stored, and its root entry
-/// ([`FileFormat::package_meta`]).
+/// entries, in the order they are stored ([`FileFormat::package_meta`]).
 ///
 /// A package nested in another has a meta of its own, keyed by its
 /// packaged path (`outer.usdz[inner.usdz]`).
@@ -249,9 +255,6 @@ pub trait FileFormat: Sync {
 pub struct PackageMeta {
     /// The entry names, in the order they are stored.
     pub entries: Vec<String>,
-    /// The entry the package's root layer is, `None` where the first entry
-    /// stored names no layer format.
-    pub root: Option<String>,
 }
 
 /// What [`FileFormat::write_bytes`] produces: the serialized bytes and, for

@@ -27,8 +27,8 @@ use crate::ar;
 
 use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
 use super::{
-    AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerRegistry, LayerSink, LayerSinkId,
-    PackageMeta, TargetLayer, dry_run_layers, edit_layers, sink,
+    AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId, PackageMeta,
+    ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
 };
 
 /// A failure to read, edit or add a layer of a
@@ -164,14 +164,18 @@ struct Slots {
     packages: HashMap<String, HeldPackage>,
 }
 
-/// A package's meta and the slots of the layers that lie in it.
-struct HeldPackage {
+/// A package's listing and the slots of the layers that hold it.
+pub(crate) struct HeldPackage {
     /// What the package holds, `None` while no listing of it has succeeded.
     meta: Option<Rc<PackageMeta>>,
-    /// The filled slots whose layers lie in the package, live or awaiting a
+    /// The filled slots whose layers hold the package, live or awaiting a
     /// sweep.
     layers: Vec<u32>,
 }
+
+/// The packages a layer holds, each with its listing where one was read
+/// ([`held_packages`]).
+pub(crate) type PackageListings = Vec<(String, Option<Rc<PackageMeta>>)>;
 
 /// One arena slot: the epoch it is in, and its layer while it is filled.
 #[derive(Default)]
@@ -451,11 +455,16 @@ impl LayerHandle {
         store.ensure_editable(&changing)?;
         let mut targets = Vec::new();
         let mut reloads = Vec::new();
-        // What each package a reloaded layer lies in holds now, listed once
-        // per package.
-        let mut listed = HashMap::new();
+        // The packages each reloaded layer holds now (`held_packages`), each
+        // listed anew.
+        let mut relisted = Vec::new();
         {
             let read = store.read()?;
+            // One listing for the batch, so a package several reloaded
+            // layers hold is read once: a store's layers share a resolver.
+            let mut listing = None;
+            // The packages the reloaded layers held and hold.
+            let mut touched = HashSet::new();
             // TODO(rayon): each layer's read and diff is independent of the
             // others'.
             for (at, handle, due) in due {
@@ -463,16 +472,26 @@ impl LayerHandle {
                 match layer.read_due(due) {
                     Ok(reload) => {
                         if let Some(resolver) = layer.resolver() {
-                            for package in ar::enclosing_packages(layer.real_path()) {
-                                listed
-                                    .entry(package)
-                                    .or_insert_with_key(|package| LayerRegistry::list_package(&**resolver, package));
-                            }
+                            let listing = listing.get_or_insert_with(|| ReadListing::new(&**resolver, None));
+                            let packages = held_packages(layer.real_path(), listing);
+                            touched.extend(read.held_by(handle).iter().cloned());
+                            touched.extend(packages.iter().map(|(package, _)| package.clone()));
+                            relisted.push((handle.token.key, packages));
                         }
                         targets.push(handle);
                         reloads.push(reload);
                     }
                     Err(error) => failed.push((at, error)),
+                }
+            }
+            // Another live layer in a package listed anew reads its root
+            // chain from the new listing too.
+            if let Some(listing) = listing.as_mut() {
+                let reloaded: HashSet<SlotKey> = relisted.iter().map(|&(key, _)| key).collect();
+                for (key, layer) in read.holders(&touched) {
+                    if !reloaded.contains(&key) {
+                        relisted.push((key, held_packages(layer.real_path(), listing)));
+                    }
                 }
             }
         }
@@ -487,7 +506,13 @@ impl LayerHandle {
             Ok::<_, LayerError>(())
         })?;
         // An observer of the reload finds its packages listed anew.
-        store.relist(listed);
+        //
+        // TODO: a listing that changed does not invalidate what composition
+        // anchored from it: a search path a layer in the package authors can
+        // now name another entry. Carry a package change on the change list
+        // of every live layer holding the package, the layers not reloaded
+        // among them, and have composition treat it as significant.
+        store.relist(relisted);
         store.deliver(committed);
         failed.map_or(Ok(true), Err)
     }
@@ -655,12 +680,46 @@ impl StoreRead<'_> {
         Some(&entry.layer)
     }
 
-    /// What the package `package` holds, while a live layer lies in it.
-    pub(crate) fn package_meta(&self, package: &str) -> Option<&Rc<PackageMeta>> {
+    /// The packages the layer `handle` names holds ([`held_packages`]).
+    pub(crate) fn held_by(&self, handle: &LayerHandle) -> &[String] {
+        &self
+            .slots
+            .as_ref()
+            .expect("a read holds its borrow until it drops")
+            .entry(handle.token.key)
+            .expect("a handle keeps its slot filled in its own store")
+            .packages
+    }
+
+    /// Each live layer that holds one of `packages`, by its slot.
+    pub(crate) fn holders(&self, packages: &HashSet<String>) -> Vec<(SlotKey, &Layer)> {
+        let slots = self.slots.as_ref().expect("a read holds its borrow until it drops");
+        let mut seen = HashSet::new();
+        packages
+            .iter()
+            .filter_map(|package| slots.packages.get(package))
+            .flat_map(|held| &held.layers)
+            .filter(|&&index| seen.insert(index))
+            .filter_map(|&index| {
+                let slot = &slots.slots[index as usize];
+                let entry = slot.entry.as_ref().filter(|entry| entry.token.strong_count() > 0)?;
+                Some((
+                    SlotKey {
+                        index,
+                        epoch: slot.epoch,
+                    },
+                    &*entry.layer,
+                ))
+            })
+            .collect()
+    }
+
+    /// The package `package`, while a live layer holds it.
+    pub(crate) fn package(&self, package: &str) -> Option<&HeldPackage> {
         self.slots
             .as_ref()
             .expect("a read holds its borrow until it drops")
-            .package_meta(package)
+            .package(package)
     }
 }
 
@@ -712,7 +771,7 @@ impl LayerStore {
     pub(crate) fn insert(
         self: &Rc<Self>,
         mut layer: Layer,
-        packages: Vec<(String, Option<Rc<PackageMeta>>)>,
+        packages: PackageListings,
     ) -> Result<LayerHandle, AdoptError> {
         self.sweep();
         let Ok(mut slots) = self.slots_mut() else {
@@ -752,17 +811,7 @@ impl LayerStore {
         });
         let mut held = Vec::new();
         for (package, meta) in packages {
-            // A package only dead layers lie in takes the new listing: the
-            // meta it has may predate a change.
-            let live = slots.package_meta(&package).is_some();
-            let entry = slots.packages.entry(package.clone()).or_insert(HeldPackage {
-                meta: None,
-                layers: Vec::new(),
-            });
-            if !live && meta.is_some() {
-                entry.meta = meta;
-            }
-            entry.layers.push(index);
+            slots.hold_package(package.clone(), meta, index, false);
             held.push(package);
         }
         slots.slots[index as usize].entry = Some(Entry {
@@ -795,17 +844,14 @@ impl LayerStore {
         self.with_layers(handles, |_| Ok(()))
     }
 
-    /// Replace the meta of each held package `listed` lists anew, after a
-    /// reload read layers in it again. A package whose listing failed keeps
-    /// the meta it has.
-    fn relist(&self, listed: HashMap<String, Option<PackageMeta>>) {
+    /// Have each reloaded layer `relisted` names hold the packages listed
+    /// beside it, in place of those it held (see [`held_packages`]).
+    fn relist(&self, relisted: Vec<(SlotKey, PackageListings)>) {
         let Ok(mut slots) = self.slots_mut() else {
             return;
         };
-        for (package, meta) in listed {
-            if let (Some(held), Some(meta)) = (slots.packages.get_mut(&package), meta) {
-                held.meta = Some(Rc::new(meta));
-            }
+        for (key, packages) in relisted {
+            slots.relist(key, packages);
         }
     }
 
@@ -963,8 +1009,8 @@ impl LayerStore {
 }
 
 impl Slots {
-    /// What the package `package` holds, while a live layer lies in it.
-    fn package_meta(&self, package: &str) -> Option<&Rc<PackageMeta>> {
+    /// The package `package`, while a live layer holds it.
+    fn package(&self, package: &str) -> Option<&HeldPackage> {
         let held = self.packages.get(package)?;
         let live = held.layers.iter().any(|&index| {
             self.slots[index as usize]
@@ -972,7 +1018,59 @@ impl Slots {
                 .as_ref()
                 .is_some_and(|entry| entry.token.strong_count() > 0)
         });
-        held.meta.as_ref().filter(|_| live)
+        live.then_some(held)
+    }
+
+    /// Record that the layer in slot `index` holds `package`, listed as
+    /// `meta`, a failed listing included. The listing replaces the one held
+    /// when `fresh`, read anew from the package, and where no live layer
+    /// holds the package, whose listing may predate a change. A live
+    /// package keeps its listing otherwise: the root chains its layers hold
+    /// were read from it.
+    fn hold_package(&mut self, package: String, meta: Option<Rc<PackageMeta>>, index: u32, fresh: bool) {
+        let replace = fresh || self.package(&package).is_none();
+        let held = self.packages.entry(package).or_insert(HeldPackage {
+            meta: None,
+            layers: Vec::new(),
+        });
+        if replace {
+            held.meta = meta;
+        }
+        // Only a relist can find the slot holding the package already.
+        if !(fresh && held.layers.contains(&index)) {
+            held.layers.push(index);
+        }
+    }
+
+    /// Record that the layer in slot `index` no longer holds `package`,
+    /// dropping a package no layer holds.
+    fn release_package(&mut self, package: &str, index: u32) {
+        if let Some(held) = self.packages.get_mut(package) {
+            held.layers.retain(|&layer| layer != index);
+            if held.layers.is_empty() {
+                self.packages.remove(package);
+            }
+        }
+    }
+
+    /// Have the layer in slot `key` hold `packages`, each read anew, in place
+    /// of those it holds.
+    fn relist(&mut self, key: SlotKey, packages: PackageListings) {
+        let Some(entry) = self.entry_mut(key) else {
+            return;
+        };
+        let old = mem::replace(
+            &mut entry.packages,
+            packages.iter().map(|(package, _)| package.clone()).collect(),
+        );
+        for package in &old {
+            if !packages.iter().any(|(held, _)| held == package) {
+                self.release_package(package, key.index);
+            }
+        }
+        for (package, meta) in packages {
+            self.hold_package(package, meta, key.index, true);
+        }
     }
 
     /// The slot of the live layer whose identifier is `identifier`, or, with
@@ -1056,14 +1154,17 @@ impl Slots {
         unindex(&mut self.by_identifier, entry.layer.identifier());
         unindex(&mut self.by_real_path, entry.layer.real_path());
         for package in &entry.packages {
-            if let Some(held) = self.packages.get_mut(package) {
-                held.layers.retain(|&layer| layer != key.index);
-                if held.layers.is_empty() {
-                    self.packages.remove(package);
-                }
-            }
+            self.release_package(package, key.index);
         }
         Some(entry)
+    }
+}
+
+impl HeldPackage {
+    /// What the package holds, or `None` where no listing of it succeeded:
+    /// a package that cannot be opened.
+    pub(crate) fn meta(&self) -> Option<&Rc<PackageMeta>> {
+        self.meta.as_ref()
     }
 }
 

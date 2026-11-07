@@ -448,7 +448,7 @@ impl<'a> Discoverer<'a> {
         };
         let registry = self.graph.layer_registry();
         let anchor = self.sources[referrer].content.anchor();
-        let anchored: &dyn Fn(&str) -> String = &|path| sdf::absolute_path_at(registry, anchor.as_ref(), path);
+        let anchored: &dyn Fn(&str) -> String = &|path| registry.absolute_path(anchor.as_ref(), path);
         // A search path anchors to the same spelling from every layer, so the
         // anchor is part of the key.
         let key = (anchor.clone(), anchored(path));
@@ -547,7 +547,7 @@ impl<'a> Discoverer<'a> {
     fn locate(&self, referrer: usize, path: &str, kind: AssetKind) -> Located {
         let registry = self.graph.layer_registry();
         let anchor = self.sources[referrer].content.anchor();
-        let anchored = |path: &str| sdf::absolute_path_at(registry, anchor.as_ref(), path);
+        let anchored = |path: &str| registry.absolute_path(anchor.as_ref(), path);
         let target = anchored(path);
         let set = self
             .udim_sets

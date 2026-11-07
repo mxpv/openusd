@@ -463,7 +463,7 @@ fn resolve_path(
     if asset.is_empty() || asset.evaluated_path() == Some("") || outcome != AssetOutcome::Evaluated {
         return (asset, outcome);
     }
-    let identifier = sdf::absolute_path_at(registry, anchor, asset.asset_path());
+    let identifier = registry.absolute_path(anchor, asset.asset_path());
     if let Some(resolved) = registry.resolve(&identifier) {
         asset.set_resolved_path(resolved.to_string_lossy().into_owned());
     }
@@ -486,7 +486,7 @@ fn anchor_path(
     let path = asset.evaluated_path().unwrap_or(asset.as_str());
     match anchor {
         Some(anchor) if !path.is_empty() && ar::is_relative_path(path) => {
-            AssetPath::new(sdf::absolute_path_at(registry, Some(anchor), path))
+            AssetPath::new(registry.absolute_path(Some(anchor), path))
         }
         _ => AssetPath::new(path),
     }
