@@ -20,13 +20,19 @@ mod writer;
 
 pub use package::{Package, PackageError, PackageStats, open_package, package_contains, package_entry, package_stats};
 pub use reader::Archive;
-pub(crate) use reader::is_layer_name;
+pub(crate) use reader::{is_layer_name, is_package_name};
 pub use writer::ArchiveWriter;
 
 use std::io::{self, Cursor};
 use std::str;
 
 use crate::{ar, sdf, tf, usda, usdc};
+
+/// How deep packages may nest, each as the first entry of the one around it,
+/// before the root layer they lead to is refused with
+/// [`ArchiveError::NestedTooDeep`]. Reading follows the chain one recursion
+/// per package, so the limit bounds the stack a crafted package can take.
+pub const MAX_NESTING: usize = 32;
 
 /// Error reading or writing a `.usdz` package ([`Archive`] /
 /// [`ArchiveWriter`]).
@@ -51,9 +57,15 @@ pub enum ArchiveError {
         source: Box<ArchiveError>,
     },
 
-    /// The archive holds no USD layer to serve as the package's default.
-    #[error("no USD layer found in USDZ archive")]
-    NoDefaultLayer,
+    /// The archive has no root layer: it holds no entry, or its first entry
+    /// names no layer format.
+    #[error("the USDZ archive has no root layer: its first entry is missing or not a USD layer")]
+    NoRootLayer,
+
+    /// The root layer sits in packages nested, each as the first entry of the
+    /// one around it, deeper than [`MAX_NESTING`].
+    #[error("the USDZ archive's root layer is nested in packages deeper than {MAX_NESTING}")]
+    NestedTooDeep,
 
     /// The writer refuses an unsafe or non-portable entry name.
     #[error("USDZ entry name {name:?} {reason}")]
@@ -131,7 +143,7 @@ pub struct UsdzFileFormat;
 /// Name of the single inner crate entry written into a `.usdz` package.
 ///
 /// `write` only sees the sink, not the destination filename, so the entry name
-/// is fixed; reading back is name-agnostic ([`Archive::read_first_layer`] takes
+/// is fixed; reading back is name-agnostic ([`Archive::read_root`] takes
 /// the first entry).
 const USDZ_LAYER_NAME: &str = "layer.usdc";
 
@@ -156,24 +168,37 @@ impl sdf::FileFormat for UsdzFileFormat {
     }
 
     fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
-        // A package is anchored to its default (first) packaged layer. A package
-        // nested in another (`pkg.usdz[inner.usdz]`) is anchored inside the
-        // innermost bracket, `pkg.usdz[inner.usdz[first.usdc]]`.
-        let package = resolved.to_string_lossy();
-        // A package that cannot be opened, or that lists no default layer, falls
-        // back to the bare package path so `read` surfaces the precise zip/parse
-        // error, rather than being demoted to an unresolved (missing) asset.
+        // A package is anchored to its root layer, its first entry, followed
+        // into a package nested there (`pkg.usdz[inner.usdz[root.usdc]]`, C++
+        // `_ExpandPackagePath`). A package nested in another
+        // (`pkg.usdz[inner.usdz]`) is anchored inside the innermost bracket.
         //
-        // Only the central directory is read to list the default layer,
-        // whatever the asset, and the package is the one the cache scope
-        // holds for the entry reads that follow.
-        let first = open_package(resolver, resolved)
-            .ok()
-            .and_then(|package| package.with(|archive| archive.first_layer_name().ok().flatten()));
-        Some(match first {
-            Some(first) => ar::ResolvedPath::new(ar::nest_packaged_path(&package, &first)),
-            None => resolved.clone(),
-        })
+        // A package that cannot be opened, or that has no root layer, is
+        // anchored at that package itself, so `read` reports its zip or parse
+        // error there and the asset counts as found. A chain nested deeper
+        // than `MAX_NESTING` is anchored at the package resolved, whose read
+        // counts the whole chain.
+        //
+        // Each level's central directory names its root entry. The cache
+        // scope holds every level's package for this lookup, and for the
+        // reads that follow when the caller's scope encloses it.
+        let _scope = ar::CacheScope::begin();
+        let mut package = resolved.clone();
+        for _ in 0..=MAX_NESTING {
+            let root = open_package(resolver, &package)
+                .ok()
+                .and_then(|opened| opened.with(|archive| archive.root_entry().ok().flatten()));
+            let Some(root) = root else {
+                return Some(package);
+            };
+            let nested = ar::ResolvedPath::new(ar::nest_packaged_path(&package.to_string_lossy(), &root));
+            if !is_package_name(&root) {
+                return Some(nested);
+            }
+            package = nested;
+        }
+        // Past the limit, the read of the whole chain refuses it.
+        Some(resolved.clone())
     }
 
     fn read_bytes(&self, bytes: ar::AssetBuffer, _source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
@@ -183,11 +208,11 @@ impl sdf::FileFormat for UsdzFileFormat {
         // even an I/O error comes from the cursor reading them and means the
         // package is truncated or corrupt.
         Archive::from_bytes(bytes)
-            .and_then(|mut archive| archive.read_first_layer())
+            .and_then(|mut archive| archive.read_root())
             .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
     }
 
-    /// Reads the default layer of the package at `resolved` from the
+    /// Reads the root layer of the package at `resolved` from the
     /// package [`open_package`] gives, which a cache scope shares with the
     /// lookups around this read.
     fn read(
@@ -203,7 +228,7 @@ impl sdf::FileFormat for UsdzFileFormat {
             _ => sdf::FormatError::Decode(Box::new(error)),
         })?;
         package
-            .with(|archive| archive.read_first_layer())
+            .with(|archive| archive.read_root())
             .map_err(|error| sdf::FormatError::Decode(Box::new(error)))
     }
 
@@ -353,7 +378,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Anchoring a bare package to its default layer reads the archive's
+    /// Anchoring a bare package to its root layer reads the archive's
     /// central directory, not the packaged entries.
     #[test]
     fn default_layer_central_directory() -> Result<()> {
@@ -437,7 +462,7 @@ pub(crate) mod tests {
         assert!(archive.contains("root.usda"));
         assert!(archive.contains("texture.bin"));
         assert!(!archive.contains("missing.usda"));
-        assert_eq!(archive.first_layer_name().unwrap().as_deref(), Some("root.usda"));
+        assert_eq!(archive.root_entry().unwrap().as_deref(), Some("root.usda"));
         let probed = read.load(Ordering::Relaxed);
         assert!(probed < size / 4, "the probes read {probed} of {size} bytes");
 
@@ -538,9 +563,9 @@ pub(crate) mod tests {
     }
 
     /// A `.usdz` holding another `.usdz`, as C++ reads one: a reference to the
-    /// inner package composes its default layer, the nested package path
+    /// inner package composes its root layer, the nested package path
     /// `outer.usdz[inner.usdz]` opens as a stage, and the raw archive reads the
-    /// nested entry's default layer.
+    /// nested entry's root layer.
     #[test]
     fn resolves_nested_package() -> Result<()> {
         let mut inner = ArchiveWriter::new(Cursor::new(Vec::new()));
@@ -576,6 +601,112 @@ pub(crate) mod tests {
             assert_eq!(resolver.resolve(&nested), None, "{nested}");
         }
         Ok(())
+    }
+
+    /// A package whose first entry is another package is anchored at that
+    /// package's root layer (C++ `_ExpandPackagePath`), and opens as it.
+    #[test]
+    fn nested_root_expanded() -> Result<()> {
+        let inner = package(&[("root.usda", b"#usda 1.0\ndef \"Inner\" { custom int probe = 42 }\n")]);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("outer.usdz");
+        fs::write(
+            &path,
+            package(&[("inner.usdz", &inner), ("other.usda", b"#usda 1.0\n")]),
+        )?;
+        let outer = ar::ResolvedPath::new(path.canonicalize()?);
+
+        let resolved = UsdzFileFormat.resolve_layer(&ar::DefaultResolver::new(), &outer);
+        let expected = ar::join_package_relative_path(&outer.to_string_lossy(), "inner.usdz[root.usda]");
+        assert_eq!(resolved.map(|path| path.to_string_lossy().into_owned()), Some(expected));
+        let stage = Stage::open(path.to_str().unwrap())?;
+        assert_eq!(
+            stage
+                .attribute("/Inner.probe")?
+                .get_at::<vt::Value>(TimeCode::new(0.0))?,
+            Some(vt::Value::Int(42))
+        );
+        Ok(())
+    }
+
+    /// The first entry is the root layer, whatever comes after it: a package
+    /// whose first entry no layer format reads has none, and does not open.
+    #[test]
+    fn first_entry_not_layer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        fs::write(&path, package(&[("tex.png", b"png"), ("root.usda", b"#usda 1.0\n")]))?;
+        assert_eq!(Archive::open(&path)?.root_entry()?, None);
+        let Err(error) = Archive::open(&path)?.read_root() else {
+            panic!("a package with no root layer reads nothing");
+        };
+        assert!(matches!(innermost(&error), ArchiveError::NoRootLayer), "{error:?}");
+        assert!(Stage::open(path.to_str().unwrap()).is_err());
+        Ok(())
+    }
+
+    /// The failure `error` wraps, through every entry that reached it.
+    fn innermost(mut error: &ArchiveError) -> &ArchiveError {
+        while let ArchiveError::Entry { source, .. } = error {
+            error = source;
+        }
+        error
+    }
+
+    /// Packages nested as root entries read up to `MAX_NESTING` deep, and a
+    /// deeper chain is refused with `NestedTooDeep`.
+    #[test]
+    fn nested_too_deep() -> Result<()> {
+        let chain = |depth: usize| {
+            let mut bytes = package(&[("root.usda", b"#usda 1.0\ndef \"Deep\" {}\n")]);
+            for _ in 0..depth {
+                bytes = package(&[("nested.usdz", &bytes)]);
+            }
+            bytes
+        };
+        let data = Archive::from_bytes(chain(MAX_NESTING))?.read_root()?;
+        assert!(data.has_spec(&sdf::path("/Deep")?));
+        let Err(error) = Archive::from_bytes(chain(MAX_NESTING + 1))?.read_root() else {
+            panic!("a chain past the limit is refused");
+        };
+        assert!(matches!(innermost(&error), ArchiveError::NestedTooDeep), "{error:?}");
+
+        // A stage opens the chain within the limit, and refuses the one past it.
+        let dir = tempfile::tempdir()?;
+        let within = dir.path().join("within.usdz");
+        fs::write(&within, chain(MAX_NESTING))?;
+        assert!(Stage::open(within.to_str().unwrap())?.prim("/Deep")?.is_valid()?);
+        let past = dir.path().join("past.usdz");
+        fs::write(&past, chain(MAX_NESTING + 1))?;
+        assert!(Stage::open(past.to_str().unwrap()).is_err());
+        Ok(())
+    }
+
+    /// The root entry is the one stored first, whatever order the central
+    /// directory lists entries in (C++ walks local file headers).
+    #[test]
+    fn root_is_stored_first() -> Result<()> {
+        let mut bytes = package(&[("root.usda", b"#usda 1.0\n"), ("tex.png", b"png")]);
+        swap_central_records(&mut bytes);
+        let zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a zip");
+        let listed = zip.name_for_index(0).expect("an entry").expect("a name");
+        assert_eq!(listed, "tex.png", "the directory lists tex.png first");
+        let archive = Archive::from_bytes(bytes)?;
+        assert_eq!(archive.root_entry()?.as_deref(), Some("root.usda"));
+        Ok(())
+    }
+
+    /// Swaps the first two records of the central directory of the package
+    /// `bytes`, leaving the entries where they are stored.
+    pub(crate) fn swap_central_records(bytes: &mut [u8]) {
+        let u16_at = |bytes: &[u8], at: usize| usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
+        let end = bytes.len() - 22;
+        assert_eq!(&bytes[end..end + 4], b"PK\x05\x06", "an end record with no comment");
+        let start = u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap()) as usize;
+        let record = |at: usize| 46 + u16_at(bytes, at + 28) + u16_at(bytes, at + 30) + u16_at(bytes, at + 32);
+        let first = record(start);
+        let second = record(start + first);
+        bytes[start..start + first + second].rotate_left(first);
     }
 
     /// The bytes of a package holding `entries`, in order.

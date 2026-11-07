@@ -80,7 +80,7 @@ pub(super) enum AssetKind {
     /// A layer a format reads, or whatever a sublayer, reference, payload or
     /// clip template names (C++ `UsdStage::IsSupportedFile`).
     Layer,
-    /// A package, opened at its default layer and carried whole.
+    /// A package, opened at its root layer and carried whole.
     Package,
     /// Any other file, such as a texture.
     Asset,

@@ -99,7 +99,7 @@ fn create_method_writes_to_disk_and_reads_back() {
     }
 
     let mut archive = Archive::open(&tmp).unwrap();
-    assert_eq!(archive.first_layer_name().unwrap().as_deref(), Some("scene.usdc"));
+    assert_eq!(archive.root_entry().unwrap().as_deref(), Some("scene.usdc"));
     let layer = archive.read("scene.usdc").unwrap();
     assert!(layer.has_spec(&sdf::Path::abs_root()));
 }

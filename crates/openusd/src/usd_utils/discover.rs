@@ -65,7 +65,7 @@ impl<'a> From<&'a sdf::Layer> for Root<'a> {
 /// which names the asset itself. A layer `stage` already holds is read as it
 /// is in memory, unsaved edits included, as C++ reads a layer already open in
 /// its layer registry; any other is read through the resolver without joining
-/// the stage. A package is opened at its default layer and followed like any
+/// the stage. A package is opened at its root layer and followed like any
 /// layer. The layers and assets inside it are reported by their
 /// package-relative path.
 ///
@@ -108,7 +108,7 @@ pub(super) struct Discover {
     /// add no opinion, but a delete must still find its target once both are
     /// packaged.
     pub inactive: bool,
-    /// Open a package at its default layer and follow what it authors, as C++
+    /// Open a package at its root layer and follow what it authors, as C++
     /// `SdfLayer::FindOrOpen` does with one. Off, a package is taken whole,
     /// with the layers the stage holds inside it walked in their own scope.
     pub open_packages: bool,

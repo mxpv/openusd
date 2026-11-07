@@ -462,9 +462,10 @@ impl LayerRegistry {
     ///
     /// This is [`resolve`](Self::resolve) deferred to the selected format's
     /// [`resolve_layer`](sdf::FileFormat::resolve_layer): a package
-    /// (`pkg.usdz`) resolves to its default — first — packaged layer
-    /// (`pkg.usdz[root.usd]`), so it composes as an ordinary layer stack and
-    /// the sublayers and references authored inside it anchor in-package, while
+    /// (`pkg.usdz`) resolves to its root layer, its first entry followed into a
+    /// package nested there (`pkg.usdz[root.usd]`), so it composes as an
+    /// ordinary layer stack and the sublayers and references authored inside
+    /// it anchor in-package, while
     /// an ordinary format keeps the resolved location. Generic
     /// [`resolve`](Self::resolve) stays package-agnostic for asset-value
     /// resolution and the resolvability probe, which want the package path
@@ -582,7 +583,7 @@ impl LayerRegistry {
     }
 
     /// Opens the layer at `identifier` as an [`sdf::Layer`] anchored at the
-    /// location it resolved to, which for a package is its default packaged
+    /// location it resolved to, which for a package is its packaged root
     /// layer, or `None` when it does not resolve. The registry does not hold it.
     pub(crate) fn open_layer(&self, identifier: &str) -> Result<Option<sdf::Layer>, LoadError> {
         let _scope = ar::CacheScope::begin();

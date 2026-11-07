@@ -151,7 +151,7 @@ pub trait FileFormat: Sync {
     }
 
     /// Whether a layer of this format is a package holding other assets (C++
-    /// `SdfFileFormat::IsPackage`): it opens at its default packaged layer,
+    /// `SdfFileFormat::IsPackage`): it opens at its packaged root layer,
     /// and as a dependency it is carried whole.
     fn is_package(&self) -> bool {
         false
@@ -194,8 +194,9 @@ pub trait FileFormat: Sync {
     ///
     /// The default is the identity: an ordinary layer loads from the location
     /// it resolved to. A package format overrides this to select the package's
-    /// default layer (`pkg.usdz` → `pkg.usdz[root.usd]`), so the package
-    /// composes as an ordinary layer stack and the paths authored inside it
+    /// root layer, followed into a package nested as its first entry
+    /// (`pkg.usdz` → `pkg.usdz[root.usd]`), so the package composes as an
+    /// ordinary layer stack and the paths authored inside it
     /// anchor in-package; a package it cannot open returns `None`. Opening the
     /// asset goes through `resolver` so a host-provided byte source is honored.
     fn resolve_layer(&self, _resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {

@@ -8,7 +8,7 @@ use std::str;
 use zip::read::{ArchiveOffset, Config};
 use zip::{CompressionMethod, ZipArchive};
 
-use super::ArchiveError;
+use super::{ArchiveError, MAX_NESTING};
 use crate::{ar, sdf, usda, usdc};
 
 /// A USDZ package: the entries its central directory lists, over the asset
@@ -24,6 +24,10 @@ pub struct Archive {
     /// The package's bytes when the asset shares them, which entry views
     /// slice.
     bytes: Option<ar::SharedBuffer>,
+    /// The index of the entry stored first, the package's root, as C++
+    /// walks local file headers from the start. The central directory may
+    /// list entries in another order, and records where each is stored.
+    first: Option<usize>,
 }
 
 impl Archive {
@@ -46,7 +50,11 @@ impl Archive {
             archive_offset: ArchiveOffset::Known(0),
         };
         let archive = ZipArchive::with_config(config, asset)?;
-        Ok(Archive { archive, bytes })
+        let first = (0..archive.len())
+            .filter_map(|index| Some((archive.by_index_data(index).ok()?.header_start(), index)))
+            .min()
+            .map(|(_, index)| index);
+        Ok(Archive { archive, bytes, first })
     }
 
     /// A package over bytes already in hand, whose entries are views of them.
@@ -60,27 +68,35 @@ impl Archive {
         self.archive.index_for_name(name).is_some()
     }
 
-    /// Returns the file name of the first layer in the archive.
+    /// The name of the package's first entry, its root layer, when a layer
+    /// format reads it (C++ `SdfUsdzFileFormat::GetPackageRootLayerPath` and
+    /// `CanRead`): a native USD layer, or a package nested there.
     ///
     /// Per the [USDZ specification](https://openusd.org/release/spec_usdz.html),
     /// the first file in a USDZ package must be a native USD file (`.usda`, `.usdc`,
-    /// or `.usd`) and serves as the root layer of the composed stage.
+    /// or `.usd`) and serves as the root layer of the composed stage. A
+    /// package whose first file is not one has no root layer: `None`.
     ///
-    /// Fails when an entry name before the first layer cannot be decoded.
-    pub fn first_layer_name(&self) -> Result<Option<String>, ArchiveError> {
-        for name in self.archive.file_names() {
-            let name = name?;
-            if is_layer_name(&name) {
-                return Ok(Some(name.into_owned()));
-            }
-        }
-        Ok(None)
+    /// Fails when the first entry's name cannot be decoded.
+    pub fn root_entry(&self) -> Result<Option<String>, ArchiveError> {
+        let Some(index) = self.first else {
+            return Ok(None);
+        };
+        let name = self.archive.by_index_data(index)?.name()?.into_owned();
+        let reads = sdf::LayerRegistry::find_by_extension(ar::extension(&name)).is_some();
+        Ok(reads.then_some(name))
     }
 
-    /// Opens the first (root) layer from the archive.
-    pub fn read_first_layer(&mut self) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
-        let name = self.first_layer_name()?.ok_or(ArchiveError::NoDefaultLayer)?;
-        self.read(&name)
+    /// Reads the package's root layer, the [`root_entry`](Self::root_entry),
+    /// that of a package nested there read in turn.
+    pub fn read_root(&mut self) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
+        self.read_root_at(0)
+    }
+
+    /// [`read_root`](Self::read_root) of a package nested `depth` deep.
+    fn read_root_at(&mut self, depth: usize) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
+        let name = self.root_entry()?.ok_or(ArchiveError::NoRootLayer)?;
+        self.read_at(&name, depth)
     }
 
     /// The bytes of the entry `name`.
@@ -159,14 +175,23 @@ impl Archive {
         Ok(())
     }
 
-    /// Read either a USDA or USDC file from the archive. A nested `.usdz`
-    /// entry reads that package's default (first) layer.
+    /// Read either a USDA or USDC file from the archive. A nested package
+    /// entry reads that package's root layer, up to [`MAX_NESTING`]
+    /// packages deep.
     pub fn read(&mut self, file_path: &str) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
+        self.read_at(file_path, 0)
+    }
+
+    /// [`read`](Self::read) in a package nested `depth` deep.
+    fn read_at(&mut self, file_path: &str, depth: usize) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
         let bytes = self.entry(file_path)?;
 
-        if file_path.ends_with(".usdz") {
+        if is_package_name(file_path) {
+            if depth >= MAX_NESTING {
+                return Err(ArchiveError::NestedTooDeep);
+            }
             return Archive::from_bytes(bytes)
-                .and_then(|mut nested| nested.read_first_layer())
+                .and_then(|mut nested| nested.read_root_at(depth + 1))
                 .map_err(|e| ArchiveError::entry(file_path, e));
         }
 
@@ -198,10 +223,15 @@ impl Archive {
 }
 
 /// Whether `name` names a native USD layer, one a non-package format reads
-/// (`.usd`, `.usda` or `.usdc`): the kind of entry
-/// [`Archive::first_layer_name`] takes for the default layer.
+/// (`.usd`, `.usda` or `.usdc`): the kind of entry a package is written with
+/// first.
 pub(crate) fn is_layer_name(name: &str) -> bool {
     sdf::LayerRegistry::find_by_extension(ar::extension(name)).is_some_and(|format| !format.is_package())
+}
+
+/// Whether `name` names a package, one a package format reads (`.usdz`).
+pub(crate) fn is_package_name(name: &str) -> bool {
+    sdf::LayerRegistry::find_by_extension(ar::extension(name)).is_some_and(|format| format.is_package())
 }
 
 #[cfg(test)]

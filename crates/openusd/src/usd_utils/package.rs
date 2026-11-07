@@ -317,7 +317,15 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
         })
         .collect();
     let mut rebuilt = usdz::ArchiveWriter::new(Cursor::new(Vec::new()));
-    for index in 0..archive.len() {
+    // Entries are copied in the order they are stored, so the entry stored
+    // first, the package's root layer, stays first; the central directory
+    // may list them in another order.
+    let mut stored: Vec<(u64, usize)> = (0..archive.len())
+        .map(|index| Ok((archive.by_index_data(index)?.header_start(), index)))
+        .collect::<Result<_, zip::result::ZipError>>()
+        .map_err(usdz::ArchiveError::from)?;
+    stored.sort_unstable();
+    for (_, index) in stored {
         let mut entry = archive.by_index(index).map_err(usdz::ArchiveError::from)?;
         let name = entry.name().map_err(usdz::ArchiveError::from)?.into_owned();
         let mut contents = Vec::new();
@@ -1064,6 +1072,35 @@ def "T"
         let packaged = Stage::open(output.to_str().unwrap())?;
         assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(42)));
         assert_eq!(attribute_value(&packaged, "/B.probe"), Some(vt::Value::Int(42)));
+        Ok(())
+    }
+
+    /// A rebuilt package keeps its entries in the order they are stored, so
+    /// its root layer stays first though its central directory lists a
+    /// texture first.
+    #[test]
+    fn rebuild_keeps_stored_order() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut bytes = usdz::tests::package(&[
+            ("first.usda", b"#usda 1.0\ndef \"R\" {\n    int probe = 1\n}\n"),
+            ("tex.png", b"PNG"),
+        ]);
+        usdz::tests::swap_central_records(&mut bytes);
+        fs::write(dir.path().join("pkg.usdz"), bytes)?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" (\n    prepend references = @./pkg.usdz@</R>\n)\n{\n}\n",
+        );
+        let (root, stage) = open(dir.path(), "root.usda")?;
+        assert_eq!(attribute_value(&stage, "/A.probe"), Some(vt::Value::Int(1)));
+
+        let output = dir.path().join("out.usdz");
+        create_usdz_package(&stage, &root, &output, None)?;
+        let nested = ar::join_package_relative_path(output.to_str().unwrap(), "pkg.usdz");
+        assert_eq!(nested_entries(&nested).0, ["first.usda", "tex.png"]);
+        let packaged = Stage::open(output.to_str().unwrap())?;
+        assert_eq!(attribute_value(&packaged, "/A.probe"), Some(vt::Value::Int(1)));
         Ok(())
     }
 

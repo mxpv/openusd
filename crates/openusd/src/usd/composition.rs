@@ -1575,7 +1575,7 @@ impl StageComposition {
 
     /// The failure an open of `asset_path` that found no layer records. When
     /// the raw asset still resolves, the layer-level resolution (a package's
-    /// default layer, say) is what failed, and the failure is unreadable: it
+    /// root layer, say) is what failed, and the failure is unreadable: it
     /// is terminal, where a resolvable asset whose failure was `Unresolved`
     /// would be opened again every pass.
     fn unopened(&self, asset_path: &str) -> pcp::LoadFailure {

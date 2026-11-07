@@ -488,7 +488,7 @@ mod tests {
         Ok(())
     }
 
-    /// A package whose default layer references into a package nested in it
+    /// A package whose root layer references into a package nested in it
     /// costs one file open and one parse per level.
     #[test]
     fn stage_opens_nested_once() -> crate::Result<()> {

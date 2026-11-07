@@ -259,7 +259,7 @@ impl Layer {
     /// The loader passes the [`real_path`](Self::real_path) it resolved the
     /// layer to: it equals `identifier` for an ordinary layer, but a package
     /// opens under its bare identifier while its real path is the
-    /// package-relative default layer, so the paths it authors anchor
+    /// package-relative root layer, so the paths it authors anchor
     /// in-package. Only a real path that differs from the identifier is
     /// stored. The layer keeps `resolver`, the one it was read through, for
     /// [`save`](Self::save) to reopen its file with.
@@ -470,7 +470,7 @@ impl Layer {
     /// never read from anywhere (C++ `SdfLayer::GetRealPath`, empty for one).
     ///
     /// This is the identifier except for a package, whose location is its
-    /// package-relative default layer, and a layer found through a resolver
+    /// package-relative root layer, and a layer found through a resolver
     /// search directory, whose identifier is the bare search path it was asked
     /// for.
     pub fn resolved_path(&self) -> Option<&str> {
@@ -1665,12 +1665,11 @@ impl Drop for GroupEditGuard<'_, '_> {
 // packaged layer is anchored there if that resolves, then at the package's
 // root layer (`GetPackageRootLayerPath`, expanded through nested packages by
 // `_ExpandPackagePath`) if that resolves, then by the plain resolver against
-// the package file. Here every such path stays inside the package. A path
-// authored against a package itself (an anchor that is the package file)
-// joins the package's root here, where C++ anchors beside its expanded root
-// layer, which may sit in a directory or a nested package. With no anchor,
-// `DefaultResolver` joins the current directory where C++ returns the
-// normalized path.
+// the package file. Here every such path stays inside the package. A layer
+// anchored at a package itself (one `resolve_layer` could not take to its
+// root layer) has a path it authors joined at the package's root, where C++
+// anchors beside the expanded root layer. With no anchor, `DefaultResolver`
+// joins the current directory where C++ returns the normalized path.
 //
 // The sites that anchor a path a layer authors to load or resolve it call
 // this function: composition and clips, `LayerRegistry::open_sublayers`,
@@ -2791,7 +2790,7 @@ pub(crate) mod tests {
 
         // The usdz should contain an entry we can read back.
         let archive = crate::usdz::Archive::open(&usdz_path)?;
-        let name = archive.first_layer_name()?.expect("usdz has a layer");
+        let name = archive.root_entry()?.expect("usdz has a layer");
         assert!(name.ends_with(".usdc"));
         Ok(())
     }
