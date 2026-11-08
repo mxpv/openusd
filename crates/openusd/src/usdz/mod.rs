@@ -281,7 +281,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::fs;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -799,13 +799,13 @@ pub(crate) mod tests {
         };
         let (a, b) = (open("a.usda")?, open("b.usda")?);
 
-        fs::write(
+        repackage(
             &path,
-            package(&[
+            &[
                 ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
                 ("b.usda", b"#usda 1.0\ndef \"B\" {}\n"),
                 ("c.usda", b"#usda 1.0\n"),
-            ]),
+            ],
         )?;
         assert!(a.reload(false)?);
         assert!(
@@ -850,13 +850,13 @@ pub(crate) mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Edit", sdf::Specifier::Def, "")?;
             Ok(())
         })?;
-        fs::write(
+        repackage(
             &path,
-            package(&[
+            &[
                 ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
                 ("b.usda", b"#usda 1.0\ndef \"B\" {}\n"),
                 ("c.usda", empty),
-            ]),
+            ],
         )?;
         assert!(handles[0].reload(false)?);
         assert!(defines(&handles[0], "/A")?);
@@ -874,7 +874,7 @@ pub(crate) mod tests {
         let empty: &[u8] = b"#usda 1.0\n";
         let (_dir, path, _registry, handles) =
             package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
-        fs::write(&path, package(&[("a.usda", b"#usda 1.0\ndef \"A\" {}\n")]))?;
+        repackage(&path, &[("a.usda", b"#usda 1.0\ndef \"A\" {}\n")])?;
         assert!(handles[0].reload(false)?);
         assert!(defines(&handles[0], "/A")?);
         Ok(())
@@ -888,13 +888,13 @@ pub(crate) mod tests {
         let (_dir, path, _registry, handles) =
             package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
         let guard = handles[1].borrow();
-        fs::write(
+        repackage(
             &path,
-            package(&[
+            &[
                 ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
                 ("b.usda", empty),
                 ("c.usda", empty),
-            ]),
+            ],
         )?;
         let reloaded = handles[0].reload(false);
         assert!(
@@ -953,13 +953,13 @@ pub(crate) mod tests {
         };
         let (a, _b) = (open("a.usda")?, open("b.usda")?);
 
-        fs::write(
+        repackage(
             &path,
-            package(&[
+            &[
                 ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
                 ("b.usda", b"#usda 1.0\ndef (\n"),
                 ("c.usda", b"#usda 1.0\n"),
-            ]),
+            ],
         )?;
         assert!(a.reload(false).is_err(), "b cannot be read");
         assert!(
@@ -991,13 +991,13 @@ pub(crate) mod tests {
         let canonical = path.canonicalize()?.to_string_lossy().into_owned();
         handles[1].add_sink(Veto)?;
 
-        fs::write(
+        repackage(
             &path,
-            package(&[
+            &[
                 ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
                 ("b.usda", empty),
                 ("c.usda", empty),
-            ]),
+            ],
         )?;
         assert!(handles[0].reload(false).is_err(), "the sink on b vetoes");
         let held = registry
@@ -1278,5 +1278,13 @@ pub(crate) mod tests {
             writer.add_layer(name, bytes).expect("a valid entry");
         }
         writer.finish().expect("a finished package").into_inner()
+    }
+
+    /// Overwrites the package at `path` with one holding `entries`, and
+    /// moves its modification time past any it had, so an unforced reload
+    /// reads it again.
+    fn repackage(path: &Path, entries: &[(&str, &[u8])]) -> Result<()> {
+        fs::write(path, package(entries))?;
+        sdf::layer::tests::touch_later(path)
     }
 }
