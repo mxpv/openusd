@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::{cmp, convert::Infallible, fmt, iter, str::FromStr};
 
@@ -88,7 +89,13 @@ struct Text {
     /// The text's hash under the unkeyed [`FxBuildHasher`]. Equal texts in
     /// separate allocations hash alike.
     hash: u64,
+    /// The path's [`prim_element_count`](Path::prim_element_count), counted
+    /// on first use, or [`UNCOUNTED`] before.
+    prim_elements: AtomicU32,
 }
+
+/// The [`Text::prim_elements`] of a path not yet counted.
+const UNCOUNTED: u32 = u32::MAX;
 
 impl Default for Path {
     /// The empty path.
@@ -836,9 +843,19 @@ impl Path {
     /// "/"        -> 0
     /// ```
     pub fn prim_element_count(&self) -> usize {
-        self.components()
+        // Every clone shares the count, and racing threads store the same one.
+        let cached = self.path.prim_elements.load(Ordering::Relaxed);
+        if cached != UNCOUNTED {
+            return cached as usize;
+        }
+        let count = self
+            .components()
             .filter(|c| matches!(c, PathComponent::Prim(_)))
-            .count()
+            .count();
+        if let Ok(stored) = u32::try_from(count) {
+            self.path.prim_elements.store(stored, Ordering::Relaxed);
+        }
+        count
     }
 
     /// Counts every prim-namespace component of this path, including `{set=sel}`
@@ -1592,6 +1609,7 @@ impl Text {
         Self {
             hash: FxBuildHasher.hash_one(text.as_str()),
             text,
+            prim_elements: AtomicU32::new(UNCOUNTED),
         }
     }
 }
