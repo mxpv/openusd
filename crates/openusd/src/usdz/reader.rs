@@ -247,14 +247,14 @@ fn header_starts(
 /// Whether an entry `name`, stored first, is the package's root layer: one a
 /// layer format reads, a native USD layer or a nested package.
 fn is_root_name(name: &str) -> bool {
-    sdf::LayerRegistry::find_by_extension(ar::extension(name)).is_some()
+    sdf::layer_registry::builtin_format(ar::extension(name)).is_some()
 }
 
 /// Whether `name` names a native USD layer, one a non-package format reads
 /// (`.usd`, `.usda` or `.usdc`): the kind of entry a package is written with
 /// first.
 pub(crate) fn is_layer_name(name: &str) -> bool {
-    sdf::LayerRegistry::find_by_extension(ar::extension(name)).is_some_and(|format| !format.is_package())
+    sdf::layer_registry::builtin_format(ar::extension(name)).is_some_and(|format| !format.is_package())
 }
 
 #[cfg(test)]

@@ -227,7 +227,8 @@ impl Layer {
     /// as in [`new_anonymous`](Self::new_anonymous).
     pub fn from_bytes(tag: impl fmt::Display, bytes: impl Into<ar::AssetBuffer>) -> Result<Self, FormatError> {
         let identifier = Self::anonymous_identifier(tag);
-        let (data, format) = sdf::LayerRegistry::read_bytes(bytes.into(), &identifier)?;
+        let (data, format) =
+            sdf::layer_registry::read_bytes_in(&sdf::layer_registry::formats_with(None), bytes.into(), &identifier)?;
         let mut layer = Self::new(identifier, data);
         layer.format = Some(format);
         Ok(layer)
@@ -563,7 +564,7 @@ impl Layer {
     /// layer's on-disk format. Named to avoid confusion with the infallible
     /// [`ToString::to_string`].
     pub fn export_to_string(&self) -> Result<String, ExportError> {
-        let format = super::LayerRegistry::find_by_id("usda").expect("usda is a built-in format");
+        let format = super::layer_registry::builtin_format_by_id("usda").expect("usda is a built-in format");
         let mut buf = Cursor::new(Vec::new());
         format.write(self.data(), &mut buf)?;
         Ok(String::from_utf8(buf.into_inner()).expect("the usda writer emits UTF-8 text"))
@@ -721,7 +722,7 @@ impl Layer {
             // as C++ `SdfLayer::CreateAnonymous` takes it, whatever format
             // the content was read in; a tag naming none is the text
             // format's.
-            let format = super::LayerRegistry::find_by_extension(ar::extension(&self.identifier));
+            let format = super::layer_registry::builtin_format(ar::extension(&self.identifier));
             if format.is_some_and(|format| format.skip_anonymous_reload()) {
                 return Ok(None);
             }
@@ -744,7 +745,11 @@ impl Layer {
         };
         // The asset may have moved since it was read, so the identifier
         // resolves again.
-        let resolved = super::LayerRegistry::resolve_layer_with(resolver.as_ref(), &self.identifier)
+        // The layer reads again in the format it was read in, as C++
+        // `SdfLayer::Reload` reads with the layer's `SdfFileFormat`, beside the
+        // built-in ones for a `.usd` whose encoding changed.
+        let formats = super::layer_registry::formats_with(self.format);
+        let resolved = super::LayerRegistry::resolve_layer_with(&formats, resolver.as_ref(), &self.identifier)
             .ok_or_else(|| crate::Error::UnresolvedAsset(self.identifier.clone()))?;
         // TODO: C++ reloads a layer from where its identifier resolves now
         // (`DidChangeLayerResolvedPath`). A registry, a stage's graph and a
@@ -780,7 +785,9 @@ impl Layer {
                 modified,
             } => (resolver, resolved, modified),
         };
-        let prepared = super::LayerRegistry::read(resolver.as_ref(), self.identifier.clone(), resolved, modified)?;
+        let formats = super::layer_registry::formats_with(self.format);
+        let prepared =
+            super::LayerRegistry::read(&formats, resolver.as_ref(), self.identifier.clone(), resolved, modified)?;
         let reloaded = Reloaded {
             format: prepared.format,
             modified: prepared.modified,
