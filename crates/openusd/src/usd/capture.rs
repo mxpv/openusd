@@ -1138,6 +1138,30 @@ mod tests {
         Ok(())
     }
 
+    /// Undoing a removal puts the prim back in its place among its siblings,
+    /// and its properties in their authored order.
+    #[test]
+    fn undo_removal_keeps_order() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        for name in ["/W/a", "/W/b", "/W/c"] {
+            stage.define_prim(name)?;
+        }
+        stage.create_attribute("/W/b.z", "double")?;
+        stage.create_attribute("/W/b.y", "double")?;
+        stage.remove_prim("/W/b")?;
+        assert!(stage.undo()?);
+
+        assert_eq!(stage.prim("/W")?.child_names()?, ["a", "b", "c"]);
+        let layer = stage.root_layer();
+        let props = layer
+            .borrow()
+            .data()
+            .field(&sdf::path("/W/b")?, "propertyChildren")?
+            .into_owned();
+        assert_eq!(props.try_as_token_vec().expect("a token list"), ["z", "y"]);
+        Ok(())
+    }
+
     /// Every spec created in one transaction undoes together as one step: an
     /// ancestor chain authored by a single `define_prim` is one step.
     #[test]

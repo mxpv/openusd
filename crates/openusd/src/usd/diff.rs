@@ -270,14 +270,16 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
 /// a spec the edit created inverts to a removal; a spec the edit removed or
 /// replaced inverts to a re-creation of its whole base state.
 ///
-/// Returns the inverse edits for one layer, ordered by path; a read error
+/// Returns the inverse edits for one layer, ordered by path, then the base
+/// order of each child list the edit touched; a read error
 /// propagates (like [`forward_diff`]) rather than silently dropping a spec or
 /// field, so a partial — and therefore unsafe — inverse is never recorded. The
 /// caller attaches the transaction's mapping once (all its layers share one).
 pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
     let base = change.base;
+    let change_list = change.change_list;
     let mut edits = Vec::new();
-    for (path, entry) in change.change_list.entries() {
+    for (path, entry) in change_list.entries() {
         if entry.is_child_bookkeeping() {
             continue;
         }
@@ -307,6 +309,20 @@ pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
     // recorded order (the sort is stable). Removals still apply after the
     // authoring operations through [`apply_edits_verbatim`]'s partition.
     edits.sort_by(|a, b| a.path().cmp(b.path()));
+    // A re-created spec lands last among its siblings; restore the base order.
+    for (path, entry) in change_list.entries() {
+        let Some(spec_type) = base.spec_type(path) else {
+            continue;
+        };
+        for key in [sdf::ChildrenKey::PrimChildren, sdf::ChildrenKey::PropertyChildren] {
+            let field = tf::Token::from(key.as_str());
+            let touched = entry.info_changed().any(|f| *f == field)
+                || entry.flags.intersects(sdf::ChangeFlags::ADD | sdf::ChangeFlags::REMOVE);
+            if touched && base.try_field(path, key.as_str())?.is_some() {
+                edits.push(field_op(base, path, spec_type, &field)?);
+            }
+        }
+    }
     Ok(edits)
 }
 
