@@ -237,6 +237,9 @@ fn empty_layer_roundtrips_through_crate_writer() {
     let mut buf = Vec::new();
     CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("empty layer write");
 
+    let file = openusd::usdc::CrateFile::open(buf.clone()).expect("empty layer header");
+    assert!(!file.tokens.is_empty(), "the root's path element needs token 0");
+
     let round = CrateData::open(buf.clone(), true).expect("empty layer re-parse");
 
     let orig_paths = (&data as &dyn AbstractData).spec_paths();
