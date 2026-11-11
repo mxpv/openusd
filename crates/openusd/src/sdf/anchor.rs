@@ -209,7 +209,7 @@ fn first_entry(listing: &mut dyn Listing, package: &str) -> String {
     let Some(files) = listing.files(package) else {
         return String::new();
     };
-    LayerRegistry::find_by_extension(ar::extension(package))
+    super::layer_registry::builtin_format(ar::extension(package))
         .and_then(|format| format.package_root(&files))
         .unwrap_or_default()
         .to_owned()
