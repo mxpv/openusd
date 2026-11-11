@@ -1,0 +1,27 @@
+[package]
+name = "openusd-mtlx"
+description = "MaterialX documents as USD layers: a read-only `.mtlx` file format for openusd"
+keywords = ["usd", "openusd", "materialx", "shading"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# The crate's code is MIT, as the workspace's; the MaterialX definition
+# libraries it embeds (`libraries/`) are Apache-2.0.
+license = "MIT AND Apache-2.0"
+categories.workspace = true
+include = ["src/**", "libraries/**", "README.md"]
+
+[dependencies]
+openusd.workspace = true
+# The XML reader. Pure safe Rust with no dependencies of its own; a document
+# is small next to the scene that binds it, so it is read whole.
+roxmltree = "0.21"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
