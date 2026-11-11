@@ -4717,10 +4717,24 @@ impl StageBuilder {
     }
 
     /// Sets a custom asset resolver, wrapping it in a [`sdf::LayerRegistry`]
-    /// over the built-in formats. A convenience over
+    /// that reads the formats the current one does. A convenience over
     /// [`registry`](Self::registry).
     pub fn resolver<R: ar::Resolver + 'static>(mut self, resolver: R) -> Self {
-        self.registry = sdf::LayerRegistry::new(Box::new(resolver));
+        let registry = sdf::LayerRegistry::new(Box::new(resolver));
+        self.registry = self
+            .registry
+            .formats()
+            .iter()
+            .fold(registry, |registry, &format| registry.with_format(format));
+        self
+    }
+
+    /// Reads layers in `format` too, beside the formats the registry already
+    /// reads ([`sdf::LayerRegistry::with_format`]), so a reference, payload
+    /// or sublayer naming one of its files composes, and so does a root layer
+    /// of it.
+    pub fn format(mut self, format: &'static dyn sdf::FileFormat) -> Self {
+        self.registry = self.registry.with_format(format);
         self
     }
 
@@ -5180,6 +5194,26 @@ pub(crate) mod tests {
 
     pub(crate) fn stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// A reference into a file of a format the builder adds composes, through
+    /// a resolver set after the format.
+    #[test]
+    fn builder_format_composes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("lib.planted"), "Thing\n")?;
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            "#usda 1.0\ndef \"W\" (references = @./lib.planted@</Thing>)\n{\n}\n",
+        )?;
+        let stage = Stage::builder()
+            .format(&sdf::layer_registry::tests::PLANTED)
+            .resolver(ar::DefaultResolver::new())
+            .open(root.to_str().expect("utf-8 path"))?;
+        let prim = stage.prim("/W")?;
+        assert_eq!(prim.type_name()?.as_ref().map(|t| t.as_str()), Some("Scope"));
+        Ok(())
     }
 
     /// A stage whose `/Child` references `</R>` in `ref.usda`, with the edit
