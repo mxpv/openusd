@@ -193,7 +193,51 @@ pub(crate) fn parse(text: &str, source_name: &str) -> Result<Document, ReadError
             _ => doc.nodes.push(node(el)),
         }
     }
+    first_of_each_name(&mut doc);
     Ok(doc)
+}
+
+/// `doc` with each scope's elements unique by name, the first of a name
+/// kept, as MaterialX's reader keeps it (it skips a child whose name its
+/// parent already holds): a node's inputs, a node graph's interface inputs,
+/// nodes and outputs, and the document's nodes, node graphs and outputs. Each
+/// element dropped is noted in [`Document::skipped`].
+fn first_of_each_name(doc: &mut Document) {
+    let mut notes = Vec::new();
+    for node in &mut doc.nodes {
+        dedup(&mut node.inputs, |i| &i.name, &node.name, &mut notes);
+    }
+    for graph in &mut doc.graphs {
+        for node in &mut graph.nodes {
+            let scope = format!("{}/{}", graph.name, node.name);
+            dedup(&mut node.inputs, |i| &i.name, &scope, &mut notes);
+        }
+        dedup(&mut graph.inputs, |i| &i.name, &graph.name, &mut notes);
+        dedup(&mut graph.nodes, |n| &n.name, &graph.name, &mut notes);
+        dedup(&mut graph.outputs, |o| &o.name, &graph.name, &mut notes);
+    }
+    dedup(&mut doc.nodes, |n| &n.name, "the document", &mut notes);
+    dedup(&mut doc.graphs, |g| &g.name, "the document", &mut notes);
+    dedup(&mut doc.outputs, |o| &o.name, "the document", &mut notes);
+    doc.skipped.extend(notes);
+}
+
+/// `items` without each item whose `name` an earlier one has, a note in
+/// `notes` for each, naming `scope`.
+fn dedup<T>(items: &mut Vec<T>, name: fn(&T) -> &String, scope: &str, notes: &mut Vec<String>) {
+    let mut seen: Vec<String> = Vec::new();
+    items.retain(|item| {
+        let n = name(item);
+        if seen.contains(n) {
+            notes.push(format!(
+                "{scope}: a second element named {n} is ignored, as MaterialX reads the first"
+            ));
+            false
+        } else {
+            seen.push(n.clone());
+            true
+        }
+    });
 }
 
 /// `text` with each `<UDIM>` and `<UVTILE>` escaped, so an attribute holding
@@ -292,6 +336,29 @@ mod tests {
         assert_eq!(doc.skipped, ["<look> elements are not translated"]);
         assert!(doc.nodes.is_empty());
         assert_eq!(doc.graphs[0].outputs[0].name, "out");
+    }
+
+    #[test]
+    fn first_input_wins() {
+        let doc = parse(
+            r#"<materialx version="1.39">
+                 <constant name="c" type="color3"><input name="value" type="color3" value="1, 0, 0" /></constant>
+                 <open_pbr_surface name="s" type="surfaceshader">
+                   <input name="base_color" type="color3" value="0, 0, 1" />
+                   <input name="base_color" type="color3" nodename="c" />
+                 </open_pbr_surface>
+               </materialx>"#,
+            "t",
+        )
+        .expect("parses");
+        let inputs = &doc.nodes[1].inputs;
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].value.as_deref(), Some("0, 0, 1"));
+        assert!(inputs[0].nodename.is_none());
+        assert_eq!(
+            doc.skipped,
+            ["s: a second element named base_color is ignored, as MaterialX reads the first"]
+        );
     }
 
     #[test]
