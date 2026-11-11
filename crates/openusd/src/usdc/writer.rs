@@ -201,6 +201,11 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             self.tokens.intern(segment);
         }
 
+        // C++ reads token 0 as the root's path element.
+        if self.tokens.items.is_empty() {
+            self.tokens.intern(String::new());
+        }
+
         Ok(())
     }
 
