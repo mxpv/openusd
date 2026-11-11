@@ -1,0 +1,329 @@
+#usda 1.0
+(
+    customLayerData = {
+        string colorSpace = "lin_rec709"
+    }
+)
+
+def "MaterialX"
+{
+    def "Materials"
+    {
+        def Material "M_Rook_B" (
+            prepend apiSchemas = ["MaterialXConfigAPI"]
+        )
+        {
+            string config:mtlx:version = "1.38"
+            float inputs:base
+            color3f inputs:base_color
+            float inputs:coat
+            float inputs:coat_affect_color
+            float inputs:coat_affect_roughness
+            float inputs:coat_anisotropy
+            color3f inputs:coat_color
+            float inputs:coat_IOR
+            float3 inputs:coat_normal
+            float inputs:coat_rotation
+            float inputs:coat_roughness
+            float inputs:diffuse_roughness
+            float inputs:emission
+            color3f inputs:emission_color
+            float inputs:metalness
+            float3 inputs:normal
+            color3f inputs:opacity
+            float inputs:sheen
+            color3f inputs:sheen_color
+            float inputs:sheen_roughness
+            float inputs:specular
+            float inputs:specular_anisotropy
+            color3f inputs:specular_color
+            float inputs:specular_IOR
+            float inputs:specular_rotation
+            float inputs:specular_roughness
+            float inputs:subsurface
+            float inputs:subsurface_anisotropy
+            color3f inputs:subsurface_color
+            color3f inputs:subsurface_radius
+            float inputs:subsurface_scale
+            float3 inputs:tangent
+            float inputs:thin_film_IOR
+            float inputs:thin_film_thickness
+            bool inputs:thin_walled
+            float inputs:transmission
+            color3f inputs:transmission_color
+            float inputs:transmission_depth
+            float inputs:transmission_dispersion
+            float inputs:transmission_extra_roughness
+            color3f inputs:transmission_scatter
+            float inputs:transmission_scatter_anisotropy
+            token outputs:mtlx:surface.connect = </MaterialX/Materials/M_Rook_B/Rook_B.outputs:surface>
+
+            def Shader "Rook_B" (
+                prepend references = </MaterialX/Shaders/Rook_B>
+            )
+            {
+                float inputs:base.connect = </MaterialX/Materials/M_Rook_B.inputs:base>
+                color3f inputs:base_color.connect = </MaterialX/Materials/M_Rook_B/NG_RookBlack.outputs:base_color_output>
+                float inputs:coat.connect = </MaterialX/Materials/M_Rook_B.inputs:coat>
+                float inputs:coat_affect_color.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_affect_color>
+                float inputs:coat_affect_roughness.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_affect_roughness>
+                float inputs:coat_anisotropy.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_anisotropy>
+                color3f inputs:coat_color.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_color>
+                float inputs:coat_IOR.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_IOR>
+                float3 inputs:coat_normal.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_normal>
+                float inputs:coat_rotation.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_rotation>
+                float inputs:coat_roughness.connect = </MaterialX/Materials/M_Rook_B.inputs:coat_roughness>
+                float inputs:diffuse_roughness.connect = </MaterialX/Materials/M_Rook_B.inputs:diffuse_roughness>
+                float inputs:emission.connect = </MaterialX/Materials/M_Rook_B.inputs:emission>
+                color3f inputs:emission_color.connect = </MaterialX/Materials/M_Rook_B.inputs:emission_color>
+                float inputs:metalness.connect = </MaterialX/Materials/M_Rook_B/NG_RookBlack.outputs:metalness_output>
+                float3 inputs:normal.connect = </MaterialX/Materials/M_Rook_B/NG_RookBlack.outputs:normal_output>
+                color3f inputs:opacity.connect = </MaterialX/Materials/M_Rook_B.inputs:opacity>
+                float inputs:sheen.connect = </MaterialX/Materials/M_Rook_B.inputs:sheen>
+                color3f inputs:sheen_color.connect = </MaterialX/Materials/M_Rook_B.inputs:sheen_color>
+                float inputs:sheen_roughness.connect = </MaterialX/Materials/M_Rook_B.inputs:sheen_roughness>
+                float inputs:specular.connect = </MaterialX/Materials/M_Rook_B.inputs:specular>
+                float inputs:specular_anisotropy.connect = </MaterialX/Materials/M_Rook_B.inputs:specular_anisotropy>
+                color3f inputs:specular_color.connect = </MaterialX/Materials/M_Rook_B.inputs:specular_color>
+                float inputs:specular_IOR.connect = </MaterialX/Materials/M_Rook_B.inputs:specular_IOR>
+                float inputs:specular_rotation.connect = </MaterialX/Materials/M_Rook_B.inputs:specular_rotation>
+                float inputs:specular_roughness.connect = </MaterialX/Materials/M_Rook_B/NG_RookBlack.outputs:roughness_output>
+                float inputs:subsurface.connect = </MaterialX/Materials/M_Rook_B.inputs:subsurface>
+                float inputs:subsurface_anisotropy.connect = </MaterialX/Materials/M_Rook_B.inputs:subsurface_anisotropy>
+                color3f inputs:subsurface_color.connect = </MaterialX/Materials/M_Rook_B.inputs:subsurface_color>
+                color3f inputs:subsurface_radius.connect = </MaterialX/Materials/M_Rook_B.inputs:subsurface_radius>
+                float inputs:subsurface_scale.connect = </MaterialX/Materials/M_Rook_B.inputs:subsurface_scale>
+                float3 inputs:tangent.connect = </MaterialX/Materials/M_Rook_B.inputs:tangent>
+                float inputs:thin_film_IOR.connect = </MaterialX/Materials/M_Rook_B.inputs:thin_film_IOR>
+                float inputs:thin_film_thickness.connect = </MaterialX/Materials/M_Rook_B.inputs:thin_film_thickness>
+                bool inputs:thin_walled.connect = </MaterialX/Materials/M_Rook_B.inputs:thin_walled>
+                float inputs:transmission.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission>
+                color3f inputs:transmission_color.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission_color>
+                float inputs:transmission_depth.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission_depth>
+                float inputs:transmission_dispersion.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission_dispersion>
+                float inputs:transmission_extra_roughness.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission_extra_roughness>
+                color3f inputs:transmission_scatter.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission_scatter>
+                float inputs:transmission_scatter_anisotropy.connect = </MaterialX/Materials/M_Rook_B.inputs:transmission_scatter_anisotropy>
+            }
+
+            def "NG_RookBlack" (
+                prepend references = </MaterialX/NodeGraphs/NG_RookBlack>
+            )
+            {
+            }
+        }
+
+        def Material "M_Rook_W" (
+            prepend apiSchemas = ["MaterialXConfigAPI"]
+        )
+        {
+            string config:mtlx:version = "1.38"
+            float inputs:base
+            color3f inputs:base_color
+            float inputs:coat
+            float inputs:coat_affect_color
+            float inputs:coat_affect_roughness
+            float inputs:coat_anisotropy
+            color3f inputs:coat_color
+            float inputs:coat_IOR
+            float3 inputs:coat_normal
+            float inputs:coat_rotation
+            float inputs:coat_roughness
+            float inputs:diffuse_roughness
+            float inputs:emission
+            color3f inputs:emission_color
+            float inputs:metalness
+            float3 inputs:normal
+            color3f inputs:opacity
+            float inputs:sheen
+            color3f inputs:sheen_color
+            float inputs:sheen_roughness
+            float inputs:specular
+            float inputs:specular_anisotropy
+            color3f inputs:specular_color
+            float inputs:specular_IOR
+            float inputs:specular_rotation
+            float inputs:specular_roughness
+            float inputs:subsurface
+            float inputs:subsurface_anisotropy
+            color3f inputs:subsurface_color
+            color3f inputs:subsurface_radius
+            float inputs:subsurface_scale
+            float3 inputs:tangent
+            float inputs:thin_film_IOR
+            float inputs:thin_film_thickness
+            bool inputs:thin_walled
+            float inputs:transmission
+            color3f inputs:transmission_color
+            float inputs:transmission_depth
+            float inputs:transmission_dispersion
+            float inputs:transmission_extra_roughness
+            color3f inputs:transmission_scatter
+            float inputs:transmission_scatter_anisotropy
+            token outputs:mtlx:surface.connect = </MaterialX/Materials/M_Rook_W/Rook_W.outputs:surface>
+
+            def Shader "Rook_W" (
+                prepend references = </MaterialX/Shaders/Rook_W>
+            )
+            {
+                float inputs:base.connect = </MaterialX/Materials/M_Rook_W.inputs:base>
+                color3f inputs:base_color.connect = </MaterialX/Materials/M_Rook_W/NG_RookWhite.outputs:base_color_output>
+                float inputs:coat.connect = </MaterialX/Materials/M_Rook_W.inputs:coat>
+                float inputs:coat_affect_color.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_affect_color>
+                float inputs:coat_affect_roughness.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_affect_roughness>
+                float inputs:coat_anisotropy.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_anisotropy>
+                color3f inputs:coat_color.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_color>
+                float inputs:coat_IOR.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_IOR>
+                float3 inputs:coat_normal.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_normal>
+                float inputs:coat_rotation.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_rotation>
+                float inputs:coat_roughness.connect = </MaterialX/Materials/M_Rook_W.inputs:coat_roughness>
+                float inputs:diffuse_roughness.connect = </MaterialX/Materials/M_Rook_W.inputs:diffuse_roughness>
+                float inputs:emission.connect = </MaterialX/Materials/M_Rook_W.inputs:emission>
+                color3f inputs:emission_color.connect = </MaterialX/Materials/M_Rook_W.inputs:emission_color>
+                float inputs:metalness.connect = </MaterialX/Materials/M_Rook_W/NG_RookWhite.outputs:metalness_output>
+                float3 inputs:normal.connect = </MaterialX/Materials/M_Rook_W/NG_RookWhite.outputs:normal_output>
+                color3f inputs:opacity.connect = </MaterialX/Materials/M_Rook_W.inputs:opacity>
+                float inputs:sheen.connect = </MaterialX/Materials/M_Rook_W.inputs:sheen>
+                color3f inputs:sheen_color.connect = </MaterialX/Materials/M_Rook_W.inputs:sheen_color>
+                float inputs:sheen_roughness.connect = </MaterialX/Materials/M_Rook_W.inputs:sheen_roughness>
+                float inputs:specular.connect = </MaterialX/Materials/M_Rook_W.inputs:specular>
+                float inputs:specular_anisotropy.connect = </MaterialX/Materials/M_Rook_W.inputs:specular_anisotropy>
+                color3f inputs:specular_color.connect = </MaterialX/Materials/M_Rook_W.inputs:specular_color>
+                float inputs:specular_IOR.connect = </MaterialX/Materials/M_Rook_W.inputs:specular_IOR>
+                float inputs:specular_rotation.connect = </MaterialX/Materials/M_Rook_W.inputs:specular_rotation>
+                float inputs:specular_roughness.connect = </MaterialX/Materials/M_Rook_W/NG_RookWhite.outputs:roughness_output>
+                float inputs:subsurface.connect = </MaterialX/Materials/M_Rook_W.inputs:subsurface>
+                float inputs:subsurface_anisotropy.connect = </MaterialX/Materials/M_Rook_W.inputs:subsurface_anisotropy>
+                color3f inputs:subsurface_color.connect = </MaterialX/Materials/M_Rook_W.inputs:subsurface_color>
+                color3f inputs:subsurface_radius.connect = </MaterialX/Materials/M_Rook_W.inputs:subsurface_radius>
+                float inputs:subsurface_scale.connect = </MaterialX/Materials/M_Rook_W.inputs:subsurface_scale>
+                float3 inputs:tangent.connect = </MaterialX/Materials/M_Rook_W.inputs:tangent>
+                float inputs:thin_film_IOR.connect = </MaterialX/Materials/M_Rook_W.inputs:thin_film_IOR>
+                float inputs:thin_film_thickness.connect = </MaterialX/Materials/M_Rook_W.inputs:thin_film_thickness>
+                bool inputs:thin_walled.connect = </MaterialX/Materials/M_Rook_W.inputs:thin_walled>
+                float inputs:transmission.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission>
+                color3f inputs:transmission_color.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission_color>
+                float inputs:transmission_depth.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission_depth>
+                float inputs:transmission_dispersion.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission_dispersion>
+                float inputs:transmission_extra_roughness.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission_extra_roughness>
+                color3f inputs:transmission_scatter.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission_scatter>
+                float inputs:transmission_scatter_anisotropy.connect = </MaterialX/Materials/M_Rook_W.inputs:transmission_scatter_anisotropy>
+            }
+
+            def "NG_RookWhite" (
+                prepend references = </MaterialX/NodeGraphs/NG_RookWhite>
+            )
+            {
+            }
+        }
+    }
+
+    def "Shaders"
+    {
+        def Shader "Rook_B"
+        {
+            uniform token info:id = "ND_standard_surface_surfaceshader"
+            token outputs:surface
+        }
+
+        def Shader "Rook_W"
+        {
+            uniform token info:id = "ND_standard_surface_surfaceshader"
+            token outputs:surface
+        }
+    }
+
+    def "NodeGraphs"
+    {
+        def NodeGraph "NG_RookBlack"
+        {
+            color3f outputs:base_color_output.connect = </MaterialX/NodeGraphs/NG_RookBlack/diffuse6.outputs:out>
+            float outputs:metalness_output.connect = </MaterialX/NodeGraphs/NG_RookBlack/metallic6.outputs:out>
+            float3 outputs:normal_output.connect = </MaterialX/NodeGraphs/NG_RookBlack/mtlxnormalmap8.outputs:out>
+            float outputs:roughness_output.connect = </MaterialX/NodeGraphs/NG_RookBlack/roughness6.outputs:out>
+
+            def Shader "diffuse6"
+            {
+                uniform token info:id = "ND_image_color3"
+                asset inputs:file = @tex/rook_black_base_color.jpg@ (
+                    colorSpace = "srgb_texture"
+                )
+                color3f outputs:out
+            }
+
+            def Shader "metallic6"
+            {
+                uniform token info:id = "ND_image_float"
+                asset inputs:file = @tex/rook_shared_metallic.jpg@
+                float outputs:out
+            }
+
+            def Shader "roughness6"
+            {
+                uniform token info:id = "ND_image_float"
+                asset inputs:file = @tex/rook_shared_roughness.jpg@
+                float outputs:out
+            }
+
+            def Shader "normal6"
+            {
+                uniform token info:id = "ND_image_vector3"
+                asset inputs:file = @tex/rook_shared_normal.jpg@
+                float3 outputs:out
+            }
+
+            def Shader "mtlxnormalmap8"
+            {
+                uniform token info:id = "ND_normalmap_float"
+                float3 inputs:in.connect = </MaterialX/NodeGraphs/NG_RookBlack/normal6.outputs:out>
+                float3 outputs:out
+            }
+        }
+
+        def NodeGraph "NG_RookWhite"
+        {
+            color3f outputs:base_color_output.connect = </MaterialX/NodeGraphs/NG_RookWhite/diffuse7.outputs:out>
+            float outputs:metalness_output.connect = </MaterialX/NodeGraphs/NG_RookWhite/metallic7.outputs:out>
+            float3 outputs:normal_output.connect = </MaterialX/NodeGraphs/NG_RookWhite/mtlxnormalmap9.outputs:out>
+            float outputs:roughness_output.connect = </MaterialX/NodeGraphs/NG_RookWhite/roughness7.outputs:out>
+
+            def Shader "diffuse7"
+            {
+                uniform token info:id = "ND_image_color3"
+                asset inputs:file = @tex/rook_white_base_color.jpg@ (
+                    colorSpace = "srgb_texture"
+                )
+                color3f outputs:out
+            }
+
+            def Shader "metallic7"
+            {
+                uniform token info:id = "ND_image_float"
+                asset inputs:file = @tex/rook_shared_metallic.jpg@
+                float outputs:out
+            }
+
+            def Shader "roughness7"
+            {
+                uniform token info:id = "ND_image_float"
+                asset inputs:file = @tex/rook_shared_roughness.jpg@
+                float outputs:out
+            }
+
+            def Shader "normal7"
+            {
+                uniform token info:id = "ND_image_vector3"
+                asset inputs:file = @tex/rook_shared_normal.jpg@
+                float3 outputs:out
+            }
+
+            def Shader "mtlxnormalmap9"
+            {
+                uniform token info:id = "ND_normalmap_float"
+                float3 inputs:in.connect = </MaterialX/NodeGraphs/NG_RookWhite/normal7.outputs:out>
+                float3 outputs:out
+            }
+        }
+    }
+}
+
