@@ -1633,13 +1633,73 @@ fn apply_mapped_edit(layers: &mut [sdf::LayerEdit<'_>], edit: &MappedEdit) -> Re
 
 /// Move the spec subtree at `src` to `dst` within one layer: copy it then remove
 /// the source, returning whether a spec was present to move. The structural move
-/// shared by the local-stack and mapped authoring paths.
+/// shared by the local-stack and mapped authoring paths. A rename keeps its
+/// place among its siblings, as C++ moves with `SdfNamespaceEdit::Same`.
 fn move_spec(layer: &mut sdf::LayerEdit<'_>, src: &sdf::Path, dst: &sdf::Path) -> Result<bool, sdf::AuthoringError> {
+    let slot = rename_slot(layer.data(), src, dst);
     let moved = sdf::copy_spec_within(layer.data_mut(), src, dst)?;
     if moved {
         layer.remove_spec(src)?;
+        if let Some((owner, key, index)) = slot {
+            restore_slot(layer.data_mut(), &owner, key, index, dst);
+        }
     }
     Ok(moved)
+}
+
+/// The owner, child list and index of `src` in this layer, when the move to
+/// `dst` keeps its owner.
+fn rename_slot(
+    data: &dyn sdf::AbstractData,
+    src: &sdf::Path,
+    dst: &sdf::Path,
+) -> Option<(sdf::Path, sdf::ChildrenKey, usize)> {
+    let (owner, key, name) = match (src.split_property(), dst.split_property()) {
+        (Some((owner, name)), Some((dst_owner, _))) if owner == dst_owner => {
+            (owner, sdf::ChildrenKey::PropertyChildren, name.to_owned())
+        }
+        (None, None) if src.parent() == dst.parent() => {
+            (src.parent()?, sdf::ChildrenKey::PrimChildren, src.name()?.to_owned())
+        }
+        _ => return None,
+    };
+    let value = data.try_field(&owner, key.as_str()).ok()??;
+    let vt::Value::TokenVec(names) = value.as_ref() else {
+        return None;
+    };
+    let index = names.iter().position(|n| *n == name.as_str())?;
+    Some((owner, key, index))
+}
+
+/// Return `dst`'s name to `index` in `owner`'s child list `key`.
+fn restore_slot(
+    data: &mut dyn sdf::AbstractData,
+    owner: &sdf::Path,
+    key: sdf::ChildrenKey,
+    index: usize,
+    dst: &sdf::Path,
+) {
+    let name = match dst.split_property() {
+        Some((_, name)) => name.to_owned(),
+        None => match dst.name() {
+            Some(name) => name.to_owned(),
+            None => return,
+        },
+    };
+    let Some(vt::Value::TokenVec(mut names)) = data
+        .try_field(owner, key.as_str())
+        .ok()
+        .flatten()
+        .map(|v| v.into_owned())
+    else {
+        return;
+    };
+    let Some(at) = names.iter().position(|n| *n == name.as_str()) else {
+        return;
+    };
+    let token = names.remove(at);
+    names.insert(index.min(names.len()), token);
+    data.set_field(owner, key.as_str(), vt::Value::TokenVec(names));
 }
 
 /// Rewrite every embedded namespace path in `layer` for an identity local-stack
@@ -2068,6 +2128,38 @@ mod tests {
 
         assert!(stage.has_spec(&path("/A.renamed").unwrap()).unwrap());
         assert!(!stage.has_spec(&path("/A.out").unwrap()).unwrap());
+    }
+
+    /// A renamed prim or property keeps its place among its siblings.
+    #[test]
+    fn rename_keeps_place() {
+        let stage = Stage::builder().in_memory("root.usda").unwrap();
+        for name in ["/A", "/B", "/C"] {
+            stage.define_prim(name).unwrap();
+        }
+        for name in ["/A.x", "/A.y", "/A.z"] {
+            stage.create_attribute(name, "double").unwrap();
+        }
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/B").unwrap(), path("/B2").unwrap())
+            .unwrap()
+            .move_property(path("/A.y").unwrap(), path("/A.y2").unwrap())
+            .unwrap()
+            .apply()
+            .unwrap();
+
+        let children = |owner: &str, key: &str| {
+            let layer = stage.root_layer();
+            let names = layer
+                .borrow()
+                .data()
+                .field(&path(owner).unwrap(), key)
+                .unwrap()
+                .into_owned();
+            names.try_as_token_vec().unwrap()
+        };
+        assert_eq!(children("/", "primChildren"), ["A", "B2", "C"]);
+        assert_eq!(children("/A", "propertyChildren"), ["x", "y2", "z"]);
     }
 
     #[test]
