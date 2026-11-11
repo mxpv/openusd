@@ -21,9 +21,9 @@
 //!   linear (e.g. tokens, strings, arrays whose bracketing lengths
 //!   differ), behaviour falls back to held.
 //!
-//! When the bracketing samples include a [`Value::ValueBlock`] or
-//! [`Value::None`], evaluation returns `None` — the spec semantics
-//! for a "blocked" sample.
+//! When the earlier bracketing sample is a [`Value::ValueBlock`] or
+//! [`Value::None`], evaluation returns `None`; a block as the later one
+//! holds the earlier value.
 
 use crate::gf;
 use crate::sdf;
@@ -52,7 +52,7 @@ pub enum InterpolationType {
 /// the nearest end sample. A NaN is such a query: the order puts it past
 /// every number on its sign bit's side, so a positive one takes the last
 /// sample and a negative one the first. Returns `None` when the list is
-/// empty or when the bracketing samples encode a blocked value
+/// empty or when the earlier bracketing sample encodes a blocked value
 /// (`Value::ValueBlock` / `Value::None`).
 pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) -> Option<Value> {
     if samples.is_empty() {
@@ -76,9 +76,12 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
     let (t_lo, v_lo) = &samples[lo];
     let (t_hi, v_hi) = &samples[hi];
 
-    // Blocked-sample fallthrough applies regardless of mode.
-    if is_blocked(v_lo) || is_blocked(v_hi) {
+    if is_blocked(v_lo) {
         return None;
+    }
+    // C++ `UsdAttribute::Get` holds the earlier sample when the later one is a block.
+    if is_blocked(v_hi) {
+        return clean(v_lo.clone());
     }
 
     match mode {
@@ -303,11 +306,18 @@ mod tests {
     }
 
     #[test]
-    fn linear_blocked_sample_returns_none() {
-        let s = vec![(0.0, Value::Double(1.0)), (10.0, Value::ValueBlock)];
-        assert_eq!(evaluate(&s, 5.0, InterpolationType::Linear), None);
-        // At t == 10 exactly, the sample IS the block — return None.
-        assert_eq!(evaluate(&s, 10.0, InterpolationType::Linear), None);
+    fn blocked_sample_blocks_until_the_next() {
+        let s = vec![
+            (0.0, Value::Double(1.0)),
+            (10.0, Value::ValueBlock),
+            (20.0, Value::Double(3.0)),
+        ];
+        for mode in [InterpolationType::Linear, InterpolationType::Held] {
+            assert_eq!(evaluate(&s, 5.0, mode), Some(Value::Double(1.0)));
+            assert_eq!(evaluate(&s, 10.0, mode), None);
+            assert_eq!(evaluate(&s, 15.0, mode), None);
+            assert_eq!(evaluate(&s, 20.0, mode), Some(Value::Double(3.0)));
+        }
     }
 
     #[test]
