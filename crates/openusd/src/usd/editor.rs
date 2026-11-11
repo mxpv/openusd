@@ -1652,6 +1652,9 @@ fn move_spec(layer: &mut sdf::LayerEdit<'_>, src: &sdf::Path, dst: &sdf::Path) -
         if let Some(slot) = slot {
             slot.restore(layer.data_mut())?;
         }
+        if src.parent() != dst.parent() {
+            remove_inert_ancestors(layer, src)?;
+        }
     }
     Ok(moved)
 }
@@ -1705,6 +1708,33 @@ impl Slot {
         data.set_field(&self.owner, self.key.as_str(), vt::Value::TokenVec(names));
         Ok(())
     }
+}
+
+/// Remove the ancestors of `src` that a reparent left as inert overs, nearest
+/// first, as C++ does under `SdfCleanupEnabler`: prim specs holding nothing but
+/// `specifier = over`.
+fn remove_inert_ancestors(layer: &mut sdf::LayerEdit<'_>, src: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+    let mut cursor = src.parent();
+    while let Some(path) = cursor.filter(|p| !p.is_abs_root()) {
+        let data = layer.data();
+        let inert = data.spec_type(&path) == Some(sdf::SpecType::Prim)
+            && data
+                .list_fields(&path)
+                .is_some_and(|fields| fields == [sdf::FieldKey::Specifier.as_str()])
+            && matches!(
+                data.try_field(&path, sdf::FieldKey::Specifier.as_str())
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+                Some(vt::Value::Specifier(sdf::Specifier::Over))
+            );
+        if !inert {
+            break;
+        }
+        layer.remove_spec(&path)?;
+        cursor = path.parent();
+    }
+    Ok(())
 }
 
 /// Rewrite every embedded namespace path in `layer` for an identity local-stack
@@ -2208,6 +2238,30 @@ mod tests {
             .apply()
             .unwrap();
         assert_eq!(stage.prim("/P").unwrap().child_names().unwrap(), ["x", "y", "A"]);
+    }
+
+    /// A reparent removes the overs it leaves holding nothing, and keeps one
+    /// still holding an opinion.
+    #[test]
+    fn reparent_removes_inert_overs() {
+        let stage = Stage::builder().in_memory("root.usda").unwrap();
+        stage.define_prim("/A").unwrap();
+        stage.override_prim("/A/Empty/Deeper/Leaf").unwrap();
+        stage.override_prim("/A/Kept/Leaf").unwrap();
+        stage.create_attribute("/A/Kept.x", "double").unwrap();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A/Empty/Deeper/Leaf").unwrap(), path("/A/Leaf").unwrap())
+            .unwrap()
+            .move_prim(path("/A/Kept/Leaf").unwrap(), path("/A/Leaf2").unwrap())
+            .unwrap()
+            .apply()
+            .unwrap();
+
+        let layer = stage.root_layer();
+        let data = layer.borrow();
+        assert!(!data.data().has_spec(&path("/A/Empty").unwrap()));
+        assert!(data.data().has_spec(&path("/A/Kept").unwrap()));
+        assert!(data.data().has_spec(&path("/A/Leaf").unwrap()));
     }
 
     #[test]
