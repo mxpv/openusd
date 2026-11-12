@@ -30,6 +30,12 @@ pub fn parse(text: &str) -> Result<sdf::Data, ParseError> {
 /// the cookie, so `#usdaFOO` is not text this format claims.
 pub const MAGIC: &[u8] = b"#usda ";
 
+/// How deep prims, variants and dictionaries may nest in a `usda` layer. The
+/// reader and writer recurse once per level, and a layer comes from an
+/// arbitrary file, so a deeper one is refused rather than overflowing the
+/// stack. The writer refuses a deeper prim, which a crate file can hold.
+pub const MAX_NESTING: usize = 256;
+
 /// Read a `usda` file from disk into an in-memory [`sdf::Data`] store.
 pub fn read_file(path: impl AsRef<Path>) -> crate::Result<sdf::Data> {
     let path = path.as_ref();
@@ -111,5 +117,48 @@ mod tests {
             data.field(&size, "default").unwrap().into_owned(),
             vt::Value::Float(2.5)
         );
+    }
+
+    /// Prims nested `MAX_NESTING` deep read and write back; one level deeper
+    /// is refused by the reader, and by the writer for a layer holding one.
+    #[test]
+    fn prim_nesting_limit() -> crate::Result<()> {
+        let text = |depth| format!("#usda 1.0\n{}{}", "def \"P\" {\n".repeat(depth), "}\n".repeat(depth));
+        let data = parse(&text(MAX_NESTING))?;
+        let mut written = Vec::new();
+        TextWriter::write(&data, &mut io::Cursor::new(&mut written))?;
+        parse(&String::from_utf8(written).expect("usda is UTF-8"))?;
+        let error = parse(&text(MAX_NESTING + 1)).expect_err("one level too deep");
+        assert!(error.to_string().contains("nested more than"), "{error}");
+
+        let mut deep = sdf::Data::new();
+        deep.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot)
+            .add("primChildren", vt::Value::token_vec(["P"]));
+        let mut path = sdf::Path::abs_root();
+        for _ in 0..=MAX_NESTING {
+            path = path.append_path("P")?;
+            deep.create_spec(path.clone(), SpecType::Prim)
+                .add("primChildren", vt::Value::token_vec(["P"]));
+        }
+        let error = TextWriter::write(&deep, &mut io::Cursor::new(Vec::new())).expect_err("one level too deep");
+        assert!(error.to_string().contains("nested more than"), "{error}");
+        Ok(())
+    }
+
+    /// Dictionaries nested `MAX_NESTING` deep read back; one level deeper is
+    /// refused.
+    #[test]
+    fn dictionary_nesting_limit() -> crate::Result<()> {
+        let text = |depth: usize| {
+            format!(
+                "#usda 1.0\ndef \"P\" (\n    customData = {}{{\nint x = 1\n{}\n)\n{{\n}}\n",
+                "{\ndictionary d = ".repeat(depth - 1),
+                "}\n".repeat(depth)
+            )
+        };
+        parse(&text(MAX_NESTING))?;
+        let error = parse(&text(MAX_NESTING + 1)).expect_err("one level too deep");
+        assert!(error.to_string().contains("nested more than"), "{error}");
+        Ok(())
     }
 }

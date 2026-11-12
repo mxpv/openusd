@@ -260,6 +260,11 @@ impl Emitter<'_> {
     /// type, a blank line before the child prims and between them, then the
     /// variant sets.
     fn emit_prim_body(&mut self, data: &dyn AbstractData, path: &Path) -> Result<(), FormatError> {
+        if path.element_count() > super::MAX_NESTING {
+            return Err(FormatError::Encode {
+                reason: format!("prims nested more than {} deep", super::MAX_NESTING).into(),
+            });
+        }
         self.emit_body_reorders(data, path)?;
 
         let mut props = children(data, path, ChildrenKey::PropertyChildren)
