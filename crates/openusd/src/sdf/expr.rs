@@ -941,10 +941,17 @@ fn normalize_index(index: i64, len: usize) -> Option<usize> {
     (0..len as i64).contains(&idx).then_some(idx as usize)
 }
 
+/// How deep function calls may nest in an expression. The recursive-descent
+/// parser consumes native stack per call, and expressions arrive from
+/// arbitrary files. A deeper call is refused.
+const MAX_NESTING: usize = 128;
+
 /// Parser for USD variable expressions.
 struct Parser<'a> {
     input: &'a str,
     iter: Peekable<SpannedIter<'a, Token<'a>>>,
+    /// How many function calls enclose the position.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -959,6 +966,7 @@ impl<'a> Parser<'a> {
         Self {
             input,
             iter: Token::lexer(input).spanned().peekable(),
+            depth: 0,
         }
     }
 
@@ -1044,7 +1052,13 @@ impl<'a> Parser<'a> {
             .parse()
             .map_err(|_| ExprError::new(format!("Unknown function {name}")))?;
         self.expect(Token::LParen)?;
+        ensure!(
+            self.depth < MAX_NESTING,
+            "Function calls nested more than {MAX_NESTING} deep"
+        );
+        self.depth += 1;
         let args = self.parse_delimited(Token::RParen, ')', "function call", Self::parse)?;
+        self.depth -= 1;
         func.validate_arg_count(args.len())?;
         Ok(Expr::Call { func, args })
     }
@@ -1276,6 +1290,15 @@ mod tests {
                 Ok(Token::RBracket),
             ]
         );
+    }
+
+    /// Calls nested `MAX_NESTING` deep parse; one level deeper is refused.
+    #[test]
+    fn call_nesting_limit() {
+        let text = |depth| format!("`{}true{}`", "not(".repeat(depth), ")".repeat(depth));
+        Expr::parse(&text(MAX_NESTING)).expect("at the limit");
+        let error = Expr::parse(&text(MAX_NESTING + 1)).expect_err("one level too deep");
+        assert!(error.to_string().contains("nested more than"), "{error}");
     }
 
     #[test]
