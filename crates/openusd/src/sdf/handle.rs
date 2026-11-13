@@ -444,7 +444,7 @@ def \"P\"
         assert!(handle.resolved_path().is_some());
         drop(guard);
 
-        sdf::layer::tests::rewrite(&path, &text(3.0))?;
+        sdf::layer::tests::rewrite(&path, text(3.0))?;
         assert!(handle.reload(false)?);
         assert_eq!(double(attr.default()?), Some(3.0));
         Ok(())
