@@ -16,8 +16,8 @@ let stage = usd::Stage::builder()
 
 Each `surfacematerial` becomes a `Material` at
 `/MaterialX/Materials/<name>`, each node a `Shader` whose `info:id` names its
-MaterialX nodedef. The nodedefs come from MaterialX 1.39's `stdlib`, `pbrlib`
-and `bxdf` libraries, embedded under `libraries/` (Apache-2.0, see
+MaterialX nodedef. The nodedefs come from MaterialX 1.39's `stdlib`, `pbrlib`,
+`nprlib` and `bxdf` libraries, embedded under `libraries/` (Apache-2.0, see
 `libraries/LICENSE`), and from those the document declares itself.
 
 Shading the result is a renderer's work, as it is in C++: this crate
