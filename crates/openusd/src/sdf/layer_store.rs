@@ -395,7 +395,8 @@ impl LayerHandle {
     /// reloads once.
     ///
     /// A package whose listing changed brings every live layer in it into
-    /// the batch, reloaded when its asset changed, and the layers holding a
+    /// the batch, and each layer in it without unsaved edits is read again
+    /// whatever its asset's time. The layers holding a
     /// package in common reload as one group, together with the packages'
     /// listings. Every group is tried: one with a layer whose asset cannot
     /// be read is left as it is whole, while a layer whose identifier no
@@ -515,21 +516,36 @@ impl LayerHandle {
                         store: Rc::clone(store),
                     };
                     let layer = read.layer(&handle);
-                    // A layer brought in reloads when its asset changed. One
-                    // with unsaved edits keeps them, and one whose asset no
-                    // longer resolves where it was read stays as it is:
-                    // neither was asked for, so neither stops the batch.
-                    let step = (!layer.is_dirty())
-                        .then(|| layer.reload_due(false).ok().flatten().map(Step::Due))
-                        .flatten();
                     members.push(Member {
                         asked: false,
                         held: read.held_by(&handle).to_vec(),
                         packages: held_packages(layer.real_path(), &mut listing),
                         handle,
-                        step,
+                        step: None,
                         package_changed: false,
                     });
+                }
+                // A layer in a package whose listing changed is read again
+                // whatever its asset's time, since the package was rewritten.
+                // One brought in with unsaved edits keeps them, and one whose
+                // asset no longer resolves where it was read stays as it is:
+                // neither was asked for, so neither stops the batch.
+                for (at, member) in members.iter_mut().enumerate() {
+                    let layer = read.layer(&member.handle);
+                    let rewritten = member
+                        .held
+                        .iter()
+                        .chain(member.packages.iter().map(|(package, _)| package))
+                        .any(|package| changed.contains(package));
+                    let told = failed.iter().any(|&(failed, _)| failed == at);
+                    if member.step.is_some() || !rewritten || told || layer.is_dirty() {
+                        continue;
+                    }
+                    match layer.reload_due(true) {
+                        Ok(due) => member.step = due.map(Step::Due),
+                        Err(error) if member.asked => failed.push((at, error)),
+                        Err(_) => {}
+                    }
                 }
             }
         }

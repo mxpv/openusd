@@ -840,6 +840,52 @@ pub(crate) mod tests {
         Ok(handle.read(|layer| layer.data().has_spec(&sdf::path(path).unwrap()))?)
     }
 
+    /// A layer brought into a reload is read again though its package keeps
+    /// the time it was read at, as a rewrite within one timestamp tick does.
+    #[test]
+    fn reload_sibling_same_time() -> Result<()> {
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (_dir, path, _registry, handles) =
+            package_layers(&[("a.usda", empty), ("b.usda", empty)], &["a.usda", "b.usda"])?;
+        let read = fs::metadata(&path)?.modified()?;
+        fs::write(
+            &path,
+            package(&[
+                ("a.usda", b"#usda 1.0\ndef \"A\" {}\n"),
+                ("b.usda", empty),
+                ("c.usda", empty),
+            ]),
+        )?;
+        fs::File::options().write(true).open(&path)?.set_modified(read)?;
+        assert!(handles[1].reload(true)?);
+        assert!(defines(&handles[0], "/A")?, "a reloaded with b");
+        Ok(())
+    }
+
+    /// An unforced reload reads a layer it was asked for again when another
+    /// layer of the batch finds its package's listing changed, though the
+    /// package keeps the time the layer was read at.
+    #[test]
+    fn reload_asked_same_time() -> Result<()> {
+        let empty: &[u8] = b"#usda 1.0\n";
+        let (dir, path, registry, handles) = package_layers(&[("a.usda", empty)], &["a.usda"])?;
+        let plain = dir.path().join("plain.usda");
+        fs::write(&plain, empty)?;
+        let plain_layer = registry
+            .find_or_open(plain.to_str().unwrap())?
+            .expect("the layer opens");
+        let read = fs::metadata(&path)?.modified()?;
+        fs::write(
+            &path,
+            package(&[("a.usda", b"#usda 1.0\ndef \"A\" {}\n"), ("c.usda", empty)]),
+        )?;
+        fs::File::options().write(true).open(&path)?.set_modified(read)?;
+        sdf::layer::tests::rewrite(&plain, "#usda 1.0\ndef \"Plain\" {}\n")?;
+        assert!(sdf::LayerHandle::reload_all(&[handles[0].clone(), plain_layer], false)?);
+        assert!(defines(&handles[0], "/A")?, "a reloaded with its package");
+        Ok(())
+    }
+
     /// A layer brought into a reload keeps its unsaved edits.
     #[test]
     fn reload_sibling_keeps_edits() -> Result<()> {
@@ -1136,6 +1182,11 @@ pub(crate) mod tests {
         };
         let (a, b) = (open("a.usda")?, open("b.usda")?);
 
+        // An unsaved edit keeps `a` as it is when the reload brings it in.
+        a.edit(|e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Edit", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
         let nested = package(&[("root.usda", b"#usda 1.0\n")]);
         fs::write(
             &path,
@@ -1146,6 +1197,7 @@ pub(crate) mod tests {
             ]),
         )?;
         assert!(b.reload(true)?);
+        assert!(defines(&a, "/Edit")?, "a keeps its edits");
         drop(b);
         registry.sweep();
         assert!(
