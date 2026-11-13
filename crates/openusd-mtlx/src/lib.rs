@@ -34,9 +34,9 @@
 //!   by an internal reference.
 //!
 //! A node's `info:id` is the name of its nodedef: the one the document
-//! declares, or one of MaterialX 1.39's `stdlib`, `pbrlib` and `bxdf`
-//! libraries, which the crate embeds. Each input of a colour type, and the
-//! `file` of an image with a colour output, carries its effective
+//! declares, or one of MaterialX 1.39's `stdlib`, `pbrlib`, `nprlib` and
+//! `bxdf` libraries, which the crate embeds. Each input of a colour type, and
+//! the `file` of an image with a colour output, carries its effective
 //! `colorspace` as `colorSpace` metadata, and a `fileprefix` is folded into
 //! each `filename` value; asset paths stay as authored, so they anchor at the
 //! `.mtlx` that authors them.
