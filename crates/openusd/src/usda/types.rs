@@ -229,10 +229,17 @@ fn check_shape(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> Result<(), R
 
 /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
 pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<vt::Value, RawError> {
-    // Handle array case: parse each element as a typed scalar, then collect
-    // into the most specific Vec variant that fits all elements.
+    // Handle array case: parse each element as a scalar, then collect into
+    // the most specific Vec variant that fits all elements. An array holds no
+    // array, as a `VtArray` holds none.
     if cursor.at_punctuation('[')? {
-        let values = parse_array_with(cursor, parse_untyped_value)?;
+        let values = parse_array_with(cursor, |c| {
+            ensure!(
+                !c.at_punctuation('[')? && !c.at_punctuation('{')?,
+                "An untyped array cannot hold an array or a dictionary"
+            );
+            parse_untyped_scalar(c)
+        })?;
 
         // An array of numbers is a double array where any of them is
         // fractional, and an integer array otherwise.
@@ -293,6 +300,11 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<vt::Value, 
         return Ok(vt::Value::Dictionary(parse_dictionary(cursor)?.into()));
     }
 
+    parse_untyped_scalar(cursor)
+}
+
+/// Parse an untyped value that is a single token.
+fn parse_untyped_scalar(cursor: &mut Cursor<'_>) -> Result<vt::Value, RawError> {
     let token = cursor.bump()?;
     match token {
         Token::None => Ok(vt::Value::ValueBlock),
@@ -314,16 +326,7 @@ pub(super) fn parse_untyped_value(cursor: &mut Cursor<'_>) -> Result<vt::Value, 
 
 /// Parse a dictionary value from `{` to `}`.
 pub(super) fn parse_dictionary(cursor: &mut Cursor<'_>) -> Result<HashMap<String, vt::Value>, RawError> {
-    parse_nested_dictionary(cursor, 1)
-}
-
-/// Parse a dictionary that `depth - 1` dictionaries enclose.
-fn parse_nested_dictionary(cursor: &mut Cursor<'_>, depth: usize) -> Result<HashMap<String, vt::Value>, RawError> {
-    ensure!(
-        depth <= super::MAX_NESTING,
-        "Dictionaries nested more than {} deep",
-        super::MAX_NESTING
-    );
+    cursor.enter()?;
     let mut dict = HashMap::new();
 
     parse_block(cursor, '{', '}', |c| {
@@ -346,7 +349,7 @@ fn parse_nested_dictionary(cursor: &mut Cursor<'_>, depth: usize) -> Result<Hash
         c.expect_punctuation('=')?;
 
         let value = if nested {
-            vt::Value::Dictionary(parse_nested_dictionary(c, depth + 1)?.into())
+            vt::Value::Dictionary(parse_dictionary(c)?.into())
         } else if let Some(ty) = type_hint {
             // An entry spells its own type, and a dictionary keeps no room to
             // record one alongside a literal, so an unregistered spelling
@@ -360,6 +363,7 @@ fn parse_nested_dictionary(cursor: &mut Cursor<'_>, depth: usize) -> Result<Hash
         dict.insert(key, value);
         Ok(())
     })?;
+    cursor.leave();
 
     Ok(dict)
 }

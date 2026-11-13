@@ -56,7 +56,7 @@ impl TextWriter {
     /// rather than a layer — showing a schema's fallback in documentation, say.
     pub fn value_to_string(value: &vt::Value) -> Result<String, FormatError> {
         let mut text = String::new();
-        format_value(&mut ValueText::of(&mut text), value, 0)?;
+        format_value(&mut ValueText::of(&mut text, 0), value, 0)?;
         Ok(text)
     }
 
@@ -75,6 +75,7 @@ fn emit(data: &dyn AbstractData, out: &mut dyn Write) -> Result<(), FormatError>
     Emitter {
         out,
         indent: 0,
+        depth: 0,
         scratch: String::new(),
     }
     .emit_layer(data)
@@ -83,6 +84,8 @@ fn emit(data: &dyn AbstractData, out: &mut dyn Write) -> Result<(), FormatError>
 struct Emitter<'w> {
     out: &'w mut dyn Write,
     indent: usize,
+    /// How many prim and variant bodies enclose what is being written.
+    depth: usize,
     /// The text of the value or item being written, kept from one to the
     /// next so its storage is allocated once.
     scratch: String,
@@ -260,11 +263,7 @@ impl Emitter<'_> {
     /// type, a blank line before the child prims and between them, then the
     /// variant sets.
     fn emit_prim_body(&mut self, data: &dyn AbstractData, path: &Path) -> Result<(), FormatError> {
-        if path.element_count() > super::MAX_NESTING {
-            return Err(FormatError::Encode {
-                reason: format!("prims nested more than {} deep", super::MAX_NESTING).into(),
-            });
-        }
+        enter(&mut self.depth)?;
         self.emit_body_reorders(data, path)?;
 
         let mut props = children(data, path, ChildrenKey::PropertyChildren)
@@ -299,6 +298,7 @@ impl Emitter<'_> {
                 self.emit_variant_set(data, &vset_path, vset.as_str())?;
             }
         }
+        self.depth -= 1;
         Ok(())
     }
 
@@ -602,7 +602,7 @@ impl Emitter<'_> {
             && !custom.is_empty()
         {
             s.push_str("; ");
-            format_inline_dictionary(s, custom)?;
+            format_inline_dictionary(&mut ValueText::of(s, self.depth), custom)?;
         }
 
         s.push(',');
@@ -903,8 +903,10 @@ impl Emitter<'_> {
             Value::ReferenceListOp(op) => {
                 // A reference with custom data spans lines, one level in
                 // from the statement, as it is always one item of a list.
-                let indent = self.indent + 1;
-                self.emit_listop_statement(name, op, |s, r| write_reference(s, r, indent))?;
+                let (indent, depth) = (self.indent + 1, self.depth);
+                self.emit_listop_statement(name, op, |s, r| {
+                    write_reference(&mut ValueText::of(s, depth), r, indent)
+                })?;
                 Ok(Some(true))
             }
             Value::PayloadListOp(op) => {
@@ -1039,6 +1041,7 @@ impl Emitter<'_> {
         let mut text = ValueText {
             text: &mut self.scratch,
             spill: Some(&mut *self.out),
+            depth: self.depth,
         };
         format_value(&mut text, value, self.indent)?;
         text.finish()?;
@@ -1072,15 +1075,23 @@ impl Emitter<'_> {
 struct ValueText<'o> {
     text: &'o mut String,
     spill: Option<&'o mut dyn Write>,
+    /// How many prim, variant, dictionary and array bodies enclose the value
+    /// being formatted.
+    depth: usize,
 }
 
 /// How much of an array's text [`ValueText`] holds before handing it on.
 const SPILL: usize = 1 << 16;
 
 impl<'o> ValueText<'o> {
-    /// Text that keeps the whole value in `text`.
-    fn of(text: &'o mut String) -> Self {
-        Self { text, spill: None }
+    /// Text that keeps the whole value in `text`, which `depth` bodies
+    /// enclose.
+    fn of(text: &'o mut String, depth: usize) -> Self {
+        Self {
+            text,
+            spill: None,
+            depth,
+        }
     }
 
     /// Hands what is left to `spill`, the end of a value written to one.
@@ -1120,13 +1131,31 @@ impl DerefMut for ValueText<'_> {
 
 // ---------- value formatter (string-producing) ----------
 
+/// A value whose line is indented `indent` levels: a dictionary in it spans
+/// several lines, its entries one level in and its `}` at `indent`.
+///
+/// A dictionary and a value array recurse from here, so only this small
+/// frame, not [`format_flat`]'s, lies between one level and the next.
+fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), FormatError> {
+    match v {
+        Value::Dictionary(dict) | Value::UnregisteredDictionary(dict) => format_dictionary(s, dict, indent),
+        Value::ValueVec(v) => {
+            enter(&mut s.depth)?;
+            format_vec(s, v, |s, v| format_value(s, v, indent))?;
+            s.depth -= 1;
+            Ok(())
+        }
+        v => format_flat(s, v, indent),
+    }
+}
+
 // One arm per variant, grouped by value type family so a new variant has an
 // obvious home. Folding together the distinct variants that happen to share
 // a formatter would scatter that grouping.
-/// A value whose line is indented `indent` levels: a dictionary in it spans
-/// several lines, its entries one level in and its `}` at `indent`.
+/// A value as [`format_value`] formats it, which hands a dictionary or a
+/// value array back to it.
 #[allow(clippy::match_same_arms)]
-fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), FormatError> {
+fn format_flat(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), FormatError> {
     match v {
         // The USDA parser reads the `None` token as `Value::ValueBlock`. Emitting
         // either `Value::None` (absent-opinion marker) or `Value::Value` (expression
@@ -1224,9 +1253,7 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
             Variability::Uniform => "uniform",
         }),
 
-        Value::Dictionary(dict) | Value::UnregisteredDictionary(dict) => {
-            format_dictionary(s, dict, indent)?;
-        }
+        Value::Dictionary(_) | Value::UnregisteredDictionary(_) | Value::ValueVec(_) => format_value(s, v, indent)?,
 
         Value::TokenListOp(op) => format_inline_listop(s, op, |s, t: &Token| write_quoted(s, t.as_str()))?,
         Value::StringListOp(op) => format_inline_listop(s, op, |s, t: &String| write_quoted(s, t))?,
@@ -1294,7 +1321,6 @@ fn format_value(s: &mut ValueText<'_>, v: &Value, indent: usize) -> Result<(), F
             )?;
         }
 
-        Value::ValueVec(v) => format_vec(s, v, |s, v| format_value(s, v, indent))?,
         // An unregistered value is the literal a layer was written with,
         // recorded because nothing could type it. Quoting it would make it a
         // string; it is copied out as it came in.
@@ -1453,6 +1479,7 @@ fn get_double(dict: &HashMap<String, Value>, key: &str) -> f64 {
 fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>, indent: usize) -> Result<(), FormatError> {
     let mut keys: Vec<&String> = dict.keys().collect();
     keys.sort();
+    enter(&mut s.depth)?;
     s.push_str("{\n");
     for k in &keys {
         let value = &dict[k.as_str()];
@@ -1463,6 +1490,7 @@ fn format_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>, inden
     }
     push_indent(s, indent);
     s.push('}');
+    s.depth -= 1;
     Ok(())
 }
 
@@ -1494,9 +1522,10 @@ fn push_entry_head(s: &mut String, key: &str, value: &Value) -> Result<(), Forma
 /// A dictionary on one line, its entries in key order and separated by
 /// semicolons, as C++ `Sdf_FileIOUtility::WriteDictionary` writes one with
 /// `multiLine` off: a spline knot's custom data.
-fn format_inline_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
+fn format_inline_dictionary(s: &mut ValueText<'_>, dict: &HashMap<String, Value>) -> Result<(), FormatError> {
     let mut entries: Vec<_> = dict.iter().collect();
     entries.sort_by_key(|(key, _)| *key);
+    enter(&mut s.depth)?;
     s.push_str("{ ");
     for (i, (key, value)) in entries.into_iter().enumerate() {
         if i > 0 {
@@ -1505,10 +1534,11 @@ fn format_inline_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Re
         push_entry_head(s, key, value)?;
         match value {
             Value::Dictionary(nested) | Value::UnregisteredDictionary(nested) => format_inline_dictionary(s, nested)?,
-            value => format_value(&mut ValueText::of(s), value, 0)?,
+            value => format_value(s, value, 0)?,
         }
     }
     s.push_str(" }");
+    s.depth -= 1;
     Ok(())
 }
 
@@ -1518,6 +1548,23 @@ fn interpolation(knot: &HashMap<String, Value>) -> &str {
         Some(Value::Token(t)) => t.as_str(),
         _ => "held",
     }
+}
+
+/// Steps `depth` into a prim, variant, dictionary or array body, refusing one
+/// nested past [`MAX_NESTING`](super::MAX_NESTING), since the writer recurses
+/// once per body. The caller steps back out by decrementing `depth`.
+fn enter(depth: &mut usize) -> Result<(), FormatError> {
+    if *depth >= super::MAX_NESTING {
+        return Err(FormatError::Encode {
+            reason: format!(
+                "prims, variants, dictionaries and arrays nested more than {} deep",
+                super::MAX_NESTING
+            )
+            .into(),
+        });
+    }
+    *depth += 1;
+    Ok(())
 }
 
 fn push_indent(s: &mut String, levels: usize) {
@@ -1578,7 +1625,7 @@ fn write_asset_path(s: &mut String, path: &str) -> Result<(), FormatError> {
 /// A reference on a line indented `indent` levels, as C++
 /// `_ListOpWriter<SdfReference>` writes one: custom data puts its layer
 /// offset and the data on lines of their own, in parentheses.
-fn write_reference(s: &mut String, r: &Reference, indent: usize) -> Result<(), FormatError> {
+fn write_reference(s: &mut ValueText<'_>, r: &Reference, indent: usize) -> Result<(), FormatError> {
     write_arc_target(s, &r.asset_path, &r.prim_path)?;
     if r.custom_data.is_empty() {
         write_layer_offset(s, &r.layer_offset, None);
@@ -1588,7 +1635,7 @@ fn write_reference(s: &mut String, r: &Reference, indent: usize) -> Result<(), F
     write_layer_offset(s, &r.layer_offset, Some(indent + 1));
     push_indent(s, indent + 1);
     s.push_str("customData = ");
-    format_dictionary(&mut ValueText::of(s), &r.custom_data, indent + 1)?;
+    format_dictionary(s, &r.custom_data, indent + 1)?;
     s.push('\n');
     push_indent(s, indent);
     s.push(')');
@@ -1750,7 +1797,7 @@ mod tests {
         for literal in ["7", "(1, 2, 3)", "[a, b]", "\"already quoted\""] {
             let mut out = String::new();
             format_value(
-                &mut ValueText::of(&mut out),
+                &mut ValueText::of(&mut out, 0),
                 &Value::UnregisteredValue(literal.to_owned()),
                 0,
             )
@@ -1775,7 +1822,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit(["1, 2".to_owned()]);
 
         let mut out = String::new();
-        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op), 0).expect("writes");
+        format_value(&mut ValueText::of(&mut out, 0), &Value::UnregisteredValueListOp(op), 0).expect("writes");
         assert_eq!(out, "[1, 2]");
     }
 
@@ -1785,7 +1832,7 @@ mod tests {
         let op = sdf::ListOp::<String>::explicit([]);
 
         let mut out = String::new();
-        format_value(&mut ValueText::of(&mut out), &Value::UnregisteredValueListOp(op), 0).expect("writes");
+        format_value(&mut ValueText::of(&mut out, 0), &Value::UnregisteredValueListOp(op), 0).expect("writes");
         assert_eq!(out, "[]");
     }
 

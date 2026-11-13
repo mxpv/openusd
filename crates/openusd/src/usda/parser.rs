@@ -264,11 +264,7 @@ impl<'a> Parser<'a> {
         owner_spec: &mut sdf::SpecData,
         data: &mut sdf::PathMap<sdf::SpecData>,
     ) -> Result<PrimBodyNames, RawError> {
-        ensure!(
-            path.element_count() <= super::MAX_NESTING,
-            "Prims nested more than {} deep",
-            super::MAX_NESTING
-        );
+        self.cursor.enter()?;
         let mut children = Vec::new();
         let mut properties = PropertyNames::default();
         let mut variant_sets = Vec::new();
@@ -302,6 +298,7 @@ impl<'a> Parser<'a> {
             }
             Ok(())
         })?;
+        self.cursor.leave();
 
         Ok((children, properties, variant_sets))
     }

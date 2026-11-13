@@ -30,6 +30,8 @@ pub(super) struct Cursor<'source> {
     /// [`last_span`](Self::last_span) cannot say: that one follows lookahead
     /// too, so it moves past text no caller has taken yet.
     consumed_end: usize,
+    /// How many prim, variant and dictionary bodies enclose the position.
+    depth: usize,
 }
 
 impl<'source> Cursor<'source> {
@@ -39,7 +41,26 @@ impl<'source> Cursor<'source> {
             source,
             last_span: None,
             consumed_end: 0,
+            depth: 0,
         }
+    }
+
+    /// Steps into a prim, variant or dictionary body, refusing one nested
+    /// past [`MAX_NESTING`](super::MAX_NESTING), since the parser recurses
+    /// once per body. [`leave`](Self::leave) steps back out.
+    pub(super) fn enter(&mut self) -> Result<(), RawError> {
+        ensure!(
+            self.depth < super::MAX_NESTING,
+            "Prims, variants and dictionaries nested more than {} deep",
+            super::MAX_NESTING
+        );
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Steps out of the body [`enter`](Self::enter) stepped into.
+    pub(super) fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     /// The full input this cursor reads from.
