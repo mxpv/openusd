@@ -135,6 +135,45 @@ fn root_layer() -> Result {
     Ok(())
 }
 
+/// A node of `nprlib` composes with its nodedef's `info:id` and output.
+#[test]
+fn nprlib_nodes() -> Result {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("npr.mtlx");
+    fs::write(
+        &path,
+        r#"<materialx version="1.39">
+             <nodegraph name="g">
+               <viewdirection name="v" type="vector3" nodedef="ND_viewdirection_vector3" />
+               <facingratio name="f" type="float"><input name="viewdirection" type="vector3" nodename="v" /></facingratio>
+               <output name="out" type="float" nodename="f" />
+             </nodegraph>
+             <standard_surface name="s" type="surfaceshader"><input name="base" type="float" nodegraph="g" output="out" /></standard_surface>
+             <surfacematerial name="m" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s" /></surfacematerial>
+           </materialx>"#,
+    )?;
+    let stage = stage(&path)?;
+    let graph = "/MaterialX/Materials/m/g";
+    let view = stage.prim(format!("{graph}/v"))?;
+    assert_eq!(
+        view.attribute("info:id").get::<vt::Value>()?,
+        Some(vt::Value::token("ND_viewdirection_vector3"))
+    );
+    assert_eq!(
+        view.attribute("outputs:out").type_name()?.as_ref().map(|t| t.as_str()),
+        Some("float3")
+    );
+    assert_eq!(
+        value(&stage, &format!("{graph}/f"), "info:id")?,
+        Some(vt::Value::token("ND_facingratio_float"))
+    );
+    assert_eq!(
+        source(&stage, &format!("{graph}/f"), "inputs:viewdirection")?,
+        format!("{graph}/v.outputs:out")
+    );
+    Ok(())
+}
+
 /// A registry without the format reads no `.mtlx`.
 #[test]
 fn needs_format() {

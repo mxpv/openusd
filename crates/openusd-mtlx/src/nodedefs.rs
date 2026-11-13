@@ -1,8 +1,8 @@
 //! Node definitions: the signatures a node's `info:id`, its inputs' types and
 //! its outputs come from.
 //!
-//! The standard ones are MaterialX 1.39's `stdlib`, `pbrlib` and `bxdf`
-//! libraries, embedded and parsed once; a document's own `<nodedef>`s come
+//! The standard ones are MaterialX 1.39's `stdlib`, `pbrlib`, `nprlib` and
+//! `bxdf` libraries, embedded and parsed once; a document's own `<nodedef>`s come
 //! before them for that document. C++ `usdMtlx` reads the same libraries
 //! through `UsdMtlxGetDocument("")`.
 
@@ -15,6 +15,7 @@ use crate::document::Node;
 const LIBRARIES: &[&str] = &[
     include_str!("../libraries/stdlib/stdlib_defs.mtlx"),
     include_str!("../libraries/pbrlib/pbrlib_defs.mtlx"),
+    include_str!("../libraries/nprlib/nprlib_defs.mtlx"),
     include_str!("../libraries/bxdf/standard_surface.mtlx"),
     include_str!("../libraries/bxdf/open_pbr_surface.mtlx"),
     include_str!("../libraries/bxdf/gltf_pbr.mtlx"),
