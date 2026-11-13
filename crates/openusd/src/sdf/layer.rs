@@ -1783,16 +1783,16 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Writes `text` to `path` with a modification time past any it had.
-    pub(crate) fn rewrite(path: &FsPath, text: &str) -> Result<()> {
-        fs::write(path, text)?;
+    /// Writes `contents` to `path` with a modification time past any it had.
+    pub(crate) fn rewrite(path: &FsPath, contents: impl AsRef<[u8]>) -> Result<()> {
+        fs::write(path, contents)?;
         touch_later(path)
     }
 
     /// Appends `text` to the file at `path`, as [`rewrite`] writes.
     pub(crate) fn append(path: &FsPath, text: &str) -> Result<()> {
         let old = fs::read_to_string(path)?;
-        rewrite(path, &format!("{old}{text}"))
+        rewrite(path, format!("{old}{text}"))
     }
 
     /// Sets the modification time of the file at `path` past any it had.
