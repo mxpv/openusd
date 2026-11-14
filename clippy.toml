@@ -52,5 +52,6 @@ doc-valid-idents = [
 
 # A `Stage` and a `LayerHandle` hash and compare by handle identity, never by
 # the state their cells guard, so either (or a `Prim` or a live spec handle
-# holding one) is a sound map key.
-ignore-interior-mutability = ["openusd::usd::Stage", "openusd::sdf::LayerHandle"]
+# holding one) is a sound map key. A `Path` hashes and compares by its text,
+# never by the element count it caches.
+ignore-interior-mutability = ["openusd::usd::Stage", "openusd::sdf::LayerHandle", "openusd::sdf::Path"]

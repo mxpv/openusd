@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::{cmp, convert::Infallible, fmt, iter, str::FromStr};
 
@@ -81,7 +82,13 @@ struct Text {
     /// The text's hash under a fixed-key hasher. Equal texts in separate
     /// allocations hash alike.
     hash: u64,
+    /// The path's [`prim_element_count`](Path::prim_element_count), counted
+    /// on first use, or [`UNCOUNTED`] before.
+    prim_elements: AtomicU32,
 }
+
+/// The [`Text::prim_elements`] of a path not yet counted.
+const UNCOUNTED: u32 = u32::MAX;
 
 impl Default for Path {
     /// The empty path.
@@ -246,6 +253,31 @@ impl Path {
         }
 
         Ok(Path::from_text([self.as_str(), ".", property].concat()))
+    }
+
+    /// Appends the prim `name` under this path (C++ `SdfPath::AppendChild`):
+    /// after a `/`, or directly after a variant selection (`/A{v=s}B`). `name`
+    /// must be an identifier, and this path the pseudo-root, a prim, a
+    /// variant selection or the reflexive `.`, which gives `name` itself.
+    pub fn append_child(&self, name: &str) -> Result<Path, PathParseError> {
+        let fail = |offset, reason| PathParseError {
+            input: format!("{}/{name}", self.path),
+            offset,
+            reason,
+        };
+        if !Path::is_valid_identifier(name) {
+            return Err(fail(self.path.len() + 1, "child name is not a valid identifier"));
+        }
+        if self.is_empty() || self.is_property() || self.path.ends_with(']') {
+            return Err(fail(0, "path cannot own children"));
+        }
+        let text = match self.as_str() {
+            "." => return Ok(Path::from_text(name.to_owned())),
+            "/" => ["/", name].concat(),
+            parent if self.is_variant_selection() => [parent, name].concat(),
+            parent => [parent, "/", name].concat(),
+        };
+        Ok(Path::from_text(text))
     }
 
     /// Appends `path` (parsed if given as a string) under this path with a `/`
@@ -804,9 +836,19 @@ impl Path {
     /// "/"        -> 0
     /// ```
     pub fn prim_element_count(&self) -> usize {
-        self.components()
+        // Every clone shares the count, and racing threads store the same one.
+        let cached = self.path.prim_elements.load(Ordering::Relaxed);
+        if cached != UNCOUNTED {
+            return cached as usize;
+        }
+        let count = self
+            .components()
             .filter(|c| matches!(c, PathComponent::Prim(_)))
-            .count()
+            .count();
+        if let Ok(stored) = u32::try_from(count) {
+            self.path.prim_elements.store(stored, Ordering::Relaxed);
+        }
+        count
     }
 
     /// Counts every prim-namespace component of this path, including `{set=sel}`
@@ -924,6 +966,9 @@ impl Path {
 
         if me == old {
             return Some(new_prefix.clone());
+        }
+        if old_prefix == new_prefix {
+            return self.has_prefix(old_prefix).then(|| self.clone());
         }
 
         // Must start with old_prefix followed by '/', '.', or '{'. Property
@@ -1554,6 +1599,7 @@ impl Text {
         Self {
             hash: hasher.finish(),
             text,
+            prim_elements: AtomicU32::new(UNCOUNTED),
         }
     }
 }
@@ -1831,6 +1877,24 @@ pub(crate) mod tests {
             "/foo/bar.attr.mapper[/target].arg"
         );
 
+        Ok(())
+    }
+
+    /// A child attaches after a `/`, directly after a variant selection, and
+    /// alone under `.`; a property, a target, or a non-identifier name refuses.
+    #[test]
+    fn append_child_name() -> Result<()> {
+        assert_eq!(Path::abs_root().append_child("A")?.as_str(), "/A");
+        assert_eq!(Path::new("/A")?.append_child("B")?.as_str(), "/A/B");
+        assert_eq!(Path::new("/A{v=s}")?.append_child("B")?.as_str(), "/A{v=s}B");
+        assert_eq!(Path::new(".")?.append_child("B")?.as_str(), "B");
+        assert_eq!(Path::new("../A")?.append_child("B")?.as_str(), "../A/B");
+        assert!(Path::new("/A.x")?.append_child("B").is_err());
+        assert!(Path::new("/A.rel[/T]")?.append_child("B").is_err());
+        assert!(Path::default().append_child("B").is_err());
+        for name in ["", "B/C", "B.x", "..", "1B", "B{v=s}"] {
+            assert!(Path::new("/A")?.append_child(name).is_err(), "{name:?}");
+        }
         Ok(())
     }
 

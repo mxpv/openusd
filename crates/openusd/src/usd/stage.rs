@@ -4137,7 +4137,7 @@ impl Stage {
                 // that is not populated has none.
                 Ok(children) => {
                     for name in children.iter().rev() {
-                        if let Ok(child) = path.append_path(name.as_str()) {
+                        if let Ok(child) = path.append_child(name.as_str()) {
                             stack.push(child);
                         }
                     }
@@ -4289,7 +4289,7 @@ impl Stage {
         let names = self.masked(parent, |g, cache| cache.populated_children(g, parent))?;
         let mut children = Vec::with_capacity(names.len());
         for name in names {
-            let Ok(child) = parent.append_path(name.as_str()) else {
+            let Ok(child) = parent.append_child(name.as_str()) else {
                 continue;
             };
             let status = self.child_status_masked(&child, status, needed)?;
@@ -4635,7 +4635,7 @@ impl Stage {
             let children = self.masked(&path, |g, cache| cache.populated_children(g, &path))?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
-                if let Ok(child) = path.append_path(name.as_str()) {
+                if let Ok(child) = path.append_child(name.as_str()) {
                     stack.push((child, Some((epoch, status))));
                 }
             }
