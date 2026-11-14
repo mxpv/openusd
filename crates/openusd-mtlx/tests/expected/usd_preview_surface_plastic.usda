@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    customLayerData = {
+        string colorSpace = "lin_rec709"
+    }
+)
+
+def "MaterialX"
+{
+    def "Materials"
+    {
+        def Material "USD_Plastic" (
+            prepend apiSchemas = ["MaterialXConfigAPI"]
+        )
+        {
+            string config:mtlx:version = "1.38"
+            float inputs:clearcoat
+            float inputs:clearcoatRoughness
+            color3f inputs:diffuseColor = (0.10470402, 0.24188282, 0.818) (
+                colorSpace = "lin_rec709"
+            )
+            float inputs:displacement
+            color3f inputs:emissiveColor
+            float inputs:ior = 1.5
+            float inputs:metallic
+            float3 inputs:normal
+            float inputs:occlusion
+            float inputs:opacity
+            int inputs:opacityMode
+            float inputs:opacityThreshold
+            float inputs:roughness = 0.32467532
+            color3f inputs:specularColor
+            int inputs:useSpecularWorkflow
+            token outputs:mtlx:surface.connect = </MaterialX/Materials/USD_Plastic/SR_plastic.outputs:surface>
+
+            def Shader "SR_plastic" (
+                prepend references = </MaterialX/Shaders/SR_plastic>
+            )
+            {
+                float inputs:clearcoat.connect = </MaterialX/Materials/USD_Plastic.inputs:clearcoat>
+                float inputs:clearcoatRoughness.connect = </MaterialX/Materials/USD_Plastic.inputs:clearcoatRoughness>
+                color3f inputs:diffuseColor.connect = </MaterialX/Materials/USD_Plastic.inputs:diffuseColor>
+                float inputs:displacement.connect = </MaterialX/Materials/USD_Plastic.inputs:displacement>
+                color3f inputs:emissiveColor.connect = </MaterialX/Materials/USD_Plastic.inputs:emissiveColor>
+                float inputs:ior.connect = </MaterialX/Materials/USD_Plastic.inputs:ior>
+                float inputs:metallic.connect = </MaterialX/Materials/USD_Plastic.inputs:metallic>
+                float3 inputs:normal.connect = </MaterialX/Materials/USD_Plastic.inputs:normal>
+                float inputs:occlusion.connect = </MaterialX/Materials/USD_Plastic.inputs:occlusion>
+                float inputs:opacity.connect = </MaterialX/Materials/USD_Plastic.inputs:opacity>
+                int inputs:opacityMode.connect = </MaterialX/Materials/USD_Plastic.inputs:opacityMode>
+                float inputs:opacityThreshold.connect = </MaterialX/Materials/USD_Plastic.inputs:opacityThreshold>
+                float inputs:roughness.connect = </MaterialX/Materials/USD_Plastic.inputs:roughness>
+                color3f inputs:specularColor.connect = </MaterialX/Materials/USD_Plastic.inputs:specularColor>
+                int inputs:useSpecularWorkflow.connect = </MaterialX/Materials/USD_Plastic.inputs:useSpecularWorkflow>
+            }
+        }
+    }
+
+    def "Shaders"
+    {
+        def Shader "SR_plastic"
+        {
+            uniform token info:id = "ND_UsdPreviewSurface_surfaceshader"
+            token outputs:surface
+        }
+    }
+}
+

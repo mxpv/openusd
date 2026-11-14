@@ -4,9 +4,11 @@
 //! binary crate, `usdz` archive) to the shared [`AbstractData`] interface, so
 //! [`Layer`](super::Layer) and the loader stay decoupled from any single
 //! format. This module is the format abstraction (the trait); the registry that
-//! holds the built-in formats and looks them up by extension/content lives with
-//! [`LayerRegistry`](super::LayerRegistry) (`find_by_extension` / `find_by_id`),
-//! mirroring C++ `SdfFileFormat::FindByExtension` / `FindById`.
+//! holds the formats a stage reads — the built-in ones and any added with
+//! [`with_format`](super::LayerRegistry::with_format) — and looks them up by
+//! extension/content lives with [`LayerRegistry`](super::LayerRegistry)
+//! (`find_by_extension` / `find_by_id`), mirroring C++
+//! `SdfFileFormat::FindByExtension` / `FindById`.
 
 use std::io::{self, Seek, Write};
 use std::{error, fmt, mem};
@@ -128,8 +130,10 @@ impl<T: Write + Seek + ?Sized> WriteSeek for T {}
 /// A scene-description file format: the read/write bridge between a concrete
 /// encoding and [`AbstractData`].
 ///
-/// `Sync` so the built-in formats can live in the static registry. Format
-/// objects are stateless; lookup hands out `&'static dyn FileFormat`.
+/// `Sync` so a format can live in a `static`, as the built-in ones do. Format
+/// objects are stateless; lookup hands out `&'static dyn FileFormat`, and
+/// another crate adds one to a registry the same way
+/// ([`LayerRegistry::with_format`](super::LayerRegistry::with_format)).
 pub trait FileFormat: Sync {
     /// The format's stable identifier token (C++ `SdfFileFormat::GetFormatId`),
     /// e.g. `"usda"`.
