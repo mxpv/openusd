@@ -8,7 +8,8 @@ use std::io::Cursor;
 use std::path::Path;
 
 use openusd::sdf::{self, AbstractData, ChildrenKey, Data, FieldKey, SpecType, Specifier, path};
-use openusd::usdc::{CrateData, CrateWriter};
+use openusd::usda;
+use openusd::usdc::{CrateData, CrateFile, CrateWriter};
 use openusd::vt::{self, Value};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
@@ -230,15 +231,20 @@ fn asset_array_roundtrips() {
 
 #[test]
 fn empty_layer_roundtrips_through_crate_writer() {
-    // `cross_empty` covers USDA -> USDC. Make sure a programmatically
-    // constructed empty `Data` also writes and reads back successfully, as
-    // the writer has conditional branches for empty path/token/field tables.
+    // `cross_empty` covers USDA -> USDC. An empty `Data` built in memory also
+    // writes and reads back, as the reader and writer branch on empty path
+    // and field tables.
     let data = Data::new();
     let mut buf = Vec::new();
     CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("empty layer write");
 
-    let file = openusd::usdc::CrateFile::open(buf.clone()).expect("empty layer header");
-    assert!(!file.tokens.is_empty(), "the root's path element needs token 0");
+    // The tokens are the one at index 0 and the root's empty element, whose
+    // index C++ range-checks against them.
+    let file = CrateFile::open(buf.clone()).expect("empty layer header");
+    assert_eq!(
+        file.tokens.iter().map(|token| token.as_str()).collect::<Vec<_>>(),
+        [";-)", ""]
+    );
 
     let round = CrateData::open(buf.clone(), true).expect("empty layer re-parse");
 
@@ -253,6 +259,21 @@ fn empty_layer_roundtrips_through_crate_writer() {
         diffs.is_empty(),
         "empty-layer mismatch:\n{}",
         diff_json::DiffFormatter::new().format(&diffs)
+    );
+}
+
+/// A property named as its prim reads back as a property, and token 0 is
+/// the one C++ writes there.
+#[test]
+fn property_named_first_token() {
+    let data = usda::parse("#usda 1.0\ndef \"A\" {\n    float A = 1\n}\n").expect("parse");
+    let mut buf = Vec::new();
+    CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
+    assert_eq!(CrateFile::open(buf.clone()).expect("header").tokens[0].as_str(), ";-)");
+    let round = CrateData::open(buf, true).expect("re-parse");
+    assert_eq!(
+        (&round as &dyn AbstractData).spec_type(&path("/A.A").unwrap()),
+        Some(SpecType::Attribute)
     );
 }
 
