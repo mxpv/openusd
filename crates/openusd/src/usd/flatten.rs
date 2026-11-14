@@ -117,13 +117,14 @@ impl Stage {
         // written, because `traverse` borrows the stage for the walk. Each
         // prim's write is independent of every other, so a per-prim sink would
         // let the walk stream — and parallelize.
-        // An inactive prim is written without its descendants, which the
-        // stage does not hold (C++ `UsdStage::Flatten` walks
-        // `UsdPrimRange::AllPrims`).
+        // C++ `UsdStage::Flatten` prunes deactivated prims.
         let mut paths = Vec::new();
         self.traverse(PrimPredicate::ALL, |path| paths.push(path.clone()))?;
         for path in paths {
-            write_prim(&mut data, &self.prim(&path)?, assets)?;
+            let prim = self.prim(&path)?;
+            if prim.is_active()? {
+                write_prim(&mut data, &prim, assets)?;
+            }
         }
 
         let tag = format!("flattened {}", self.root_layer().identifier());
@@ -607,6 +608,21 @@ mod tests {
                 .get::<vt::Value>("default"),
             Some(vt::Value::Double(3.0))
         );
+    }
+
+    /// A deactivated prim is pruned from the result, as C++ prunes it.
+    #[test]
+    fn inactive_prims_pruned() {
+        let root = layer("root.usda", |data| {
+            sdf::PrimSpec::new(data, "/Kept", sdf::Specifier::Def, "").expect("prim");
+            sdf::PrimSpec::new(data, "/Off", sdf::Specifier::Def, "").expect("prim");
+            data.set_field(&sdf::Path::new("/Off").expect("path"), "active", vt::Value::Bool(false));
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
+
+        let flattened = stage.flatten().expect("flattens");
+        assert!(flattened.prim("/Kept").expect("a path").is_some());
+        assert!(flattened.prim("/Off").expect("a path").is_none());
     }
 
     /// A connected attribute stays connected: nothing else writes the composed
