@@ -59,7 +59,7 @@ that broader spec behavior can be considered fully covered.
 | Relative resource identifiers (anchored) | `9.4.1` | :white_check_mark: | `0.2.0` | `sdf::Layer::absolute_path`; `ar::DefaultResolver` reads `\` as a separator on every host<br>Remaining — file format arguments (`:SDF_FORMAT_ARGS:`) are anchored as part of the path |
 | Non-anchored identifiers (search paths) | `9.4.2` | :white_check_mark: | `0.2.0` | `DefaultResolver` with search paths |
 | Resolving identifiers to locations | `9.5` | :white_check_mark: | `0.2.0` | `Resolver` trait |
-| Resolving extensions | `9.6` | :white_check_mark: | `0.2.0` | `.usd`/`.usda`/`.usdc`/`.usdz` dispatch |
+| Resolving extensions | `9.6` | :white_check_mark: | `0.2.0` | `.usd`/`.usda`/`.usdc`/`.usdz` dispatch; formats added at run time: `sdf::LayerRegistry::with_format`, `usd::StageBuilder::format`<br>Remaining — a package or export format added to a registry is not found by package anchoring, the `usdz` reader or `sdf::Layer::export` |
 | Packaged resources | `9.7` | :white_check_mark: | `main` | `asset.usdz[sublayer.usd]` syntax, nested packages; a search path authored in a package falls back as C++ `SdfComputeAssetPathRelativeToLayer` does; `sdf::PackageFiles`, `sdf::LayerRegistry::package_files`, `sdf::ChangeList::did_change_package` |
 | `file` URI scheme ([RFC 8089](https://datatracker.ietf.org/doc/html/rfc8089)) | `9.8` | :construction: | | Filesystem paths accepted but not as `file:///` URIs |
 | `usd-anon` scheme (in-memory resources) | `9.8.1` | :white_check_mark: | `0.4.0` | `sdf::Layer::new_anonymous` / `is_anonymous`; identifiers spelled `anon:<n>:<tag>` as in C++, never used as an anchor |

@@ -90,7 +90,7 @@ impl AssetKind {
     /// What `path` names. `arc` marks a path a sublayer, reference, payload
     /// or clip template names, which is a layer whatever its extension.
     pub(super) fn of(path: &str, arc: bool) -> Self {
-        match sdf::LayerRegistry::find_by_extension(ar::extension(path)) {
+        match sdf::layer_registry::builtin_format(ar::extension(path)) {
             Some(format) if format.is_package() => Self::Package,
             Some(_) => Self::Layer,
             None if arc => Self::Layer,

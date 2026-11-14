@@ -95,7 +95,9 @@ fn main() -> Result<()> {
 
 /// The format registered under `id`.
 fn format_named(id: &str) -> Result<&'static dyn sdf::FileFormat> {
-    sdf::LayerRegistry::find_by_id(id).ok_or_else(|| Error::UnsupportedFormat(id.to_owned()))
+    sdf::LayerRegistry::default()
+        .find_by_id(id)
+        .ok_or_else(|| Error::UnsupportedFormat(id.to_owned()))
 }
 
 /// The format claiming `path`'s extension.
@@ -103,6 +105,6 @@ fn format_claiming(path: &str) -> Result<&'static dyn sdf::FileFormat> {
     Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
-        .and_then(sdf::LayerRegistry::find_by_extension)
+        .and_then(|extension| sdf::LayerRegistry::default().find_by_extension(extension))
         .ok_or_else(|| Error::UnsupportedFormat(path.to_owned()))
 }
