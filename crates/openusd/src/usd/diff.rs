@@ -48,6 +48,7 @@
 //! # }
 //! ```
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{Result, pcp, sdf, tf, vt};
 
@@ -94,6 +95,9 @@ pub enum Edit {
         spec_type: sdf::SpecType,
         /// Every authored field of the new spec, with its value.
         fields: Vec<FieldValue>,
+        /// Where a prim or property spec goes among its siblings, or `None` to
+        /// leave it after them.
+        place: Option<Place>,
     },
     /// The edit authored one field of a pre-existing spec. A replay onto a
     /// destination that already holds the spec writes just this field, leaving
@@ -131,6 +135,14 @@ pub enum Edit {
 }
 
 impl Edit {
+    /// The place a [`Create`](Edit::Create) gives its spec among its siblings.
+    pub fn place(&self) -> Option<&Place> {
+        match self {
+            Edit::Create { place, .. } => place.as_ref(),
+            _ => None,
+        }
+    }
+
     /// The spec path this edit applies to.
     pub fn path(&self) -> &sdf::Path {
         match self {
@@ -149,6 +161,18 @@ pub struct FieldValue {
     pub field: tf::Token,
     /// The authored value.
     pub value: vt::Value,
+}
+
+/// Where an [`Edit::Create`] puts its spec in its parent's child-name list, as
+/// C++ `Sdf_ChildrenUtils::InsertChild` takes an index into it. A replay places
+/// a spec it newly registers there; one after a sibling the destination does
+/// not hold stays after its siblings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// Before every sibling.
+    First,
+    /// Right after the sibling with this name.
+    After(tf::Token),
 }
 
 /// How [`Stage::apply_diff`] interprets a [`Diff`]'s paths.
@@ -225,9 +249,11 @@ pub(super) fn forward_diff(stage: &Stage, objects: &CommittedChange<'_>) -> Resu
 /// `primChildren` / `propertyChildren` / variant-chain registration a descendant
 /// edit stamps on its ancestors — yields no edit: its own opinions did not
 /// change, and the descendant's spec re-registers itself on replay. Only specs
-/// the edit genuinely touched land in the edit list.
+/// the edit genuinely touched land in the edit list, followed by the child-name
+/// lists it reordered ([`child_orders`]).
 fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> Result<Vec<Edit>> {
     let mut edits = Vec::new();
+    let mut places = Places::default();
     for (path, entry) in change_list.entries() {
         // A spec's presence in `src` is the source of truth: one still there
         // (added, modified, or removed-then-re-added within the edit) is
@@ -243,12 +269,12 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
             // A spec the edit created is owned by the edit wholesale, so its
             // whole authored state is captured; a pre-existing one is owned only
             // at its touched fields — each either set (still authored) or erased
-            // (absent). Child-name lists are namespace bookkeeping the
-            // destination rebuilds, captured only when the edit reordered one.
+            // (absent). Child-name lists are namespace bookkeeping: a created
+            // spec carries its place among its siblings.
             if entry.flags.intersects(sdf::ChangeFlags::ADD) {
-                edits.push(spec_create_edit(src, path, spec_type)?);
+                edits.push(spec_create_edit(src, &mut places, path, spec_type)?);
             } else {
-                for field in entry.replayed_fields() {
+                for field in entry.authored_fields() {
                     edits.push(field_op(src, path, spec_type, field)?);
                 }
             }
@@ -256,6 +282,7 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
             edits.push(Edit::RemoveSpec { path: path.clone() });
         }
     }
+    edits.extend(child_orders(src, change_list)?);
     Ok(edits)
 }
 
@@ -270,16 +297,18 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
 /// a spec the edit created inverts to a removal; a spec the edit removed or
 /// replaced inverts to a re-creation of its whole base state.
 ///
-/// Returns the inverse edits for one layer, ordered by path, then the base
-/// order of each child list the edit touched; a read error
+/// Returns the inverse edits for one layer, ordered by path, followed by the
+/// base order of each child-name list the edit reordered ([`child_orders`]).
+/// A re-created spec carries its base place among its siblings. A read error
 /// propagates (like [`forward_diff`]) rather than silently dropping a spec or
-/// field, so a partial — and therefore unsafe — inverse is never recorded. The
-/// caller attaches the transaction's mapping once (all its layers share one).
+/// field, so a partial — and therefore unsafe — inverse is never recorded.
+/// The caller attaches the transaction's mapping once (all its layers share
+/// one).
 pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
     let base = change.base;
-    let change_list = change.change_list;
     let mut edits = Vec::new();
-    for (path, entry) in change_list.entries() {
+    let mut places = Places::default();
+    for (path, entry) in change.change_list.entries() {
         if entry.is_child_bookkeeping() {
             continue;
         }
@@ -288,18 +317,18 @@ pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
             // The edit created (or replaced) the spec here: restore the base
             // spec wholesale when one existed, else remove the fresh creation.
             match base_type {
-                Some(spec_type) => edits.push(spec_create_edit(base, path, spec_type)?),
+                Some(spec_type) => edits.push(spec_create_edit(base, &mut places, path, spec_type)?),
                 None => edits.push(Edit::RemoveSpec { path: path.clone() }),
             }
         } else if entry.flags.intersects(sdf::ChangeFlags::REMOVE) {
             // The edit removed the spec: re-create it from its base state.
             if let Some(spec_type) = base_type {
-                edits.push(spec_create_edit(base, path, spec_type)?);
+                edits.push(spec_create_edit(base, &mut places, path, spec_type)?);
             }
         } else if let Some(spec_type) = base_type {
             // Field-level edits on a surviving spec: restore each touched field
             // to its base value, or erase it when the base did not hold it.
-            for field in entry.replayed_fields() {
+            for field in entry.authored_fields() {
                 edits.push(field_op(base, path, spec_type, field)?);
             }
         }
@@ -309,17 +338,26 @@ pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
     // recorded order (the sort is stable). Removals still apply after the
     // authoring operations through [`apply_edits_verbatim`]'s partition.
     edits.sort_by(|a, b| a.path().cmp(b.path()));
-    // A re-created spec lands last among its siblings; restore the base order.
+    edits.extend(child_orders(base, change.change_list)?);
+    Ok(edits)
+}
+
+/// A [`SetField`](Edit::SetField) with the list `data` holds for each
+/// child-name list `change_list` records as reordered.
+fn child_orders(data: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> Result<Vec<Edit>> {
+    let mut edits = Vec::new();
     for (path, entry) in change_list.entries() {
-        let Some(spec_type) = base.spec_type(path) else {
-            continue;
-        };
-        for key in [sdf::ChildrenKey::PrimChildren, sdf::ChildrenKey::PropertyChildren] {
-            let field = tf::Token::from(key.as_str());
-            let touched = entry.info_changed().any(|f| *f == field)
-                || entry.flags.intersects(sdf::ChangeFlags::ADD | sdf::ChangeFlags::REMOVE);
-            if touched && base.try_field(path, key.as_str())?.is_some() {
-                edits.push(field_op(base, path, spec_type, &field)?);
+        for field in entry.reordered_children() {
+            let Some(spec_type) = data.spec_type(path) else {
+                continue;
+            };
+            if let Some(value) = data.try_field(path, field.as_str())? {
+                edits.push(Edit::SetField {
+                    path: path.clone(),
+                    spec_type,
+                    field: field.clone(),
+                    value: value.into_owned(),
+                });
             }
         }
     }
@@ -327,11 +365,17 @@ pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
 }
 
 /// An [`Edit::Create`] capturing the whole authored state of the spec at `path`
-/// in `data` — every field except the child-name lists, with its value. The
-/// building block both directions use to reproduce (`forward_diff`, reading the
-/// committed layer) or restore (`inverse_diff`, reading the pre-edit base) a spec
-/// wholesale.
-fn spec_create_edit(data: &dyn sdf::AbstractData, path: &sdf::Path, spec_type: sdf::SpecType) -> Result<Edit> {
+/// in `data` — every field except the child-name lists, with its value — and
+/// its place among the siblings `data` lists, read through `places`. The
+/// building block both directions use to reproduce (`forward_diff`, reading
+/// the committed layer) or restore (`inverse_diff`, reading the pre-edit base)
+/// a spec wholesale.
+fn spec_create_edit(
+    data: &dyn sdf::AbstractData,
+    places: &mut Places,
+    path: &sdf::Path,
+    spec_type: sdf::SpecType,
+) -> Result<Edit> {
     let mut fields = Vec::new();
     for field in data.list_fields(path).unwrap_or_default() {
         if sdf::is_children_field(&field) {
@@ -348,7 +392,40 @@ fn spec_create_edit(data: &dyn sdf::AbstractData, path: &sdf::Path, spec_type: s
         path: path.clone(),
         spec_type,
         fields,
+        place: places.of(data, path)?,
     })
+}
+
+/// The place each child-name list of one layer's data gives the specs it
+/// names, keyed by the list's parent path and key, each list read once.
+#[derive(Default)]
+struct Places(HashMap<(sdf::Path, &'static str), HashMap<tf::Token, Place>>);
+
+impl Places {
+    /// The place `data` gives the spec at `path` among its siblings, or `None`
+    /// for a spec outside a prim or property list and for an only child, whose
+    /// place says nothing about siblings the destination may hold.
+    fn of(&mut self, data: &dyn sdf::AbstractData, path: &sdf::Path) -> Result<Option<Place>, sdf::DataError> {
+        let Some((parent, key, name)) = sdf::child_slot(path) else {
+            return Ok(None);
+        };
+        let list = (parent, key.as_str());
+        if !self.0.contains_key(&list) {
+            let mut places = HashMap::new();
+            if let Some(value) = data.try_field(&list.0, list.1)?
+                && let vt::Value::TokenVec(names) = value.as_ref()
+            {
+                if let [first, _, ..] = names.as_slice() {
+                    places.insert(first.clone(), Place::First);
+                }
+                for pair in names.windows(2) {
+                    places.insert(pair[1].clone(), Place::After(pair[0].clone()));
+                }
+            }
+            self.0.insert(list.clone(), places);
+        }
+        Ok(self.0[&list].get(&tf::Token::from(name)).cloned())
+    }
 }
 
 /// The [`Edit`] restoring or reproducing one authored `field` of the spec at
@@ -447,17 +524,145 @@ impl Stage {
 /// same path (the change record collapses per path), so the partition
 /// preserves the diff's semantics.
 pub(super) fn apply_edits_verbatim(layer: &mut sdf::LayerEdit<'_>, edits: &[Edit]) -> Result<(), sdf::AuthoringError> {
-    for edit in edits {
-        if !matches!(edit, Edit::RemoveSpec { .. }) {
-            apply_edit(layer, edit.path(), edit, &vt::Value::clone)?;
-        }
-    }
+    let authoring = edits
+        .iter()
+        .filter(|edit| !matches!(edit, Edit::RemoveSpec { .. }))
+        .map(|edit| (edit.path(), edit, edit.place()));
+    apply_authoring(layer, authoring, &vt::Value::clone)?;
     for edit in edits {
         if matches!(edit, Edit::RemoveSpec { .. }) {
             apply_edit(layer, edit.path(), edit, &vt::Value::clone)?;
         }
     }
     Ok(())
+}
+
+/// Apply the authoring `edits`, each at its destination path with its place,
+/// with every written value produced by `translate`: the creations and fields
+/// first, then each newly registered spec moves to its place
+/// ([`place_specs`]), then the child-name lists set the order of the specs in
+/// place.
+fn apply_authoring<'e>(
+    layer: &mut sdf::LayerEdit<'_>,
+    edits: impl IntoIterator<Item = (&'e sdf::Path, &'e Edit, Option<&'e Place>)>,
+    translate: &impl Fn(&vt::Value) -> vt::Value,
+) -> Result<(), sdf::AuthoringError> {
+    let (lists, edits): (Vec<_>, Vec<_>) = edits.into_iter().partition(|(_, edit, _)| is_child_list(edit));
+    // A creation registers its name anew unless the destination already held
+    // a spec it authors over, read before any edit applies: an earlier edit
+    // can materialize the spec as an ancestor of its own. A property the
+    // creation replaces with one of the other kind keeps the place the
+    // destination gave it, unless the creation names one. Of two creations
+    // landing on one destination, the later, stronger one decides.
+    let mut placed = BTreeMap::new();
+    let mut held_places = Places::default();
+    for (dst, edit, place) in &edits {
+        let Edit::Create { spec_type, .. } = edit else {
+            continue;
+        };
+        let held = layer.data().spec_type(dst);
+        if held.is_some_and(|held| authors_over(held, *spec_type)) {
+            continue;
+        }
+        let place = match (place, held) {
+            (Some(place), _) => Some((*place).clone()),
+            (None, Some(_)) => held_places.of(layer.data(), dst)?,
+            (None, None) => None,
+        };
+        match place {
+            Some(place) => placed.insert(*dst, place),
+            None => placed.remove(dst),
+        };
+    }
+    for (dst, edit, _) in &edits {
+        apply_edit(layer, dst, edit, translate)?;
+    }
+    place_specs(layer, &placed)?;
+    for (dst, edit, _) in lists {
+        apply_edit(layer, dst, edit, translate)?;
+    }
+    Ok(())
+}
+
+/// Whether a creation of a `created` spec authors over an `existing` one in
+/// place. Prim and variant specs hold the same prim-level fields and author
+/// onto each other (the chain builder derives the created kind from the
+/// destination path); a property of the other kind is replaced.
+fn authors_over(existing: sdf::SpecType, created: sdf::SpecType) -> bool {
+    existing == created || (existing.is_prim_or_variant() && created.is_prim_or_variant())
+}
+
+/// Move each spec in `placed`, which its creation registered after its
+/// siblings, to its [`Place`], writing each child-name list once
+/// ([`placed_order`]).
+fn place_specs(
+    layer: &mut sdf::LayerEdit<'_>,
+    placed: &BTreeMap<&sdf::Path, Place>,
+) -> Result<(), sdf::AuthoringError> {
+    let mut lists: BTreeMap<(sdf::Path, &'static str), Vec<(tf::Token, &Place)>> = BTreeMap::new();
+    for (path, place) in placed {
+        if let Some((parent, key, name)) = sdf::child_slot(path) {
+            lists
+                .entry((parent, key.as_str()))
+                .or_default()
+                .push((tf::Token::from(name), place));
+        }
+    }
+    for ((parent, key), specs) in lists {
+        let Some(value) = layer.data().try_field(&parent, key)? else {
+            continue;
+        };
+        let vt::Value::TokenVec(names) = value.as_ref() else {
+            continue;
+        };
+        let order = placed_order(names, &specs);
+        if order != *names {
+            layer.data_mut().set_field(&parent, key, vt::Value::TokenVec(order));
+        }
+    }
+    Ok(())
+}
+
+/// The child-name list `names` with each spec in `specs` moved to its
+/// [`Place`]: a spec first or right after its sibling, and a chain of specs
+/// each placed after the one before in the recorded order, whatever order
+/// `specs` lists them in. A spec placed after a name `names` does not hold
+/// stays where it is.
+fn placed_order(names: &[tf::Token], specs: &[(tf::Token, &Place)]) -> Vec<tf::Token> {
+    let held: HashSet<&tf::Token> = names.iter().collect();
+    let mut first = Vec::new();
+    let mut after: HashMap<&tf::Token, Vec<&tf::Token>> = HashMap::new();
+    let mut moved = HashSet::new();
+    for (name, place) in specs {
+        match place {
+            _ if !held.contains(name) => continue,
+            Place::First => first.push(name),
+            Place::After(prev) if held.contains(prev) => after.entry(prev).or_default().push(name),
+            Place::After(_) => continue,
+        }
+        moved.insert(name);
+    }
+    let mut order = Vec::with_capacity(names.len());
+    let mut emitted = HashSet::new();
+    let roots = first
+        .iter()
+        .copied()
+        .chain(names.iter().filter(|name| !moved.contains(name)));
+    for root in roots {
+        let mut stack = vec![root];
+        while let Some(name) = stack.pop() {
+            if emitted.insert(name) {
+                order.push(name.clone());
+                if let Some(next) = after.get(name) {
+                    stack.extend(next.iter().rev());
+                }
+            }
+        }
+    }
+    // A spec placed after another moved spec that nothing reaches keeps its
+    // place in `names`.
+    order.extend(names.iter().filter(|name| !emitted.contains(name)).cloned());
+    order
 }
 
 /// Apply one [`Edit`] at `dst`, with every written value produced by
@@ -478,18 +683,11 @@ fn apply_edit(
 ) -> Result<(), sdf::AuthoringError> {
     match edit {
         Edit::Create { spec_type, fields, .. } => {
-            // Prim and variant specs hold the same prim-level fields and
-            // author onto each other (the chain builder derives the created
-            // kind from the destination path), so the correspondence counts
-            // as a kind match here.
-            let kind_matches = |existing: sdf::SpecType| {
-                existing == *spec_type || (existing.is_prim_or_variant() && spec_type.is_prim_or_variant())
-            };
             match layer.data().spec_type(dst) {
                 // The recorded fields are the created spec's whole state:
                 // clear the other opinions a matching destination spec
                 // already holds so the replay reproduces that state.
-                Some(existing) if kind_matches(existing) => {
+                Some(existing) if authors_over(existing, *spec_type) => {
                     for field in layer.data().list_fields(dst).unwrap_or_default() {
                         let recorded = fields.iter().any(|f| f.field == field.as_str());
                         if !recorded && !sdf::is_children_field(&field) {
@@ -519,11 +717,13 @@ fn apply_edit(
             ..
         } => {
             let mut value = translate(value);
-            if field == sdf::ChildrenKey::PrimChildren.as_str() || field == sdf::ChildrenKey::PropertyChildren.as_str()
-            {
+            if is_child_list(edit) {
                 // A child-name list registers the destination's own specs, so
                 // a recorded list reorders the names the destination holds:
                 // the ones it names in its order, then the rest as they were.
+                // TODO(perf): `sdf::reorder` scans the held list once per
+                // recorded name; a map from each name to its place in `order`
+                // would sort the list once.
                 let held = layer.data().try_field(dst, field).ok().flatten().map(Cow::into_owned);
                 let (Some(vt::Value::TokenVec(mut held)), vt::Value::TokenVec(order)) = (held, &value) else {
                     return Ok(());
@@ -537,6 +737,12 @@ fn apply_edit(
         Edit::RemoveSpec { .. } => remove_or_clear(layer, dst)?,
     }
     Ok(())
+}
+
+/// Whether `edit` sets a `primChildren` or `propertyChildren` list, which
+/// orders the specs the other edits place.
+fn is_child_list(edit: &Edit) -> bool {
+    matches!(edit, Edit::SetField { field, .. } if sdf::is_ordered_children(field.as_str()))
 }
 
 /// Remove the spec at `path` from `layer`, clearing its authored opinions
@@ -562,9 +768,11 @@ fn remove_or_clear(layer: &mut sdf::LayerEdit<'_>, path: &sdf::Path) -> Result<(
 /// [`translate_diff`] as a pure pre-pass, so every path is validated before
 /// [`apply_translated_diff`] mutates the target layer.
 struct TranslatedDiff<'a> {
-    /// The authoring operations as `(destination path, edit)` pairs, ordered
-    /// by destination path (parents before children).
-    edits: Vec<(sdf::Path, &'a Edit)>,
+    /// The authoring operations as `(destination path, edit, place)` triples,
+    /// ordered by destination path (parents before children). A creation's
+    /// place names its sibling in the target layer, and is `None` when the
+    /// target cannot express that sibling.
+    edits: Vec<(sdf::Path, &'a Edit, Option<Place>)>,
     /// The whole-spec removals, with their paths in the target layer's
     /// namespace, applied after the authoring operations in the edit list's
     /// order.
@@ -619,21 +827,37 @@ fn translate_diff<'a>(diff: &'a Diff, target: &EditTarget) -> Result<TranslatedD
                 removed.push(dst);
                 continue;
             }
-            Edit::Create { fields, .. } => {
+            Edit::Create { fields, place, .. } => {
                 for field in fields {
                     validate_value(diff, target, &field.value)?;
                 }
+                // A place carries over when the parent, and the sibling it
+                // names, map to the destination's parent.
+                let place = place.as_ref().and_then(|place| {
+                    let (parent, key, _) = sdf::child_slot(edit.path())?;
+                    let (dst_parent, _, _) = sdf::child_slot(&dst)?;
+                    match place {
+                        Place::First => (translate(&parent).ok()? == dst_parent).then_some(Place::First),
+                        Place::After(prev) => {
+                            let sibling = translate(&sdf::join_child(&parent, key, prev.as_str()).ok()?).ok()?;
+                            let (sibling_parent, _, name) = sdf::child_slot(&sibling)?;
+                            (sibling_parent == dst_parent).then(|| Place::After(tf::Token::from(name)))
+                        }
+                    }
+                });
+                edits.push((dst, edit, place));
+                continue;
             }
             Edit::SetField { value, .. } => validate_value(diff, target, value)?,
             Edit::EraseField { .. } => {}
         }
-        edits.push((dst, edit));
+        edits.push((dst, edit, None));
     }
     // A variant spec and its owning prim can translate onto the same
     // destination; the variant's opinions are the weaker of the two, so they
     // apply first and the direct — stronger — opinions land last. The sort is
     // stable, so operations sharing a destination keep their recorded order.
-    edits.sort_by(|(dst_a, edit_a), (dst_b, edit_b)| {
+    edits.sort_by(|(dst_a, edit_a, _), (dst_b, edit_b, _)| {
         let direct = |edit: &Edit| !edit.path().has_variant_selection();
         dst_a.cmp(dst_b).then_with(|| direct(edit_a).cmp(&direct(edit_b)))
     });
@@ -662,9 +886,11 @@ fn apply_translated_diff(
     let translate = |value: &vt::Value| {
         translate_value(value, diff, target, translated.time_offset).unwrap_or_else(|| value.clone())
     };
-    for (dst, edit) in &translated.edits {
-        apply_edit(layer, dst, edit, &translate)?;
-    }
+    let authoring = translated
+        .edits
+        .iter()
+        .map(|(dst, edit, place)| (dst, *edit, place.as_ref()));
+    apply_authoring(layer, authoring, &translate)?;
     for path in &translated.removed {
         remove_or_clear(layer, path)?;
     }
@@ -754,7 +980,7 @@ fn translate_value(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -766,6 +992,21 @@ mod tests {
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// An [`Edit::Create`] of a spec with no fields at `path`.
+    pub(crate) fn create(path: &str, spec_type: sdf::SpecType, place: Option<Place>) -> Result<Edit> {
+        Ok(Edit::Create {
+            path: sdf::path(path)?,
+            spec_type,
+            fields: Vec::new(),
+            place,
+        })
+    }
+
+    /// An [`Edit::Create`] of a prim with no fields at `path`.
+    fn prim_create(path: &str, place: Option<Place>) -> Result<Edit> {
+        create(path, sdf::SpecType::Prim, place)
     }
 
     /// A recorded child-name list reorders the children the destination
@@ -1054,6 +1295,86 @@ mod tests {
             b.attribute(&sdf::path("/World/MyPrim/added.out")?)?.connections()?,
             vec![sdf::path("/World/MyPrim/Child.in")?]
         );
+        Ok(())
+    }
+
+    /// A creation keeps its place when an earlier edit in the diff already
+    /// materialized its spec as an ancestor.
+    #[test]
+    fn apply_diff_place_ancestor() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/a")?;
+        let root = stage.root_layer().identifier().to_string();
+        let diff = Diff {
+            edits: vec![prim_create("/W/child", None)?, prim_create("/W", Some(Place::First))?],
+            mapping: None,
+        };
+        stage.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        assert_eq!(stage.root_prims()?, ["W", "a"]);
+        Ok(())
+    }
+
+    /// A property created over one of the other kind takes its recorded place,
+    /// since the replacement registers its name again.
+    #[test]
+    fn apply_diff_place_kind_swap() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/P")?;
+        for name in ["/P.a", "/P.b", "/P.d"] {
+            stage.create_attribute(name, "double")?;
+        }
+        let root = stage.root_layer().identifier().to_string();
+        let diff = Diff {
+            edits: vec![create(
+                "/P.b",
+                sdf::SpecType::Relationship,
+                Some(Place::After("a".into())),
+            )?],
+            mapping: None,
+        };
+        stage.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        let props = |stage: &Stage| -> Result<Vec<tf::Token>> {
+            let layer = stage.root_layer();
+            let props = layer.borrow().prim("/P")?.expect("a prim").property_children();
+            Ok(props.expect("properties"))
+        };
+        assert_eq!(props(&stage)?, ["a", "b", "d"]);
+
+        // One with no place keeps the place the destination gave it.
+        let diff = Diff {
+            edits: vec![Edit::Create {
+                path: sdf::path("/P.b")?,
+                spec_type: sdf::SpecType::Attribute,
+                fields: vec![FieldValue {
+                    field: sdf::FieldKey::TypeName.as_str().into(),
+                    value: vt::Value::token("double"),
+                }],
+                place: None,
+            }],
+            mapping: None,
+        };
+        stage.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        assert_eq!(props(&stage)?, ["a", "b", "d"]);
+        Ok(())
+    }
+
+    /// Created specs keep their place through a reference arc target, and a
+    /// place after a sibling the target cannot express is dropped.
+    #[test]
+    fn apply_diff_place_through_reference() -> Result<()> {
+        let diff = Diff {
+            edits: vec![
+                prim_create("/World/MyPrim/later", Some(Place::After("Child".into())))?,
+                prim_create("/World/MyPrim/added", Some(Place::First))?,
+                prim_create("/World/MyPrim", Some(Place::After("Other".into())))?,
+            ],
+            mapping: None,
+        };
+        let b = Stage::open(&fixture_path("ref_external.usda"))?;
+        let target = b.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
+        let _ctx = b.edit_context(target)?;
+        b.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
+        assert_eq!(b.prim("/World/MyPrim")?.child_names()?, ["added", "Child", "later"]);
         Ok(())
     }
 
@@ -1378,11 +1699,13 @@ mod tests {
                     path: sdf::path("/A")?,
                     spec_type: sdf::SpecType::Prim,
                     fields: Vec::new(),
+                    place: None,
                 },
                 Edit::Create {
                     path: sdf::path("/B.x")?,
                     spec_type: sdf::SpecType::Prim,
                     fields: Vec::new(),
+                    place: None,
                 },
             ],
             mapping: None,
@@ -1634,6 +1957,7 @@ mod tests {
                 path: sdf::Path::abs_root(),
                 spec_type: sdf::SpecType::Prim,
                 fields: Vec::new(),
+                place: None,
             }],
             mapping: None,
         };

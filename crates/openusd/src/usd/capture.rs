@@ -1060,6 +1060,7 @@ mod tests {
     use std::panic::{self, AssertUnwindSafe};
 
     use super::*;
+    use crate::usd::diff::tests::create;
     use crate::usd::stage::tests::recorder_counts;
     use crate::usd::{ApplyMode, Diff, Edit, EditTarget, ListPosition, StageSink};
     use crate::{Error, Result};
@@ -1159,6 +1160,132 @@ mod tests {
             .field(&sdf::path("/W/b")?, "propertyChildren")?
             .into_owned();
         assert_eq!(props.try_as_token_vec().expect("a token list"), ["z", "y"]);
+        Ok(())
+    }
+
+    /// Undoing the removal of a subtree puts its prims back in their authored
+    /// order at every level.
+    #[test]
+    fn undo_subtree_keeps_order() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        for name in ["/a", "/W/y", "/W/x", "/c"] {
+            stage.define_prim(name)?;
+        }
+        stage.remove_prim("/W")?;
+        assert!(stage.undo()?);
+        assert_eq!(stage.root_prims()?, ["a", "W", "c"]);
+        assert_eq!(stage.prim("/W")?.child_names()?, ["y", "x"]);
+        Ok(())
+    }
+
+    /// Undoing one transaction that creates a prim and moves its siblings
+    /// removes the prim and puts the siblings back in order.
+    #[test]
+    fn undo_create_and_move() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        for name in ["/W/a", "/W/b", "/W/c"] {
+            stage.define_prim(name)?;
+        }
+        let root = stage.root_layer().identifier().to_string();
+        let diff = Diff {
+            edits: vec![
+                create("/W/d", sdf::SpecType::Prim, None)?,
+                Edit::SetField {
+                    path: sdf::path("/W")?,
+                    spec_type: sdf::SpecType::Prim,
+                    field: "primChildren".into(),
+                    value: vt::Value::token_vec(["c", "b", "a", "d"]),
+                },
+            ],
+            mapping: None,
+        };
+        stage.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        assert_eq!(stage.prim("/W")?.child_names()?, ["c", "b", "a", "d"]);
+
+        assert!(stage.undo()?);
+        assert_eq!(stage.prim("/W")?.child_names()?, ["a", "b", "c"]);
+        Ok(())
+    }
+
+    /// A replayed creation lands after the children the destination holds,
+    /// whose order it keeps.
+    #[test]
+    fn replay_create_keeps_order() -> Result<()> {
+        let source = ReplayStage::from(in_memory_stage()?);
+        let destination = in_memory_stage()?;
+        for (stage, names) in [(&*source, ["/W/a", "/W/b"]), (&destination, ["/W/z", "/W/y"])] {
+            for name in names {
+                stage.define_prim(name)?;
+            }
+        }
+        source.clear();
+        source.define_prim("/W/d")?;
+        let root = destination.root_layer().identifier().to_string();
+        for diff in source.diff() {
+            destination.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        }
+        assert_eq!(destination.prim("/W")?.child_names()?, ["z", "y", "d"]);
+
+        // An only child says nothing about the destination's other children.
+        destination.define_prim("/V/x")?;
+        source.clear();
+        source.define_prim("/V/e")?;
+        for diff in source.diff() {
+            destination.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+        }
+        assert_eq!(destination.prim("/V")?.child_names()?, ["x", "e"]);
+        Ok(())
+    }
+
+    /// Siblings one edit creates replay in the source's order, whatever order
+    /// the diff lists them in, through either apply mode.
+    #[test]
+    fn replay_siblings_one_edit() -> Result<()> {
+        let names = ["h", "c", "f", "a", "g", "b", "e", "d"];
+        let source = ReplayStage::from(in_memory_stage()?);
+        source.edit(|edit| -> Result<(), StageAuthoringError> {
+            for name in names {
+                edit.define_prim(format!("/W/{name}").as_str())?;
+            }
+            Ok(())
+        })?;
+        assert_eq!(source.prim("/W")?.child_names()?, names);
+        let exact = in_memory_stage()?;
+        let retarget = in_memory_stage()?;
+        let root = exact.root_layer().identifier().to_string();
+        for diff in source.diff() {
+            exact.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+            retarget.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
+        }
+        assert_eq!(exact.prim("/W")?.child_names()?, names);
+        assert_eq!(retarget.prim("/W")?.child_names()?, names);
+        Ok(())
+    }
+
+    /// A mirror replaying an undone removal puts the prim back where the
+    /// source holds it, through either apply mode.
+    #[test]
+    fn replay_undo_keeps_order() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let exact = in_memory_stage()?;
+        let retarget = in_memory_stage()?;
+        for target in [&stage, &exact, &retarget] {
+            for name in ["/W/a", "/W/b", "/W/c"] {
+                target.define_prim(name)?;
+            }
+        }
+        let replay = ReplayStage::from(stage.clone());
+        let undo = UndoStage::from(stage);
+        undo.remove_prim("/W/b")?;
+        assert!(undo.undo()?);
+
+        let root = exact.root_layer().identifier().to_string();
+        for diff in replay.diff() {
+            exact.apply_diff(&diff, ApplyMode::ExactLayer(&root))?;
+            retarget.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
+        }
+        assert_eq!(exact.prim("/W")?.child_names()?, ["a", "b", "c"]);
+        assert_eq!(retarget.prim("/W")?.child_names()?, ["a", "b", "c"]);
         Ok(())
     }
 
@@ -1963,6 +2090,62 @@ mod tests {
         assert!(a.undo()?);
         assert!(!a.prim("/A")?.is_valid()?);
         assert!(a.prim("/B")?.is_valid()?, "B's sibling stays");
+        Ok(())
+    }
+
+    /// [`shared`] over a root layer holding a prim `/W` with the children
+    /// `names`.
+    fn shared_children(names: &[&str]) -> Result<(tempfile::TempDir, UndoStage, Stage)> {
+        let children: String = names.iter().map(|name| format!("    def \"{name}\" {{}}\n")).collect();
+        shared(&format!("def \"W\" {{\n{children}}}\n"))
+    }
+
+    /// Set `/W`'s child list from another stage, as an edit made elsewhere.
+    fn reorder_w(stage: &Stage, names: &[&str]) -> Result<()> {
+        stage.root_layer().edit(|e| {
+            e.data_mut().set_field(
+                &sdf::path("/W")?,
+                sdf::ChildrenKey::PrimChildren.as_str(),
+                vt::Value::token_vec(names.iter().copied()),
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Undoing a creation removes the prim and keeps the order another stage
+    /// gave its siblings since.
+    #[test]
+    fn undo_create_foreign_order() -> Result<()> {
+        let (_dir, a, b) = shared_children(&["a", "b", "c"])?;
+        a.define_prim("/W/d")?;
+        reorder_w(&b, &["c", "b", "a", "d"])?;
+        assert!(a.undo()?);
+        assert_eq!(a.prim("/W")?.child_names()?, ["c", "b", "a"]);
+        Ok(())
+    }
+
+    /// Undoing a removal puts the prim back after its sibling and keeps the
+    /// order another stage gave the siblings since.
+    #[test]
+    fn undo_removal_foreign_order() -> Result<()> {
+        let (_dir, a, b) = shared_children(&["a", "b", "c"])?;
+        assert!(a.remove_prim("/W/b")?);
+        reorder_w(&b, &["c", "a"])?;
+        assert!(a.undo()?);
+        assert_eq!(a.prim("/W")?.child_names()?, ["c", "a", "b"]);
+        Ok(())
+    }
+
+    /// Undoing the removal of a last child puts it back after its sibling,
+    /// ahead of a child another stage appended since.
+    #[test]
+    fn undo_last_foreign_append() -> Result<()> {
+        let (_dir, a, b) = shared_children(&["a", "b"])?;
+        assert!(a.remove_prim("/W/b")?);
+        b.define_prim("/W/c")?;
+        assert!(a.undo()?);
+        assert_eq!(a.prim("/W")?.child_names()?, ["a", "b", "c"]);
         Ok(())
     }
 
