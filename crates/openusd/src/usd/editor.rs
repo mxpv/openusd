@@ -170,6 +170,12 @@ pub enum NamespaceEditError {
     #[error("the edit at {0} would need a relocate the current edit target cannot author")]
     RequiresRelocate(sdf::Path),
 
+    /// A property edit would leave opinions that arrive across a composition
+    /// arc below the edit target, which only a relocate could move, and
+    /// relocates move prims alone. C++ refuses the same edits.
+    #[error("the property at {0} composes opinions across a composition arc, which relocates cannot move")]
+    PropertyAcrossArc(sdf::Path),
+
     /// A composed-stage query needed to validate or apply an edit failed.
     #[error(transparent)]
     Composition(pcp::QueryError),
@@ -512,6 +518,9 @@ impl NamespaceEditor {
         for (i, edit) in self.edits.iter().enumerate() {
             validate_edit_shape(edit)?;
             let earlier = &self.edits[..i];
+            if projection.property_across_arc(edit.source(), earlier)? {
+                return Err(NamespaceEditError::PropertyAcrossArc(edit.source().clone()));
+            }
             let entry = match edit {
                 NamespaceEdit::Move { src, dst, .. } => {
                     let occupied = projection.occupied(dst, earlier)?;
@@ -609,6 +618,9 @@ impl NamespaceEditor {
             // relocate: doing so reveals the masked plain content at the old path.
             if facts.masks {
                 return Err(NamespaceEditError::UnrepresentableRelocateBatch(stage_src));
+            }
+            if facts.property_below {
+                return Err(NamespaceEditError::PropertyAcrossArc(stage_src));
             }
             // Only a prim arriving across an arc below the target needs (and can
             // carry) a relocate; a property is moved or deleted directly.
@@ -910,6 +922,53 @@ impl<'a> NamespaceProjection<'a> {
         Ok((facts.realized, facts.masks))
     }
 
+    /// Whether the property at `path`, after the `earlier` edits, composes an
+    /// opinion from a node below the local stack's root node. False for a prim.
+    fn property_across_arc(&self, path: &sdf::Path, earlier: &[NamespaceEdit]) -> Result<bool, NamespaceEditError> {
+        if !path.is_property() {
+            return Ok(false);
+        }
+        let Some(origin) = projected_origin(path, earlier) else {
+            return Ok(false);
+        };
+        let index = Prim::new(self.stage, origin.prim_path())
+            .prim_index()
+            .graph_composed()?;
+        let Some(root) = index.local_root() else {
+            return Ok(false);
+        };
+        self.property_below(&index, root, &origin)
+    }
+
+    /// Whether a node below `top` in `index` holds a spec for the property
+    /// `property` names, in any layer of its stack (C++
+    /// `_ProcessPropEditRequiresRelocates`).
+    fn property_below(
+        &self,
+        index: &pcp::PrimIndex,
+        top: pcp::NodeId,
+        property: &sdf::Path,
+    ) -> Result<bool, NamespaceEditError> {
+        let Some((_, name)) = property.split_property() else {
+            return Ok(false);
+        };
+        let layers = self.stage.layer_view()?;
+        Ok(index
+            .all_nodes()
+            .filter(|node| node.id() != top && node.has_specs() && !node.is_inert())
+            .filter(|node| node_in_subtree(index, node.id(), top))
+            .any(|node| {
+                let Ok(spec) = node.path().append_property(name) else {
+                    return false;
+                };
+                layers
+                    .distinct_members(node.layer_stack_id())
+                    .into_iter()
+                    .filter_map(|id| layers.try_layer(id))
+                    .any(|layer| layer.data().has_spec(&spec))
+            }))
+    }
+
     /// Whether a composed object (prim or property) occupies `path` after the
     /// `earlier` edits and so blocks a move onto it. A destination an earlier
     /// edit vacated round-trips to a different path and is free. Catches
@@ -967,14 +1026,15 @@ impl<'a> NamespaceProjection<'a> {
             // requires-relocate error.
             return Ok(TargetFacts {
                 outside: index.all_nodes().any(|node| node.has_specs()),
-                below_target: false,
-                masks: false,
+                ..TargetFacts::default()
             });
         };
         let facts = classify_source_nodes(&index, &prim, Some(target_node));
+        let property_below = path.is_property() && self.property_below(&index, target_node, &origin)?;
         Ok(TargetFacts {
             below_target: facts.below_target,
             outside: facts.outside,
+            property_below,
             // A property cannot itself be a relocate target, so it never masks
             // (matching `cross_arc_facts`'s property short-circuit).
             masks: !path.is_property() && facts.masks,
@@ -1002,6 +1062,8 @@ struct TargetFacts {
     /// composed, so no single relocate can express the edit (mirrors the
     /// local-stack `masks` rejection in `cross_arc_facts`).
     masks: bool,
+    /// The source is a property with a spec in a node of N's subtree below N.
+    property_below: bool,
 }
 
 /// The non-empty `layerRelocates` of each layer in `layer_ids`, keyed by layer:
@@ -3763,13 +3825,58 @@ mod tests {
             .unwrap()
             .move_property(path("/Ref/Renamed.attr").unwrap(), path("/Ref/Renamed.attr2").unwrap())
             .unwrap();
-        assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::PropertyAcrossArc(_))
+        ));
         assert!(
             !layer_relocates(&stage.root_layer())
                 .iter()
                 .any(|(s, _)| s.is_property()),
             "no property relocate must be authored"
         );
+    }
+
+    /// A property with an opinion across a reference cannot be moved or deleted
+    /// through its local overrides alone, and is refused as C++ refuses it.
+    #[test]
+    fn rejects_property_across_arc() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                vt::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref/Geom", Specifier::Over, "").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Ref/Geom.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Model/Geom.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, pcp::Diagnostics::default());
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_property(path("/Ref/Geom.attr").unwrap(), path("/Ref/Geom.attr2").unwrap())
+            .unwrap();
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::PropertyAcrossArc(_))
+        ));
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_property(path("/Ref/Geom.attr").unwrap()).unwrap();
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::PropertyAcrossArc(_))
+        ));
     }
 
     fn nested_ref_stage(children: &[&str]) -> Stage {
