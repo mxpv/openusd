@@ -31,6 +31,11 @@ use super::reader::CrateFile;
 /// handles (time samples, relocates, path expressions, etc.).
 const WRITER_VERSION: Version = version(0, 12, 0);
 
+/// The token a crate file holds at index 0, as C++ `CrateFile::StartPacking`
+/// writes it. A property's element is written as the negated index of its
+/// name, and `-0` reads as `0`, so index 0 holds a token no property names.
+const INDEX_ZERO_TOKEN: &str = ";-)";
+
 /// The compressed-paths encoding of the interned path table: per-entry path
 /// indices, element token indices, and sibling jumps.
 type EncodedPaths = (Vec<u32>, Vec<i32>, Vec<i32>);
@@ -105,6 +110,9 @@ struct Packer<'w, W: Write + Seek> {
     /// Each entry is an index into `tokens`.
     strings: Interner<u32>,
     paths: Interner<Path>,
+    /// The token index of the element of each path in `paths`, at the same
+    /// index, negated for a property element.
+    elements: Vec<i32>,
     /// Fields are keyed by `(token_idx, value_rep_raw)` — `ValueRep` has no
     /// `Hash` impl so we hash the underlying `u64`.
     fields: Interner<(u32, u64)>,
@@ -123,11 +131,14 @@ struct Packer<'w, W: Write + Seek> {
 
 impl<'w, W: Write + Seek> Packer<'w, W> {
     fn new(out: &'w mut W) -> Self {
+        let mut tokens = Interner::new();
+        tokens.intern(INDEX_ZERO_TOKEN.to_owned());
         Self {
             out,
-            tokens: Interner::new(),
+            tokens,
             strings: Interner::new(),
             paths: Interner::new(),
+            elements: Vec::new(),
             fields: Interner::new(),
             fieldsets: Vec::new(),
             specs: Vec::new(),
@@ -186,37 +197,23 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             });
         }
 
-        // Pre-intern the path-segment tokens so they exist in `self.tokens`
-        // before the TOKENS section is written. `encode_paths` would intern
-        // them later otherwise, and those extra tokens would never make it
-        // into the file.
-        for i in 0..self.paths.items.len() {
-            let segment = {
-                let p = &self.paths.items[i];
-                if p.as_str() == "/" {
-                    continue;
-                }
-                path_element_token(p).0
-            };
-            self.tokens.intern(segment);
-        }
-
-        // C++ reads token 0 as the root's path element.
-        if self.tokens.items.is_empty() {
-            self.tokens.intern(String::new());
-        }
-
         Ok(())
     }
 
     /// Intern a path and all its ancestors so the path tree is complete by the
-    /// time [`encode_paths`] DFSes from the root.
+    /// time [`encode_paths`] DFSes from the root, with each one's element
+    /// token and its entry in `elements`.
     fn intern_path(&mut self, path: Path) -> u32 {
-        if !self.paths.index.contains_key(&path)
-            && let Some(parent) = path.parent()
-        {
+        if let Some(&index) = self.paths.index.get(&path) {
+            return index;
+        }
+        if let Some(parent) = path.parent() {
             self.intern_path(parent);
         }
+        // The element's token goes in with the path (C++ `_AddPath`).
+        let (segment, is_prop) = path_element_token(&path);
+        let element = self.tokens.intern(segment) as i32;
+        self.elements.push(if is_prop { -element } else { element });
         self.paths.intern(path)
     }
 
@@ -399,15 +396,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Paths — DFS over the prim/property tree.
     // -----------------------------------------------------------------
 
-    fn encode_paths(&mut self) -> Result<EncodedPaths, FormatError> {
-        let by_index: sdf::PathMap<u32> = self
-            .paths
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.clone(), i as u32))
-            .collect();
-
+    fn encode_paths(&self) -> Result<EncodedPaths, FormatError> {
         // Build parent → children map. Skip empty paths — they can appear in
         // list-op items as placeholders (e.g. internal payload paths) and are
         // represented by the reader as the default empty slot in the paths
@@ -432,46 +421,26 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         let mut tokens = Vec::with_capacity(len);
         let mut jumps = Vec::with_capacity(len);
 
-        self.emit_path_node(
-            &root,
-            &children,
-            &by_index,
-            true,
-            &mut path_indexes,
-            &mut tokens,
-            &mut jumps,
-        )?;
+        self.emit_path_node(&root, &children, &mut path_indexes, &mut tokens, &mut jumps)?;
 
         Ok((path_indexes, tokens, jumps))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_path_node(
-        &mut self,
+        &self,
         node: &Path,
         children_map: &sdf::PathMap<Vec<Path>>,
-        by_index: &sdf::PathMap<u32>,
-        is_root_chain_root: bool,
         path_indexes: &mut Vec<u32>,
         tokens: &mut Vec<i32>,
         jumps: &mut Vec<i32>,
     ) -> Result<(), FormatError> {
         let this_idx = path_indexes.len();
 
-        let path_index = *by_index.get(node).ok_or_else(|| FormatError::Encode {
+        let path_index = *self.paths.index.get(node).ok_or_else(|| FormatError::Encode {
             reason: format!("path {node} not interned").into(),
         })?;
         path_indexes.push(path_index);
-
-        // element_token_indexes: token index of the element name, negative if
-        // the path is a prim-property path (so the reader appends via `.`).
-        if is_root_chain_root {
-            tokens.push(0);
-        } else {
-            let (segment, is_prop) = path_element_token(node);
-            let tok_idx = self.tokens.intern(segment) as i32;
-            tokens.push(if is_prop { -tok_idx } else { tok_idx });
-        }
+        tokens.push(self.elements[path_index as usize]);
 
         // Placeholder; will be set after subtree is emitted.
         jumps.push(0);
@@ -484,7 +453,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         // emitting its own subtree and its own sibling (via recursion).
         for (i, kid) in kids.iter().enumerate() {
             let kid_start = path_indexes.len() as i32;
-            self.emit_path_node(kid, children_map, by_index, false, path_indexes, tokens, jumps)?;
+            self.emit_path_node(kid, children_map, path_indexes, tokens, jumps)?;
 
             // Patch the kid's jump to point at the next sibling if there is one.
             let end = path_indexes.len() as i32;
