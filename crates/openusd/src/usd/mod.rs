@@ -45,7 +45,7 @@ pub use core_schemas::{
     ClipsAPI, ClipsAPISchema, CollectionAPI, CollectionMode, ColorSpaceAPI, ColorSpaceDefinitionAPI, ExpansionRule,
     ModelAPI, ModelAPISchema, SCHEMAS, tokens,
 };
-pub use diff::{ApplyMode, Diff, Edit, FieldValue};
+pub use diff::{ApplyMode, Diff, Edit, FieldValue, Place};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use flatten::FlattenAssets;
 pub use interp::{InterpolationType, bracketing_time_samples};

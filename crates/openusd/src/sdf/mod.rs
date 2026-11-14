@@ -49,7 +49,7 @@ pub use copy::{
     CopyChildren, CopyChildrenArgs, CopyValue, CopyValueArgs, copy_spec, copy_spec_with, copy_spec_within,
     should_copy_children, should_copy_value,
 };
-pub(crate) use copy::{author_spec, is_children_field};
+pub(crate) use copy::{author_spec, child_slot, is_children_field, is_ordered_children, join_child};
 pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};

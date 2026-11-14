@@ -523,7 +523,11 @@ fn child_fields(spec_type: sdf::SpecType) -> &'static [sdf::ChildrenKey] {
 /// child spec's path. A variant set attaches as `{name=}` to its prim; a variant
 /// attaches as `{set=name}` to its prim, recovering the set from the variant-set
 /// `parent`.
-fn join_child(parent: &sdf::Path, key: sdf::ChildrenKey, name: &str) -> Result<sdf::Path, sdf::AuthoringError> {
+pub(crate) fn join_child(
+    parent: &sdf::Path,
+    key: sdf::ChildrenKey,
+    name: &str,
+) -> Result<sdf::Path, sdf::AuthoringError> {
     let invalid = || sdf::AuthoringError::InvalidPath {
         path: parent.clone(),
         reason: "child name is not a valid path component",
@@ -539,6 +543,26 @@ fn join_child(parent: &sdf::Path, key: sdf::ChildrenKey, name: &str) -> Result<s
         }
         _ => Err(invalid()),
     }
+}
+
+/// The child-name list that names the spec at `path` — its parent's path, the
+/// list's key, and the spec's name in it — for a prim or a prim property: the
+/// inverse of [`join_child`] for those keys.
+pub(crate) fn child_slot(path: &sdf::Path) -> Option<(sdf::Path, sdf::ChildrenKey, &str)> {
+    if path.is_prim_property() {
+        let (owner, name) = path.split_property()?;
+        Some((owner, sdf::ChildrenKey::PropertyChildren, name))
+    } else if path.is_prim() {
+        Some((path.parent()?, sdf::ChildrenKey::PrimChildren, path.name()?))
+    } else {
+        None
+    }
+}
+
+/// Whether `field` is a `primChildren` or `propertyChildren` list, the lists
+/// whose order is the order of their prims and properties.
+pub(crate) fn is_ordered_children(field: &str) -> bool {
+    field == sdf::ChildrenKey::PrimChildren.as_str() || field == sdf::ChildrenKey::PropertyChildren.as_str()
 }
 
 /// Read a namespace-children field as its authored child-name list, or an empty

@@ -85,8 +85,10 @@ pub enum FieldChange {
     Presence,
     /// The field was authored before and after, and now holds a different value.
     Value,
-    /// A `primChildren` or `propertyChildren` list holds the same names as
-    /// before in another order (C++ `_IsOrderChangeOnly`).
+    /// A `primChildren` or `propertyChildren` list holds the names it shares
+    /// with the base in another order, whether or not names were added or
+    /// removed. Only a list holding the same names (C++ `_IsOrderChangeOnly`)
+    /// also raises a reorder flag.
     Order,
 }
 
@@ -200,12 +202,10 @@ impl ChangeEntry {
         self.info_changed().filter(|f| !super::is_children_field(f.as_str()))
     }
 
-    /// The fields a replay of this entry sets: the
-    /// [`authored_fields`](Self::authored_fields) and each child-name list it
-    /// reordered ([`FieldChange::Order`]).
-    pub fn replayed_fields(&self) -> impl Iterator<Item = &tf::Token> {
+    /// The child-name lists this entry reordered ([`FieldChange::Order`]).
+    pub fn reordered_children(&self) -> impl Iterator<Item = &tf::Token> {
         self.fields()
-            .filter(|(field, change)| *change == FieldChange::Order || !super::is_children_field(field.as_str()))
+            .filter(|(_, change)| *change == FieldChange::Order)
             .map(|(field, _)| field)
     }
 }
@@ -412,9 +412,9 @@ fn note_field_change(entry: &mut ChangeEntry, base: &dyn AbstractData, path: &Pa
         Err(_) => FieldChange::Value,
     };
     let held = held.ok().flatten();
-    let reorder = children_reorder_flag(field, held.as_deref(), value);
+    let (moved, reorder) = children_change(field, held.as_deref(), value);
     entry.flags |= order_flag(field) | reorder;
-    entry.note(field, if reorder.is_empty() { change } else { FieldChange::Order });
+    entry.note(field, if moved { FieldChange::Order } else { change });
 }
 
 /// Notes in `entry` that `field` appeared or was removed, with the reorder it
@@ -436,32 +436,35 @@ fn order_flag(field: &str) -> ChangeFlags {
     }
 }
 
-/// The reorder flag staging `new` over `old` in a `primChildren` or
-/// `propertyChildren` list raises: only a list holding the same names in
-/// another order reorders (C++ `_IsOrderChangeOnly`). Sdf maintains those
-/// lists as bookkeeping when a child spec comes or goes, and the child's own
-/// entry reports that.
-fn children_reorder_flag(field: &str, old: Option<&Value>, new: &Value) -> ChangeFlags {
+/// How staging `new` over a different `old` in a `primChildren` or
+/// `propertyChildren` list orders it: whether the names both lists hold come in
+/// another order, whatever names were added or removed, and the reorder flag
+/// that raises. Only a list holding the same names in another order raises the
+/// flag (C++ `_IsOrderChangeOnly`); a child spec that comes or goes reports
+/// itself through its own entry.
+fn children_change(field: &str, old: Option<&Value>, new: &Value) -> (bool, ChangeFlags) {
     let flag = if field == ChildrenKey::PrimChildren.as_str() {
         ChangeFlags::REORDER_CHILDREN
     } else if field == ChildrenKey::PropertyChildren.as_str() {
         ChangeFlags::REORDER_PROPERTIES
     } else {
-        return ChangeFlags::empty();
+        return (false, ChangeFlags::empty());
     };
-    match (old, new) {
-        (Some(Value::TokenVec(old)), Value::TokenVec(new)) if is_permutation(old, new) => flag,
-        _ => ChangeFlags::empty(),
+    let (Some(Value::TokenVec(old)), Value::TokenVec(new)) = (old, new) else {
+        return (false, ChangeFlags::empty());
+    };
+    // A list that only grew at its end keeps its order. TODO(perf): every
+    // other change hashes both lists.
+    if new.starts_with(old) {
+        return (false, ChangeFlags::empty());
     }
-}
-
-/// Whether `new` holds the names of `old` in some order: the same length and
-/// the same set of names, as C++ `_IsOrderChangeOnly` compares them.
-fn is_permutation(old: &[tf::Token], new: &[tf::Token]) -> bool {
-    if old.len() != new.len() {
-        return false;
-    }
-    old.iter().collect::<HashSet<_>>() == new.iter().collect::<HashSet<_>>()
+    let (old_names, new_names) = (old.iter().collect::<HashSet<_>>(), new.iter().collect::<HashSet<_>>());
+    let moved = !old
+        .iter()
+        .filter(|name| new_names.contains(name))
+        .eq(new.iter().filter(|name| old_names.contains(name)));
+    let permuted = old.len() == new.len() && old_names == new_names;
+    (moved, if moved && permuted { flag } else { ChangeFlags::empty() })
 }
 
 /// Record the removal of the spec currently at `path` in `data` into `entry`:
@@ -1053,9 +1056,14 @@ mod tests {
         // A permuted child list is noted as an order change, which replay
         // carries; one that grew is not.
         let permuted = entry(|c| c.set_field(&p("/P"), CHILDREN, names(&["b", "a"])));
-        assert!(permuted.replayed_fields().any(|f| f == CHILDREN));
+        assert!(permuted.reordered_children().any(|f| f == CHILDREN));
         let grown = entry(|c| c.set_field(&p("/P"), CHILDREN, names(&["a", "b", "c"])));
-        assert!(grown.replayed_fields().next().is_none());
+        assert!(grown.reordered_children().next().is_none());
+        // One that grew and moved a name is an order change, though no
+        // reorder flag.
+        let moved = entry(|c| c.set_field(&p("/P"), CHILDREN, names(&["b", "a", "c"])));
+        assert!(moved.reordered_children().any(|f| f == CHILDREN));
+        assert!(!moved.flags.intersects(ChangeFlags::REORDER_CHILDREN));
     }
 
     /// Authoring a `def` prim tree through [`PrimSpec`] — the real layer path —
