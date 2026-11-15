@@ -1,7 +1,7 @@
 //! Reading labels under one taxonomy across a stage's namespace.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use openusd::Result;
 use openusd::gf;
@@ -30,7 +30,7 @@ pub struct LabelsQuery {
     time: QueryTime,
     /// What each prim asked about carries, or `None` for a prim the schema is
     /// not applied to, so that asking again about either answers from here.
-    labels: RefCell<HashMap<sdf::Path, Option<BTreeSet<tf::Token>>>>,
+    labels: RefCell<sdf::PathMap<Option<BTreeSet<tf::Token>>>>,
 }
 
 /// The time a [`LabelsQuery`] reads labels at.

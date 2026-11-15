@@ -9,9 +9,7 @@
 //! product, var) carries the render-delegate settings
 //! [`namespaced_settings`] gathers on its prim.
 
-use std::collections::HashMap;
-
-use openusd::sdf::Path;
+use openusd::sdf::{self, Path};
 use openusd::usd::{Attribute, Stage};
 use openusd::vt::{self, Value};
 use openusd::{Result, gf, tf};
@@ -64,7 +62,7 @@ pub fn render_spec_in(
 
     let mut spec = RenderSpec::default();
     // var path → index into `spec.render_vars`, for the de-duplication.
-    let mut var_index: HashMap<Path, usize> = HashMap::new();
+    let mut var_index = sdf::PathMap::default();
 
     for product_path in settings.products_rel().forwarded_targets()? {
         let Some(product) = Product::get(stage, &product_path)? else {
@@ -212,7 +210,7 @@ fn collect_var_indices(
     product: &Product,
     product_path: &Path,
     spec: &mut RenderSpec,
-    var_index: &mut HashMap<Path, usize>,
+    var_index: &mut sdf::PathMap<usize>,
     namespaces: &[&str],
 ) -> Result<Vec<usize>, SchemaError> {
     let mut indices = Vec::new();

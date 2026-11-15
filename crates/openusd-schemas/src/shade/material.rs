@@ -10,7 +10,6 @@ use openusd::sdf;
 use openusd::{tf, usd};
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 
 use super::ConnectableContext;
 use super::tokens;
@@ -260,7 +259,7 @@ impl Material {
     ) -> Result<Option<ResolvedTerminal>, SchemaError> {
         let output = self.terminal_output(render_context, kind);
         let mut sources = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = sdf::PathSet::default();
         for attribute in context.value_producing_attributes(output, ProducerFilter::ShaderOutputsOnly)? {
             // Sibling branches can converge on one endpoint; report it once.
             if !seen.insert(attribute.path().clone()) {

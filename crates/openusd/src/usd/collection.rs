@@ -25,7 +25,6 @@
 //! attribute picks between them; under the default `automatic` mode a
 //! non-empty rule map wins.
 
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::Result;
@@ -78,12 +77,12 @@ impl CollectionAPI {
     pub fn membership_query(&self) -> Result<MembershipQuery> {
         let mode: CollectionMode = composed_or_default(&self.mode_attr())?;
         let mut query = MembershipQuery {
-            rule_map: PathExpansionRuleMap::new(),
+            rule_map: PathExpansionRuleMap::default(),
             expansion_rule: composed_or_default(&self.expansion_rule_attr())?,
             evaluator: None,
         };
         if mode != CollectionMode::Expression {
-            let mut visited = HashSet::new();
+            let mut visited = sdf::PathSet::default();
             visited.insert(self.collection_path()?);
             self.build_into(&mut query.rule_map, &mut visited)?;
         }
@@ -199,7 +198,7 @@ impl CollectionAPI {
                 || membership_expression(self)?.is_none_or(|expression| expression.is_empty())))
     }
 
-    fn build_into(&self, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
+    fn build_into(&self, map: &mut PathExpansionRuleMap, visited: &mut sdf::PathSet) -> Result<()> {
         // TODO(perf): each (possibly nested) invocation re-reads expansionRule,
         // includeRoot, includes and excludes from the stage as separate field
         // lookups; snapshot a collection's authored opinions once per build.
@@ -285,7 +284,7 @@ pub fn included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPre
     if !query.uses_rule_map() {
         return compute_included_by_expression(stage, query, predicate);
     }
-    let mut seen = HashSet::new();
+    let mut seen = sdf::PathSet::default();
     let mut err: Result<()> = Ok(());
     let collect_props = query
         .rule_map
@@ -296,7 +295,7 @@ pub fn included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPre
     // resolved just before it, and `is_included_below` decides each prim from
     // the rule its parent leaves it. A parent the predicate skipped takes its
     // rule from `inherited`, cached beside the others.
-    let mut effective: HashMap<Path, PathRule> = HashMap::new();
+    let mut effective = sdf::PathMap::default();
 
     stage.traverse(predicate, |prim| {
         if err.is_err() {
@@ -328,8 +327,8 @@ pub fn included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPre
     // `GetPropertyAtPath`), regardless of whether their owning prim satisfies
     // `predicate` — only properties reached by prim expansion are gated by it.
     //
-    // Sort first: `rule_map` is a `HashMap`, so iterating it directly would
-    // yield these tail entries in a non-deterministic order.
+    // Sort first: iterating `rule_map` yields these tail entries in hash
+    // order.
     let mut props: Vec<&Path> = query.rule_map.keys().filter(|p| p.is_property()).collect();
     props.sort();
     for path in props {
@@ -459,7 +458,7 @@ fn push_member_properties(
     prim: &Path,
     prim_rule: PathRule,
     query: &MembershipQuery,
-    seen: &mut HashSet<Path>,
+    seen: &mut sdf::PathSet,
     out: &mut Vec<Path>,
 ) -> Result<()> {
     for name in stage.prim(prim.clone())?.property_names()? {
@@ -504,7 +503,7 @@ impl PathRule {
 /// Maps each authored/derived path to the rule that governs it (the
 /// `Exclude` sentinel marks excluded subtrees). The resolved form of a
 /// collection's includes/excludes/expansionRule/includeRoot opinions.
-pub type PathExpansionRuleMap = HashMap<Path, PathRule>;
+pub type PathExpansionRuleMap = sdf::PathMap<PathRule>;
 
 /// A resolved membership predicate for a collection. Build it once (see
 /// `membership_query`) and query [`is_included`] cheaply; it
@@ -1247,8 +1246,8 @@ mod tests {
 
     #[test]
     fn explicit_props_sorted() -> Result<()> {
-        // Explicit property targets come from a HashMap; the result must be
-        // sorted so it is deterministic across runs.
+        // Explicit property targets come from a hash map; the result is
+        // sorted by path.
         let stage = scene()?;
         for p in ["/W/B.a", "/W/B.c", "/W/B.b"] {
             stage.create_attribute(sdf::path(p)?, "float")?.set(Value::Float(0.0))?;

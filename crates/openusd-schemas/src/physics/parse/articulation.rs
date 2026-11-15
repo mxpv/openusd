@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use openusd::sdf::{Path, PathSet};
+use openusd::sdf::{self, Path, PathSet};
 use openusd::usd::{self, PrimPredicate};
 
 use super::{ParseDiagnostic, Parser, filtered_pairs};
@@ -39,9 +39,12 @@ struct Link {
 /// The links reached from one body, by path (C++ `ArticulationLinkMap`).
 type LinkMap = BTreeMap<Path, Link>;
 
+/// Each body by its path.
+type BodyMap<'a> = HashMap<&'a Path, &'a desc::RigidBody, sdf::PathHasher>;
+
 /// The enabled joints of each enabled body, in joint path order (C++
 /// `BodyJointMap`, filled from the path-ordered joint map).
-type BodyJoints<'a> = HashMap<&'a Path, Vec<&'a desc::Joint>>;
+type BodyJoints<'a> = HashMap<&'a Path, Vec<&'a desc::Joint>, sdf::PathHasher>;
 
 impl Parser<'_> {
     /// The articulations among `prims`, leaving out and recording those with
@@ -52,11 +55,11 @@ impl Parser<'_> {
         bodies: &[desc::RigidBody],
         joints: &[desc::Joint],
     ) -> Result<Vec<desc::Articulation>, SchemaError> {
-        let body_map: HashMap<&Path, &desc::RigidBody> = bodies.iter().map(|body| (&body.path, body)).collect();
+        let body_map: BodyMap<'_> = bodies.iter().map(|body| (&body.path, body)).collect();
         // Iterated in path order, as C++ iterates its `std::map`; the order
         // reaches each body's joint list and so the link graph.
         let joint_map: BTreeMap<&Path, &desc::Joint> = joints.iter().map(|joint| (&joint.path, joint)).collect();
-        let mut body_joints = BodyJoints::new();
+        let mut body_joints = BodyJoints::default();
         for joint in joint_map.values().filter(|joint| joint.enabled) {
             for body in [&joint.body0, &joint.body1].into_iter().flatten() {
                 if body_map.get(body).is_some_and(|body| body.enabled) {
@@ -92,7 +95,7 @@ impl Parser<'_> {
     fn finalize(
         &self,
         articulation: &mut desc::Articulation,
-        body_map: &HashMap<&Path, &desc::RigidBody>,
+        body_map: &BodyMap<'_>,
         joint_map: &BTreeMap<&Path, &desc::Joint>,
         body_joints: &BodyJoints<'_>,
     ) -> Result<(), SchemaError> {

@@ -539,7 +539,7 @@ impl Dependencies {
     /// order. Callers flatten their per-site lists into one path stream.
     fn dedup_paths<'a>(deps: impl Iterator<Item = &'a Path>) -> Vec<Path> {
         let mut out: Vec<Path> = Vec::new();
-        let mut seen: FxHashSet<&Path> = FxHashSet::default();
+        let mut seen = HashSet::<&Path, sdf::PathHasher>::default();
         for d in deps {
             if seen.insert(d) {
                 out.push(d.clone());

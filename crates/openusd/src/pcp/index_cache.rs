@@ -2988,8 +2988,8 @@ impl IndexCache {
         path: &Path,
     ) -> Result<Vec<Path>, QueryError> {
         let mut out = Vec::new();
-        let mut emitted = HashSet::new();
-        let mut followed = HashSet::new();
+        let mut emitted = sdf::PathSet::default();
+        let mut followed = sdf::PathSet::default();
         followed.insert(path.clone());
 
         // Seed with the queried relationship's raw targets. Targets are pushed
@@ -4177,8 +4177,8 @@ impl IndexCache {
         let records = self.store.take_retired();
         let order = nesting_order(&records);
         let mut records: Vec<Option<RetiredPrototype>> = records.into_iter().map(Some).collect();
-        let mut moved: HashMap<Path, Vec<Path>> = HashMap::new();
-        let mut kept: HashSet<Path> = HashSet::new();
+        let mut moved = sdf::PathMap::default();
+        let mut kept = sdf::PathSet::default();
         let mut busy = None;
         // TODO(rayon): the targets of records no other encloses are
         // independent of each other.
@@ -4238,7 +4238,7 @@ impl IndexCache {
         &mut self,
         graph: &LayerView<'_>,
         record: &RetiredPrototype,
-        moved: &HashMap<Path, Vec<Path>>,
+        moved: &sdf::PathMap<Vec<Path>>,
     ) -> Result<Option<Vec<Path>>, QueryError> {
         let mut targets = Vec::new();
         let mut provisional = false;
@@ -4415,7 +4415,7 @@ enum Settlement {
 /// encloses one of its instances. A prototype root is a root prim, so an
 /// instance's enclosing record is the one rooted at its root prim.
 fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {
-    let by_root: HashMap<&Path, usize> = records
+    let by_root: HashMap<&Path, usize, sdf::PathHasher> = records
         .iter()
         .enumerate()
         .map(|(at, record)| (&record.root, at))
@@ -4453,7 +4453,7 @@ fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {
 
 /// `instance` as the transfers in `moved` place it: under each group its
 /// enclosing prototype moved to, or itself when no enclosing one moved.
-fn translated(instance: &Path, moved: &HashMap<Path, Vec<Path>>) -> Vec<Path> {
+fn translated(instance: &Path, moved: &sdf::PathMap<Vec<Path>>) -> Vec<Path> {
     let enclosing = instance.root_prim().and_then(|root| Some((moved.get(&root)?, root)));
     match enclosing {
         Some((targets, root)) => targets

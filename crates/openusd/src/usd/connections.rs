@@ -21,11 +21,8 @@
 //! source of A; A is a sink of B), matching the dataflow direction
 //! (values flow from B into A).
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-
 use crate::Result;
-use crate::sdf::Path;
+use crate::sdf::{self, Path};
 use crate::usd::{PrimPredicate, Stage};
 
 /// A directed index of every authored attribute connection on a stage.
@@ -36,9 +33,9 @@ use crate::usd::{PrimPredicate, Stage};
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionGraph {
     /// `attr -> its connection sources` (what the attr reads from).
-    forward: HashMap<Path, Vec<Path>>,
+    forward: sdf::PathMap<Vec<Path>>,
     /// `source -> attrs that connect to it` (reverse edges).
-    reverse: HashMap<Path, Vec<Path>>,
+    reverse: sdf::PathMap<Vec<Path>>,
 }
 
 impl ConnectionGraph {
@@ -125,7 +122,7 @@ impl ConnectionGraph {
         // Iterative depth-first walk over the `forward` graph. An explicit
         // stack keeps deep chains from blowing the call stack.
         let mut terminals = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited = sdf::PathSet::default();
         let mut stack: Vec<&Path> = vec![attr];
         while let Some(node) = stack.pop() {
             if !visited.insert(node.clone()) {

@@ -13,8 +13,6 @@ pub use layout::{Version, version};
 pub use reader::CrateFile;
 pub use writer::CrateWriter;
 
-use rustc_hash::FxBuildHasher;
-
 use crate::{ar, sdf, tf, vt};
 
 /// USDC binary format magic bytes (`PXR-USDC`).
@@ -202,7 +200,7 @@ impl CrateData {
         // its fieldset. The fields themselves stay in the file's compact,
         // deduplicated arrays and are resolved on demand.
         let specs = mem::take(&mut file.specs);
-        let mut data = sdf::PathMap::with_capacity_and_hasher(specs.len(), FxBuildHasher);
+        let mut data = sdf::PathMap::with_capacity_and_hasher(specs.len(), sdf::PathHasher::default());
 
         for spec in &specs {
             let path = file.paths[spec.path_index].clone();

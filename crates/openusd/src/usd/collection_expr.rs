@@ -805,7 +805,7 @@ def Xform "World" (
                 );
             }
         }
-        assert!(rule_map_expression(&PathExpansionRuleMap::new()).is_empty());
+        assert!(rule_map_expression(&PathExpansionRuleMap::default()).is_empty());
         Ok(())
     }
 
