@@ -21,11 +21,14 @@
 //!   linear (e.g. tokens, strings, arrays whose bracketing lengths
 //!   differ), behaviour falls back to held.
 //!
-//! When the earlier bracketing sample is a [`Value::ValueBlock`] or
-//! [`Value::None`], evaluation returns `None`; a block as the later one
-//! holds the earlier value.
+//! A query answers from the sample at its time, from the end sample when it
+//! falls outside the sampled range, or else from the earlier sample of the
+//! pair bracketing it. When that sample is a [`Value::ValueBlock`] or
+//! [`Value::None`], evaluation returns `None`. A block as the later sample of
+//! the pair holds the earlier value.
 
 use crate::gf;
+use crate::pcp::value_resolve::is_block;
 use crate::sdf;
 use crate::vt::Value;
 
@@ -52,7 +55,7 @@ pub enum InterpolationType {
 /// the nearest end sample. A NaN is such a query: the order puts it past
 /// every number on its sign bit's side, so a positive one takes the last
 /// sample and a negative one the first. Returns `None` when the list is
-/// empty or when the earlier bracketing sample encodes a blocked value
+/// empty or when the sample the query answers from is blocked
 /// (`Value::ValueBlock` / `Value::None`).
 pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) -> Option<Value> {
     if samples.is_empty() {
@@ -76,21 +79,16 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
     let (t_lo, v_lo) = &samples[lo];
     let (t_hi, v_hi) = &samples[hi];
 
-    if is_blocked(v_lo) {
+    if is_block(v_lo) {
         return None;
     }
-    // C++ `UsdAttribute::Get` holds the earlier sample when the later one is a block.
-    if is_blocked(v_hi) {
-        return clean(v_lo.clone());
+    // A block as the later sample falls back to held, as in C++
+    // `Usd_Interpolator::GetInterpolatingSamples`.
+    if mode == InterpolationType::Held || is_block(v_hi) {
+        return Some(v_lo.clone());
     }
-
-    match mode {
-        InterpolationType::Held => clean(v_lo.clone()),
-        InterpolationType::Linear => {
-            let t = (time - t_lo) / (t_hi - t_lo);
-            lerp_value(v_lo, v_hi, t).or_else(|| clean(v_lo.clone()))
-        }
-    }
+    let t = (time - t_lo) / (t_hi - t_lo);
+    lerp_value(v_lo, v_hi, t).or_else(|| Some(v_lo.clone()))
 }
 
 /// The pair of authored sample times bracketing `time`, or `None` when
@@ -120,14 +118,10 @@ pub fn bracketing_time_samples(times: &[f64], time: f64) -> Option<(f64, f64)> {
     }
 }
 
-fn is_blocked(v: &Value) -> bool {
-    matches!(v, Value::ValueBlock | Value::None)
-}
-
 /// Filter out blocked sentinels at the read boundary so callers can
 /// treat the return shape as "Some(real value) or no value".
 fn clean(v: Value) -> Option<Value> {
-    if is_blocked(&v) { None } else { Some(v) }
+    if is_block(&v) { None } else { Some(v) }
 }
 
 /// Component-wise lerp between two authored samples. Returns `None`
@@ -306,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_sample_blocks_until_the_next() {
+    fn block_holds_until_next() {
         let s = vec![
             (0.0, Value::Double(1.0)),
             (10.0, Value::ValueBlock),

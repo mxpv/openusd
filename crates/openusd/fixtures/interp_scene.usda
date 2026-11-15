@@ -32,10 +32,12 @@ def Xform "Prim"
         10: "omega",
     }
 
-    # ValueBlock anywhere in the bracketing pair → value_at returns None.
+    # A ValueBlock after a sample holds that sample; from the block on there
+    # is no value until the next sample.
     double blocked.timeSamples = {
         0: 1.0,
         10: None,
+        20: 3.0,
     }
 
     # No timeSamples at all → fall back to the attribute's default.
