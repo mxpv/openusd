@@ -6,12 +6,13 @@
 //! and a sublayer all disappear, and what they contributed is written where it
 //! landed.
 //!
-//! What survives is what a reader would still ask for — the prim tree, each
-//! prim's metadata, and each property's declaration, value and targets.
+//! What survives is what a reader would still ask for — the tree of active
+//! prims, each prim's metadata, and each property's declaration, value and
+//! targets.
 
 use std::collections::BTreeSet;
 
-use crate::usd::{Attribute, Prim, PrimPredicate, SpecSite, Stage};
+use crate::usd::{Attribute, Prim, PrimPredicate, PrimStatus, SpecSite, Stage};
 use crate::{Result, pcp, sdf, tf, vt};
 
 /// Fields flattening does not copy.
@@ -95,6 +96,10 @@ impl Stage {
 
     /// The composed stage written into one layer, with each `asset` path as
     /// `assets` says; [`flatten`](Self::flatten) anchors them.
+    ///
+    /// A deactivated prim is left out with its subtree (C++
+    /// `UsdStage::Flatten` prunes it). A target, a connection or a
+    /// `defaultPrim` that names it is written as composed.
     // TODO: instancing is not preserved. C++ mints a prototype per master and
     // authors an internal reference on each instance; this writes every
     // instance's contents in full, so N instances become N copies.
@@ -108,23 +113,21 @@ impl Stage {
         let mut data = sdf::Data::rooted();
         write_fields(&mut data, &root, stage_fields(self, assets)?);
 
-        // Everything the stage holds, whatever its status: a class prim is
-        // abstract and the default predicate skips it, yet a schema library is
-        // nothing but class prims. Instance proxies stand where an instance's
-        // prototype content belongs, so walking through them writes each
-        // instance's contents in place and leaves no prototype to refer to.
+        // Every active prim the stage holds, whatever its other status:
+        // abstract, undefined and unloaded prims are written too. A schema
+        // library is nothing but abstract class prims. Instance proxies
+        // stand where an instance's prototype content belongs, so walking
+        // through them writes each instance's contents in place and leaves no
+        // prototype to refer to.
         // TODO(perf): the whole namespace is collected before anything is
         // written, because `traverse` borrows the stage for the walk. Each
         // prim's write is independent of every other, so a per-prim sink would
         // let the walk stream — and parallelize.
-        // C++ `UsdStage::Flatten` prunes deactivated prims.
+        let active = PrimPredicate::new(PrimStatus::ACTIVE, PrimStatus::empty()).with_instance_proxies(true);
         let mut paths = Vec::new();
-        self.traverse(PrimPredicate::ALL, |path| paths.push(path.clone()))?;
+        self.traverse(active, |path| paths.push(path.clone()))?;
         for path in paths {
-            let prim = self.prim(&path)?;
-            if prim.is_active()? {
-                write_prim(&mut data, &prim, assets)?;
-            }
+            write_prim(&mut data, &self.prim(&path)?, assets)?;
         }
 
         let tag = format!("flattened {}", self.root_layer().identifier());
@@ -608,21 +611,6 @@ mod tests {
                 .get::<vt::Value>("default"),
             Some(vt::Value::Double(3.0))
         );
-    }
-
-    /// A deactivated prim is pruned from the result, as C++ prunes it.
-    #[test]
-    fn inactive_prims_pruned() {
-        let root = layer("root.usda", |data| {
-            sdf::PrimSpec::new(data, "/Kept", sdf::Specifier::Def, "").expect("prim");
-            sdf::PrimSpec::new(data, "/Off", sdf::Specifier::Def, "").expect("prim");
-            data.set_field(&sdf::Path::new("/Off").expect("path"), "active", vt::Value::Bool(false));
-        });
-        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
-
-        let flattened = stage.flatten().expect("flattens");
-        assert!(flattened.prim("/Kept").expect("a path").is_some());
-        assert!(flattened.prim("/Off").expect("a path").is_none());
     }
 
     /// A connected attribute stays connected: nothing else writes the composed
@@ -1206,5 +1194,55 @@ mod tests {
             .get::<f64>()
             .expect("a read");
         assert_eq!(value, Some(2.0));
+    }
+
+    /// A deactivated prim takes its subtree with it, wherever the opinion that
+    /// deactivates it sits: in a weaker sublayer, or inside the prototype an
+    /// instance's contents come from, where an override authored on the
+    /// instance is ignored. A target naming a pruned prim is kept.
+    #[test]
+    fn inactive_subtrees_pruned() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("sub.usda"),
+            "#usda 1.0\nover \"Weak\" (active = false) {}\nover \"Strong\" (active = false) {}\n",
+        )?;
+        fs::write(
+            dir.path().join("asset.usda"),
+            "#usda 1.0\ndef \"Asset\" {\n    def \"On\" {}\n    def \"Off\" (active = false) {\n        def \"Deep\" {}\n    }\n}\n",
+        )?;
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            concat!(
+                "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n",
+                "def \"Kept\" {\n    rel off = </Off>\n}\n",
+                "def \"Off\" (active = false) {\n    def \"Child\" {}\n}\n",
+                "def \"Weak\" {}\n",
+                "def \"Strong\" (active = true) {}\n",
+                "def \"Inst\" (instanceable = true\n    references = @./asset.usda@</Asset>) {\n    over \"Off\" (active = true) {}\n}\n",
+            ),
+        )?;
+        let stage = Stage::open(root.to_str().expect("utf-8 path"))?;
+
+        let flattened = stage.flatten()?;
+        let present = |path: &str| flattened.prim(path).expect("a path").is_some();
+        for kept in ["/Kept", "/Strong", "/Inst", "/Inst/On"] {
+            assert!(present(kept), "{kept} is active");
+        }
+        for pruned in ["/Off", "/Off/Child", "/Weak", "/Inst/Off", "/Inst/Off/Deep"] {
+            assert!(!present(pruned), "{pruned} is pruned");
+        }
+        let targets = flattened
+            .relationship("/Kept.off")?
+            .expect("the relationship")
+            .get::<sdf::PathListOp>(sdf::FieldKey::TargetPaths.as_str())
+            .expect("targets");
+        assert_eq!(
+            targets.explicit_items(),
+            vec![sdf::path("/Off")?],
+            "a target to a pruned prim stays"
+        );
+        Ok(())
     }
 }
