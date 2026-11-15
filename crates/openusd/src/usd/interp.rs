@@ -25,7 +25,7 @@
 //! falls outside the sampled range, or else from the earlier sample of the
 //! pair bracketing it. When that sample is a [`Value::ValueBlock`] or
 //! [`Value::None`], evaluation returns `None`. A block as the later sample of
-//! the pair holds the earlier value.
+//! the pair, or a pair less than `1e-6` apart, holds the earlier value.
 
 use crate::gf;
 use crate::pcp::value_resolve::is_block;
@@ -82,9 +82,9 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
     if is_block(v_lo) {
         return None;
     }
-    // A block as the later sample falls back to held, as in C++
-    // `Usd_Interpolator::GetInterpolatingSamples`.
-    if mode == InterpolationType::Held || is_block(v_hi) {
+    // A block as the later sample, or a pair less than `1e-6` apart, falls
+    // back to held, as in C++ `Usd_Interpolator::GetInterpolatingSamples`.
+    if mode == InterpolationType::Held || is_block(v_hi) || t_hi - t_lo < 1e-6 {
         return Some(v_lo.clone());
     }
     let t = (time - t_lo) / (t_hi - t_lo);
@@ -312,6 +312,15 @@ mod tests {
             assert_eq!(evaluate(&s, 15.0, mode), None);
             assert_eq!(evaluate(&s, 20.0, mode), Some(Value::Double(3.0)));
         }
+    }
+
+    #[test]
+    fn close_pair_holds() {
+        let s = vec![(1.0, Value::Double(1.0)), (1.0 + 1e-7, Value::Double(3.0))];
+        assert_eq!(
+            evaluate(&s, 1.0 + 5e-8, InterpolationType::Linear),
+            Some(Value::Double(1.0))
+        );
     }
 
     #[test]
