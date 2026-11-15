@@ -10,7 +10,7 @@
 //! entry holds, and neither does it refresh the transforms the cache keeps
 //! in its [`XformCache`]. Call [`BBoxCache::clear`] after an edit.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use openusd::usd::{self, SchemaBase};
@@ -347,7 +347,7 @@ impl BBoxCache {
         prim: &usd::Prim,
         skip: &BTreeSet<sdf::Path>,
         prim_override: gf::Mat4d,
-        ctm_overrides: &HashMap<sdf::Path, gf::Mat4d>,
+        ctm_overrides: &sdf::PathMap<gf::Mat4d>,
     ) -> Result<gf::BBox3d, SchemaError> {
         self.bound_with_overrides(prim, skip, Some(prim_override), ctm_overrides)
     }
@@ -365,7 +365,7 @@ impl BBoxCache {
         &mut self,
         prim: &usd::Prim,
         skip: &BTreeSet<sdf::Path>,
-        ctm_overrides: &HashMap<sdf::Path, gf::Mat4d>,
+        ctm_overrides: &sdf::PathMap<gf::Mat4d>,
     ) -> Result<gf::BBox3d, SchemaError> {
         self.bound_with_overrides(prim, skip, None, ctm_overrides)
     }
@@ -525,14 +525,14 @@ impl BBoxCache {
         prim: &usd::Prim,
         skip: &BTreeSet<sdf::Path>,
         prim_override: Option<gf::Mat4d>,
-        ctm_overrides: &HashMap<sdf::Path, gf::Mat4d>,
+        ctm_overrides: &sdf::PathMap<gf::Mat4d>,
     ) -> Result<gf::BBox3d, SchemaError> {
         if !prim.is_valid()? {
             return Ok(gf::BBox3d::default());
         }
         // A prim above a skipped path or above an override is not bounded
         // whole: the walk goes on to the prims beneath it.
-        let above: HashSet<sdf::Path> = (skip.iter().chain(ctm_overrides.keys()))
+        let above: sdf::PathSet = (skip.iter().chain(ctm_overrides.keys()))
             .flat_map(sdf::Path::strict_ancestors)
             .collect();
 
@@ -1378,7 +1378,7 @@ fn inverse(matrix: gf::Mat4d) -> gf::Mat4d {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
 
     use openusd::usd::{self, SchemaBase};
     use openusd::{gf, sdf};
@@ -1664,7 +1664,7 @@ def Xform "World"
         )?;
         let world = stage.prim("/World")?;
         let mut cache = default_cache();
-        let none = HashMap::new();
+        let none = sdf::PathMap::default();
         let all = cache.untransformed_bound_with_overrides(&world, &BTreeSet::new(), &none)?;
         assert_range(all.aligned_range(), range([-1.0; 3], [51.0, 21.0, 1.0]));
 
@@ -1725,7 +1725,7 @@ def Xform "FlatModel" (kind = "component")
         );
 
         // A prim relative to itself is in its own space, flattened or not.
-        let whole = cache.untransformed_bound_with_overrides(&flat, &BTreeSet::new(), &HashMap::new())?;
+        let whole = cache.untransformed_bound_with_overrides(&flat, &BTreeSet::new(), &sdf::PathMap::default())?;
         assert_eq!(whole, own);
         assert_eq!(cache.relative_bound(&flat, &flat)?, own);
         Ok(())
@@ -2088,7 +2088,7 @@ def Xform "Bad"
         assert_eq!(cache.local_bound(&missing)?, gf::BBox3d::default());
         assert_eq!(cache.untransformed_bound(&missing)?, gf::BBox3d::default());
         assert_eq!(cache.relative_bound(&missing, &root)?, gf::BBox3d::default());
-        let none = cache.untransformed_bound_with_overrides(&missing, &BTreeSet::new(), &HashMap::new())?;
+        let none = cache.untransformed_bound_with_overrides(&missing, &BTreeSet::new(), &sdf::PathMap::default())?;
         assert_eq!(none, gf::BBox3d::default());
         assert!(cache.entries.is_empty());
         assert_eq!(cache.world_bound(&root)?, gf::BBox3d::default());
@@ -2229,7 +2229,7 @@ def Xform "Root"
         let (_dir, stage) = crate::tests::from_usda(OVERRIDES)?;
         let root = stage.prim("/Root")?;
         let mut cache = default_cache();
-        let none = HashMap::new();
+        let none = sdf::PathMap::default();
 
         let all = cache.untransformed_bound_with_overrides(&root, &BTreeSet::new(), &none)?;
         assert_range(all.aligned_range(), range([-1.0; 3], [21.0, 1.0, 1.0]));
@@ -2252,18 +2252,18 @@ def Xform "Root"
         let root = stage.prim("/Root")?;
         let mut cache = default_cache();
         let skip = BTreeSet::from([sdf::path("/Root/C")?]);
-        let moved = HashMap::from([(sdf::path("/Root/B")?, gf::Mat4d::translation([0.0, 5.0, 0.0]))]);
+        let moved = sdf::PathMap::from_iter([(sdf::path("/Root/B")?, gf::Mat4d::translation([0.0, 5.0, 0.0]))]);
 
         let found = cache.untransformed_bound_with_overrides(&root, &skip, &moved)?;
         assert_range(found.aligned_range(), range([-1.0; 3], [1.0, 6.0, 1.0]));
 
         // An override above a prim places it too.
-        let beneath = HashMap::from([(sdf::path("/Root/B/Ball")?, gf::Mat4d::translation([0.0, 0.0, 9.0]))]);
+        let beneath = sdf::PathMap::from_iter([(sdf::path("/Root/B/Ball")?, gf::Mat4d::translation([0.0, 0.0, 9.0]))]);
         let found = cache.untransformed_bound_with_overrides(&root, &skip, &beneath)?;
         assert_range(found.aligned_range(), range([-1.0; 3], [1.0, 1.0, 10.0]));
 
         let far = gf::Mat4d::translation([100.0, 0.0, 0.0]);
-        let found = cache.world_bound_with_overrides(&root, &skip, far, &HashMap::new())?;
+        let found = cache.world_bound_with_overrides(&root, &skip, far, &sdf::PathMap::default())?;
         assert_range(found.aligned_range(), range([99.0, -1.0, -1.0], [111.0, 1.0, 1.0]));
         Ok(())
     }
@@ -2276,7 +2276,7 @@ def Xform "Root"
         let world = stage.prim("/World")?;
         let skip = BTreeSet::from([sdf::path("/World/Plain")?]);
         let mut cache = default_cache();
-        let found = cache.untransformed_bound_with_overrides(&world, &skip, &HashMap::new())?;
+        let found = cache.untransformed_bound_with_overrides(&world, &skip, &sdf::PathMap::default())?;
 
         let mut fresh = default_cache();
         let component = stage.prim("/World/Comp")?;
@@ -2293,7 +2293,7 @@ def Xform "Root"
 
         // Skipping beneath the component walks through it.
         let skip = BTreeSet::from([sdf::path("/World/Comp/Geom/B")?, sdf::path("/World/Plain")?]);
-        let found = cache.untransformed_bound_with_overrides(&world, &skip, &HashMap::new())?;
+        let found = cache.untransformed_bound_with_overrides(&world, &skip, &sdf::PathMap::default())?;
         let cube = stage.prim("/World/Comp/Geom/A")?;
         assert_eq!(found, fresh.relative_bound(&cube, &world)?);
         Ok(())
@@ -2307,7 +2307,7 @@ def Xform "Root"
         let root = stage.prim("/Root")?;
         let mut cache = default_cache();
         let skip = BTreeSet::from([sdf::path("/Root/C")?]);
-        let moved = HashMap::from([(sdf::path("/Root/B")?, gf::Mat4d::translation([0.0, 5.0, 0.0]))]);
+        let moved = sdf::PathMap::from_iter([(sdf::path("/Root/B")?, gf::Mat4d::translation([0.0, 5.0, 0.0]))]);
         cache.world_bound_with_overrides(&root, &skip, gf::Mat4d::translation([100.0, 0.0, 0.0]), &moved)?;
 
         let mut fresh = default_cache();

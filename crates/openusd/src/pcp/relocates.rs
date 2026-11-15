@@ -14,8 +14,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rustc_hash::{FxHashMap, FxHashSet};
-
 use crate::sdf::{self, Path, RelocateList, element_cmp};
 use crate::tf::Token;
 
@@ -422,7 +420,7 @@ fn relocate_pair_conflicts(sa: &Path, ta: &Path, sb: &Path, tb: &Path) -> Vec<Re
 /// structurally invalid pair) is never flagged and does not reserve its source
 /// for the entries after it.
 fn duplicate_source_mask<'a>(sources: impl Iterator<Item = (bool, &'a Path)>) -> Vec<bool> {
-    let mut seen: FxHashSet<&Path> = FxHashSet::default();
+    let mut seen = HashSet::<&Path, sdf::PathHasher>::default();
     sources
         .map(|(eligible, source)| eligible && !seen.insert(source))
         .collect()
@@ -463,7 +461,7 @@ pub(crate) fn analyze_relocate_occurrences(pairs: &[(Path, Path)]) -> Vec<Reloca
     }
 
     let can_conflict: Vec<bool> = status.iter().map(|s| s.is_active()).collect();
-    let mut by_target: FxHashMap<&Path, Vec<usize>> = FxHashMap::default();
+    let mut by_target = HashMap::<&Path, Vec<usize>, sdf::PathHasher>::default();
     for (i, (_, target)) in pairs.iter().enumerate() {
         if can_conflict[i] && !target.is_empty() {
             by_target.entry(target).or_default().push(i);

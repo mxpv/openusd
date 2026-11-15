@@ -18,7 +18,6 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::{fmt, mem};
 
@@ -347,14 +346,14 @@ pub(super) struct PlanState {
     /// read the plan makes.
     overlay: pcp::Overlay,
     /// Each prim the plan has read.
-    prims: HashMap<sdf::Path, PrimPlan>,
+    prims: sdf::PathMap<PrimPlan>,
     /// The queued property paths.
-    properties: HashSet<sdf::Path>,
+    properties: sdf::PathSet,
     /// The schema each prim resolves to under the current overlay, with the
     /// stage's edit epoch it was read at: read once for every property planned
     /// under the prim until a prim operation changes the overlay or a change
     /// outside the batch moves the epoch.
-    schemas: HashMap<sdf::Path, (u64, Arc<PrimTypeInfo>)>,
+    schemas: sdf::PathMap<(u64, Arc<PrimTypeInfo>)>,
     /// The stage's edit epoch when the plan opened, while it holds nothing
     /// has changed what the stage composes and every read is current; `None`
     /// for a plan committed as soon as it is made, which records no stamps.
@@ -529,9 +528,9 @@ impl PlanState {
         PlanState {
             writes: Vec::new(),
             overlay: pcp::Overlay::default(),
-            prims: HashMap::new(),
-            properties: HashSet::new(),
-            schemas: HashMap::new(),
+            prims: sdf::PathMap::default(),
+            properties: sdf::PathSet::default(),
+            schemas: sdf::PathMap::default(),
             epoch: None,
         }
     }

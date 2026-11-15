@@ -68,7 +68,8 @@ pub(crate) use layer_store::{
 };
 pub use ordering::{apply_ordering, element_cmp, order_properties, reorder};
 pub use path::{
-    IntoPath, Path, PathComponent, PathComponents, PathElement, PathMap, PathParseError, PathSet, path, try_into_path,
+    IntoPath, Path, PathComponent, PathComponents, PathElement, PathHasher, PathMap, PathParseError, PathSet, path,
+    try_into_path,
 };
 pub use path_expr::{EvalError, ExpressionReference, PathExpression, PathPattern, PredicateExpression};
 pub(crate) use path_table::Covering;

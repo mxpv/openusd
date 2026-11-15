@@ -1,7 +1,5 @@
 //! Reverse queries for NodeGraph interface-input connections.
 
-use std::collections::{HashMap, HashSet};
-
 use openusd::Result;
 
 use openusd::{sdf, usd};
@@ -19,7 +17,7 @@ pub struct InterfaceInputConsumersMap {
     entries: Vec<InterfaceInputConsumers>,
     /// Entry position by interface-input property path; the entry's stage
     /// identity is confirmed on lookup.
-    index: HashMap<sdf::Path, usize>,
+    index: sdf::PathMap<usize>,
 }
 
 impl InterfaceInputConsumersMap {
@@ -71,7 +69,7 @@ struct InterfaceInputConsumers {
     consumers: Vec<Input>,
     /// Consumer property paths already recorded, deduping converging
     /// connections while the direct map is built.
-    seen: HashSet<sdf::Path>,
+    seen: sdf::PathSet,
 }
 
 impl InterfaceInputConsumers {
@@ -79,7 +77,7 @@ impl InterfaceInputConsumers {
         InterfaceInputConsumers {
             interface_input,
             consumers: Vec::new(),
-            seen: HashSet::new(),
+            seen: sdf::PathSet::default(),
         }
     }
 
@@ -127,7 +125,7 @@ impl ConnectableContext {
             return Ok(direct);
         }
 
-        let mut nested_maps = HashMap::new();
+        let mut nested_maps = sdf::PathMap::default();
         collect_nested_maps(self, &direct, root.stage(), &mut nested_maps)?;
         if nested_maps.is_empty() {
             return Ok(direct);
@@ -191,11 +189,11 @@ fn collect_nested_maps(
     context: &ConnectableContext,
     consumers: &InterfaceInputConsumersMap,
     stage: &usd::Stage,
-    maps: &mut HashMap<sdf::Path, InterfaceInputConsumersMap>,
+    maps: &mut sdf::PathMap<InterfaceInputConsumersMap>,
 ) -> Result<()> {
     let mut pending = nested_container_paths(consumers);
     pending.reverse();
-    let mut visited: HashSet<sdf::Path> = HashSet::new();
+    let mut visited = sdf::PathSet::default();
     while let Some(path) = pending.pop() {
         if !visited.insert(path.clone()) {
             continue;
@@ -228,9 +226,9 @@ fn nested_container_paths(consumers: &InterfaceInputConsumersMap) -> Vec<sdf::Pa
 /// inputs, in worklist order. A consumer outside any container map is a leaf;
 /// a nested interface input with no consumers of its own is kept, and a
 /// converging path is visited once.
-fn resolve_consumers(consumers: &[Input], nested_maps: &HashMap<sdf::Path, InterfaceInputConsumersMap>) -> Vec<Input> {
+fn resolve_consumers(consumers: &[Input], nested_maps: &sdf::PathMap<InterfaceInputConsumersMap>) -> Vec<Input> {
     let mut pending: Vec<Input> = consumers.iter().rev().cloned().collect();
-    let mut visited = HashSet::new();
+    let mut visited = sdf::PathSet::default();
     let mut resolved = Vec::new();
     while let Some(consumer) = pending.pop() {
         if !visited.insert(consumer.path().clone()) {
@@ -503,7 +501,7 @@ mod tests {
             chain.push(Input::new(stage.attribute(input_path)?));
         }
 
-        let mut maps = HashMap::with_capacity(DEPTH - 1);
+        let mut maps = sdf::PathMap::with_capacity_and_hasher(DEPTH - 1, sdf::PathHasher::default());
         for pair in chain.windows(2) {
             let mut map = InterfaceInputConsumersMap::default();
             let mut entry = InterfaceInputConsumers::new(pair[0].clone());

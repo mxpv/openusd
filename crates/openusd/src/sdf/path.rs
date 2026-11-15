@@ -50,20 +50,27 @@ pub fn try_into_path(path: impl IntoPath) -> Result<Path, PathParseError> {
 /// Clones share the path's text, as C++ `SdfPath` copies share one pooled
 /// path node, and the empty and absolute root paths share one text each
 /// however they are reached.
+///
+/// A path hashes as a single `u64`, which [`FxBuildHasher`] computes from its
+/// text when the path is made. That hasher has no key, and texts can be
+/// chosen whose hashes collide. Such paths collide in every hash map or set
+/// keyed by paths, whatever hasher it uses.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
     path: Arc<Text>,
 }
 
-/// A map keyed by [`Path`], hashed with [`FxBuildHasher`]: a path writes the
-/// hash it already holds, so a lookup mixes one word.
-///
-/// The hasher has no per-process key, so the map gives no protection against
-/// paths chosen to collide.
-pub type PathMap<V> = HashMap<Path, V, FxBuildHasher>;
+// TODO(perf): the word is already a finished hash; a pass-through hasher
+// would skip mixing it again on every lookup.
+/// The hasher for maps keyed by [`Path`] or `&Path`. A path writes the hash
+/// it already holds, and a lookup mixes that one word.
+pub type PathHasher = FxBuildHasher;
+
+/// A map keyed by [`Path`], hashed with [`PathHasher`].
+pub type PathMap<V> = HashMap<Path, V, PathHasher>;
 
 /// A set of [`Path`]s, hashed as a [`PathMap`] is.
-pub type PathSet = HashSet<Path, FxBuildHasher>;
+pub type PathSet = HashSet<Path, PathHasher>;
 
 /// The text of the empty path, shared by every [`Path::default`].
 static EMPTY: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::new())));
@@ -78,8 +85,8 @@ static ABS_ROOT: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(Strin
 /// not read its text again to hash it. Equality and ordering compare the text.
 struct Text {
     text: String,
-    /// The text's hash under a fixed-key hasher. Equal texts in separate
-    /// allocations hash alike.
+    /// The text's hash under the unkeyed [`FxBuildHasher`]. Equal texts in
+    /// separate allocations hash alike.
     hash: u64,
 }
 

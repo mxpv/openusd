@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use openusd::Result;
-use openusd::sdf::Path;
+use openusd::sdf::{self, Path};
 use openusd::usd::{CollectionAPI, PrimPredicate, SchemaBase, Stage};
 
 use super::tokens::COLLIDERS;
@@ -145,7 +145,7 @@ pub fn collision_group_table(stage: &Stage) -> Result<CollisionGroupTable> {
         };
         merged_of_group.push(index);
     }
-    let merged_index: HashMap<&Path, usize> = groups
+    let merged_index: HashMap<&Path, usize, sdf::PathHasher> = groups
         .iter()
         .map(|group| group.path())
         .zip(merged_of_group.iter().copied())
