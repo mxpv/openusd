@@ -10612,6 +10612,12 @@ fn mixed_blocks_track_time() -> Result<()> {
     assert!(live.has_authored_value());
     assert!(!live.value_is_blocked());
 
+    // Before the block the earlier sample holds, and the resolve info agrees.
+    let held = attr.resolve_info_at(usd::TimeCode::new(5.0))?;
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(5.0))?, Some(1.0));
+    assert_eq!(held.source(), usd::ResolveInfoSource::TimeSamples);
+    assert!(!held.value_is_blocked());
+
     let blocked = attr.resolve_info_at(usd::TimeCode::new(10.0))?;
     assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(10.0))?, None);
     assert_eq!(blocked.source(), usd::ResolveInfoSource::None);

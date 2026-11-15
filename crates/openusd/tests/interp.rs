@@ -92,22 +92,16 @@ fn held_mode_returns_previous_sample() -> Result<()> {
 }
 
 #[test]
-fn blocked_sample_returns_none() -> Result<()> {
+fn blocked_sample_holds() -> Result<()> {
     let stage = open()?;
-    // Bracketing pair includes a ValueBlock — get_at returns None.
-    assert!(
-        stage
-            .attribute(path("/Prim.blocked")?)?
-            .get_at::<Value>(usd::TimeCode::new(5.0))?
-            .is_none()
-    );
-    // At the blocked sample itself.
-    assert!(
-        stage
-            .attribute(path("/Prim.blocked")?)?
-            .get_at::<Value>(usd::TimeCode::new(10.0))?
-            .is_none()
-    );
+    let attr = stage.attribute(path("/Prim.blocked")?)?;
+    let at = |t: f64| attr.get_at::<Value>(usd::TimeCode::new(t));
+    // The block is the later sample: the earlier one holds.
+    assert_eq!(at(5.0)?, Some(Value::Double(1.0)));
+    // At the block, and between it and the next sample, there is no value.
+    assert_eq!(at(10.0)?, None);
+    assert_eq!(at(15.0)?, None);
+    assert_eq!(at(20.0)?, Some(Value::Double(3.0)));
     Ok(())
 }
 
