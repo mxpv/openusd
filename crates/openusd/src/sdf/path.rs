@@ -925,6 +925,11 @@ impl Path {
     /// "/Ref".replace_prefix("/Ref", "/MyPrim")       -> Some("/MyPrim")
     /// "/Other".replace_prefix("/Ref", "/MyPrim")     -> None
     /// ```
+    // TODO: a target path embedded in brackets (`/Ref.rel[/Ref/T].attr`) keeps
+    // the old prefix. C++ `SdfPath::ReplacePrefix` rewrites those too by
+    // default (`fixTargetPaths`); every caller here, composition's mappings
+    // and flattening's prototype remap among them, would take the target-aware
+    // replacement.
     pub fn replace_prefix(&self, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
         let old = old_prefix.as_str();
         let me = self.as_str();

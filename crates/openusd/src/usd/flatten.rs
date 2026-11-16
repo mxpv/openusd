@@ -4,13 +4,14 @@
 //! writes those answers down once, so the result stands alone. Every arc is
 //! resolved rather than copied: a reference, an inherit, a variant selection
 //! and a sublayer all disappear, and what they contributed is written where it
-//! landed.
+//! landed. The one arc written is the internal reference each instance carries
+//! to the prototype holding its contents.
 //!
 //! What survives is what a reader would still ask for — the tree of active
 //! prims, each prim's metadata, and each property's declaration, value and
 //! targets.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::usd::{Attribute, Prim, PrimPredicate, PrimStatus, SpecSite, Stage};
 use crate::{Result, pcp, sdf, tf, vt};
@@ -18,8 +19,9 @@ use crate::{Result, pcp, sdf, tf, vt};
 /// Fields flattening does not copy.
 ///
 /// The first group says how a prim composes rather than what it holds:
-/// flattening has already applied them, and a reference written into the
-/// flattened layer would be composed again by whoever opened it. The second is
+/// flattening has already applied them, and an arc copied into the flattened
+/// layer would be composed again by whoever opened it. The internal reference
+/// an instance carries to its prototype is written on its own. The second is
 /// written from the composed answer instead, so copying it too would write it
 /// twice. The clip fields are in the second group because a clip's schedule
 /// cannot survive a layer that no longer has the arcs it was scheduled over.
@@ -35,10 +37,6 @@ const NOT_COPIED: &[sdf::FieldKey] = &[
     sdf::FieldKey::VariantSetNames,
     sdf::FieldKey::VariantSelection,
     sdf::FieldKey::Relocates,
-    // An expanded instance is no longer one, so the flag would promise an arc
-    // that is not there.
-    sdf::FieldKey::Instanceable,
-    sdf::FieldKey::Specifier,
     sdf::FieldKey::TypeName,
     sdf::FieldKey::ApiSchemas,
     sdf::FieldKey::Default,
@@ -100,9 +98,10 @@ impl Stage {
     /// A deactivated prim is left out with its subtree (C++
     /// `UsdStage::Flatten` prunes it). A target, a connection or a
     /// `defaultPrim` that names it is written as composed.
-    // TODO: instancing is not preserved. C++ mints a prototype per master and
-    // authors an internal reference on each instance; this writes every
-    // instance's contents in full, so N instances become N copies.
+    ///
+    /// Instancing survives. Each prototype is written once, at a root of its
+    /// own named `/Flattened_Prototype_N`, and each instance reaches the
+    /// prototype's contents through an internal reference to that root.
     // TODO: a value clip's schedule is dropped and its values are not baked, so
     // a flattened layer loses what the clips supplied. C++ writes the
     // clip-derived samples out instead (`MakeTimeSampleMapForFlatten`).
@@ -113,21 +112,30 @@ impl Stage {
         let mut data = sdf::Data::rooted();
         write_fields(&mut data, &root, stage_fields(self, assets)?);
 
-        // Every active prim the stage holds, whatever its other status:
-        // abstract, undefined and unloaded prims are written too. A schema
-        // library is nothing but abstract class prims. Instance proxies
-        // stand where an instance's prototype content belongs, so walking
-        // through them writes each instance's contents in place and leaves no
-        // prototype to refer to.
-        // TODO(perf): the whole namespace is collected before anything is
-        // written, because `traverse` borrows the stage for the walk. Each
-        // prim's write is independent of every other, so a per-prim sink would
-        // let the walk stream — and parallelize.
-        let active = PrimPredicate::new(PrimStatus::ACTIVE, PrimStatus::empty()).with_instance_proxies(true);
-        let mut paths = Vec::new();
-        self.traverse(active, |path| paths.push(path.clone()))?;
-        for path in paths {
-            write_prim(&mut data, &self.prim(&path)?, assets)?;
+        // Every active prim, whatever its other status: abstract, undefined
+        // and unloaded prims are written too. A schema library is nothing but
+        // abstract class prims. Neither walk descends into an instance, whose
+        // contents its prototype holds.
+        let active = PrimPredicate::new(PrimStatus::ACTIVE, PrimStatus::empty());
+        let prototypes = Prototypes::name(self)?;
+
+        // The prototypes go first, grouped at the top of the layer as C++
+        // writes them.
+        // TODO(rayon): each prototype's subtree, and each prim of the main
+        // walk, is written independently of every other.
+        for (prototype, flattened) in &prototypes.flattened {
+            for prim in self.prim(prototype)?.filtered_subtree(active)? {
+                let prim = prim?;
+                let dest = prim
+                    .path()
+                    .replace_prefix(prototype, flattened)
+                    .expect("a prim of the prototype's subtree");
+                write_prim(&mut data, &prim, &dest, &prototypes, assets)?;
+            }
+        }
+        for prim in self.prim(&root)?.filtered_descendants(active)? {
+            let prim = prim?;
+            write_prim(&mut data, &prim, prim.path(), &prototypes, assets)?;
         }
 
         let tag = format!("flattened {}", self.root_layer().identifier());
@@ -135,15 +143,79 @@ impl Stage {
     }
 }
 
-/// Writes one composed prim and every property it carries.
-fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim, assets: pcp::AssetMode) -> Result<()> {
+/// Where each of a stage's prototypes is written in its flattened layer: the
+/// `/Flattened_Prototype_N` root that stands for each `/__Prototype_N` root
+/// (C++ `_GenerateFlattenedPrototypePath`).
+///
+/// A `__Prototype_N` name means a prototype only to the stage that minted
+/// it. The flattened layer gives each a name of its own.
+struct Prototypes {
+    /// The root each prototype root is written at, sorted by path, the order
+    /// [`Stage::prototypes`] lists them in and [`Prototypes::name`] numbers
+    /// them in.
+    flattened: BTreeMap<sdf::Path, sdf::Path>,
+}
+
+impl Prototypes {
+    /// Numbers the stage's prototypes in the order it lists them, skipping a
+    /// name a prim of the stage already holds.
+    // TODO(perf): `Stage::prototypes` discovers instances by walking the whole
+    // stage, which the flatten walk then walks again, even where no prim is
+    // instanced. A stage that knew it held no instanceable prim could skip
+    // the discovery.
+    fn name(stage: &Stage) -> Result<Self> {
+        let mut flattened = BTreeMap::new();
+        let mut number = 0;
+        for root in stage.prototypes()? {
+            let path = loop {
+                number += 1;
+                let path = sdf::path(format!("/Flattened_Prototype_{number}"))?;
+                if !stage.prim(&path)?.is_valid()? {
+                    break path;
+                }
+            };
+            flattened.insert(root, path);
+        }
+        Ok(Self { flattened })
+    }
+
+    /// Composed targets or connections as the flattened layer states them:
+    /// one in a prototype's namespace moved under the root standing for that
+    /// prototype, and one naming a prototype the stage does not hold dropped,
+    /// since no prim stands there (C++ `_RemapTargetPaths` and
+    /// `_RemovePrototypeTargetPaths`).
+    fn targets(&self, paths: Vec<sdf::Path>) -> Vec<sdf::Path> {
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                if !pcp::is_prototype_namespace(&path) {
+                    return Some(path);
+                }
+                let root = path.root_prim()?;
+                path.replace_prefix(&root, self.flattened.get(&root)?)
+            })
+            .collect()
+    }
+}
+
+/// Writes one composed prim, and every property it carries, at `dest`.
+/// `prototypes` names the root each instance refers to and translates the
+/// targets and connections.
+fn write_prim(
+    data: &mut dyn sdf::AbstractData,
+    prim: &Prim,
+    dest: &sdf::Path,
+    prototypes: &Prototypes,
+    assets: pcp::AssetMode,
+) -> Result<()> {
     let stage = prim.stage();
-    let specifier = prim.specifier()?.unwrap_or(sdf::Specifier::Def);
+    // A spec starts as an `over`, as C++ creates it, and takes the composed
+    // specifier with the other fields its sites author.
     let type_name = prim.type_name()?.unwrap_or_default();
-    sdf::PrimSpec::new(data, prim.path(), specifier, type_name.as_str())?;
+    sdf::PrimSpec::new(data, dest, sdf::Specifier::Over, type_name.as_str())?;
     write_fields(
         data,
-        prim.path(),
+        dest,
         spec_fields(
             site_fields(&prim.prim_stack()?)?,
             &[],
@@ -156,27 +228,55 @@ fn write_prim(data: &mut dyn sdf::AbstractData, prim: &Prim, assets: pcp::AssetM
     let applied = prim.api_schemas()?;
     if !applied.is_empty() {
         let list_op = sdf::TokenListOp::explicit(applied);
-        data.set_field(prim.path(), sdf::FieldKey::ApiSchemas.as_str(), list_op.into());
+        data.set_field(dest, sdf::FieldKey::ApiSchemas.as_str(), list_op.into());
+    }
+
+    // An instance refers to its prototype, which holds its contents. C++
+    // adds the reference to the legacy `add` list.
+    // TODO(perf): `Prim::prototype` registers the instance again to answer.
+    // Each prototype's `Prim::instances`, read once, would answer every
+    // instance from one map.
+    // A stage with no prototype has no instance to ask about.
+    if !prototypes.flattened.is_empty()
+        && let Some(prototype) = prim.prototype()?
+    {
+        let flattened = prototypes.flattened.get(&prototype);
+        debug_assert!(flattened.is_some(), "`Stage::prototypes` lists {prototype}");
+        if let Some(flattened) = flattened {
+            let reference = sdf::Reference {
+                prim_path: flattened.clone(),
+                ..Default::default()
+            };
+            let list_op = sdf::ReferenceListOp::added([reference]);
+            data.set_field(dest, sdf::FieldKey::References.as_str(), list_op.into());
+        }
     }
 
     for name in prim.authored_property_names()? {
-        write_property(data, prim, &name, assets)?;
+        write_property(data, prim, dest, &name, prototypes, assets)?;
     }
     Ok(())
 }
 
-/// Writes one composed property: its declaration, the fields around it, and
-/// what it holds.
+/// Writes one composed property of `prim`, which is written at `dest`: its
+/// declaration, the fields around it, and what it holds.
 fn write_property(
     data: &mut dyn sdf::AbstractData,
     prim: &Prim,
+    dest: &sdf::Path,
     name: &tf::Token,
+    prototypes: &Prototypes,
     assets: pcp::AssetMode,
 ) -> Result<()> {
     let stage = prim.stage();
-    let path = prim.path().append_property(name.as_str())?;
+    let source = prim.path().append_property(name.as_str())?;
+    let path = if dest == prim.path() {
+        source.clone()
+    } else {
+        dest.append_property(name.as_str())?
+    };
 
-    match stage.spec_type(&path)? {
+    match stage.spec_type(&source)? {
         Some(sdf::SpecType::Attribute) => {
             let attribute = prim.attribute(name.clone());
             let sites = attribute.property_stack()?;
@@ -193,7 +293,7 @@ fn write_property(
             write_fields(
                 data,
                 &path,
-                spec_fields(site_fields(&sites)?, &[], composed(stage, &path, assets))?,
+                spec_fields(site_fields(&sites)?, &[], composed(stage, &source, assets))?,
             );
 
             let held = held(stage, &attribute, &sites, assets)?;
@@ -207,10 +307,16 @@ fn write_property(
                     vt::Value::TimeSamples(samples),
                 );
             }
-            // Connections are composed paths on the flattened stage, so they
-            // need no translation; an explicit list is how one layer states
-            // them.
-            write_explicit_paths(data, &path, sdf::FieldKey::ConnectionPaths, attribute.connections()?);
+            // Connections are composed paths on the stage. Only those into a
+            // prototype need translating, and an explicit list is how one
+            // layer states them.
+            write_targets(
+                data,
+                &path,
+                sdf::FieldKey::ConnectionPaths,
+                attribute.connections()?,
+                prototypes,
+            );
         }
         Some(sdf::SpecType::Relationship) => {
             let relationship = prim.relationship(name.clone());
@@ -218,7 +324,7 @@ fn write_property(
             // being the spelling `rel` and the reverse of how an attribute
             // reads, so an unauthored one is the `varying rel` a schema wrote.
             let variability = stage
-                .field::<sdf::Variability>(&path, sdf::FieldKey::Variability.as_str())?
+                .field::<sdf::Variability>(&source, sdf::FieldKey::Variability.as_str())?
                 .unwrap_or_default();
             sdf::RelationshipSpec::new(data, &path, variability, relationship.is_custom()?)?;
             write_fields(
@@ -227,10 +333,16 @@ fn write_property(
                 spec_fields(
                     site_fields(&relationship.property_stack()?)?,
                     &[],
-                    composed(stage, &path, assets),
+                    composed(stage, &source, assets),
                 )?,
             );
-            write_explicit_paths(data, &path, sdf::FieldKey::TargetPaths, relationship.targets()?);
+            write_targets(
+                data,
+                &path,
+                sdf::FieldKey::TargetPaths,
+                relationship.targets()?,
+                prototypes,
+            );
         }
         // A property a schema declares but no layer authors has nothing to
         // write; its fallback belongs to the schema, not to this layer.
@@ -391,19 +503,28 @@ fn copied(name: &str, also_dropped: &[sdf::FieldKey]) -> bool {
     !sdf::is_children_field(name) && !NOT_COPIED.iter().chain(also_dropped).any(|key| key.as_str() == name)
 }
 
+/// Writes composed targets or connections as the explicit list op one layer
+/// states them with, as `prototypes` translates them. A list left empty is
+/// not written, as C++ assigns no items to it.
+fn write_targets(
+    data: &mut dyn sdf::AbstractData,
+    path: &sdf::Path,
+    key: sdf::FieldKey,
+    paths: Vec<sdf::Path>,
+    prototypes: &Prototypes,
+) {
+    let paths = prototypes.targets(paths);
+    if paths.is_empty() {
+        return;
+    }
+    data.set_field(path, key.as_str(), sdf::PathListOp::explicit(paths).into());
+}
+
 /// Writes every field composition left on a spec.
 fn write_fields(data: &mut dyn sdf::AbstractData, path: &sdf::Path, fields: Vec<(String, vt::Value)>) {
     for (key, value) in fields {
         data.set_field(path, &key, value);
     }
-}
-
-/// Writes a path list as the explicit list op one layer states it with.
-fn write_explicit_paths(data: &mut dyn sdf::AbstractData, path: &sdf::Path, key: sdf::FieldKey, paths: Vec<sdf::Path>) {
-    if paths.is_empty() {
-        return;
-    }
-    data.set_field(path, key.as_str(), sdf::PathListOp::explicit(paths).into());
 }
 
 #[cfg(test)]
@@ -1196,6 +1317,69 @@ mod tests {
         assert_eq!(value, Some(2.0));
     }
 
+    /// A target naming a prototype's namespace, where the flattened layer
+    /// holds no prim, is dropped, and a list it leaves empty is not written.
+    #[test]
+    fn prototype_targets_dropped() -> Result<()> {
+        let root = layer("root.usda", |data| {
+            sdf::PrimSpec::new(data, "/Prim", sdf::Specifier::Def, "").expect("prim");
+            sdf::RelationshipSpec::new(data, "/Prim.rel", sdf::Variability::Uniform, false).expect("rel");
+            let targets = sdf::PathListOp::explicit([sdf::path("/__Prototype_9/X").expect("path")]);
+            data.set_field(
+                &sdf::path("/Prim.rel").expect("path"),
+                sdf::FieldKey::TargetPaths.as_str(),
+                targets.into(),
+            );
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, pcp::Diagnostics::default());
+
+        let targets = stage
+            .flatten()?
+            .relationship("/Prim.rel")?
+            .expect("the relationship")
+            .get::<sdf::PathListOp>(sdf::FieldKey::TargetPaths.as_str());
+        assert!(targets.is_none(), "{targets:?}");
+        Ok(())
+    }
+
+    /// Instances stay instances of one prototype, whose root takes the next
+    /// free name where a prim of the stage holds the first.
+    #[test]
+    fn instances_share_prototype() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("asset.usda"),
+            "#usda 1.0\ndef \"Asset\" {\n    def \"Geom\" {}\n}\n",
+        )?;
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            concat!(
+                "#usda 1.0\n",
+                "def \"Flattened_Prototype_1\" {}\n",
+                "def \"A\" (instanceable = true\n    references = @./asset.usda@</Asset>) {}\n",
+                "def \"B\" (instanceable = true\n    references = @./asset.usda@</Asset>) {}\n",
+            ),
+        )?;
+        let stage = Stage::open(root.to_str().expect("utf-8 path"))?;
+
+        let flattened = stage.flatten()?;
+        assert!(
+            flattened.prim("/Flattened_Prototype_2/Geom")?.is_some(),
+            "the prototype's contents"
+        );
+        assert!(flattened.prim("/A/Geom")?.is_none(), "an instance holds none of them");
+        let held = flattened.prim("/Flattened_Prototype_1")?.expect("the stage's own prim");
+        assert_eq!(held.specifier(), Some(sdf::Specifier::Def));
+
+        let reopened = Stage::builder().open_layer(flattened)?;
+        let (a, b) = (reopened.prim("/A")?, reopened.prim("/B")?);
+        assert!(a.is_instance()? && b.is_instance()?);
+        assert_eq!(a.prototype()?, b.prototype()?, "one prototype");
+        assert!(reopened.prim("/A/Geom")?.is_valid()?);
+        Ok(())
+    }
+
     /// A deactivated prim takes its subtree with it, wherever the opinion that
     /// deactivates it sits: in a weaker sublayer, or inside the prototype an
     /// instance's contents come from, where an override authored on the
@@ -1226,13 +1410,6 @@ mod tests {
         let stage = Stage::open(root.to_str().expect("utf-8 path"))?;
 
         let flattened = stage.flatten()?;
-        let present = |path: &str| flattened.prim(path).expect("a path").is_some();
-        for kept in ["/Kept", "/Strong", "/Inst", "/Inst/On"] {
-            assert!(present(kept), "{kept} is active");
-        }
-        for pruned in ["/Off", "/Off/Child", "/Weak", "/Inst/Off", "/Inst/Off/Deep"] {
-            assert!(!present(pruned), "{pruned} is pruned");
-        }
         let targets = flattened
             .relationship("/Kept.off")?
             .expect("the relationship")
@@ -1243,6 +1420,16 @@ mod tests {
             vec![sdf::path("/Off")?],
             "a target to a pruned prim stays"
         );
+
+        // The instance's contents compose from the prototype it refers to.
+        let reopened = Stage::builder().open_layer(flattened)?;
+        let present = |path: &str| -> Result<bool> { reopened.prim(path)?.is_valid() };
+        for kept in ["/Kept", "/Strong", "/Inst", "/Inst/On"] {
+            assert!(present(kept)?, "{kept} is active");
+        }
+        for pruned in ["/Off", "/Off/Child", "/Weak", "/Inst/Off", "/Inst/Off/Deep"] {
+            assert!(!present(pruned)?, "{pruned} is pruned");
+        }
         Ok(())
     }
 }

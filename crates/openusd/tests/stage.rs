@@ -214,8 +214,7 @@ fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
     notices
 }
 
-/// The stage's first prototype in registration order, which discovery makes
-/// the first instance in stage order. Instancing tests ask the stage for it
+/// The stage's first prototype by path. Instancing tests ask the stage for it
 /// rather than naming `/__Prototype_1`, whose number depends on which instance
 /// registered first.
 fn first_prototype(stage: &Stage) -> Result<sdf::Path> {
@@ -5424,8 +5423,11 @@ fn nested_prototype_cold_query() -> Result<()> {
 
     let roots = stage.prototypes()?;
     assert_eq!(roots.len(), 2, "an outer and a nested prototype: {roots:?}");
-    let outer = roots[0].clone();
-    let nested = roots[1].clone();
+    let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    let nested = roots
+        .into_iter()
+        .find(|root| *root != outer)
+        .expect("a second prototype");
     assert_eq!(
         stage.prim(nested)?.instances()?,
         vec![outer.append_path("Nested")?],

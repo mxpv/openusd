@@ -366,12 +366,13 @@ When implementing a new feature from the spec:
 ## Testing
 
 Integration tests live in each crate's `tests/` directory and read fixture
-files from its `fixtures/`. Three suites in the core crate are compliance
+files from its `fixtures/`. Four suites in the core crate are compliance
 checks against external references: `composition.rs` regenerates the vendor
 `pcp.txt` composition dumps byte-for-byte, `text_format.rs` compares parsed
-`.usda` files with the Python reference implementation's output, and
+`.usda` files with the Python reference implementation's output,
 `text_writer_baselines.rs` writes C++ `testSdfParsing` baselines back
-byte-for-byte. The `openusd-build`
+byte-for-byte, and `flatten_baselines.rs` flattens the C++ `testUsdFlatten2`
+cases into the text C++ wrote for them. The `openusd-build`
 goldens under its `tests/` regenerate with `UPDATE_EXPECTED=1`.
 
 Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a

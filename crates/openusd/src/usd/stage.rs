@@ -4186,7 +4186,8 @@ impl Stage {
     }
 
     /// Returns every prototype root (`/__Prototype_N`) this stage's population
-    /// contains, in registration order (C++ `UsdStage::GetPrototypes`).
+    /// contains, sorted by path (C++ `UsdStage::GetPrototypes`), so
+    /// `/__Prototype_10` comes before `/__Prototype_2`.
     ///
     /// Completing the population is what makes the answer whole: the registry
     /// fills as instances compose, so a stage that has composed nothing knows
@@ -4195,7 +4196,9 @@ impl Stage {
     pub fn prototypes(&self) -> Result<Vec<sdf::Path>> {
         self.settle()?;
         self.ensure_prototypes_discovered()?;
-        Ok(self.cache().prototypes())
+        let mut prototypes = self.cache().prototypes();
+        prototypes.sort_unstable();
+        Ok(prototypes)
     }
 
     /// Returns the resolved stage status bits for a prim.
