@@ -455,7 +455,7 @@ impl ClipSet {
             false,
         );
         let mut out = vec![start];
-        out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| active.contains(x)));
+        out.extend(self.knot_times().filter(|&x| active.contains(x)));
         for clip_time in samples {
             out.extend(
                 self.stage_times_for_clip_time(clip_time)
@@ -483,12 +483,28 @@ impl ClipSet {
         self.active.len() > 1
     }
 
+    /// The stage time of each `times` knot, as a sample time. The earlier knot
+    /// of a jump discontinuity lists the time [`JUMP_STEP`] before the jump,
+    /// the last time the earlier clip time holds, since the jump itself lists
+    /// the later knot (C++ `Usd_ClipSet` moves the knot there).
+    fn knot_times(&self) -> impl Iterator<Item = f64> + '_ {
+        self.times
+            .iter()
+            .enumerate()
+            .map(|(i, knot)| match self.times.get(i + 1) {
+                Some(next) if next.x == knot.x => knot.x - JUMP_STEP,
+                _ => knot.x,
+            })
+    }
+
     /// The stage times mapping to clip time `clip_time` — the inverse of
     /// [`Self::map_stage_to_clip`] over the timing curve. With no `times`
     /// authored the mapping is identity (the clip time is its own stage time).
     /// Each linear segment that crosses `clip_time` contributes one stage time;
     /// a constant segment (no clip-time change) contributes none, since the
     /// value is held there and only the activation boundary marks a change.
+    /// Neither does a jump discontinuity, which spans no stage time (C++
+    /// `Usd_Clip::_ListTimeSamplesForPathFromClipLayer` skips it).
     fn stage_times_for_clip_time(&self, clip_time: f64) -> Vec<f64> {
         if self.times.is_empty() {
             return vec![clip_time];
@@ -499,7 +515,7 @@ impl ClipSet {
                 let (sa, ca) = (seg[0].x, seg[0].y);
                 let (sb, cb) = (seg[1].x, seg[1].y);
                 let (lo, hi) = if ca <= cb { (ca, cb) } else { (cb, ca) };
-                if ca == cb || clip_time < lo || clip_time > hi {
+                if sa == sb || ca == cb || clip_time < lo || clip_time > hi {
                     return None;
                 }
                 Some(sa + (clip_time - ca) / (cb - ca) * (sb - sa))
@@ -507,6 +523,11 @@ impl ClipSet {
             .collect()
     }
 }
+
+/// How far before a jump discontinuity the earlier knot's sample time lists:
+/// C++ `UsdTimeCode::SafeStep()` with its default arguments, the distance
+/// `Usd_ClipSet` moves that knot back by.
+const JUMP_STEP: f64 = f64::EPSILON * 1e6 * 10.0 * 2.0;
 
 /// The `assetPaths` index an `active` entry's second component names, or `None`
 /// when it is not a whole non-negative number. `active` is a `double2[]`, so the
@@ -2594,6 +2615,19 @@ pub(crate) mod tests {
         let cs = clip_set(vec![(0.0, 0)], knots(&[(0.0, 0.0), (10.0, 5.0)]));
         let times = cs.stage_sample_times(&[vec![0.0, 2.5, 5.0]]);
         assert_eq!(times, vec![0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn stage_times_jump() {
+        // times = [(0,0),(16,16),(16,0),(32,16)] loops two clips at stage 16.
+        // The earlier knot of the jump lists just before it, inside the first
+        // clip's window, and no clip time maps through the jump itself.
+        let cs = clip_set(
+            vec![(0.0, 0), (16.0, 1)],
+            knots(&[(0.0, 0.0), (16.0, 16.0), (16.0, 0.0), (32.0, 16.0)]),
+        );
+        let times = cs.stage_sample_times(&[vec![5.0], vec![3.0]]);
+        assert_eq!(times, vec![0.0, 5.0, 16.0 - JUMP_STEP, 16.0, 19.0, 32.0]);
     }
 
     #[test]
