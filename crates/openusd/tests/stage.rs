@@ -13865,6 +13865,64 @@ def "Model"
     Ok(())
 }
 
+/// An attribute a schema declares and no layer authors takes its value from a
+/// clip that authors one: the stage holds the attribute, so the clip answers
+/// for it as for an authored one, at every query that resolves a value.
+#[test]
+fn clip_answers_declared_attr() -> Result<()> {
+    static SITE: &usd::SchemaFamily<'_> = &usd::SchemaFamily::new(
+        "site",
+        &[usd::SchemaDecl::new("Widget", usd::SchemaKind::ConcreteTyped)
+            .bases(&["Typed"])
+            .properties(&[usd::PropertyDecl::attribute("size", "float")])],
+    );
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+def Widget "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+}
+"#,
+        r#"#usda 1.0
+def "Model"
+{
+    float size
+}
+"#,
+        r#"#usda 1.0
+def "Model"
+{
+    float size.timeSamples = {
+        0: 7,
+        2: 9,
+    }
+}
+"#,
+    )?;
+
+    let stage = Stage::builder()
+        .schema_registry(usd::SchemaRegistry::builder().register(SITE).build()?)
+        .open(&root)?;
+    let size = stage.attribute("/Model.size")?;
+    assert_eq!(size.get_at::<f32>(usd::TimeCode::new(2.0))?, Some(9.0));
+    assert_eq!(size.query().get_at::<f32>(usd::TimeCode::new(0.0))?, Some(7.0));
+    assert_eq!(size.resolve_info()?.source(), usd::ResolveInfoSource::ValueClips);
+    assert_eq!(stage.time_sample_times("/Model.size")?, Some(vec![0.0, 2.0]));
+    assert_eq!(stage.num_time_samples("/Model.size")?, 2);
+    assert!(stage.value_might_be_time_varying("/Model.size")?);
+    Ok(())
+}
+
 // Stage change listeners (C++ `UsdNotice`), exercised through the public API.
 
 /// A listener installed with `set_listener` fires once per edit, and the

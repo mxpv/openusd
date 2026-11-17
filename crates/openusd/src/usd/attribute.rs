@@ -984,7 +984,7 @@ impl Attribute {
 
     /// The spec type the owning prim's schema declares for this property, or
     /// `None` when no schema declares it.
-    fn declared_spec_type(&self) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
+    pub(super) fn declared_spec_type(&self) -> Result<Option<sdf::SpecType>, pcp::QueryError> {
         let Some((info, name)) = authoring::schema_definition(&self.stage, &self.path)? else {
             return Ok(None);
         };

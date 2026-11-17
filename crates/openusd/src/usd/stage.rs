@@ -3589,14 +3589,16 @@ impl Stage {
     /// source's map: a winning value-clip set contributes its times here.
     pub fn time_sample_times(&self, attr_path: impl sdf::IntoPath) -> Result<Option<Vec<f64>>> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(self.masked_opinions(&attr_path, |g, c| c.time_sample_times(g, &attr_path))?)
+        self.attribute_opinions(&attr_path, |g, c, declared| {
+            c.time_sample_times(g, &attr_path, declared)
+        })
     }
 
     /// Returns the number of composed `timeSamples` for an attribute, zero when
     /// none are authored. Resolves the count without cloning the sample values.
     pub fn num_time_samples(&self, attr_path: impl sdf::IntoPath) -> Result<usize> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(self.masked_opinions(&attr_path, |g, c| c.num_time_samples(g, &attr_path))?)
+        self.attribute_opinions(&attr_path, |g, c, declared| c.num_time_samples(g, &attr_path, declared))
     }
 
     /// Whether an attribute's value may vary over time, the introspection behind
@@ -3607,7 +3609,9 @@ impl Stage {
     /// even where the discrete sample count collapses to one (spec 12.3.4).
     pub fn value_might_be_time_varying(&self, attr_path: impl sdf::IntoPath) -> Result<bool> {
         let attr_path = sdf::try_into_path(attr_path)?;
-        Ok(self.masked_opinions(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))?)
+        self.attribute_opinions(&attr_path, |g, c, declared| {
+            c.value_might_be_time_varying(g, &attr_path, declared)
+        })
     }
 
     /// Evaluate an attribute's value at `time`, or at the default time when it
@@ -3637,7 +3641,9 @@ impl Stage {
         let attr_path = sdf::try_into_path(attr_path)?;
         let interp_type = self.interpolation.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        Ok(self.masked_opinions(&attr_path, |g, c| c.value_at(g, &attr_path, time, &interp, read))?)
+        self.attribute_opinions(&attr_path, |g, c, declared| {
+            c.value_at(g, &attr_path, time, &interp, read, declared)
+        })
     }
 
     /// Resolves the cacheable value source for an attribute, the source half of
@@ -3648,7 +3654,9 @@ impl Stage {
     /// `None` with no stamp when the attribute's prim is outside the population
     /// mask.
     pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::StampedValueSource> {
-        Ok(self.masked_opinions(attr_path, |g, c| c.resolve_value_source(g, attr_path))?)
+        self.attribute_opinions(attr_path, |g, c, declared| {
+            c.resolve_value_source(g, attr_path, declared)
+        })
     }
 
     /// Every spec contributing to the property at `path`, strongest first, with
@@ -3693,7 +3701,39 @@ impl Stage {
         // decides which samples answer exactly as the value read does.
         let interp_type = self.interpolation.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        Ok(self.masked_opinions(attr_path, |g, c| c.resolve_info(g, &stage_id, attr_path, mode, &interp))?)
+        self.attribute_opinions(attr_path, |g, c, declared| {
+            c.resolve_info(g, &stage_id, attr_path, mode, &interp, declared)
+        })
+    }
+
+    /// Runs an attribute query, and runs it again as a declared attribute
+    /// where composition reports that the answer turns on a declaration
+    /// ([`pcp::Gated::NeedsDeclaration`]).
+    ///
+    /// A value clip answers for an attribute a schema declares and no layer
+    /// authors, and only the schema registry knows which attributes those
+    /// are. The declaration is looked up only for such an attribute; where
+    /// none declares it, the query's own answer for that case stands.
+    // TODO(perf): a declared attribute composes twice, once to learn that its
+    // declaration decides and once to answer. The declaration, memoized per
+    // prim type beside the type info, would let the first pass carry it.
+    fn attribute_opinions<T: Default>(
+        &self,
+        attr_path: &sdf::Path,
+        mut query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache, bool) -> Result<pcp::Gated<T>, pcp::QueryError>,
+    ) -> Result<T> {
+        let undeclared = match self.masked_opinions(attr_path, |g, c| query(g, c, false))? {
+            pcp::Gated::Answer(answer) => return Ok(answer),
+            pcp::Gated::NeedsDeclaration { undeclared } => undeclared,
+        };
+        let attribute = super::Attribute::new(self, attr_path.clone());
+        if attribute.declared_spec_type()? != Some(sdf::SpecType::Attribute) {
+            return Ok(undeclared);
+        }
+        match self.masked_opinions(attr_path, |g, c| query(g, c, true))? {
+            pcp::Gated::Answer(answer) => Ok(answer),
+            pcp::Gated::NeedsDeclaration { .. } => unreachable!("a declared attribute needs no declaration"),
+        }
     }
 
     /// The epochs a memoized prim type stays valid under, read together from
