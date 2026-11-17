@@ -2301,6 +2301,15 @@ impl IndexCache {
         &self.store
     }
 
+    /// Whether value clips may answer for the attributes of the prim at
+    /// `path`: clip metadata is authored there or on an ancestor (C++
+    /// `Usd_PrimData::MayHaveOpinionsInClips`).
+    pub(crate) fn prim_may_have_clips(&mut self, graph: &LayerView<'_>, path: &Path) -> Result<bool, QueryError> {
+        let path = self.effective_path(graph, path)?;
+        self.ensure_index(graph, &path)?;
+        Ok(self.may_have_clips(&path))
+    }
+
     /// Whether value resolution has to consult value clips for `path`: clip
     /// metadata is authored there or on an ancestor.
     ///

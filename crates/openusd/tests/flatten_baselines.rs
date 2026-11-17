@@ -1,18 +1,20 @@
 //! Flattened stages against the layers C++ flattened.
 //!
-//! `fixtures/usd_flatten2` holds the cases of C++ `testUsdFlatten2`, each a
-//! `root.usda` with the layers it composes and `flat.usda`, the text C++
-//! `UsdStage::ExportToString` wrote for it with no source-file comment.
-//! Flattened and written, each root must come out as C++ wrote it.
+//! Each directory of `fixtures/flatten` is a case from the C++ test suite:
+//! the instancing cases of `testUsdFlatten2` and the `flatten` case of
+//! `testUsdValueClips`. A case holds a `root.usda` with the layers it composes
+//! and `flat.usda`, the text C++ `UsdStage::ExportToString` wrote for it with
+//! no source-file comment. Flattened and written, each root must come out as
+//! C++ wrote it.
 
 use std::fs;
 
 use openusd::usd;
 
 #[test]
-fn cpp_flatten2_baselines() {
-    let mut cases: Vec<_> = fs::read_dir("fixtures/usd_flatten2")
-        .expect("fixtures/usd_flatten2")
+fn cpp_flatten_baselines() {
+    let mut cases: Vec<_> = fs::read_dir("fixtures/flatten")
+        .expect("fixtures/flatten")
         .map(|entry| entry.expect("a directory entry").path())
         .filter(|path| path.is_dir())
         .collect();
