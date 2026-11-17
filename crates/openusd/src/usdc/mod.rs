@@ -659,6 +659,51 @@ mod tests {
         Ok(())
     }
 
+    /// A file is written as crate 0.8.0, raised to the version that introduced
+    /// the newest value type it holds, at any depth, as C++ `CrateFile` writes
+    /// it.
+    #[test]
+    fn written_version_is_the_oldest_that_holds_the_layer() -> Result<()> {
+        let written = |values: Vec<vt::Value>| -> Result<Version> {
+            let mut layer = sdf::Data::rooted();
+            for (index, value) in values.into_iter().enumerate() {
+                layer.set_field(&sdf::Path::abs_root(), &format!("field{index}"), value);
+            }
+            Ok(CrateWriter::write_file(&layer)?.version())
+        };
+        let time_code = || vt::Value::TimeCode(sdf::TimeCode(5.0));
+        let relocates = || -> Result<vt::Value> {
+            Ok(vt::Value::Relocates(vec![(
+                sdf::Path::new("/a")?,
+                sdf::Path::new("/b")?,
+            )]))
+        };
+
+        assert_eq!(written(vec![])?, version(0, 8, 0));
+        assert_eq!(
+            written(vec![vt::Value::Double(1.0), vt::Value::FloatVec(vec![1.0; 32])])?,
+            version(0, 8, 0)
+        );
+        assert_eq!(written(vec![time_code()])?, version(0, 9, 0));
+        assert_eq!(
+            written(vec![vt::Value::TimeCodeVec(vec![sdf::TimeCode(1.0)])])?,
+            version(0, 9, 0)
+        );
+        assert_eq!(
+            written(vec![vt::Value::TimeSamples(vec![(0.0, time_code())])])?,
+            version(0, 9, 0)
+        );
+        let nested = vt::Value::Dictionary(vt::Dictionary::from([("t".to_owned(), time_code())]));
+        assert_eq!(written(vec![nested])?, version(0, 9, 0));
+        assert_eq!(
+            written(vec![vt::Value::PathExpression(sdf::PathExpression::parse("/a"))])?,
+            version(0, 10, 0)
+        );
+        assert_eq!(written(vec![relocates()?])?, version(0, 11, 0));
+        assert_eq!(written(vec![relocates()?, time_code()])?, version(0, 11, 0));
+        Ok(())
+    }
+
     /// The file the writer returns reads as the file a reader opens from the
     /// same bytes: every spec, field and value agrees.
     #[test]
