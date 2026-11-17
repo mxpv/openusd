@@ -1,0 +1,15 @@
+#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./c1.usda@, @./c2.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1)]
+            bool interpolateMissingClipValues = 1
+        }
+    }
+)
+{
+    float size
+}

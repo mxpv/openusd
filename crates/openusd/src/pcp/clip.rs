@@ -36,11 +36,10 @@ use crate::vt::Value;
 use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};
 use super::diagnostics::Diagnostics;
-use super::index_cache::block_to_none;
 use super::layer_graph::{LayerGraph, LayerView, LoadFailure};
 use super::prim_graph::Node;
 use super::prim_resolve::Supplied;
-use super::value_resolve::ValueState;
+use super::value_resolve::{self, ValueState};
 use super::{ClipLoad, CompositionDiagnostic, LayerId, LayerStackId, QueryError};
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
@@ -1032,11 +1031,12 @@ impl ClipCache {
             return Ok(value);
         };
         let path = &clip.clip_path;
-        let samples = match self.clip_contributes(graph, resolved, &clip.manifest, path, clip.activation) {
-            true => self
+        let excluded = self.excluded_activations(graph, resolved, &clip.manifest, path);
+        let samples = match excludes(&excluded, clip.activation) {
+            false => self
                 .clip_time_samples(graph, clip.asset.asset_path(), resolved.source.layer, path)?
                 .map(|(_, samples)| samples),
-            false => None,
+            true => None,
         };
         let samples = samples.iter().flatten().map(|(time, _)| *time);
         let mut times = set.window_sample_times(position, samples);
@@ -1132,14 +1132,18 @@ impl ClipCache {
         } = clip;
         let clip_time = set.map_stage_to_clip(time);
 
-        // A manifest block at the active clip's activation time states the
-        // clip carries no samples for the attribute, so the read goes
-        // straight to the gap below without opening it. Consulted on the
-        // same terms as the gap search itself, which is what keeps the two
-        // agreeing about what a clip contributes (C++
-        // `Usd_ClipSet::_ClipContributesTimeSamples`).
-        let contributes = self.clip_contributes(graph, resolved, manifest, clip_path, *activation);
-        if contributes
+        // A manifest block at the active clip's activation time, with no
+        // manifest `default`, states the clip carries no samples for the
+        // attribute, so the read goes straight to the gap below without
+        // opening it. The gap search reads the same exclusions, so the two
+        // agree about what a clip contributes (C++
+        // `Usd_ClipSet::_ClipContributesValue`).
+        // TODO(perf): the exclusions are read off the manifest and sorted on
+        // every read; flatten reads each attribute once per listed time. They
+        // depend only on the set and the attribute, so `ClipCache` could keep
+        // them per (manifest, clip path).
+        let excluded = self.excluded_activations(graph, resolved, manifest, clip_path);
+        if !excludes(&excluded, *activation)
             && let Some((clip_id, value)) =
                 self.clip_sample_at(graph, resolved, asset.asset_path(), clip_path, clip_time, interp)?
         {
@@ -1150,8 +1154,9 @@ impl ClipCache {
         // the attribute, so it answers for the gap:
         //
         // (a) Manifest default: synthesize a sample at the clip's active
-        //     time (spec 12.3.4.6). A synthesized manifest carries no
-        //     defaults, so only an authored one reaches here.
+        //     time (spec 12.3.4.6), a block where the default is one. A
+        //     synthesized manifest carries no defaults, so only an authored
+        //     one reaches here.
         if let Some(value) = self.manifest_default(graph, manifest, clip_path)? {
             return Ok(self.resolve_asset_in(graph, diagnostics, manifest, resolved, clip_path, value, assets));
         }
@@ -1159,8 +1164,16 @@ impl ClipCache {
         // (b) interpolateMissingClipValues: interpolate the gap across the
         //     nearest surrounding clips (spec 12.3.4.7).
         if set.interpolate_missing
-            && let Some(value) =
-                self.interpolate_missing_value(graph, diagnostics, resolved, manifest, clip_path, time, interp, assets)?
+            && let Some(value) = self.interpolate_missing_value(
+                graph,
+                diagnostics,
+                resolved,
+                &excluded,
+                clip_path,
+                time,
+                interp,
+                assets,
+            )?
         {
             return Ok(value);
         }
@@ -1198,11 +1211,12 @@ impl ClipCache {
             return Ok(None);
         };
         // The clip contributes on exactly the terms the value read applies: a
-        // manifest block at its activation time states it carries no samples for
-        // the attribute, and the value then comes from the manifest or from the
-        // clips surrounding the gap, so the clip is not the spec to report.
-        let contributes = self.clip_contributes(graph, resolved, &manifest, &clip_path, activation);
-        if contributes
+        // manifest block at its activation time, with no manifest `default`,
+        // states it carries no samples for the attribute, and the value then
+        // comes from the clips surrounding the gap, so the clip is not the
+        // spec to report.
+        let excluded = self.excluded_activations(graph, resolved, &manifest, &clip_path);
+        if !excludes(&excluded, activation)
             && let Some((clip_id, samples)) =
                 self.clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &clip_path)?
             && !samples.is_empty()
@@ -1227,9 +1241,15 @@ impl ClipCache {
     /// sources the property at all, and whether it can supply a value anywhere.
     ///
     /// The timeless counterpart of [`Self::value_in_set`], deciding on the same
-    /// terms — a set that owns the property but whose clips author nothing for
-    /// it, and whose manifest carries no default to fill the gap, blocks it at
-    /// every time (spec 12.3.4.6) rather than supplying a value.
+    /// terms: the set supplies a value where a scheduled clip that contributes
+    /// authors a sample other than a block, or where a clip leaves a gap the
+    /// manifest's default fills (spec 12.3.4.6). A set whose clips author only
+    /// blocks for the property, or nothing with no default to fill the gap,
+    /// blocks it at every time.
+    ///
+    /// A clip's sample counts whether or not the set's `times` reach it, so a
+    /// clip holding a value outside the range its schedule maps to still
+    /// supplies one here.
     pub(super) fn untimed_answer_in_set(
         &mut self,
         graph: &LayerView<'_>,
@@ -1240,13 +1260,41 @@ impl ClipCache {
         let Some(samples) = self.clip_set_participates(graph, diagnostics, resolved, query)? else {
             return Ok(ValueState::Absent);
         };
-        if samples.per_clip.iter().any(|clip| !clip.is_empty()) {
+        // Whether each clip authors a sample other than a block, read once per
+        // asset however often the schedule activates it.
+        let supplies: Vec<bool> = samples
+            .per_clip
+            .iter()
+            .map(|clip| clip.iter().any(|(_, supplied)| !matches!(supplied, Supplied::Blocked)))
+            .collect();
+        // Read at the first clip that would supply a value, which most sets
+        // reach at their first activation.
+        let mut excluded = None;
+        let mut gap = false;
+        for &(activation, index) in &resolved.set.active {
+            if samples.per_clip.get(index).is_none_or(Vec::is_empty) {
+                gap = true;
+                continue;
+            }
+            if !supplies[index] {
+                continue;
+            }
+            let excluded = excluded.get_or_insert_with(|| {
+                self.excluded_activations(graph, resolved, &samples.manifest, &samples.clip_path)
+            });
+            // A clip the manifest excludes is read as a gap, as the timed read
+            // reads it.
+            if !excludes(excluded, activation) {
+                return Ok(ValueState::Present);
+            }
+            gap = true;
+        }
+        // An excluded clip leaves a gap only where the manifest authors no
+        // `default`, and `samples.gap` records that as a block.
+        if gap && !matches!(samples.gap, Supplied::Blocked) {
             return Ok(ValueState::Present);
         }
-        match self.manifest_default(graph, &samples.manifest, &samples.clip_path)? {
-            Some(_) => Ok(ValueState::Present),
-            None => Ok(ValueState::Blocked),
-        }
+        Ok(ValueState::Blocked)
     }
 
     /// The stage sample times (spec 12.3.4) `resolved` (composed on
@@ -1671,50 +1719,48 @@ impl ClipCache {
             .is_some_and(|attr| attr.variability() == sdf::Variability::Varying))
     }
 
-    /// Whether the manifest layer blocks `clip_path` at `stage_time`, the time a
-    /// clip activates — the author's assertion that the clip carries no samples
-    /// for the attribute (C++ `Usd_ClipSet::_ClipContributesTimeSamples`). Lets
-    /// a read skip the clip without opening it.
+    /// The stage times at which a clip activating there contributes nothing
+    /// for `clip_path`, ascending: with `interpolateMissingClipValues` on, each
+    /// time the manifest blocks the attribute, unless the manifest authors a
+    /// `default` for it, a block included (C++
+    /// `Usd_ClipSet::_ClipContributesValue`). The block is the author's
+    /// assertion that the clip carries no samples for the attribute, which
+    /// lets a read skip the clip without opening it. Test an activation with
+    /// [`excludes`].
     ///
     /// The manifest is read straight off its layer, so its sample times are in
     /// the frame the clip metadata was authored in, while `resolved`'s schedule
     /// has already been retimed into stage time. Each block time is mapped
-    /// through the same offset before comparing, so the two meet in stage time.
-    fn manifest_blocks(
+    /// through the same offset, so the two meet in stage time.
+    fn excluded_activations(
         &self,
         graph: &LayerView<'_>,
         resolved: &ResolvedClipSet,
         manifest: &str,
         clip_path: &Path,
-        stage_time: f64,
-    ) -> bool {
+    ) -> Vec<f64> {
+        if !resolved.set.interpolate_missing {
+            return Vec::new();
+        }
         let Some(layer) = self.layer(graph, manifest) else {
-            return false;
+            return Vec::new();
         };
+        if layer.data().has_field(clip_path, FieldKey::Default.as_str()) {
+            return Vec::new();
+        }
         let Ok(Some(field)) = layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str()) else {
-            return false;
+            return Vec::new();
         };
         let Value::TimeSamples(samples) = &*field else {
-            return false;
+            return Vec::new();
         };
-        samples.iter().any(|(time, value)| {
-            *value == Value::ValueBlock
-                && sdf::compare_sample_times(resolved.active_offset.apply(*time), stage_time).is_eq()
-        })
-    }
-
-    /// Whether the clip activating at `activation` may carry samples for
-    /// `clip_path`: always, unless `interpolateMissingClipValues` is on and
-    /// the manifest blocks the attribute there (see [`Self::manifest_blocks`]).
-    fn clip_contributes(
-        &self,
-        graph: &LayerView<'_>,
-        resolved: &ResolvedClipSet,
-        manifest: &str,
-        clip_path: &Path,
-        activation: f64,
-    ) -> bool {
-        !resolved.set.interpolate_missing || !self.manifest_blocks(graph, resolved, manifest, clip_path, activation)
+        let mut times: Vec<f64> = samples
+            .iter()
+            .filter(|(_, value)| value_resolve::is_block(value))
+            .map(|(time, _)| resolved.active_offset.apply(*time))
+            .collect();
+        sdf::normalize_sample_times(&mut times);
+        times
     }
 
     /// Where the value-clip or manifest layer `asset_path` names stands
@@ -1780,8 +1826,8 @@ impl ClipCache {
         // `Usd_ClipSet::ListTimeSamplesForPath` skips a clip whose manifest
         // blocks the attribute at its start time (`_ClipContributesValue`), and
         // never opens it. That decision is per schedule entry, so `per_clip`,
-        // which is per asset, cannot carry it; the timed read applies it
-        // through `clip_contributes`.
+        // which is per asset, cannot carry it; the value reads, timed and
+        // untimed, apply it through `excluded_activations`.
         // TODO(rayon): each scheduled clip opens and reads independently.
         let mut scheduled: Vec<usize> = set.active.iter().map(|&(_, index)| index).collect();
         scheduled.sort_unstable();
@@ -1871,8 +1917,8 @@ impl ClipCache {
 
     /// Reads the time samples for `clip_path` from a single clip layer and
     /// interpolates at `clip_time`, returning the value with the identifier of
-    /// the clip that sourced it. `None` when the layer is unresolved or the
-    /// attribute has no time samples there.
+    /// the clip that sourced it, a block where the sample held there is one.
+    /// `None` when the layer is unresolved or no sample answers there.
     ///
     /// The value comes back unresolved so the caller can resolve only what it
     /// keeps: a gap fill reads both brackets but returns one, and resolving the
@@ -1891,7 +1937,17 @@ impl ClipCache {
         let Some((clip_id, samples)) = self.clip_time_samples(graph, asset, resolved.source.layer, clip_path)? else {
             return Ok(None);
         };
-        Ok(interp(&samples, clip_time).map(|value| (clip_id, value)))
+        if let Some(value) = interp(&samples, clip_time) {
+            return Ok(Some((clip_id, value)));
+        }
+        // `interp` reads nothing where the sample held at `clip_time` is a
+        // block, and the clip answers with that block (C++
+        // `Usd_ClipSet::QueryTimeSample` returns it).
+        let held = samples.partition_point(|(at, _)| sdf::compare_sample_times(*at, clip_time).is_le());
+        Ok(samples
+            .get(held.saturating_sub(1))
+            .filter(|(_, value)| value_resolve::is_block(value))
+            .map(|_| (clip_id, Value::ValueBlock)))
     }
 
     /// Anchors and evaluates an `asset` value read out of the clip or manifest
@@ -1928,9 +1984,10 @@ impl ClipCache {
 
     /// Reads the authored `default` for `clip_path` from the manifest layer
     /// `manifest` (spec 12.3.4.6): when the active clip has a gap, the manifest
-    /// default stands in as the sample value. Returns `None` when the manifest
-    /// holds no usable default for the attribute — as a synthesized one never
-    /// does, since generation copies declarations only.
+    /// default stands in as the sample value, and a blocked default blocks the
+    /// gap. Returns `None` when the manifest authors no default for the
+    /// attribute — as a synthesized one never does, since generation copies
+    /// declarations only.
     fn manifest_default(
         &self,
         graph: &LayerView<'_>,
@@ -1943,8 +2000,7 @@ impl ClipCache {
         Ok(layer
             .data()
             .try_field(clip_path, FieldKey::Default.as_str())?
-            .map(|value| value.into_owned())
-            .and_then(block_to_none))
+            .map(|value| value.into_owned()))
     }
 
     /// Fills a gap in the active clip by interpolating across the nearest
@@ -1961,10 +2017,10 @@ impl ClipCache {
     /// supplied it — an `asset` path holds rather than blends, so a bracketed
     /// gap keeps the earlier clip's value and its anchor.
     ///
-    /// A clip the manifest blocks at its activation time is skipped without
-    /// being opened: the block is the author's statement that it carries no
-    /// samples for the attribute (C++
-    /// `Usd_ClipSet::_ClipContributesTimeSamples`).
+    /// A clip the manifest blocks at its activation time, where the manifest
+    /// authors no `default`, is skipped without being opened: the block is the
+    /// author's statement that it carries no samples for the attribute (C++
+    /// `Usd_ClipSet::_ClipContributesValue`).
     // TODO: the clip context (graph, diagnostics, resolved set, manifest, asset
     // mode) is threaded through ten `ClipCache` methods, most of which only pass it on
     // to reach `manifest_id`. Bundling it into a `ClipEval<'_>` — the shape
@@ -1976,7 +2032,7 @@ impl ClipCache {
         graph: &LayerView<'_>,
         diagnostics: &mut Diagnostics,
         resolved: &ResolvedClipSet,
-        manifest: &str,
+        excluded: &[f64],
         clip_path: &Path,
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
@@ -1995,7 +2051,7 @@ impl ClipCache {
         // Forward: nearest later clip that contributes, anchored at its start.
         let mut upper = None;
         for &(stage, idx) in set.active.iter().skip(active_pos + 1) {
-            if self.manifest_blocks(graph, resolved, manifest, clip_path, stage) {
+            if excludes(excluded, stage) {
                 continue;
             }
             if let Some(asset) = set.asset_paths.get(idx) {
@@ -2015,7 +2071,7 @@ impl ClipCache {
         // Backward: nearest earlier clip that contributes, anchored at its start.
         let mut lower = None;
         for &(stage, idx) in set.active[..active_pos].iter().rev() {
-            if self.manifest_blocks(graph, resolved, manifest, clip_path, stage) {
+            if excludes(excluded, stage) {
                 continue;
             }
             if let Some(asset) = set.asset_paths.get(idx) {
@@ -2054,6 +2110,15 @@ impl ClipCache {
             (None, None) => None,
         })
     }
+}
+
+/// Whether `activation` is one of the `excluded` activation times, ascending
+/// ([`ClipCache::excluded_activations`]): whether the clip activating there
+/// contributes nothing.
+fn excludes(excluded: &[f64], activation: f64) -> bool {
+    excluded
+        .binary_search_by(|time| sdf::compare_sample_times(*time, activation))
+        .is_ok()
 }
 
 /// Whether a set authors explicit `assetPaths` as a strict `asset[]`, mirroring

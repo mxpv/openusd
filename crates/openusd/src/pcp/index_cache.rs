@@ -809,6 +809,12 @@ impl OpinionResolver for SampleTimesResolver {
         // A map supplying no value is not a value source, so it contributes no
         // times — the same judgement the value read and the resolve info make of
         // it. It still answers, blocking weaker sources.
+        // TODO: C++ names such a map the source and lists its times, as this
+        // walk lists the times of a clip set that blocks the value. A layer
+        // flattened from such a set writes its blocks as samples, and reopened
+        // lists none. Reporting a blocking sample map or clip set as the
+        // source, with the block recorded beside it, is the C++ model; the
+        // conformance matrix in `tests/stage.rs` pins the present one.
         if !value_resolve::samples_supply_any_value(samples) {
             self.answered = true;
             return Step::Stop;
@@ -934,7 +940,6 @@ impl InfoResolver<'_> {
             self.resolution.source = kind;
             self.resolution.node = Some(ResolveNode::capture(self.graph, site.node, self.stage));
             self.resolution.spec = spec;
-            self.resolution.value = ValueState::Present;
             return self.compose(value, site).step();
         }
         // Only a composing value reads this far, so a source that varies with
@@ -948,6 +953,17 @@ impl InfoResolver<'_> {
             self.resolution.weaker.push(ResolvedSite { kind, node, spec });
         }
         folded.step()
+    }
+
+    /// Records that an opinion of `kind` answered by blocking the value.
+    ///
+    /// Only the source that answers is blocked; a stronger one this would
+    /// have composed into keeps the value it has.
+    fn block(&mut self, kind: ResolveSourceKind) {
+        if matches!(self.resolution.source, ResolveSourceKind::None) {
+            self.resolution.blocked_by = Some(kind);
+            self.resolution.withheld = self.time.is_some() && !matches!(kind, ResolveSourceKind::Default);
+        }
     }
 
     /// Folds a source's value in, so the walk knows whether anything weaker
@@ -982,11 +998,7 @@ impl OpinionResolver for InfoResolver<'_> {
         // falls through to the schema tier, and reporting `TimeSamples` would
         // disagree with it. It still answers the walk, blocking weaker sources.
         if !supplies {
-            // Only the source that answers is blocked; a stronger one this
-            // would have composed into keeps the value it has.
-            if matches!(self.resolution.source, ResolveSourceKind::None) {
-                self.resolution.value = ValueState::Blocked;
-            }
+            self.block(ResolveSourceKind::TimeSamples);
             return Step::Stop;
         }
         let spec = Some(site.spec_record(self.graph));
@@ -1013,11 +1025,7 @@ impl OpinionResolver for InfoResolver<'_> {
         self.resolution.authored = true;
         match kind {
             Withheld::DefaultBlock => {
-                // Only the source that answers is blocked; a stronger one this
-                // composed into keeps the value it has.
-                if matches!(self.resolution.source, ResolveSourceKind::None) {
-                    self.resolution.value = ValueState::Blocked;
-                }
+                self.block(ResolveSourceKind::Default);
                 Step::Stop
             }
             Withheld::TimeSamplesFieldBlock => Step::Continue,
@@ -1057,10 +1065,8 @@ impl OpinionResolver for InfoResolver<'_> {
         // sends the read to the schema tier, and naming the clip would disagree
         // with that — C++ reports the clip either way.
         self.resolution.authored = true;
-        if matches!(self.resolution.source, ResolveSourceKind::None) {
-            self.resolution.value = state;
-        }
-        if !matches!(state, ValueState::Present) {
+        if matches!(state, ValueState::Blocked) {
+            self.block(ResolveSourceKind::ValueClips);
             return Ok(Step::Stop);
         }
         // The site the set was reached at authors the `clips` metadata, not

@@ -1011,10 +1011,13 @@ impl Attribute {
     }
 
     /// `true` when the attribute resolves a value from any source, the schema
-    /// fallback included (C++ `UsdAttribute::HasValue`). A block over an
-    /// attribute with no fallback leaves it with none.
+    /// fallback included (C++ `UsdAttribute::HasValue`). A blocked `default`
+    /// over an attribute with no fallback leaves it with none. A sample map or
+    /// value clip set that blocks the value counts, as C++ names it the source:
+    /// it withholds only numeric reads, and the default-time read goes past it.
     pub fn has_value(&self) -> Result<bool> {
-        Ok(self.resolve_info()?.source() != ResolveInfoSource::None)
+        let info = self.resolve_info()?;
+        Ok(info.source() != ResolveInfoSource::None || info.blocked_by().is_some_and(ResolveInfoSource::varies))
     }
 
     /// Where the value [`get`](Self::get) returns comes from, without producing
@@ -1078,10 +1081,9 @@ impl Attribute {
     fn build_resolve_info(&self, mode: pcp::ResolveMode) -> Result<ResolveInfo> {
         let resolved = self.stage.resolve_info(&self.path, mode)?;
         let source = match resolved.source {
-            pcp::ResolveSourceKind::None => match self.has_schema_fallback()? {
-                true => ResolveInfoSource::Fallback,
-                false => ResolveInfoSource::None,
-            },
+            pcp::ResolveSourceKind::None if !resolved.withheld && self.has_schema_fallback()? => {
+                ResolveInfoSource::Fallback
+            }
             kind => source_of(kind),
         };
         // A schema fallback and an absent value come from no composition node
@@ -1101,8 +1103,8 @@ impl Attribute {
                 spec: site.spec,
                 weaker: Vec::new(),
                 composes_over_varying: false,
-                value_is_blocked: false,
                 has_authored_opinion: true,
+                blocked_by: None,
             })
             .collect();
         // A composition the layer opinions left open ends at the schema tier,
@@ -1115,8 +1117,8 @@ impl Attribute {
                 spec: None,
                 weaker: Vec::new(),
                 composes_over_varying: false,
-                value_is_blocked: false,
                 has_authored_opinion: false,
+                blocked_by: None,
             });
         }
         Ok(ResolveInfo {
@@ -1125,8 +1127,8 @@ impl Attribute {
             spec,
             weaker,
             composes_over_varying: resolved.varies,
-            value_is_blocked: resolved.value == pcp::ValueState::Blocked,
             has_authored_opinion: resolved.authored,
+            blocked_by: resolved.blocked_by.map(source_of),
         })
     }
 

@@ -10500,8 +10500,8 @@ def \"S\"
     Ok(())
 }
 
-/// A blocked `timeSamples` field is an authored opinion even though it is not
-/// a `default` block, which is the only kind `value_is_blocked` reports.
+/// A blocked `timeSamples` field is an authored opinion. It blocks no value,
+/// so `value_is_blocked` does not report it.
 #[test]
 fn blocked_field_is_authored() -> Result<()> {
     let stage = in_memory_stage()?;
@@ -11750,12 +11750,16 @@ fn assert_queries_agree(stage: &Stage, path: &str, time: f64, case: &str) {
     let count = attr.num_time_samples().expect("num_time_samples");
     let times = attr.time_sample_times().expect("time_sample_times");
     assert_eq!(times.len(), count, "{where_}: sample times and count disagree");
+    // A clip set that owns the attribute and blocks it is reported as the
+    // block, while it lists its times as one that supplies values does (C++
+    // names the set the source either way).
+    let clips_block = proximal.blocked_by() == Some(usd::ResolveInfoSource::ValueClips);
     if count > 0 {
         assert!(
             matches!(
                 proximal.source(),
                 usd::ResolveInfoSource::TimeSamples | usd::ResolveInfoSource::ValueClips
-            ),
+            ) || clips_block,
             "{where_}: {count} samples reported but the source is {:?}",
             proximal.source()
         );
@@ -11942,6 +11946,103 @@ def \"Model\"
     Ok(())
 }
 
+/// A clip set whose clips author only blocks for the property supplies no
+/// value at any time, so it reports the block whether or not the query names
+/// a time.
+#[test]
+fn clip_of_blocks_blocks() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        &clipped_model_body(
+            "    float size
+",
+        ),
+        "#usda 1.0
+def \"Model\"
+{
+    float size
+}
+",
+        "#usda 1.0
+def \"Model\"
+{
+    float size.timeSamples = {
+        0: None,
+        4: None,
+    }
+}
+",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(attr.get_at::<vt::Value>(usd::TimeCode::new(2.0))?, None);
+    for info in [attr.resolve_info()?, attr.resolve_info_at(usd::TimeCode::new(2.0))?] {
+        assert_eq!(info.source(), usd::ResolveInfoSource::None);
+        assert_eq!(info.blocked_by(), Some(usd::ResolveInfoSource::ValueClips));
+        assert!(!info.has_authored_value());
+    }
+    // The default-time read goes past the clips (C++ `HasValue` is true).
+    assert!(attr.has_value()?);
+    assert_queries_agree(&stage, "/Model.size", 2.0, "clip_of_blocks_blocks");
+    Ok(())
+}
+
+/// Under `interpolateMissingClipValues`, a clip still contributes where the
+/// manifest blocks the attribute at its activation if the manifest authors a
+/// default, and a block the clip authors then answers over that default, with
+/// or without a time (C++ `_ClipContributesValue` and `QueryTimeSample`).
+#[test]
+fn clip_block_over_default() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+            bool interpolateMissingClipValues = 1
+        }
+    }
+)
+{
+    float size
+}
+"#,
+        "#usda 1.0
+def \"Model\"
+{
+    float size = 3
+    float size.timeSamples = {
+        0: None,
+    }
+}
+",
+        "#usda 1.0
+def \"Model\"
+{
+    float size.timeSamples = {
+        0: None,
+    }
+}
+",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size")?;
+    assert_eq!(attr.get_at::<vt::Value>(usd::TimeCode::new(2.0))?, None);
+    for info in [attr.resolve_info()?, attr.resolve_info_at(usd::TimeCode::new(2.0))?] {
+        assert_eq!(info.blocked_by(), Some(usd::ResolveInfoSource::ValueClips));
+    }
+    assert_queries_agree(&stage, "/Model.size", 2.0, "clip_block_over_default");
+    Ok(())
+}
+
 /// What one source candidate answers with, across every shape value resolution
 /// can reach — the conformance matrix behind [`source_answers_conform`].
 struct Conformance {
@@ -11951,8 +12052,8 @@ struct Conformance {
     reads: bool,
     /// The source the read came from.
     source: usd::ResolveInfoSource,
-    /// Whether an opinion blocked the value.
-    blocked: bool,
+    /// The kind of opinion that blocked the value, if one did.
+    blocked_by: Option<usd::ResolveInfoSource>,
     /// Whether any opinion was authored, blocked or not.
     authored: bool,
 }
@@ -11999,7 +12100,7 @@ fn source_answers_conform() -> Result<()> {
                 case: "missing",
                 reads: false,
                 source: usd::ResolveInfoSource::None,
-                blocked: false,
+                blocked_by: None,
                 authored: false,
             },
             authored_shape(|_| Ok(()))?,
@@ -12010,7 +12111,7 @@ fn source_answers_conform() -> Result<()> {
                 case: "default value",
                 reads: true,
                 source: usd::ResolveInfoSource::Default,
-                blocked: false,
+                blocked_by: None,
                 authored: true,
             },
             authored_shape(|attr| {
@@ -12024,7 +12125,7 @@ fn source_answers_conform() -> Result<()> {
                 case: "default block",
                 reads: false,
                 source: usd::ResolveInfoSource::None,
-                blocked: true,
+                blocked_by: Some(usd::ResolveInfoSource::Default),
                 authored: true,
             },
             authored_shape(|attr| {
@@ -12038,7 +12139,7 @@ fn source_answers_conform() -> Result<()> {
                 case: "sample value",
                 reads: true,
                 source: usd::ResolveInfoSource::TimeSamples,
-                blocked: false,
+                blocked_by: None,
                 authored: true,
             },
             authored_shape(|attr| {
@@ -12053,7 +12154,8 @@ fn source_answers_conform() -> Result<()> {
                 case: "sample block",
                 reads: false,
                 source: usd::ResolveInfoSource::None,
-                blocked: true,
+                // `block` erases the samples and blocks the `default`.
+                blocked_by: Some(usd::ResolveInfoSource::Default),
                 authored: true,
             },
             authored_shape(|attr| {
@@ -12066,10 +12168,25 @@ fn source_answers_conform() -> Result<()> {
         ),
         (
             Conformance {
+                case: "all-block samples",
+                reads: false,
+                source: usd::ResolveInfoSource::None,
+                blocked_by: Some(usd::ResolveInfoSource::TimeSamples),
+                authored: true,
+            },
+            authored_shape(|attr| {
+                attr.set_at(vt::Value::ValueBlock, usd::TimeCode::new(0.0))?
+                    .set_at(vt::Value::ValueBlock, usd::TimeCode::new(10.0))?;
+                Ok(())
+            })?,
+            "/A.x",
+        ),
+        (
+            Conformance {
                 case: "clip does not own the property",
                 reads: false,
                 source: usd::ResolveInfoSource::None,
-                blocked: false,
+                blocked_by: None,
                 authored: false,
             },
             Stage::open(inactive.path().join("root.usda").to_str().unwrap())?,
@@ -12080,7 +12197,7 @@ fn source_answers_conform() -> Result<()> {
                 case: "clip value",
                 reads: true,
                 source: usd::ResolveInfoSource::ValueClips,
-                blocked: false,
+                blocked_by: None,
                 authored: true,
             },
             Stage::open(sourced.path().join("root.usda").to_str().unwrap())?,
@@ -12091,7 +12208,7 @@ fn source_answers_conform() -> Result<()> {
                 case: "clip block",
                 reads: false,
                 source: usd::ResolveInfoSource::None,
-                blocked: true,
+                blocked_by: Some(usd::ResolveInfoSource::ValueClips),
                 authored: true,
             },
             Stage::open(blocked.path().join("root.usda").to_str().unwrap())?,
@@ -12110,7 +12227,7 @@ fn source_answers_conform() -> Result<()> {
             row.case
         );
         assert_eq!(info.source(), row.source, "{}: the reported source", row.case);
-        assert_eq!(info.value_is_blocked(), row.blocked, "{}: value_is_blocked", row.case);
+        assert_eq!(info.blocked_by(), row.blocked_by, "{}: blocked_by", row.case);
         assert_eq!(
             info.has_authored_value_opinion(),
             row.authored,

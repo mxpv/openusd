@@ -23,6 +23,14 @@ pub enum ResolveInfoSource {
     ValueClips,
 }
 
+impl ResolveInfoSource {
+    /// Whether an opinion of this kind answers over time: a sample map or a
+    /// clip set, whether it supplies the value or blocks it.
+    pub(super) fn varies(self) -> bool {
+        matches!(self, Self::TimeSamples | Self::ValueClips)
+    }
+}
+
 /// Where value resolution found an attribute's answer — the resolved *location*
 /// of its value rather than the value itself (C++ `UsdResolveInfo`).
 ///
@@ -43,18 +51,33 @@ pub struct ResolveInfo {
     /// the chain does not say so itself — what a query that named no time
     /// learns by reading past a composing source.
     pub(super) composes_over_varying: bool,
-    pub(super) value_is_blocked: bool,
     /// Whether any layer authored a value opinion, including one that withholds
-    /// a value. Wider than both `source` and `value_is_blocked`: a blocked
+    /// a value. Wider than both `source` and `blocked_by`: a blocked
     /// `timeSamples` field is an authored opinion that neither records, and so
     /// is a `timeSamples` opinion a default-time query resolved past.
     pub(super) has_authored_opinion: bool,
+    /// The kind of opinion that answered by blocking the value, where one did.
+    pub(super) blocked_by: Option<ResolveInfoSource>,
 }
 
 impl ResolveInfo {
     /// The kind of source that answered.
     pub fn source(&self) -> ResolveInfoSource {
         self.source
+    }
+
+    /// Whether a value clip set that owns the attribute answered, supplying a
+    /// value or blocking it (C++ `GetResolveInfo` reports
+    /// [`ValueClips`](ResolveInfoSource::ValueClips) either way).
+    pub(super) fn clips_own(&self) -> bool {
+        self.answered() == ResolveInfoSource::ValueClips
+    }
+
+    /// The kind of opinion that answered: the one that blocked the value
+    /// where one did, which the reported source then falls past, and the
+    /// source otherwise.
+    fn answered(&self) -> ResolveInfoSource {
+        self.blocked_by.unwrap_or(self.source)
     }
 
     /// The composition node that supplied the opinion, or `None` when the answer
@@ -125,7 +148,18 @@ impl ResolveInfo {
     /// A blocked attribute still reads back its schema fallback (spec §12.3.6),
     /// so this reports the block that `source` alone cannot.
     pub fn value_is_blocked(&self) -> bool {
-        self.value_is_blocked
+        self.blocked_by.is_some()
+    }
+
+    /// The kind of opinion that blocked the value: a blocked `default`, a
+    /// `timeSamples` map that supplies no value, or a value clip set that owns
+    /// the attribute and supplies none. `None` where nothing blocked it.
+    ///
+    /// A blocking opinion is not the [`source`](Self::source). C++
+    /// `GetResolveInfo` reports a blocking `timeSamples` map or clip set as the
+    /// source all the same, which this recovers.
+    pub fn blocked_by(&self) -> Option<ResolveInfoSource> {
+        self.blocked_by
     }
 
     /// Whether a layer authored a value that survives composition.
@@ -164,12 +198,9 @@ impl ResolveInfo {
     /// this asks (C++ keeps the same answer in
     /// `_defaultCanComposeOverWeakerTimeVaryingSources`).
     pub fn value_source_might_be_time_varying(&self) -> bool {
-        let varies = |info: &ResolveInfo| {
-            matches!(
-                info.source,
-                ResolveInfoSource::TimeSamples | ResolveInfoSource::ValueClips
-            )
-        };
+        // A sample map or clip set that blocks the value still answers over
+        // time (C++ names it the source).
+        let varies = |info: &ResolveInfo| info.answered().varies();
         self.composes_over_varying || varies(self) || self.weaker.iter().any(varies)
     }
 }

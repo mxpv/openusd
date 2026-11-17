@@ -1,11 +1,14 @@
 //! Flattened stages against the layers C++ flattened.
 //!
-//! Each directory of `fixtures/flatten` is a case from the C++ test suite:
+//! Each directory of `fixtures/flatten` is a case from the C++ test suite,
 //! the instancing cases of `testUsdFlatten2` and the `flatten` case of
-//! `testUsdValueClips`. A case holds a `root.usda` with the layers it composes
-//! and `flat.usda`, the text C++ `UsdStage::ExportToString` wrote for it with
-//! no source-file comment. Flattened and written, each root must come out as
-//! C++ wrote it.
+//! `testUsdValueClips`, or one written for this suite: `ValueClipsBlocked`, a
+//! clip set whose manifest declares an attribute no clip supplies, and
+//! `ValueClipsBlockedDefault`, a gap a blocked manifest default fills. A case
+//! holds a `root.usda` with the layers it composes and `flat.usda`, the text
+//! C++ `UsdStage::ExportToString` wrote for it with no source-file comment
+//! (for a case of this suite's own, run through the C++ Python bindings).
+//! Flattened and written, each root must come out as C++ wrote it.
 
 use std::fs;
 

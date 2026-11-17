@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::usd::{Attribute, Prim, PrimPredicate, PrimStatus, ResolveInfoSource, SpecSite, Stage};
+use crate::usd::{Attribute, Prim, PrimPredicate, PrimStatus, SpecSite, Stage};
 use crate::{Result, pcp, sdf, tf, vt};
 
 /// Fields flattening does not copy.
@@ -106,7 +106,8 @@ impl Stage {
     /// prototype's contents through an internal reference to that root.
     ///
     /// What a value clip supplies is written as time samples, at each time
-    /// the clip set lists (C++ `MakeTimeSampleMapForFlatten`).
+    /// the clip set lists, with a block where a set that owns the attribute
+    /// supplies nothing (C++ `MakeTimeSampleMapForFlatten`).
     pub fn flatten_with(&self, assets: FlattenAssets) -> Result<sdf::Layer> {
         self.settle()?;
         let assets = assets.mode();
@@ -266,9 +267,10 @@ fn write_prim(
 
 /// The properties of `prim` a flattened layer writes, in the prim's order:
 /// each one a layer authors, and each one its schema declares that a value
-/// clip gives a value (C++ `_CopyPrim` copies a property with an authored
-/// value as well as an authored one). Only a prim clip metadata reaches, as
-/// `clips` says, can hold the second kind.
+/// clip set owns (C++ `_CopyPrim` copies a property with an authored value as
+/// well as an authored one, and C++ counts a value from a clip set that owns
+/// the property even where the set blocks it). Only a prim clip metadata
+/// reaches, as `clips` says, can hold the second kind.
 fn written_properties(prim: &Prim, clips: bool) -> Result<Vec<tf::Token>> {
     if !clips {
         return prim.authored_property_names();
@@ -276,10 +278,10 @@ fn written_properties(prim: &Prim, clips: bool) -> Result<Vec<tf::Token>> {
     let authored: HashSet<tf::Token> = prim.authored_property_names()?.into_iter().collect();
     let mut names = Vec::new();
     // TODO(perf): each declared property no layer authors is resolved to learn
-    // whether a clip answers for it, and resolved again when written. The
+    // whether a clip set owns it, and resolved again when written. The
     // attributes the prim's clip manifests declare are the only candidates.
     for name in prim.property_names()? {
-        if authored.contains(&name) || prim.attribute(name.clone()).has_authored_value()? {
+        if authored.contains(&name) || prim.attribute(name.clone()).resolve_info()?.clips_own() {
             names.push(name);
         }
     }
@@ -308,8 +310,8 @@ fn write_property(
 
     let spec_type = match stage.spec_type(&source)? {
         Some(spec_type) => Some(spec_type),
-        // A declared attribute no layer authors, which a value clip answers
-        // for.
+        // A declared attribute no layer authors, which a value clip set
+        // owns.
         None => prim.attribute(name.clone()).declared_spec_type()?,
     };
     match spec_type {
@@ -475,19 +477,13 @@ struct Held {
 /// the weaker opinion it hides.
 ///
 /// `clips` is whether clip metadata reaches the attribute's prim. Where a
-/// value clip wins, the samples are what the clip set supplies.
+/// clip set owns the attribute, the samples are what the set supplies, and a
+/// block where it supplies nothing (C++ names the set the source either
+/// way).
 fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], clips: bool, assets: pcp::AssetMode) -> Result<Held> {
-    // TODO(perf): the resolve walk answers whether a value clip wins, which
-    // the composed reads below walk the sites again to learn.
-    // TODO: a clip set that owns the attribute but supplies no value
-    // anywhere is reported as a block rather than as the source, so the read
-    // agrees with it (C++ `GetResolveInfo` names the clip set either way).
-    // Its blocks are then not baked here, and `written_properties` leaves out
-    // a declared attribute it alone answers for, so a weaker opinion or the
-    // schema fallback it hides reads through the flattened layer. Resolve
-    // info reporting the owning clip set apart from the value it supplies
-    // would let both ask the C++ question.
-    let clip_wins = clips && attribute.resolve_info()?.source() == ResolveInfoSource::ValueClips;
+    // TODO(perf): the resolve walk answers whether a clip set owns the
+    // attribute, which the composed reads below walk the sites again to learn.
+    let clips_own = clips && attribute.resolve_info()?.clips_own();
     // The sites' layers are borrowed for these reads alone.
     // TODO(perf): the raw samples and default are copied for every attribute
     // and used only when composition reports none; noting which site holds
@@ -521,8 +517,8 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], clips: bool, a
     };
 
     let samples = match raw_samples {
-        // A winning clip set answers for the samples instead.
-        _ if clip_wins => Some(clip_samples(attribute, assets)?),
+        // A clip set that owns the attribute answers for the samples instead.
+        _ if clips_own => Some(clip_samples(attribute, assets)?),
         Some((site, mut raw)) => {
             site.offset.apply_to_samples(&mut raw);
             // The composed map is what a read would use, and is retimed the
@@ -1501,6 +1497,78 @@ mod tests {
         Ok(())
     }
 
+    /// A stage over a `Widget` prim `/W` of `family`, which one value clip
+    /// reaches. `clip` is the body of the clip's `/W`, and `manifest` the body
+    /// of an explicit manifest's, where the set authors one. The returned
+    /// directory holds the layers, and has to outlive the stage's reads.
+    fn clipped_widget(
+        family: &'static usd::SchemaFamily<'static>,
+        clip: &str,
+        manifest: Option<&str>,
+    ) -> Result<(tempfile::TempDir, Stage)> {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let write = |name: &str, text: String| fs::write(directory.path().join(name), text).expect("write");
+        write(
+            "clip.usda",
+            format!(
+                "#usda 1.0
+def \"W\"
+{{
+{clip}}}
+"
+            ),
+        );
+        let manifest_path = match manifest {
+            Some(body) => {
+                write(
+                    "manifest.usda",
+                    format!(
+                        "#usda 1.0
+over \"W\"
+{{
+{body}}}
+"
+                    ),
+                );
+                "            asset manifestAssetPath = @./manifest.usda@
+"
+            }
+            None => "",
+        };
+        write(
+            "root.usda",
+            format!(
+                r#"#usda 1.0
+def Widget "W" (
+    clips = {{
+        dictionary default = {{
+            double2[] active = [(0, 0)]
+            asset[] assetPaths = [@./clip.usda@]
+{manifest_path}            string primPath = "/W"
+        }}
+    }}
+)
+{{
+}}
+"#
+            ),
+        );
+        let root = directory.path().join("root.usda");
+        let stage = Stage::builder()
+            .schema_registry(usd::SchemaRegistry::builder().register(family).build()?)
+            .open(&root.to_string_lossy())?;
+        Ok((directory, stage))
+    }
+
+    /// The `timeSamples` a flattened layer writes for `/W.size`.
+    fn flat_size_samples(flattened: &sdf::Layer) -> Result<sdf::TimeSampleMap> {
+        let attribute = flattened.attribute("/W.size")?.expect("the clip's attribute");
+        Ok(attribute
+            .get::<vt::Value>(sdf::FieldKey::TimeSamples.as_str())
+            .and_then(vt::Value::try_as_time_samples)
+            .expect("the clip's samples"))
+    }
+
     /// A property a schema declares, which only a value clip gives a value,
     /// is written with the samples the clip supplies (C++ `_CopyPrim` copies
     /// a property with an authored value as well as an authored one).
@@ -1512,54 +1580,68 @@ mod tests {
                 .bases(&["Typed"])
                 .properties(&[usd::PropertyDecl::attribute("size", "double")])],
         );
-        let directory = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            directory.path().join("clip.usda"),
-            "#usda 1.0
-def \"W\"
-{
-    double size.timeSamples = {
+        let (_directory, stage) = clipped_widget(
+            SITE,
+            "    double size.timeSamples = {
         1: 10,
         2: 20,
     }
-}
 ",
-        )
-        .expect("write");
-        let root = directory.path().join("root.usda");
-        fs::write(
-            &root,
-            r#"#usda 1.0
-def Widget "W" (
-    clips = {
-        dictionary default = {
-            double2[] active = [(0, 0)]
-            asset[] assetPaths = [@./clip.usda@]
-            string primPath = "/W"
-        }
-    }
-)
-{
-}
-"#,
-        )
-        .expect("write");
-        let stage = Stage::builder()
-            .schema_registry(usd::SchemaRegistry::builder().register(SITE).build()?)
-            .open(&root.to_string_lossy())?;
+            None,
+        )?;
 
-        let flattened = stage.flatten()?;
-        let attribute = flattened.attribute("/W.size")?.expect("the clip's attribute");
-        let samples = attribute
-            .get::<vt::Value>(sdf::FieldKey::TimeSamples.as_str())
-            .and_then(vt::Value::try_as_time_samples)
-            .expect("the clip's samples");
         let expected: sdf::TimeSampleMap = vec![
             (0.0, vt::Value::Double(10.0)),
             (1.0, vt::Value::Double(10.0)),
             (2.0, vt::Value::Double(20.0)),
         ];
-        assert_eq!(samples, expected);
+        assert_eq!(flat_size_samples(&stage.flatten()?)?, expected);
+        Ok(())
+    }
+
+    /// A property a schema declares, which a clip set owns and supplies no
+    /// value for, is written with the set's blocks, so its fallback stays
+    /// hidden in the flattened layer (C++ `GetResolveInfo` names the clip set
+    /// as the source, and `MakeTimeSampleMapForFlatten` writes a block where
+    /// the set supplies nothing).
+    #[test]
+    fn clip_blocked_property() -> Result<()> {
+        static SITE: &usd::SchemaFamily<'_> = &usd::SchemaFamily::new(
+            "site",
+            &[usd::SchemaDecl::new("Widget", usd::SchemaKind::ConcreteTyped)
+                .bases(&["Typed"])
+                .properties(&[usd::PropertyDecl::attribute("size", "double")
+                    .fields(&[usd::Field::new("default", || 4.0_f64.into())])])],
+        );
+        let (_directory, stage) = clipped_widget(
+            SITE,
+            "    double other.timeSamples = {
+        1: 10,
+    }
+",
+            Some(
+                "    double size
+",
+            ),
+        )?;
+        // The set's block hides the fallback at a numeric time, as it does in
+        // C++, and the flattened layer has to keep it hidden.
+        let size = stage.attribute("/W.size")?;
+        assert_eq!(size.get_at::<f64>(usd::TimeCode::new(1.0))?, None);
+        assert_eq!(size.get::<f64>()?, Some(4.0));
+        // A numeric read withholds the fallback, and so does resolve info at
+        // a time; the default-time read still has it.
+        assert_eq!(
+            size.resolve_info_at(usd::TimeCode::new(1.0))?.source(),
+            usd::ResolveInfoSource::None
+        );
+        assert!(size.has_value()?);
+
+        let flattened = stage.flatten()?;
+        let expected: sdf::TimeSampleMap = vec![(0.0, vt::Value::ValueBlock)];
+        assert_eq!(flat_size_samples(&flattened)?, expected);
+        let attribute = flattened.attribute("/W.size")?.expect("the clip's attribute");
+        assert!(attribute.get::<vt::Value>(sdf::FieldKey::Default.as_str()).is_none());
         Ok(())
     }
 }

@@ -157,27 +157,15 @@ pub(crate) enum TimedValue {
     Fallback,
 }
 
-/// Whether the source that answered the walk supplied a value there.
-///
-/// Independent of *which* source answered and of what was authored: a site can
-/// hold an opinion that supplies no value, and an unauthored property has no
-/// value without anything blocking it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What a value clip set answers for a property: a value, a block, or
+/// nothing, where the set does not source the property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValueState {
-    /// A source supplied a value.
+    /// The set supplied a value.
     Present,
-    /// An opinion blocked the value — a blocked `default`, or a sample map whose
-    /// every relevant sample is blocked, which is the shape
-    /// [`Attribute::block`] authors (it blocks the `default` and each authored
-    /// sample in place, where C++ clears the samples outright). The one state
-    /// [`ResolveInfo::value_is_blocked`](crate::usd::ResolveInfo::value_is_blocked)
-    /// reports, matching C++'s single `_valueIsBlocked` bit.
-    ///
-    /// [`Attribute::block`]: crate::usd::Attribute::block
+    /// The set sources the property and supplies no value for it.
     Blocked,
-    /// No value, and nothing blocking one: unauthored, on a prim the stage
-    /// does not hold, or authored only as opinions that withhold samples.
-    #[default]
+    /// The set does not source the property, so weaker opinions answer.
     Absent,
 }
 
@@ -204,8 +192,15 @@ pub(crate) struct Resolution {
     /// reached without a time, which selects none, and for a manifest the stage
     /// synthesized.
     pub(crate) spec: Option<SpecSiteRecord>,
-    /// Whether that source supplied a value.
-    pub(crate) value: ValueState,
+    /// The kind of opinion that answered by blocking the value, where one
+    /// did. A blocking opinion is not the reported [`source`](Self::source);
+    /// C++ `GetResolveInfo` names a blocking `timeSamples` map or clip set as
+    /// the source all the same.
+    pub(crate) blocked_by: Option<ResolveSourceKind>,
+    /// Whether the block withholds every weaker answer, the schema fallback
+    /// included, as it does from the value read: a sample or clip block at a
+    /// numeric time does, a blocked `default` does not.
+    pub(crate) withheld: bool,
     /// Whether any layer authored an opinion at all, whatever became of it.
     /// Accumulated as the walk goes, so an opinion it declined to resolve from
     /// still counts.

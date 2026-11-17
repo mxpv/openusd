@@ -372,8 +372,8 @@ checks against external references: `composition.rs` regenerates the vendor
 `.usda` files with the Python reference implementation's output,
 `text_writer_baselines.rs` writes C++ `testSdfParsing` baselines back
 byte-for-byte, and `flatten_baselines.rs` flattens the C++ `testUsdFlatten2`
-and `testUsdValueClips` cases into the text C++ wrote for them. The
-`openusd-build` goldens under its `tests/` regenerate with
+and `testUsdValueClips` cases, and cases of its own, into the text C++ wrote
+for them. The `openusd-build` goldens under its `tests/` regenerate with
 `UPDATE_EXPECTED=1`.
 
 Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a
