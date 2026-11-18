@@ -41,11 +41,9 @@ const MAX_DECOMPRESSED_BYTES: usize = if usize::BITS > 32 { 4 << 30 } else { usi
 /// moved either way, would say where it belongs.
 const MIN_ADVISED_BYTES: usize = 1 << 20;
 
-// Maximum supported USDC crate version.
-// See USD Core Specification v1.0.1 §16.3.8.2 for version history:
-//   0.10.0 — Path Expression value types
-//   0.11.0 — Relocates in layer metadata
-//   0.12.0 — Splines
+// Maximum supported USDC crate version: 0.12.0 added splines. The versions
+// that introduced the value types before it are named in `layout`, after USD
+// Core Specification v1.0.1 §16.3.8.2.
 const SW_VERSION: Version = version(0, 12, 0);
 
 /// A crate file: its structural sections, read once by [`open`](Self::open),

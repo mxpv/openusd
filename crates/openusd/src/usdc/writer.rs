@@ -24,22 +24,19 @@ use crate::{
 };
 
 use super::coding;
-use super::layout::{Bootstrap, Field, ListOpHeader, Section, Spec as FileSpec, Type, ValueRep, Version, version};
+use super::layout::{
+    Bootstrap, Field, ListOpHeader, PATH_EXPRESSION_VERSION, RELOCATES_VERSION, Section, Spec as FileSpec,
+    TIME_CODE_VERSION, Type, ValueRep, Version, version,
+};
 use super::reader::CrateFile;
 
 /// The crate version a file is written as when it holds no newer value type:
 /// the default of C++ `USD_WRITE_NEW_USDC_FILES_AS_VERSION`. A reader older
-/// than a file's version refuses the file, so a file is stamped no newer than
-/// its values need, as C++ `CrateFile` requests a write-version upgrade
-/// (`RequestWriteVersionUpgrade`) only for a value that needs one.
+/// than a file's version refuses the file. A file is stamped no newer than its
+/// values need, as C++ `CrateFile` stamps a new file: it requests a
+/// write-version upgrade (`RequestWriteVersionUpgrade`) only for a value that
+/// needs one.
 const BASE_VERSION: Version = version(0, 8, 0);
-
-/// The versions that introduced the value types newer than [`BASE_VERSION`]
-/// (USD Core Specification v1.0.1 §16.3.8.2). A spline (0.12.0) is never
-/// written.
-const TIME_CODE_VERSION: Version = version(0, 9, 0);
-const PATH_EXPRESSION_VERSION: Version = version(0, 10, 0);
-const RELOCATES_VERSION: Version = version(0, 11, 0);
 
 /// The token a crate file holds at index 0, as C++ `CrateFile::StartPacking`
 /// writes it. A property's element is written as the negated index of its
@@ -139,7 +136,8 @@ struct Packer<'w, W: Write + Seek> {
     depth: usize,
 
     /// The version the file is stamped with: [`BASE_VERSION`], raised by each
-    /// value written whose type a newer version introduced.
+    /// value written that holds an element of a type a newer version
+    /// introduced.
     version: Version,
 }
 
@@ -163,10 +161,12 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     }
 
     /// Raises the stamped version to `needed`, the version that introduced a
-    /// value type being written.
-    fn require_version(&mut self, needed: Version) {
-        if needed > self.version {
-            self.version = needed;
+    /// value type, for a value that holds `elements` of that type. A value
+    /// with none leaves the version as it is, as C++ asks for the upgrade once
+    /// per element written.
+    fn require_version(&mut self, needed: Version, elements: usize) {
+        if elements > 0 {
+            self.version = self.version.max(needed);
         }
     }
 
@@ -562,7 +562,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Uint64(v) => self.write_pod_out(Type::Uint64, v),
             Value::Double(v) => self.write_pod_out(Type::Double, v),
             Value::TimeCode(v) => {
-                self.require_version(TIME_CODE_VERSION);
+                self.require_version(TIME_CODE_VERSION, 1);
                 self.write_pod_out(Type::TimeCode, &v.0)
             }
 
@@ -637,7 +637,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Matrix3dVec(v) => self.write_array(Type::Matrix3d, v.len(), v),
             Value::Matrix4dVec(v) => self.write_array(Type::Matrix4d, v.len(), v),
             Value::TimeCodeVec(v) => {
-                self.require_version(TIME_CODE_VERSION);
+                self.require_version(TIME_CODE_VERSION, v.len());
                 self.write_array_f64_type(Type::TimeCode, v.len(), v.iter().map(|t| t.0))
             }
 
@@ -652,7 +652,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::LayerOffsetVec(v) => self.write_layer_offset_vec(v),
             Value::VariantSelectionMap(m) => self.write_variant_selection_map(m),
             Value::Relocates(v) => {
-                self.require_version(RELOCATES_VERSION);
+                self.require_version(RELOCATES_VERSION, v.len());
                 self.write_relocates(v)
             }
 
@@ -736,12 +736,12 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             // C++ never inlines a path expression: its text is a string index
             // stored on the heap.
             Value::PathExpression(expr) => {
-                self.require_version(PATH_EXPRESSION_VERSION);
+                self.require_version(PATH_EXPRESSION_VERSION, 1);
                 let idx = self.intern_string(expr.to_string());
                 self.write_pod_out(Type::PathExpression, &idx)
             }
             Value::PathExpressionVec(v) => {
-                self.require_version(PATH_EXPRESSION_VERSION);
+                self.require_version(PATH_EXPRESSION_VERSION, v.len());
                 let texts: Vec<String> = v.iter().map(|expr| expr.to_string()).collect();
                 self.write_string_vec(Type::PathExpression, true, &texts)
             }
