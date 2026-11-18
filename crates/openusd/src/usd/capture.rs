@@ -1062,9 +1062,9 @@ mod tests {
     use super::*;
     use crate::usd::diff::tests::create;
     use crate::usd::stage::tests::recorder_counts;
-    use crate::usd::{ApplyMode, Diff, Edit, EditTarget, ListPosition, StageSink};
+    use crate::usd::{ApplyMode, Diff, Edit, EditTarget, ListPosition, NamespaceEditor, StageSink};
     use crate::{Error, Result};
-    use crate::{sdf, vt};
+    use crate::{sdf, tf, vt};
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -1286,6 +1286,79 @@ mod tests {
         }
         assert_eq!(exact.prim("/W")?.child_names()?, ["a", "b", "c"]);
         assert_eq!(retarget.prim("/W")?.child_names()?, ["a", "b", "c"]);
+        Ok(())
+    }
+
+    /// A rename replays onto a mirror and undoes with the renamed prim and
+    /// property in their places among their siblings.
+    #[test]
+    fn rename_keeps_place() -> Result<()> {
+        let rename = |stage: &Stage| -> Result<()> {
+            for path in ["/A", "/B", "/C"] {
+                stage.define_prim(path)?;
+            }
+            for path in ["/A.x", "/A.y", "/A.z"] {
+                stage.create_attribute(path, "double")?;
+            }
+            NamespaceEditor::new(stage)
+                .move_prim(sdf::path("/B")?, sdf::path("/B2")?)?
+                .move_property(sdf::path("/A.y")?, sdf::path("/A.y2")?)?
+                .apply()?;
+            Ok(())
+        };
+        // Composed property names are sorted; read the layer's own list.
+        let properties = |stage: &Stage| -> Result<Vec<tf::Token>> {
+            let layer = stage.root_layer();
+            let names = layer
+                .borrow()
+                .data()
+                .field(&sdf::path("/A")?, "propertyChildren")?
+                .into_owned();
+            Ok(names.try_as_token_vec().expect("property children"))
+        };
+        let source = ReplayStage::from(in_memory_stage()?);
+        rename(&source)?;
+        let mirror = in_memory_stage()?;
+        for diff in source.diff() {
+            mirror.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
+        }
+        assert_eq!(mirror.prim("/")?.child_names()?, ["A", "B2", "C"]);
+        assert_eq!(properties(&mirror)?, ["x", "y2", "z"]);
+
+        let undo = UndoStage::from(in_memory_stage()?);
+        rename(&undo)?;
+        assert!(undo.undo()?);
+        assert_eq!(undo.prim("/")?.child_names()?, ["A", "B", "C"]);
+        assert_eq!(properties(&undo)?, ["x", "y", "z"]);
+        Ok(())
+    }
+
+    /// Two adjacent siblings renamed in one batch replay and undo in their
+    /// places.
+    #[test]
+    fn adjacent_renames_keep_place() -> Result<()> {
+        let rename = |stage: &Stage| -> Result<()> {
+            for path in ["/A", "/B", "/C", "/D"] {
+                stage.define_prim(path)?;
+            }
+            NamespaceEditor::new(stage)
+                .move_prim(sdf::path("/B")?, sdf::path("/Z")?)?
+                .move_prim(sdf::path("/C")?, sdf::path("/Y")?)?
+                .apply()?;
+            Ok(())
+        };
+        let source = ReplayStage::from(in_memory_stage()?);
+        rename(&source)?;
+        let mirror = in_memory_stage()?;
+        for diff in source.diff() {
+            mirror.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
+        }
+        assert_eq!(mirror.prim("/")?.child_names()?, ["A", "Z", "Y", "D"]);
+
+        let undo = UndoStage::from(in_memory_stage()?);
+        rename(&undo)?;
+        assert!(undo.undo()?);
+        assert_eq!(undo.prim("/")?.child_names()?, ["A", "B", "C", "D"]);
         Ok(())
     }
 
