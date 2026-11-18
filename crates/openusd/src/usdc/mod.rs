@@ -704,6 +704,25 @@ mod tests {
         Ok(())
     }
 
+    /// A path expression is written as a string index stored on the heap, as
+    /// C++ `CrateFile` packs it: a C++ reader decodes an inlined one as empty.
+    #[test]
+    fn path_expression_heap() -> Result<()> {
+        let mut layer = sdf::Data::rooted();
+        let expr = vt::Value::PathExpression(sdf::PathExpression::parse("/World//*"));
+        layer.set_field(&sdf::Path::abs_root(), "expr", expr.clone());
+        let file = CrateWriter::write_file(&layer)?;
+        let rep = file
+            .fields
+            .iter()
+            .map(|field| field.value_rep)
+            .find(|rep| matches!(rep.ty(), Ok(layout::Type::PathExpression)))
+            .expect("a path expression field");
+        assert!(!rep.is_inlined());
+        assert_eq!(file.value(rep)?, expr);
+        Ok(())
+    }
+
     /// The file the writer returns reads as the file a reader opens from the
     /// same bytes: every spec, field and value agrees.
     #[test]

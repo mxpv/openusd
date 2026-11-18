@@ -738,8 +738,9 @@ impl<'a> Decoder<'a> {
     ///
     /// Both encode an index that points into the token table when the value is
     /// inlined but into the string table when it is stored on the heap, so the
-    /// table is chosen by the inlined flag (mirrors `SdfAssetPath` /
-    /// `SdfPathExpression` handling in Pixar's crate reader).
+    /// table is chosen by the inlined flag. C++ `CrateFile` inlines an
+    /// `SdfAssetPath` as a token and stores an `SdfPathExpression` on the heap
+    /// as a string.
     fn read_asset_path(&mut self, value: ValueRep) -> Result<String, ReadError> {
         let index = self.unpack_value::<u32>(value)?;
         if value.is_inlined() {
