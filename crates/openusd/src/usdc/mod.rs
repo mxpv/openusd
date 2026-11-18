@@ -660,10 +660,10 @@ mod tests {
     }
 
     /// A file is written as crate 0.8.0, raised to the version that introduced
-    /// the newest value type it holds, at any depth, as C++ `CrateFile` writes
-    /// it.
+    /// the newest value type it holds an element of, at any depth, as C++
+    /// `CrateFile` writes a new file.
     #[test]
-    fn written_version_is_the_oldest_that_holds_the_layer() -> Result<()> {
+    fn minimum_writer_version() -> Result<()> {
         let written = |values: Vec<vt::Value>| -> Result<Version> {
             let mut layer = sdf::Data::rooted();
             for (index, value) in values.into_iter().enumerate() {
@@ -701,6 +701,14 @@ mod tests {
         );
         assert_eq!(written(vec![relocates()?])?, version(0, 11, 0));
         assert_eq!(written(vec![relocates()?, time_code()])?, version(0, 11, 0));
+        assert_eq!(
+            written(vec![
+                vt::Value::TimeCodeVec(vec![]),
+                vt::Value::PathExpressionVec(vec![]),
+                vt::Value::Relocates(vec![]),
+            ])?,
+            version(0, 8, 0)
+        );
         Ok(())
     }
 

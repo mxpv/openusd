@@ -29,8 +29,9 @@ impl From<Bootstrap> for Version {
     }
 }
 
-/// Helper structure to compare file versions.
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+/// Helper structure to compare file versions, ordered by major, then minor,
+/// then patch: the order its fields are declared in.
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u8,
     pub minor: u8,
@@ -59,21 +60,20 @@ impl Version {
     }
 
     #[inline]
-    pub fn as_u32(self) -> u32 {
-        (self.major as u32) << 16 | (self.minor as u32) << 8 | self.patch as u32
-    }
-
-    #[inline]
     pub fn is_valid(self) -> bool {
-        self.as_u32() != 0
+        self != Self::default()
     }
 }
 
-impl PartialOrd for Version {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.as_u32().cmp(&other.as_u32()))
-    }
-}
+/// The crate version that introduced the `timecode` and `timecode[]` value
+/// types (USD Core Specification v1.0.1 §16.3.8.2).
+pub(crate) const TIME_CODE_VERSION: Version = version(0, 9, 0);
+
+/// The crate version that introduced the `pathExpression` value type.
+pub(crate) const PATH_EXPRESSION_VERSION: Version = version(0, 10, 0);
+
+/// The crate version that introduced relocates in layer metadata.
+pub(crate) const RELOCATES_VERSION: Version = version(0, 11, 0);
 
 /// Max section's name length.
 pub(crate) const SECTION_NAME_MAX_LENGTH: usize = 15;
