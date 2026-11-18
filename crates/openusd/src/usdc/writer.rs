@@ -522,6 +522,10 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_value(value)
     }
 
+    // TODO(perf): C++ `CrateFile` writes each distinct out-of-line value once
+    // (`_valueDedup`, `_arrayDedup`) and shares its rep; this writer writes a
+    // value each time a field holds it. A map from value to rep, per type,
+    // would share them.
     fn write_value(&mut self, value: &Value) -> Result<ValueRep, FormatError> {
         match value {
             // `Value::None` represents an absent opinion and has no crate
@@ -729,10 +733,12 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::UnregisteredValue(s) => self.write_unregistered(|w| w.write_string_rep(s)),
             Value::UnregisteredDictionary(d) => self.write_unregistered(|w| w.write_dictionary(d)),
             Value::UnregisteredValueListOp(op) => self.write_unregistered(|w| w.write_unregistered_listop(op)),
+            // C++ never inlines a path expression: its text is a string index
+            // stored on the heap.
             Value::PathExpression(expr) => {
                 self.require_version(PATH_EXPRESSION_VERSION);
-                let idx = self.tokens.intern(expr.to_string());
-                Ok(rep_inline(Type::PathExpression, idx as u64))
+                let idx = self.intern_string(expr.to_string());
+                self.write_pod_out(Type::PathExpression, &idx)
             }
             Value::PathExpressionVec(v) => {
                 self.require_version(PATH_EXPRESSION_VERSION);
@@ -761,8 +767,8 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // Heap helpers
     // -----------------------------------------------------------------
 
-    fn intern_string(&mut self, s: &str) -> u32 {
-        let tok = self.tokens.intern(s.to_owned());
+    fn intern_string(&mut self, s: impl Into<String>) -> u32 {
+        let tok = self.tokens.intern(s.into());
         self.strings.intern(tok)
     }
 
