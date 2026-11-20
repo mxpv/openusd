@@ -12,10 +12,11 @@ and writing USD files.
 
 ## Architecture
 
-The repository is a Cargo workspace of three crates. `crates/openusd` is the
-core library, `crates/openusd-schemas` the domain schemas layered on it, and
+The repository is a Cargo workspace. `crates/openusd` is the core library,
+`crates/openusd-schemas` the domain schemas layered on it,
 `crates/openusd-build` the schema view generator that `openusd-schemas` runs as
-a build dependency; shared package properties, dependency versions, and the
+a build dependency, and `crates/openusd-mtlx` the MaterialX file format;
+shared package properties, dependency versions, and the
 lint table live in the root `Cargo.toml`. Module paths in the bullets below are
 relative to a crate's `src/`.
 
@@ -157,6 +158,13 @@ source of truth for specifics.
   stage, and emits the Rust views and token tables the schema crate
   includes (`load` → `resolve` → `validate` → `emit`; start at its `lib.rs`).
   Its golden tests under `tests/` regenerate with `UPDATE_EXPECTED=1`.
+
+- **`openusd-mtlx`** - A separate crate (`crates/openusd-mtlx`): the read-only
+  `.mtlx` file format (C++ `usdMtlx`), which a stage reads once its builder is
+  given `openusd_mtlx::MTLX` (`usd::StageBuilder::format`). It depends on
+  `openusd`, so the core never references it. It embeds MaterialX's nodedef
+  libraries under `libraries/` (Apache-2.0); its goldens under
+  `tests/expected/` regenerate with `UPDATE_EXPECTED=1`.
 
 - **`kind`** - Kinds (C++ `Kind`): `kind::Registry` (C++ `KindRegistry`) is
   the table of known kinds and their base kinds, holding the built-in model
