@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, fmt::Debug, fs, io, mem, path::Path, str};
 
-use layout::ValueRep;
+use layout::{Type, ValueRep};
 
 mod coding;
 mod layout;
@@ -219,6 +219,27 @@ impl CrateData {
 
     /// Where the value of `field` at `path` is stored, or `None` if the field
     /// is not authored.
+    /// Reads the `timeSamples` field at `path` as far as a read of single
+    /// samples needs: its sample times and where each value is.
+    fn time_sample_reps(&self, path: &sdf::Path) -> Result<Samples, sdf::DataError> {
+        let field = sdf::FieldKey::TimeSamples.as_str();
+        let rep = match self.stored(path, field) {
+            None => return Ok(Samples::Absent),
+            Some(Stored::Authored(_)) => return Ok(Samples::Whole),
+            Some(Stored::Crate(rep)) => rep,
+        };
+        if rep.ty().map_err(decode_error(path, field))? != Type::TimeSamples {
+            return Ok(Samples::Whole);
+        }
+        let (times, reps) = self.file.time_samples(rep).map_err(decode_error(path, field))?;
+        // A file a conforming writer produced orders its times; any other is
+        // read whole, which orders it.
+        if !times.is_sorted_by(|a, b| sdf::compare_sample_times(*a, *b).is_lt()) {
+            return Ok(Samples::Whole);
+        }
+        Ok(Samples::Crate(times, reps))
+    }
+
     fn stored(&self, path: &sdf::Path, field: &str) -> Option<Stored<'_>> {
         let spec = self.data.get(path)?;
         if let Some(authored) = spec.authored(field) {
@@ -279,6 +300,29 @@ impl sdf::AbstractData for CrateData {
                 let value = self.file.value(rep).map_err(decode_error(path, field))?;
                 Ok(Some(Cow::Owned(value)))
             }
+        }
+    }
+
+    fn bracketing_time_samples(&self, path: &sdf::Path, time: f64) -> Result<Option<(f64, f64)>, sdf::DataError> {
+        match self.time_sample_reps(path)? {
+            Samples::Absent => Ok(None),
+            Samples::Crate(times, _) => Ok(sdf::bracketing_time_samples(&times, time)),
+            Samples::Whole => sdf::field_bracketing(self, path, time),
+        }
+    }
+
+    fn query_time_sample(&self, path: &sdf::Path, time: f64) -> Result<Option<Cow<'_, vt::Value>>, sdf::DataError> {
+        match self.time_sample_reps(path)? {
+            Samples::Absent => Ok(None),
+            Samples::Crate(times, reps) => {
+                let Ok(i) = times.binary_search_by(|t| sdf::compare_sample_times(*t, time)) else {
+                    return Ok(None);
+                };
+                let field = sdf::FieldKey::TimeSamples.as_str();
+                let value = self.file.value(reps[i]).map_err(decode_error(path, field))?;
+                Ok(Some(Cow::Owned(value)))
+            }
+            Samples::Whole => sdf::field_sample(self, path, time),
         }
     }
 
@@ -354,6 +398,17 @@ impl sdf::AbstractData for CrateData {
             spec.remove_authored(field);
         }
     }
+}
+
+/// How a crate holds a spec's `timeSamples` field, for reading single samples.
+enum Samples {
+    /// No such field.
+    Absent,
+    /// The sample times, ordered, and the rep of each sample's value.
+    Crate(Vec<f64>, Vec<ValueRep>),
+    /// A field to read whole: authored in memory, holding something other
+    /// than samples, or stored out of order.
+    Whole,
 }
 
 /// Where [`CrateData`] keeps a field's value.
@@ -468,6 +523,53 @@ mod tests {
     use crate::Result;
     use crate::gf;
     use crate::sdf::{AbstractData, FileFormat};
+
+    /// A crate's samples read one by one agree with its field read whole, at
+    /// every kind of time, and an edit made after load is read as authored.
+    #[test]
+    fn time_samples_one_by_one() -> Result<()> {
+        let mut layer = sdf::Data::new();
+        layer.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let (x, y) = (sdf::path("/A.x")?, sdf::path("/A.y")?);
+        for p in [&x, &y] {
+            layer.create_spec(p.clone(), sdf::SpecType::Attribute);
+        }
+        let samples = [0.0, 1.0, 2.5, 4.0].map(|t| (t, vt::Value::FloatVec(vec![t as f32; 3])));
+        layer.set_field(&x, "timeSamples", vt::Value::TimeSamples(samples.to_vec()));
+        layer.set_field(&y, "timeSamples", vt::Value::ValueBlock);
+        let mut bytes = io::Cursor::new(Vec::new());
+        CrateWriter::write(&layer, &mut bytes)?;
+        let mut data = CrateData::open(bytes.into_inner(), true)?;
+
+        assert!(matches!(data.time_sample_reps(&x)?, Samples::Crate(..)));
+        assert!(matches!(data.time_sample_reps(&y)?, Samples::Whole));
+        let absent = sdf::path("/A.z")?;
+        for time in [-1.0, 0.0, 1.0, 1.5, 2.5, 3.0, 4.0, 9.0] {
+            for p in [&x, &y, &absent] {
+                assert_eq!(
+                    data.bracketing_time_samples(p, time)?,
+                    sdf::field_bracketing(&data, p, time)?,
+                    "{p} at {time}"
+                );
+                assert_eq!(
+                    data.query_time_sample(p, time)?,
+                    sdf::field_sample(&data, p, time)?,
+                    "{p} at {time}"
+                );
+            }
+        }
+        assert_eq!(data.bracketing_time_samples(&x, 1.5)?, Some((1.0, 2.5)));
+        assert_eq!(data.query_time_sample(&x, 2.5)?.as_deref(), Some(&samples[2].1));
+
+        let edit = vt::Value::TimeSamples(vec![(7.0, vt::Value::FloatVec(vec![7.0]))]);
+        data.set_field(&x, "timeSamples", edit);
+        assert_eq!(data.bracketing_time_samples(&x, 1.5)?, Some((7.0, 7.0)));
+        assert_eq!(
+            data.query_time_sample(&x, 7.0)?.as_deref(),
+            Some(&vt::Value::FloatVec(vec![7.0]))
+        );
+        Ok(())
+    }
 
     /// Crate data can be shared across threads.
     #[test]

@@ -91,33 +91,6 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
     lerp_value(v_lo, v_hi, t).or_else(|| Some(v_lo.clone()))
 }
 
-/// The pair of authored sample times bracketing `time`, or `None` when
-/// `samples` is empty. Mirrors C++ `UsdAttribute::GetBracketingTimeSamples`:
-/// the pair collapses to a single repeated time when `time` is at or beyond an
-/// end sample, or lands exactly on a sample; otherwise `lower < time < upper`.
-///
-/// `times` MUST be ordered as the times of an [`sdf::TimeSampleMap`] are,
-/// and `time` is compared in that same order, so a query outside the
-/// sampled range — a NaN included, on its sign bit's side — pairs with an
-/// end time.
-pub fn bracketing_time_samples(times: &[f64], time: f64) -> Option<(f64, f64)> {
-    if times.is_empty() {
-        return None;
-    }
-    let first = times[0];
-    if sdf::compare_sample_times(time, first).is_le() {
-        return Some((first, first));
-    }
-    let last = times[times.len() - 1];
-    if sdf::compare_sample_times(time, last).is_ge() {
-        return Some((last, last));
-    }
-    match times.binary_search_by(|t| sdf::compare_sample_times(*t, time)) {
-        Ok(i) => Some((times[i], times[i])),
-        Err(i) => Some((times[i - 1], times[i])),
-    }
-}
-
 /// Filter out blocked sentinels at the read boundary so callers can
 /// treat the return shape as "Some(real value) or no value".
 fn clean(v: Value) -> Option<Value> {
@@ -247,8 +220,8 @@ mod tests {
             Some(Value::Double(1.0)),
             "a negative NaN orders before every time"
         );
-        assert_eq!(bracketing_time_samples(&[0.0, 10.0], f64::NAN), Some((10.0, 10.0)));
-        assert_eq!(bracketing_time_samples(&[0.0, 10.0], -f64::NAN), Some((0.0, 0.0)));
+        assert_eq!(sdf::bracketing_time_samples(&[0.0, 10.0], f64::NAN), Some((10.0, 10.0)));
+        assert_eq!(sdf::bracketing_time_samples(&[0.0, 10.0], -f64::NAN), Some((0.0, 0.0)));
         assert_eq!(
             evaluate(&samples, -0.0, InterpolationType::Linear),
             Some(Value::Double(1.0)),

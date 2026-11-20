@@ -563,6 +563,15 @@ pub(crate) trait OpinionResolver {
         false
     }
 
+    /// Returns the stage time this resolver interpolates `timeSamples` at.
+    ///
+    /// With a time, the walk reads from each layer only the samples that
+    /// bracket it. The default is `None`, for a resolver that lists or keeps
+    /// every sample; the walk then reads the whole map.
+    fn sample_time(&self) -> Option<f64> {
+        None
+    }
+
     /// Whether the walk visits the layers that author no spec for the prim
     /// as well, each through [`on_site`](Self::on_site).
     ///
