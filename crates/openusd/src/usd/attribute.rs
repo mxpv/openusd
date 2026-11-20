@@ -1283,7 +1283,7 @@ impl Attribute {
     pub fn bracketing_time_samples(&self, time: impl Into<super::TimeCode>) -> Result<Option<(f64, f64)>> {
         let time = time.into();
         let times = self.time_sample_times()?;
-        Ok(interp::bracketing_time_samples(&times, time.value()))
+        Ok(sdf::bracketing_time_samples(&times, time.value()))
     }
 
     /// `true` when the value may change over time, the fast check behind

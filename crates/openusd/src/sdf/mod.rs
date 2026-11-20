@@ -52,6 +52,7 @@ pub use copy::{
 pub(crate) use copy::{author_spec, child_slot, is_children_field, is_ordered_children, join_child};
 pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
+pub(crate) use data::{field_bracketing, field_sample};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, FormatError, PackageFiles, WriteSeek, Written};
 pub use handle::{AttributeHandle, PrimHandle, PseudoRootHandle, RelationshipHandle};
@@ -487,6 +488,32 @@ pub fn normalize_sample_times(times: &mut Vec<f64>) {
     times.dedup_by(|a, b| compare_sample_times(*a, *b).is_eq());
 }
 
+/// Returns the pair of `times` that brackets `time`, or `None` when `times`
+/// is empty.
+///
+/// The pair collapses to one repeated time when `time` is at or beyond an end
+/// sample, or lands exactly on a sample; otherwise `lower < time < upper`.
+/// C++ finds the pair the same way for a layer
+/// (`SdfLayer::GetBracketingTimeSamplesForPath`) and for an attribute
+/// (`UsdAttribute::GetBracketingTimeSamples`).
+///
+/// `times` must be ordered as the times of a [`TimeSampleMap`] are, and
+/// `time` is compared in that same order, so a query outside the sampled
+/// range, a NaN included, pairs with the end on its sign bit's side.
+pub fn bracketing_time_samples(times: &[f64], time: f64) -> Option<(f64, f64)> {
+    let (&first, &last) = (times.first()?, times.last()?);
+    if compare_sample_times(time, first).is_le() {
+        return Some((first, first));
+    }
+    if compare_sample_times(time, last).is_ge() {
+        return Some((last, last));
+    }
+    match times.binary_search_by(|t| compare_sample_times(*t, time)) {
+        Ok(i) => Some((times[i], times[i])),
+        Err(i) => Some((times[i - 1], times[i])),
+    }
+}
+
 /// Orders `samples` as a [`TimeSampleMap`] requires. A repeated time keeps
 /// the spelling it was first given and the sample it was last given, as
 /// assigning into C++'s `std::map` does, so the two zeros collapse the way
@@ -529,6 +556,21 @@ pub type LayerData = Box<dyn AbstractData>;
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn bracketing_pairs() {
+        let times = [0.0, 10.0, 20.0];
+        assert_eq!(bracketing_time_samples(&[], 5.0), None);
+        assert_eq!(bracketing_time_samples(&times, -5.0), Some((0.0, 0.0)));
+        assert_eq!(bracketing_time_samples(&times, 10.0), Some((10.0, 10.0)));
+        assert_eq!(bracketing_time_samples(&times, 15.0), Some((10.0, 20.0)));
+        assert_eq!(bracketing_time_samples(&times, 25.0), Some((20.0, 20.0)));
+        assert_eq!(
+            bracketing_time_samples(&times, -0.0),
+            Some((0.0, 0.0)),
+            "the two zeros are one time"
+        );
+    }
 
     #[test]
     fn normalize_sample_times_order() {

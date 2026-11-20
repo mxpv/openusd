@@ -8,7 +8,7 @@
 //! same sample.
 
 use openusd::usd;
-use openusd::{Result, gf, vt};
+use openusd::{Result, gf, sdf, vt};
 
 use crate::SchemaError;
 
@@ -44,7 +44,7 @@ impl<T> Held<T> {
             }));
         };
         let times = attr.time_sample_times()?;
-        let bracket = usd::bracketing_time_samples(&times, base_time.value());
+        let bracket = sdf::bracketing_time_samples(&times, base_time.value());
         let sample_time = bracket.map(|(lower, _)| lower);
         let Some(value) = attr.get_at::<T>(sample_time.map(usd::TimeCode::new))? else {
             return Ok(None);
@@ -52,7 +52,7 @@ impl<T> Held<T> {
         let bracket = match bracket {
             Some((lower, upper)) if same_time(lower, upper) => {
                 let later = base_time.value() + usd::TimeCode::safe_step_default();
-                usd::bracketing_time_samples(&times, later)
+                sdf::bracketing_time_samples(&times, later)
             }
             other => other,
         };

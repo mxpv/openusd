@@ -48,7 +48,7 @@ pub use core_schemas::{
 pub use diff::{ApplyMode, Diff, Edit, FieldValue, Place};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use flatten::FlattenAssets;
-pub use interp::{InterpolationType, bracketing_time_samples};
+pub use interp::InterpolationType;
 pub use list_edit::{IntoItem, ListEdit, ListItem, ListPosition};
 pub use model_api::KindValidation;
 pub use object::{Object, Property};

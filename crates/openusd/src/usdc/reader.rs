@@ -204,6 +204,17 @@ impl CrateFile {
         Decoder::new(self).decode(rep)
     }
 
+    /// Decodes the sample times of the time-samples value `rep` describes,
+    /// and the rep of each sample's value, in the order the file stores them.
+    ///
+    /// No sample's value is decoded; [`CrateFile::value`] decodes one from its
+    /// rep. C++ reads a crate's time samples the same way: their times when
+    /// the field is read, a value when it is asked for
+    /// (`CrateFile::GetTimeSampleValue`).
+    pub fn time_samples(&self, rep: ValueRep) -> Result<(Vec<f64>, Vec<ValueRep>), ReadError> {
+        Decoder::new(self).time_sample_reps(rep)
+    }
+
     /// The kind of the value `rep` holds, read from its type without the
     /// checks [`value`](Self::value) makes of the payload. An unregistered
     /// value, whose kind its payload holds, is decoded.
@@ -1071,6 +1082,58 @@ impl<'a> Decoder<'a> {
         self.stream.read_vec::<U>(count)
     }
 
+    /// Decodes a time-samples value's sample times and the reps of their
+    /// values.
+    fn time_sample_reps(&mut self, value: ValueRep) -> Result<(Vec<f64>, Vec<ValueRep>), ReadError> {
+        corrupt!(!value.is_inlined());
+        corrupt!(!value.is_compressed());
+
+        self.stream.seek(value.payload())?;
+
+        self.apply_recursive_offset()?;
+
+        let times_rep = self.stream.read_pod::<ValueRep>()?;
+
+        let ty = times_rep.ty()?;
+        corrupt!(
+            ty == Type::DoubleVector || (ty == Type::Double && times_rep.is_array()),
+            "Invalid time samples type: expected either double vector or double array"
+        );
+
+        // Save current position.
+        let saved_position = self.stream.position();
+
+        let times = self
+            .nested_value(times_rep)?
+            .try_as_double_vec()
+            .ok_or_else(|| ReadError::corrupt("Failed to read time samples"))?;
+
+        // Restore position
+        self.stream.rewind(saved_position);
+
+        self.apply_recursive_offset()?;
+
+        let count = self.stream.read_count()?;
+        corrupt!(count == times.len(), "Invalid time samples count");
+
+        let value_reps = self.stream.read_vec::<ValueRep>(count)?;
+        corrupt!(value_reps.len() == count);
+
+        Ok((times, value_reps))
+    }
+
+    /// Decodes a time-samples value, every sample of it.
+    fn time_samples(&mut self, value: ValueRep) -> Result<vt::Value, ReadError> {
+        let (times, value_reps) = self.time_sample_reps(value)?;
+        let samples = times
+            .into_iter()
+            .zip(value_reps)
+            .map(|(time, rep)| Ok((time, self.nested_value(rep)?)))
+            .collect::<Result<Vec<_>, ReadError>>()?;
+
+        Ok(vt::Value::TimeSamples(sdf::normalize_time_samples(samples)))
+    }
+
     /// Decode the value `rep` describes as one nested in the value being
     /// decoded, refusing one already being decoded above it (a value that
     /// names itself) and one nested deeper than [`MAX_NESTING`].
@@ -1481,49 +1544,7 @@ impl<'a> Decoder<'a> {
                 vt::Value::VariantSelectionMap(map)
             }
 
-            Type::TimeSamples => {
-                corrupt!(!value.is_inlined());
-                corrupt!(!value.is_compressed());
-
-                self.stream.seek(value.payload())?;
-
-                self.apply_recursive_offset()?;
-
-                let times_rep = self.stream.read_pod::<ValueRep>()?;
-
-                let ty = times_rep.ty()?;
-                corrupt!(
-                    ty == Type::DoubleVector || (ty == Type::Double && times_rep.is_array()),
-                    "Invalid time samples type: expected either double vector or double array"
-                );
-
-                // Save current position.
-                let saved_position = self.stream.position();
-
-                let times = self
-                    .nested_value(times_rep)?
-                    .try_as_double_vec()
-                    .ok_or_else(|| ReadError::corrupt("Failed to read time samples"))?;
-
-                // Restore position
-                self.stream.rewind(saved_position);
-
-                self.apply_recursive_offset()?;
-
-                let count = self.stream.read_count()?;
-                corrupt!(count == times.len(), "Invalid time samples count");
-
-                let value_reps = self.stream.read_vec::<ValueRep>(count)?;
-                corrupt!(value_reps.len() == count);
-
-                let samples = times
-                    .into_iter()
-                    .zip(value_reps)
-                    .map(|(time, rep)| Ok((time, self.nested_value(rep)?)))
-                    .collect::<Result<Vec<_>, ReadError>>()?;
-
-                vt::Value::TimeSamples(sdf::normalize_time_samples(samples))
-            }
+            Type::TimeSamples => self.time_samples(value)?,
 
             // Empty dictionary.
             Type::Dictionary if value.is_inlined() => vt::Value::Dictionary(HashMap::default().into()),

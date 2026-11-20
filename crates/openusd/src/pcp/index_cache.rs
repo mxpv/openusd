@@ -572,6 +572,10 @@ impl ValueAtResolver<'_> {
 }
 
 impl OpinionResolver for ValueAtResolver<'_> {
+    fn sample_time(&self) -> Option<f64> {
+        self.time
+    }
+
     fn asset_mode(&self) -> AssetMode {
         self.read.assets
     }
@@ -1811,10 +1815,19 @@ impl IndexCache {
                 // At the default time the field is read only for a resolver
                 // that reports what it walked past; the value read skips it.
                 let probes_samples = mode.visits_time_samples() || resolver.wants_unresolved_samples();
-                if !samples_blocked
-                    && probes_samples
-                    && let Some(value) = data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
-                {
+                // A read at one time reads only the samples it interpolates
+                // from, at the time mapped into the layer's; any other read
+                // takes the whole map.
+                let samples = match resolver.sample_time() {
+                    Some(time) if !samples_blocked && probes_samples => {
+                        interpolating_samples(data, &site.query_path, site.offset.inverse().apply(time))?
+                    }
+                    _ if !samples_blocked && probes_samples => {
+                        data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
+                    }
+                    _ => None,
+                };
+                if let Some(value) = samples {
                     // What the field holds decides whether there is an opinion
                     // here at all; the mode then decides what to do with it.
                     let field = SampleField::classify(&value);
@@ -4559,6 +4572,40 @@ enum Settlement {
 /// The order to transfer `records` in: each after every record whose root
 /// encloses one of its instances. A prototype root is a root prim, so an
 /// instance's enclosing record is the one rooted at its root prim.
+/// Reads the samples of the `timeSamples` field at `path` that a value at
+/// `time` (in the layer's time) interpolates from: the pair bracketing it, or
+/// the one sample at or nearest it. C++ `UsdStage` reads them the same way
+/// (`_GetInterpolatingTimeSamples`), through
+/// `SdfLayer::GetBracketingTimeSamplesForPath` and `SdfLayer::QueryTimeSample`.
+///
+/// A field that holds no samples (a block, or another kind of value) is read
+/// whole, for the walk to classify. Both samples of a pair are read; C++ reads
+/// only the lower one under held interpolation.
+fn interpolating_samples<'a>(
+    data: &'a dyn sdf::AbstractData,
+    path: &Path,
+    time: f64,
+) -> Result<Option<Cow<'a, Value>>, sdf::DataError> {
+    let field = FieldKey::TimeSamples.as_str();
+    let Some((lower, upper)) = data.bracketing_time_samples(path, time)? else {
+        return data.try_field(path, field);
+    };
+    let mut samples = sdf::TimeSampleMap::with_capacity(2);
+    for at in [lower, upper] {
+        if samples
+            .last()
+            .is_some_and(|(t, _)| sdf::compare_sample_times(*t, at).is_eq())
+        {
+            continue;
+        }
+        let Some(value) = data.query_time_sample(path, at)? else {
+            return data.try_field(path, field);
+        };
+        samples.push((at, value.into_owned()));
+    }
+    Ok(Some(Cow::Owned(Value::TimeSamples(samples))))
+}
+
 fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {
     let by_root: HashMap<&Path, usize, sdf::PathHasher> = records
         .iter()
