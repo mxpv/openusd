@@ -79,20 +79,26 @@ static EMPTY: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::
 /// The text of the absolute root path, shared by every [`Path::abs_root`].
 static ABS_ROOT: LazyLock<Arc<Text>> = LazyLock::new(|| Arc::new(Text::new(String::from("/"))));
 
-/// A path's shared text and its hash.
+/// A path's shared text, its hash and its prim element count.
 ///
 /// Clones of a [`Path`] share one `Text`, whose hash is computed once, when
 /// the path is made. A path keying several maps, or one map many times, does
 /// not read its text again to hash it. Equality and ordering compare the text.
+/// The count is shared by every clone too.
 struct Text {
-    text: String,
+    text: Box<str>,
     /// The text's hash under the unkeyed [`FxBuildHasher`]. Equal texts in
     /// separate allocations hash alike.
     hash: u64,
     /// The path's [`prim_element_count`](Path::prim_element_count), counted
-    /// on first use, or [`UNCOUNTED`] before.
+    /// on first use or carried over from the parent by
+    /// [`append_child`](Path::append_child), or [`UNCOUNTED`] before.
     prim_elements: AtomicU32,
 }
+
+// A `Text` fits in 32 bytes, so on a 64-bit target a path's `Arc` allocation
+// is 48 bytes.
+const _: () = assert!(size_of::<Text>() <= 32);
 
 /// The [`Text::prim_elements`] of a path not yet counted.
 const UNCOUNTED: u32 = u32::MAX;
@@ -266,46 +272,67 @@ impl Path {
     /// after a `/`, or directly after a variant selection (`/A{v=s}B`). `name`
     /// must be an identifier, and this path the pseudo-root, a prim, a
     /// variant selection or the reflexive `.`, which gives `name` itself.
-    pub fn append_child(&self, name: &str) -> Result<Path, PathParseError> {
-        let fail = |offset, reason| PathParseError {
-            input: format!("{}/{name}", self.path),
-            offset,
-            reason,
-        };
-        if !Path::is_valid_identifier(name) {
-            return Err(fail(self.path.len() + 1, "child name is not a valid identifier"));
+    pub fn append_child(&self, name: impl AsRef<str>) -> Result<Path, PathParseError> {
+        let name = name.as_ref();
+        if self.is_empty() || self.has_property_part() {
+            return Err(PathParseError {
+                input: self.as_str().to_owned(),
+                offset: 0,
+                reason: "path cannot own children",
+            });
         }
-        if self.is_empty() || self.is_property() || self.path.ends_with(']') {
-            return Err(fail(0, "path cannot own children"));
+        let text = self.join(name);
+        if let Err((offset, reason)) = validate_identifier(&text, &text[text.len() - name.len()..]) {
+            return Err(PathParseError {
+                offset,
+                input: text,
+                reason,
+            });
         }
-        let text = match self.as_str() {
-            "." => return Ok(Path::from_text(name.to_owned())),
-            "/" => ["/", name].concat(),
-            parent if self.is_variant_selection() => [parent, name].concat(),
-            parent => [parent, "/", name].concat(),
-        };
-        Ok(Path::from_text(text))
+        let child = Path::from_string_unchecked(text);
+        // Under an absolute path the child holds one prim element more.
+        let counted = self.path.prim_elements.load(Ordering::Relaxed);
+        if self.is_abs() && counted != UNCOUNTED {
+            child.path.prim_elements.store(counted + 1, Ordering::Relaxed);
+        }
+        Ok(child)
     }
 
-    /// Appends `path` (parsed if given as a string) under this path with a `/`
-    /// separator (C++ `SdfPath::AppendPath`). Appending an absolute path to an
-    /// absolute base, or anything to a property path, is an error.
+    /// Appends `path` (parsed if given as a string) under this path (C++
+    /// `SdfPath::AppendPath`), joined as [`append_child`](Self::append_child)
+    /// joins a name. Appending an absolute path, the empty path on either
+    /// side, or anything to a property or target path, is an error.
     pub fn append_path(&self, path: impl TryInto<Path, Error: Into<PathParseError>>) -> Result<Path, PathParseError> {
         let append: Path = try_into_path(path)?;
 
-        if self.is_abs() && append.is_abs() {
+        if self.is_empty() {
             return Err(PathParseError {
-                input: append.path.to_string(),
+                input: String::new(),
                 offset: 0,
-                reason: "cannot append an absolute path to an absolute path",
+                reason: "cannot append to the empty path",
+            });
+        }
+        if append.is_empty() {
+            return Err(PathParseError {
+                input: self.as_str().to_owned(),
+                offset: self.as_str().len(),
+                reason: "cannot append the empty path",
             });
         }
 
-        if self.is_property() {
+        if append.is_abs() {
+            return Err(PathParseError {
+                input: append.path.to_string(),
+                offset: 0,
+                reason: "cannot append an absolute path",
+            });
+        }
+
+        if self.has_property_part() {
             return Err(PathParseError {
                 input: self.path.to_string(),
                 offset: self.path.rfind('.').unwrap_or(0),
-                reason: "cannot append a path to a property path",
+                reason: "cannot append a path to a property or target path",
             });
         }
 
@@ -331,19 +358,27 @@ impl Path {
             });
         }
 
-        // If base is slash only.
-        // "/" + "foo/bar" => "/foo/bar"
-        let combined = if self.as_str() == "/" {
-            format!("/{}", append.path)
-        } else if self.is_variant_selection() {
-            // A prim child attaches directly to a variant selection with no
-            // separator: "/A{v=s}" + "B" => "/A{v=s}B" (C++ SdfPath::AppendChild).
-            format!("{}{}", self.path, append.path)
-        } else {
-            format!("{}/{}", self.path, append.path)
-        };
+        Ok(Path::from_text(self.join(append.as_str())))
+    }
 
-        Ok(Path::from_text(combined))
+    /// The text of the prim namespace `tail` under this path: `tail` itself
+    /// under `.`, after the `/` of the pseudo-root, directly after a variant
+    /// selection (`/A{v=s}B`, as C++ `SdfPath::AppendChild` builds it), and
+    /// after a `/` anywhere else.
+    pub(crate) fn join(&self, tail: &str) -> String {
+        match self.as_str() {
+            "." => tail.to_owned(),
+            "/" => ["/", tail].concat(),
+            parent if self.is_variant_selection() => [parent, tail].concat(),
+            parent => [parent, "/", tail].concat(),
+        }
+    }
+
+    /// Whether this path carries a property tail (C++ `SdfPath`'s property
+    /// part): a property, or a target, relational attribute or mapper path
+    /// built on one. Such a path owns no prims or variant selections.
+    fn has_property_part(&self) -> bool {
+        self.is_property() || self.path.ends_with(']')
     }
 
     pub fn is_property(&self) -> bool {
@@ -979,57 +1014,37 @@ impl Path {
         if me == old {
             return Some(new_prefix.clone());
         }
-        if old_prefix == new_prefix {
-            return self.has_prefix(old_prefix).then(|| self.clone());
-        }
-
-        // Must start with old_prefix followed by '/', '.', or '{'. Property
-        // targets in connection/relationship list ops rely on prim-prefix
-        // mappings crossing the property separator, e.g.
+        // A prefix ends where `has_prefix` places a boundary. Property targets
+        // in connection/relationship list ops rely on prim-prefix mappings
+        // crossing the property separator, e.g.
         // `/Asset.outputs:out` -> `/Instance.outputs:out`.
-        let suffix = me.strip_prefix(old)?;
-        // The absolute root "/" is a prefix of all absolute paths; after
-        // stripping it the remainder won't start with '/' (e.g. "Foo/Bar"). A
-        // prim child attaches directly after a variant selection (`/A{v=s}B`),
-        // so a `}`-terminated prefix is a boundary too.
-        if old != "/"
-            && !suffix.starts_with('/')
-            && !suffix.starts_with('.')
-            && !suffix.starts_with('{')
-            && !old_prefix.is_variant_selection()
-        {
+        if !self.has_prefix(old_prefix) {
             return None;
         }
-        // Ensure a separator between new prefix and suffix for non-root.
-        if old == "/" && !suffix.is_empty() {
-            let new = new_prefix.as_str();
-            if new == "/" {
-                return Some(Path::from_str_unchecked(&format!("/{suffix}")));
-            }
-            return Some(Path::from_str_unchecked(&format!("{new}/{suffix}")));
+        if old_prefix == new_prefix {
+            return Some(self.clone());
         }
-
-        let new = new_prefix.as_str();
         // Separate the child body from its old-namespace separator. A prim child
-        // carries a leading `/` (child of a non-variant prim) or attaches
-        // directly to a variant selection (a bare name, `/A{v=s}B`); a property
-        // `.` or nested variant `{` attaches directly in any namespace.
-        let (body, is_prim_child) = if let Some(rest) = suffix.strip_prefix('/') {
-            (rest, true)
+        // follows the root's `/` (`Foo/Bar` under `/`), carries a leading `/`
+        // (child of a non-variant prim) or attaches directly to a variant
+        // selection (a bare name, `/A{v=s}B`); a property `.` or nested variant
+        // `{` attaches directly in any namespace.
+        let suffix = &me[old.len()..];
+        let prim_child = if old == "/" {
+            Some(suffix)
+        } else if let Some(rest) = suffix.strip_prefix('/') {
+            Some(rest)
         } else if old_prefix.is_variant_selection() && suffix.starts_with(is_identifier_cont) {
-            (suffix, true)
+            Some(suffix)
         } else {
-            (suffix, false)
+            None
         };
-        // Re-attach with the separator the new namespace needs: a prim child gets
-        // a `/`, unless the new prefix is the root (the `/` is already there) or a
-        // variant selection (the child attaches directly, `/Prim{set=sel}child`).
-        let separator = if is_prim_child && new != "/" && !new_prefix.is_variant_selection() {
-            "/"
-        } else {
-            ""
+        // A prim child re-attaches with the separator the new namespace needs.
+        let text = match prim_child {
+            Some(body) => new_prefix.join(body),
+            None => [new_prefix.as_str(), suffix].concat(),
         };
-        Some(Path::from_str_unchecked(&format!("{new}{separator}{body}")))
+        Some(Path::from_string_unchecked(text))
     }
 
     /// Appends a variant selection to a prim path, producing a path like
@@ -1062,10 +1077,9 @@ impl Path {
         // relative anchors cannot.
         if self.is_empty()
             || self.is_abs_root()
-            || self.is_property()
+            || self.has_property_part()
             || self.as_str() == "."
             || self.path.ends_with("..")
-            || self.path.ends_with(']')
         {
             return Err(fail(&self.path, "path cannot carry a variant selection"));
         }
@@ -1175,16 +1189,12 @@ impl Path {
             return anchor;
         }
         // A property/relational tail (`.attr`, `.outputs:surface`) attaches to
-        // the prim directly via its own `.` — no separator. A prim child
-        // attaches to a variant selection directly (`/A{v=s}child`) but is
-        // otherwise separated by `/`; the root already carries its slash.
-        let anchor = anchor.as_str();
-        let sep = if rest.starts_with('.') || anchor == "/" || anchor.ends_with('}') {
-            ""
+        // the prim directly via its own `.`; a prim tail joins as a child.
+        let combined = if rest.starts_with('.') {
+            [anchor.as_str(), rest].concat()
         } else {
-            "/"
+            anchor.join(rest)
         };
-        let combined = format!("{anchor}{sep}{rest}");
         if Path::validate(&combined).is_err() {
             return Path::default();
         }
@@ -1608,7 +1618,7 @@ impl Text {
     fn new(text: String) -> Self {
         Self {
             hash: FxBuildHasher.hash_one(text.as_str()),
-            text,
+            text: text.into_boxed_str(),
             prim_elements: AtomicU32::new(UNCOUNTED),
         }
     }
@@ -1908,10 +1918,46 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A refused name is reported in the path the append would have built,
+    /// at its first invalid character; a refused parent is reported alone.
+    #[test]
+    fn append_child_error() -> Result<()> {
+        let err = Path::default().append_child("B").unwrap_err();
+        assert_eq!((err.input.as_str(), err.offset), ("", 0));
+        for (parent, input) in [("/", "/1B"), ("/A{v=s}", "/A{v=s}1B"), (".", "1B"), ("/A", "/A/1B")] {
+            let err = Path::new(parent)?.append_child("1B").unwrap_err();
+            assert_eq!(err.input, input);
+            assert_eq!(&err.input[err.offset..], "1B");
+        }
+        let err = Path::new("/A")?.append_child("Part-1").unwrap_err();
+        assert_eq!(&err.input[err.offset..], "-1");
+        Ok(())
+    }
+
+    /// A child appended to a counted parent carries the count a fresh path of
+    /// its text would compute.
+    #[test]
+    fn append_child_count() -> Result<()> {
+        for parent in ["/", "/A", "/A{v=s}", "/A{v=s}B", ".", "..", "../A", "A"] {
+            let parent = Path::new(parent)?;
+            parent.prim_element_count();
+            let child = parent.append_child("C")?;
+            let fresh = Path::new(child.as_str())?;
+            assert_eq!(child.prim_element_count(), fresh.prim_element_count(), "{child}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_append_invalid_path() -> Result<()> {
         assert!(Path::new("/prim")?.append_path("/abs").is_err());
         assert!(Path::new("/prim.attr")?.append_path("abs").is_err());
+        // C++ `SdfPath::AppendPath` refuses the empty path on either side.
+        assert!(Path::new("/prim")?.append_path(Path::default()).is_err());
+        assert!(Path::default().append_path("prim").is_err());
+        assert!(Path::new("/A.rel[/T]")?.append_path("B").is_err());
+        assert!(Path::new("A")?.append_path("/B").is_err());
+        assert!(Path::new(".")?.append_path("/B").is_err());
 
         Ok(())
     }
@@ -2360,6 +2406,12 @@ pub(crate) mod tests {
     #[test]
     fn test_replace_prefix() {
         let p = |s| Path::new(s).unwrap();
+
+        // A root child attaches directly to a variant-selection prefix.
+        assert_eq!(
+            p("/Foo/Bar").replace_prefix(&p("/"), &p("/A{v=s}")).unwrap().as_str(),
+            "/A{v=s}Foo/Bar"
+        );
 
         // Exact match.
         assert_eq!(
