@@ -261,15 +261,7 @@ fn reflexive_relative() -> Path {
 /// `.` disappears under its first child, and `..` climbs a chain rather than
 /// consuming an absolute parent textually.
 fn append_prefix_child(prefix: &Path, name: &str) -> Path {
-    let base = prefix.as_str();
-    let combined = if base == "." {
-        name.to_string()
-    } else if base.ends_with('/') {
-        format!("{base}{name}")
-    } else {
-        format!("{base}/{name}")
-    };
-    Path::new(&combined).expect("a pattern prefix concatenation is a valid path string")
+    Path::new(&prefix.join(name)).expect("a pattern prefix concatenation is a valid path string")
 }
 
 /// Folds a literal property into the prefix, or `None` when the prefix
