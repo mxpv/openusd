@@ -260,7 +260,7 @@ impl NamespaceEditor {
         let src = prim.path().clone();
         let parent = src.parent().ok_or(NamespaceEditError::PseudoRoot)?;
         let dst = parent
-            .append_path(new_name)
+            .append_child(new_name)
             .map_err(|_| NamespaceEditError::InvalidDestination(src.clone()))?;
         Ok(self.push_move(src, dst, ObjectKind::Prim))
     }
@@ -283,7 +283,7 @@ impl NamespaceEditor {
         let src = prim.path().clone();
         let dst = new_parent
             .path()
-            .append_path(new_name)
+            .append_child(new_name)
             .map_err(|_| NamespaceEditError::InvalidDestination(src.clone()))?;
         Ok(self.push_move(src, dst, ObjectKind::Prim))
     }
@@ -2016,6 +2016,32 @@ mod tests {
         assert!(!valid(&stage, "/A"));
         assert_eq!(rel_targets(&stage, "/Other.rel"), vec!["/B", "/Keep"]);
         assert_eq!(connections(&stage, "/Other.con"), vec!["/B.out"]);
+    }
+
+    /// A new name must be one prim identifier, so a rename or a reparent
+    /// cannot move a prim deeper with a name like `B/C`.
+    #[test]
+    fn rename_refuses_path() {
+        let stage = sample();
+        let a = stage.prim(path("/A").unwrap()).unwrap();
+        let keep = stage.prim(path("/Keep").unwrap()).unwrap();
+        let mut editor = NamespaceEditor::new(&stage);
+        for name in ["B/C", "..", "B.x", ""] {
+            assert!(
+                matches!(
+                    editor.rename_prim(&a, name),
+                    Err(NamespaceEditError::InvalidDestination(_))
+                ),
+                "{name:?}"
+            );
+            assert!(
+                matches!(
+                    editor.reparent_prim_with_name(&a, &keep, name),
+                    Err(NamespaceEditError::InvalidDestination(_))
+                ),
+                "{name:?}"
+            );
+        }
     }
 
     #[test]

@@ -1048,7 +1048,7 @@ impl Prim {
         Ok(self
             .child_names()?
             .into_iter()
-            .filter_map(|name| self.path.append_path(name.as_str()).ok())
+            .filter_map(|name| self.path.append_child(name).ok())
             .map(|path| Prim::new(&self.stage, path))
             .collect())
     }

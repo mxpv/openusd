@@ -533,7 +533,7 @@ pub(crate) fn join_child(
         reason: "child name is not a valid path component",
     };
     match key {
-        sdf::ChildrenKey::PrimChildren => parent.append_path(name).map_err(|_| invalid()),
+        sdf::ChildrenKey::PrimChildren => parent.append_child(name).map_err(|_| invalid()),
         sdf::ChildrenKey::PropertyChildren => parent.append_property(name).map_err(|_| invalid()),
         sdf::ChildrenKey::VariantSetChildren => parent.append_variant_selection(name, "").map_err(|_| invalid()),
         sdf::ChildrenKey::VariantChildren => {

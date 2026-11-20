@@ -73,7 +73,7 @@ impl Subset {
         family_name: &str,
         family_type: Option<FamilyType>,
     ) -> Result<Subset> {
-        let path = geom.path().append_path(subset_name)?;
+        let path = geom.path().append_child(subset_name)?;
         author(geom.prim(), path, element_type, indices, family_name, family_type)
     }
 
@@ -99,7 +99,7 @@ impl Subset {
             suffix += 1;
             name = format!("{subset_name}_{suffix}");
         }
-        let path = geom.path().append_path(name.as_str())?;
+        let path = geom.path().append_child(name)?;
         author(geom.prim(), path, element_type, indices, family_name, family_type)
     }
 

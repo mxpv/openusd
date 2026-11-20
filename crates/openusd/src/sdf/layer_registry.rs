@@ -1180,7 +1180,7 @@ pub(crate) mod tests {
                 && let vt::Value::TokenVec(children) = value.into_owned()
             {
                 for name in children.iter().rev() {
-                    if let Ok(child) = path.append_path(name.as_str()) {
+                    if let Ok(child) = path.append_child(name) {
                         queue.push(child);
                     }
                 }

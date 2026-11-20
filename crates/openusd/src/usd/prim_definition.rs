@@ -166,7 +166,7 @@ impl PrimDefinition {
         applied_name: Option<tf::Token>,
         overrides: &[tf::Token],
     ) -> Result<PrimDefinition, schema_registry::SchemaRegistryError> {
-        let path = sdf::Path::abs_root().append_path(identifier.as_str())?;
+        let path = sdf::Path::abs_root().append_child(identifier)?;
         if schematics.data().spec(&path).is_none() {
             return Err(schema_registry::SchemaRegistryError::MissingClassPrim {
                 identifier: identifier.clone(),
@@ -703,7 +703,7 @@ fn types_match(strong: &sdf::SpecData, weak: &sdf::SpecData) -> bool {
 
 /// Where a name's composed spec lives inside a definition's own store.
 fn composed_path(name: &tf::Token) -> Option<sdf::Path> {
-    let prim = sdf::Path::abs_root().append_path(COMPOSED_PRIM).ok()?;
+    let prim = sdf::Path::abs_root().append_child(COMPOSED_PRIM).ok()?;
     match name.as_str().is_empty() {
         true => Some(prim),
         false => prim.append_property(name.as_str()).ok(),
