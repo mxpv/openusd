@@ -47,7 +47,7 @@ Add the crate to your `Cargo.toml` (or run `cargo add openusd`):
 
 ```toml
 [dependencies]
-openusd = "0.8"
+openusd = "0.9"
 ```
 
 If you need the latest unreleased changes, depend on the crate directly from the
