@@ -572,6 +572,25 @@ pub(crate) trait OpinionResolver {
         None
     }
 
+    /// Returns whether a `timeSamples` field's sample count answers this
+    /// resolver at the next site, without the samples' values.
+    ///
+    /// The walk then reads a field's sample times and their kinds, and calls
+    /// [`on_sample_count`](Self::on_sample_count) for one holding more than one
+    /// sample, at least one of them a value; any other field it reads whole.
+    /// C++ `UsdStage::_ValueMightBeTimeVaryingFromResolveInfo` answers from the
+    /// count the same way.
+    fn counts_samples(&self) -> bool {
+        false
+    }
+
+    /// Receives the sample count of a `timeSamples` field at `site` that holds
+    /// more than one sample, at least one of them a value. Called only while
+    /// [`counts_samples`](Self::counts_samples) is `true`.
+    fn on_sample_count(&mut self, _count: usize, _site: &OpinionSite<'_>) -> Step {
+        Step::Continue
+    }
+
     /// Whether the walk visits the layers that author no spec for the prim
     /// as well, each through [`on_site`](Self::on_site).
     ///

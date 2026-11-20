@@ -8785,6 +8785,39 @@ fn single_sample_composing_varies() -> Result<()> {
     Ok(())
 }
 
+/// Whether a value may vary reads the same from a text layer and from a
+/// crate, which answers it from its sample times and kinds: several samples
+/// vary, one varies only if it composes, and a map of blocks supplies no
+/// value.
+#[test]
+fn vary_from_sample_counts() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let text = dir.path().join("root.usda");
+    fs::write(
+        &text,
+        "#usda 1.0\ndef \"A\"\n{\n    double many.timeSamples = { 0: 1.0, 1: 2.0, 2: 3.0 }\n    \
+         double one.timeSamples = { 0: 2.0 }\n    pathExpression path.timeSamples = { 0: \"/A\" }\n    \
+         double blocks.timeSamples = { 0: None, 1: None }\n    double late.timeSamples = { 0: None, 1: 2.0 }\n}\n",
+    )?;
+    let crate_file = dir.path().join("root.usdc");
+    sdf::Layer::open(text.to_str().unwrap())?.export(crate_file.to_str().unwrap())?;
+    let expected = [
+        ("many", true),
+        ("one", false),
+        ("path", true),
+        ("blocks", false),
+        ("late", true),
+    ];
+    for file in [&text, &crate_file] {
+        let stage = Stage::open(file.to_str().unwrap())?;
+        for (name, varies) in expected {
+            let attr = stage.attribute(format!("/A.{name}").as_str())?;
+            assert_eq!(attr.might_be_time_varying()?, varies, "{name} in {}", file.display());
+        }
+    }
+    Ok(())
+}
+
 /// A stronger layer's `default` hides a weaker sublayer's `timeSamples`.
 #[test]
 fn default_hides_weaker_samples() -> Result<()> {
