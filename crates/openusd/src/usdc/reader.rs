@@ -1715,10 +1715,10 @@ fn build_compressed_paths(
     // sibling subtrees are independent and should be decoded in parallel, as
     // the C++ WorkDispatcher does.
     //
-    // TODO(perf): the append_property / append_variant_segment calls below
-    // validate each element token; if the PATHS decode shows in large-scene
-    // profiles, add a pub(crate) unchecked single-element append for
-    // machine-written crate files.
+    // TODO(perf): the append_child / append_property / append_variant_segment
+    // calls below validate each element token; if the PATHS decode shows in
+    // large-scene profiles, add a pub(crate) unchecked single-element append
+    // for machine-written crate files.
     //
     // TODO(diagnostics): a single malformed element token fails the whole
     // file load. C++ posts an error and skips the unaddressable subtree;
@@ -1758,7 +1758,7 @@ fn build_compressed_paths(
                     // to produce canonical paths like /Prim{set=sel}.
                     parent_path.append_variant_segment(element_token)?
                 } else {
-                    parent_path.append_path(element_token)?
+                    parent_path.append_child(element_token)?
                 };
             }
 

@@ -1669,7 +1669,7 @@ fn namespace_chain(target: &sdf::Path) -> Result<Vec<ChainElement>, sdf::Authori
 
     parse_prim_path(target, |component| match component {
         sdf::PathComponent::Prim(name) => {
-            let path = cursor.append_path(name).expect("name validated as an identifier");
+            let path = cursor.append_child(name).expect("name validated as an identifier");
             elems.push(ChainElement {
                 path: path.clone(),
                 spec_type: sdf::SpecType::Prim,

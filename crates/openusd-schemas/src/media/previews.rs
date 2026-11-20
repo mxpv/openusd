@@ -101,7 +101,7 @@ impl AssetPreviewsAPI {
 fn masked(default_prim: &sdf::Path) -> Result<usd::StageBuilder> {
     // A child that no prim has keeps the mask to the default prim and its
     // ancestors, without the prims beneath it.
-    let mask = usd::StagePopulationMask::new([default_prim.append_path(NO_SUCH_PRIM)?])?;
+    let mask = usd::StagePopulationMask::new([default_prim.append_child(NO_SUCH_PRIM)?])?;
     Ok(usd::Stage::builder()
         .schema_registry(crate::schema_registry())
         .mask(mask))

@@ -1343,7 +1343,7 @@ impl SchemaFamily<'_> {
         let mut fallbacks = vt::Dictionary::new();
 
         for decl in schemas {
-            let path = sdf::Path::abs_root().append_path(decl.identifier)?;
+            let path = sdf::Path::abs_root().append_child(decl.identifier)?;
 
             // A concrete schema is a prim type and its class prim carries
             // that type name; no other kind names anything a prim can be.
@@ -1946,7 +1946,7 @@ impl SchemaRegistryBuilder {
             })?
             .clone();
 
-        let class_prim = sdf::Path::abs_root().append_path(identifier.as_str())?;
+        let class_prim = sdf::Path::abs_root().append_child(identifier)?;
         let overrides = override_property_names(&schematics, &class_prim);
 
         // A multiple-apply schema is a template: it contributes under a name
@@ -2273,7 +2273,7 @@ fn plug_names(value: Option<&vt::Value>, key: &'static str) -> Result<Vec<tf::To
 
 /// Reads one schema's manifest entry from the prim at `/<identifier>`.
 fn read_schema_info(manifest: &sdf::Data, identifier: &tf::Token) -> Result<SchemaInfo, SchemaRegistryError> {
-    let prim = sdf::Path::abs_root().append_path(identifier.as_str())?;
+    let prim = sdf::Path::abs_root().append_child(identifier)?;
 
     let kind = manifest_token(manifest, &prim, "schemaKind").ok_or(SchemaRegistryError::MissingSchemaKind)?;
     let kind = SchemaKind::from_token(kind.as_str()).ok_or_else(|| SchemaRegistryError::UnknownSchemaKind { kind })?;

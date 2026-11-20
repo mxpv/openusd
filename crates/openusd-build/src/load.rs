@@ -279,7 +279,7 @@ fn read_classes(layer: &sdf::Layer, identifier: &str, owner: &Owner<'_>, generat
         .unwrap_or_default()
         .into_iter()
         .filter_map(|name| {
-            let path = sdf::Path::abs_root().append_path(name.as_str()).ok()?;
+            let path = sdf::Path::abs_root().append_child(&name).ok()?;
             let prim = layer.prim(&path).ok().flatten()?;
             if prim.specifier() != Some(sdf::Specifier::Class) {
                 return None;
