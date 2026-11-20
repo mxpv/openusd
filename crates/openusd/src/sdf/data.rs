@@ -41,15 +41,24 @@ pub trait AbstractData {
     /// signalled by `Ok(None)`.
     fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError>;
 
+    /// Returns the times of the samples in the `timeSamples` field at `path`,
+    /// ordered, or none if the field holds no samples.
+    ///
+    /// The default reads the whole field; a format that decodes the sample
+    /// times on their own overrides it. C++
+    /// `SdfAbstractData::ListTimeSamplesForPath`.
+    fn sample_times(&self, path: &Path) -> Result<Vec<f64>, DataError> {
+        field_times(self, path)
+    }
+
     /// Returns the times of the two samples in the `timeSamples` field at
     /// `path` that bracket `time`, or `None` if the field holds no samples.
     ///
     /// The pair is the one [`bracketing_time_samples`](crate::sdf::bracketing_time_samples)
-    /// finds. The default reads the whole field; a format that decodes the
-    /// sample times on their own overrides it. C++
+    /// finds among [`sample_times`](Self::sample_times). C++
     /// `SdfAbstractData::GetBracketingTimeSamplesForPath`.
     fn bracketing_time_samples(&self, path: &Path, time: f64) -> Result<Option<(f64, f64)>, DataError> {
-        field_bracketing(self, path, time)
+        Ok(sdf::bracketing_time_samples(&self.sample_times(path)?, time))
     }
 
     /// Returns the sample authored at exactly `time` in the `timeSamples`
@@ -59,6 +68,17 @@ pub trait AbstractData {
     /// by one overrides it. C++ `SdfAbstractData::QueryTimeSample`.
     fn query_time_sample(&self, path: &Path, time: f64) -> Result<Option<Cow<'_, Value>>, DataError> {
         field_sample(self, path, time)
+    }
+
+    /// Returns the kind of the sample authored at exactly `time` in the
+    /// `timeSamples` field at `path`, or `None` if there is none.
+    ///
+    /// The default decodes the sample. A format that stores each sample's
+    /// type answers from it. C++ `SdfAbstractData::QueryTimeSampleTypeid`.
+    fn time_sample_kind(&self, path: &Path, time: f64) -> Result<Option<vt::ValueKind>, DataError> {
+        Ok(self
+            .query_time_sample(path, time)?
+            .map(|value| vt::ValueKind::from(value.as_ref())))
     }
 
     /// Returns the value for a field, erroring if not authored.
@@ -337,12 +357,20 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
         (**self).try_field(path, field)
     }
 
+    fn sample_times(&self, path: &Path) -> Result<Vec<f64>, DataError> {
+        (**self).sample_times(path)
+    }
+
     fn bracketing_time_samples(&self, path: &Path, time: f64) -> Result<Option<(f64, f64)>, DataError> {
         (**self).bracketing_time_samples(path, time)
     }
 
     fn query_time_sample(&self, path: &Path, time: f64) -> Result<Option<Cow<'_, Value>>, DataError> {
         (**self).query_time_sample(path, time)
+    }
+
+    fn time_sample_kind(&self, path: &Path, time: f64) -> Result<Option<vt::ValueKind>, DataError> {
+        (**self).time_sample_kind(path, time)
     }
 
     fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
@@ -402,12 +430,20 @@ impl<T: AbstractData + Clone> AbstractData for Arc<T> {
         (**self).try_field(path, field)
     }
 
+    fn sample_times(&self, path: &Path) -> Result<Vec<f64>, DataError> {
+        (**self).sample_times(path)
+    }
+
     fn bracketing_time_samples(&self, path: &Path, time: f64) -> Result<Option<(f64, f64)>, DataError> {
         (**self).bracketing_time_samples(path, time)
     }
 
     fn query_time_sample(&self, path: &Path, time: f64) -> Result<Option<Cow<'_, Value>>, DataError> {
         (**self).query_time_sample(path, time)
+    }
+
+    fn time_sample_kind(&self, path: &Path, time: f64) -> Result<Option<vt::ValueKind>, DataError> {
+        (**self).time_sample_kind(path, time)
     }
 
     fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
@@ -648,10 +684,10 @@ impl<T: AbstractData> AbstractData for CowData<T> {
         }
     }
 
-    fn bracketing_time_samples(&self, path: &Path, time: f64) -> Result<Option<(f64, f64)>, DataError> {
+    fn sample_times(&self, path: &Path) -> Result<Vec<f64>, DataError> {
         match self.staged_field(path, FieldKey::TimeSamples.as_str()) {
-            Staged::Overlay(_) => field_bracketing(self, path, time),
-            Staged::Base => self.base.bracketing_time_samples(path, time),
+            Staged::Overlay(_) => field_times(self, path),
+            Staged::Base => self.base.sample_times(path),
         }
     }
 
@@ -659,6 +695,13 @@ impl<T: AbstractData> AbstractData for CowData<T> {
         match self.staged_field(path, FieldKey::TimeSamples.as_str()) {
             Staged::Overlay(_) => field_sample(self, path, time),
             Staged::Base => self.base.query_time_sample(path, time),
+        }
+    }
+
+    fn time_sample_kind(&self, path: &Path, time: f64) -> Result<Option<vt::ValueKind>, DataError> {
+        match self.staged_field(path, FieldKey::TimeSamples.as_str()) {
+            Staged::Overlay(_) => Ok(field_sample(self, path, time)?.map(|value| vt::ValueKind::from(value.as_ref()))),
+            Staged::Base => self.base.time_sample_kind(path, time),
         }
     }
 
@@ -809,21 +852,12 @@ pub(crate) fn mask_of(fields: &[&str], mut authors: impl FnMut(&str) -> bool) ->
         .fold(0, |mask, (bit, _)| mask | 1 << bit)
 }
 
-/// Finds the samples bracketing `time` in the `timeSamples` field at `path`,
-/// read whole.
-pub(crate) fn field_bracketing<D: AbstractData + ?Sized>(
-    data: &D,
-    path: &Path,
-    time: f64,
-) -> Result<Option<(f64, f64)>, DataError> {
-    let Some(field) = data.try_field(path, FieldKey::TimeSamples.as_str())? else {
-        return Ok(None);
-    };
-    let Value::TimeSamples(samples) = field.as_ref() else {
-        return Ok(None);
-    };
-    let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
-    Ok(sdf::bracketing_time_samples(&times, time))
+/// Reads the sample times of the `timeSamples` field at `path`, read whole.
+pub(crate) fn field_times<D: AbstractData + ?Sized>(data: &D, path: &Path) -> Result<Vec<f64>, DataError> {
+    Ok(match data.try_field(path, FieldKey::TimeSamples.as_str())?.as_deref() {
+        Some(Value::TimeSamples(samples)) => samples.iter().map(|(t, _)| *t).collect(),
+        _ => Vec::new(),
+    })
 }
 
 /// Finds the sample at exactly `time` in the `timeSamples` field at `path`,
@@ -851,6 +885,25 @@ pub(crate) fn field_sample<'a, D: AbstractData + ?Sized>(
 mod tests {
     use super::*;
     use crate::sdf::path;
+
+    #[test]
+    fn sample_times_kinds() -> Result<(), DataError> {
+        let mut data = Data::new();
+        let (x, y) = (path("/A.x").unwrap(), path("/A.y").unwrap());
+        for p in [&x, &y] {
+            data.create_spec(p.clone(), SpecType::Attribute);
+        }
+        let samples = vec![(0.0, Value::ValueBlock), (10.0, Value::Double(2.0))];
+        data.set_field(&x, "timeSamples", Value::TimeSamples(samples));
+        data.set_field(&y, "timeSamples", Value::ValueBlock);
+
+        assert_eq!(data.sample_times(&x)?, [0.0, 10.0]);
+        assert_eq!(data.time_sample_kind(&x, 0.0)?, Some(vt::ValueKind::ValueBlock));
+        assert_eq!(data.time_sample_kind(&x, 10.0)?, Some(vt::ValueKind::Double));
+        assert_eq!(data.time_sample_kind(&x, 5.0)?, None);
+        assert!(data.sample_times(&y)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn time_samples_whole() -> Result<(), DataError> {

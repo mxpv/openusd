@@ -303,11 +303,11 @@ impl sdf::AbstractData for CrateData {
         }
     }
 
-    fn bracketing_time_samples(&self, path: &sdf::Path, time: f64) -> Result<Option<(f64, f64)>, sdf::DataError> {
+    fn sample_times(&self, path: &sdf::Path) -> Result<Vec<f64>, sdf::DataError> {
         match self.time_sample_reps(path)? {
-            Samples::Absent => Ok(None),
-            Samples::Crate(times, _) => Ok(sdf::bracketing_time_samples(&times, time)),
-            Samples::Whole => sdf::field_bracketing(self, path, time),
+            Samples::Absent => Ok(Vec::new()),
+            Samples::Crate(times, _) => Ok(times),
+            Samples::Whole => sdf::field_times(self, path),
         }
     }
 
@@ -323,6 +323,20 @@ impl sdf::AbstractData for CrateData {
                 Ok(Some(Cow::Owned(value)))
             }
             Samples::Whole => sdf::field_sample(self, path, time),
+        }
+    }
+
+    fn time_sample_kind(&self, path: &sdf::Path, time: f64) -> Result<Option<vt::ValueKind>, sdf::DataError> {
+        match self.time_sample_reps(path)? {
+            Samples::Absent => Ok(None),
+            Samples::Crate(times, reps) => {
+                let Ok(i) = times.binary_search_by(|t| sdf::compare_sample_times(*t, time)) else {
+                    return Ok(None);
+                };
+                let field = sdf::FieldKey::TimeSamples.as_str();
+                self.file.kind(reps[i]).map(Some).map_err(decode_error(path, field))
+            }
+            Samples::Whole => Ok(sdf::field_sample(self, path, time)?.map(|value| vt::ValueKind::from(value.as_ref()))),
         }
     }
 
@@ -546,16 +560,20 @@ mod tests {
         let absent = sdf::path("/A.z")?;
         for time in [-1.0, 0.0, 1.0, 1.5, 2.5, 3.0, 4.0, 9.0] {
             for p in [&x, &y, &absent] {
+                let whole = sdf::field_times(&data, p)?;
+                assert_eq!(data.sample_times(p)?, whole, "{p}");
                 assert_eq!(
                     data.bracketing_time_samples(p, time)?,
-                    sdf::field_bracketing(&data, p, time)?,
+                    sdf::bracketing_time_samples(&whole, time),
                     "{p} at {time}"
                 );
+                let sample = sdf::field_sample(&data, p, time)?;
                 assert_eq!(
-                    data.query_time_sample(p, time)?,
-                    sdf::field_sample(&data, p, time)?,
+                    data.time_sample_kind(p, time)?,
+                    sample.as_deref().map(vt::ValueKind::from),
                     "{p} at {time}"
                 );
+                assert_eq!(data.query_time_sample(p, time)?, sample, "{p} at {time}");
             }
         }
         assert_eq!(data.bracketing_time_samples(&x, 1.5)?, Some((1.0, 2.5)));

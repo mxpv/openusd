@@ -812,6 +812,19 @@ impl SampleTimesResolver {
 }
 
 impl OpinionResolver for SampleTimesResolver {
+    /// A winning map of several samples may vary whatever they compose with,
+    /// so the count alone answers [`Want::Vary`] while nothing stronger has
+    /// composed.
+    fn counts_samples(&self) -> bool {
+        self.want == Want::Vary && self.series.is_empty()
+    }
+
+    fn on_sample_count(&mut self, count: usize, _site: &OpinionSite<'_>) -> Step {
+        self.answered = true;
+        self.count = Some(count);
+        Step::Stop
+    }
+
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
         // A map supplying no value is not a value source, so it contributes no
         // times — the same judgement the value read and the resolve info make of
@@ -1815,10 +1828,28 @@ impl IndexCache {
                 // At the default time the field is read only for a resolver
                 // that reports what it walked past; the value read skips it.
                 let probes_samples = mode.visits_time_samples() || resolver.wants_unresolved_samples();
+                // A resolver a sample count answers reads the sample times and
+                // their kinds alone.
+                let mut counted = false;
+                if !samples_blocked
+                    && probes_samples
+                    && mode.visits_time_samples()
+                    && resolver.counts_samples()
+                    && let Some(count) = varying_sample_count(data, &site.query_path)?
+                {
+                    counted = true;
+                    found_opinion = true;
+                    match resolver.on_sample_count(count, &site) {
+                        Step::Stop => return Ok(()),
+                        Step::NextSite => continue,
+                        Step::Continue => {}
+                    }
+                }
                 // A read at one time reads only the samples it interpolates
                 // from, at the time mapped into the layer's; any other read
                 // takes the whole map.
                 let samples = match resolver.sample_time() {
+                    _ if counted => None,
                     Some(time) if !samples_blocked && probes_samples => {
                         interpolating_samples(data, &site.query_path, site.offset.inverse().apply(time))?
                     }
@@ -4604,6 +4635,25 @@ fn interpolating_samples<'a>(
         samples.push((at, value.into_owned()));
     }
     Ok(Some(Cow::Owned(Value::TimeSamples(samples))))
+}
+
+/// Returns the number of samples in the `timeSamples` field at `path` when it
+/// holds more than one and at least one of them is a value, read from the
+/// sample times and kinds alone; `None` for any other field. C++ counts them
+/// with `SdfLayer::GetNumTimeSamplesForPath`, and reads a sample's kind with
+/// `SdfLayer::QueryTimeSampleTypeid`.
+fn varying_sample_count(data: &dyn sdf::AbstractData, path: &Path) -> Result<Option<usize>, sdf::DataError> {
+    let times = data.sample_times(path)?;
+    if times.len() < 2 {
+        return Ok(None);
+    }
+    for time in &times {
+        let kind = data.time_sample_kind(path, *time)?;
+        if kind.is_some_and(|kind| !matches!(kind, vt::ValueKind::ValueBlock | vt::ValueKind::None)) {
+            return Ok(Some(times.len()));
+        }
+    }
+    Ok(None)
 }
 
 fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {
