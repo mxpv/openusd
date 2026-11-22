@@ -4711,6 +4711,9 @@ impl Drop for LoadRulesGuard<'_> {
 /// load through (resolver + file formats) and composition options.
 pub struct StageBuilder {
     registry: sdf::LayerRegistry,
+    /// The formats [`format`](Self::format) named, added to the registry
+    /// when the stage opens.
+    formats: Vec<&'static dyn sdf::FileFormat>,
     variant_fallbacks: pcp::VariantFallbackMap,
     session_layer: Option<String>,
     initial_load_set: InitialLoadSet,
@@ -4735,6 +4738,7 @@ impl StageBuilder {
     fn new() -> Self {
         Self {
             registry: sdf::LayerRegistry::default(),
+            formats: Vec::new(),
             variant_fallbacks: pcp::VariantFallbackMap::new(),
             session_layer: None,
             initial_load_set: InitialLoadSet::LoadAll,
@@ -4760,25 +4764,31 @@ impl StageBuilder {
     }
 
     /// Sets a custom asset resolver, wrapping it in a [`sdf::LayerRegistry`]
-    /// that reads the formats the current one does. A convenience over
+    /// that takes the place of the builder's registry, the formats added to
+    /// that one directly included. A convenience over
     /// [`registry`](Self::registry).
-    pub fn resolver<R: ar::Resolver + 'static>(mut self, resolver: R) -> Self {
-        let registry = sdf::LayerRegistry::new(Box::new(resolver));
-        self.registry = self
-            .registry
-            .formats()
-            .iter()
-            .fold(registry, |registry, &format| registry.with_format(format));
+    pub fn resolver<R: ar::Resolver + 'static>(self, resolver: R) -> Self {
+        self.registry(sdf::LayerRegistry::new(Box::new(resolver)))
+    }
+
+    /// Reads layers in `format` too, beside the built-in formats, so a
+    /// reference, payload or sublayer naming one of its files composes, and
+    /// so does a root layer of it. Calls add up, in any order with
+    /// [`registry`](Self::registry) and [`resolver`](Self::resolver).
+    ///
+    /// The format is added to the stage's registry when the stage opens
+    /// ([`sdf::LayerRegistry::add_format`]). Every stage on that registry
+    /// reads it from then on.
+    pub fn format(mut self, format: &'static dyn sdf::FileFormat) -> Self {
+        self.formats.push(format);
         self
     }
 
-    /// Reads layers in `format` too, beside the formats the registry already
-    /// reads ([`sdf::LayerRegistry::with_format`]), so a reference, payload
-    /// or sublayer naming one of its files composes, and so does a root layer
-    /// of it.
-    pub fn format(mut self, format: &'static dyn sdf::FileFormat) -> Self {
-        self.registry = self.registry.with_format(format);
-        self
+    /// Adds the formats the builder names to its registry.
+    fn add_formats(&self) {
+        for &format in &self.formats {
+            self.registry.add_format(format);
+        }
     }
 
     /// Sets the stage-level interpolation mode for time-sampled
@@ -4927,6 +4937,7 @@ impl StageBuilder {
         // One cache scope spans the open. A packaged root is opened once for
         // its default-layer lookup, its probes and its entry reads.
         let _scope = ar::CacheScope::begin();
+        self.add_formats();
         let root = self.registry.prepare_root(root_path)?;
         self.open_root(root)
     }
@@ -4942,6 +4953,7 @@ impl StageBuilder {
     /// already holds a layer with its identifier or read from its file.
     pub fn open_layer(self, layer: sdf::Layer) -> Result<Stage> {
         let _scope = ar::CacheScope::begin();
+        self.add_formats();
         let root = self.registry.adopt(layer).map_err(|refused| refused.error)?;
         self.open_root(root.into())
     }
@@ -5256,6 +5268,36 @@ pub(crate) mod tests {
             .open(root.to_str().expect("utf-8 path"))?;
         let prim = stage.prim("/W")?;
         assert_eq!(prim.type_name()?.as_ref().map(|t| t.as_str()), Some("Scope"));
+        Ok(())
+    }
+
+    /// A format added before the registry is set is added to that registry,
+    /// so a second stage on it composes the format's files too.
+    #[test]
+    fn builder_format_then_registry() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("lib.planted"), "Thing\n")?;
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            "#usda 1.0\ndef \"W\" (references = @./lib.planted@</Thing>)\n{\n}\n",
+        )?;
+        let root = root.to_str().expect("utf-8 path");
+        let registry = sdf::LayerRegistry::default();
+        let first = Stage::builder()
+            .format(&sdf::layer_registry::tests::PLANTED)
+            .registry(registry.clone())
+            .open(root)?;
+        assert_eq!(
+            first.prim("/W")?.type_name()?.as_ref().map(|t| t.as_str()),
+            Some("Scope")
+        );
+        drop(first);
+        let second = Stage::builder().registry(registry).open(root)?;
+        assert_eq!(
+            second.prim("/W")?.type_name()?.as_ref().map(|t| t.as_str()),
+            Some("Scope")
+        );
         Ok(())
     }
 

@@ -50,7 +50,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::vt::Value;
-use crate::{ar, sdf, tf};
+use crate::{ar, sdf, tf, usda};
 
 use super::commit::{
     CommitRecord, Committed, Footprint, Notification, PendingCommit, Prepared, Subscriber, TxnContext,
@@ -104,6 +104,10 @@ pub struct Layer {
     /// The resolver the layer was opened through, which a save reopens the
     /// saved file with. `None` for a layer that was not read from an asset.
     resolver: Option<Rc<dyn ar::Resolver>>,
+    /// The formats of the registry the layer was opened through or is held
+    /// in, or `None` for a layer no registry has had, which reads and writes
+    /// in the built-in ones.
+    formats: Option<sdf::layer_registry::FormatSet>,
     /// The format the layer was read in (C++ `SdfLayer::GetFileFormat`), which
     /// a [`save`](Self::save) writes it back in. `None` for a layer built in
     /// memory, which saves in the format its identifier's extension names.
@@ -193,7 +197,9 @@ impl Layer {
     }
 
     /// Open the layer at `identifier` off the filesystem, read in whichever
-    /// format claims it.
+    /// built-in format claims it. A layer of another format opens through a
+    /// registry the format was added to
+    /// ([`LayerRegistry::find_or_open`](sdf::LayerRegistry::find_or_open)).
     ///
     /// The layer is read alone: the sublayers, references and payloads it
     /// declares stay the asset paths it authored. Composing them is
@@ -227,8 +233,8 @@ impl Layer {
     /// as in [`new_anonymous`](Self::new_anonymous).
     pub fn from_bytes(tag: impl fmt::Display, bytes: impl Into<ar::AssetBuffer>) -> Result<Self, FormatError> {
         let identifier = Self::anonymous_identifier(tag);
-        let (data, format) =
-            sdf::layer_registry::read_bytes_in(&sdf::layer_registry::formats_with(None), bytes.into(), &identifier)?;
+        let formats = sdf::layer_registry::BUILTIN_FORMATS;
+        let (data, format) = sdf::layer_registry::read_bytes_in(formats, bytes.into(), &identifier)?;
         let mut layer = Self::new(identifier, data);
         layer.format = Some(format);
         Ok(layer)
@@ -266,8 +272,13 @@ impl Layer {
     /// package-relative root layer, so the paths it authors anchor
     /// in-package. Only a real path that differs from the identifier is
     /// stored. The layer keeps `resolver`, the one it was read through, for
-    /// [`save`](Self::save) to reopen its file with.
-    pub(crate) fn new_resolved(prepared: sdf::PreparedLayer, resolver: Rc<dyn ar::Resolver>) -> Self {
+    /// [`save`](Self::save) to reopen its file with, and `formats`, the ones
+    /// it was read among, to reload and write in.
+    pub(crate) fn new_resolved(
+        prepared: sdf::PreparedLayer,
+        resolver: Rc<dyn ar::Resolver>,
+        formats: sdf::layer_registry::FormatSet,
+    ) -> Self {
         let sdf::PreparedLayer {
             identifier,
             resolved,
@@ -279,14 +290,38 @@ impl Layer {
         let real_path = (real_path != identifier).then_some(real_path);
         let mut layer = Self::build(identifier, real_path, data);
         layer.resolver = Some(resolver);
+        layer.formats = Some(formats);
         layer.format = format;
         layer.modified = modified;
         layer
     }
 
-    /// Anchor, read and save the layer through `resolver` from then on.
-    pub(crate) fn set_resolver(&mut self, resolver: Rc<dyn ar::Resolver>) {
+    /// Anchor, read and save the layer through `resolver` from then on, in
+    /// `formats`.
+    pub(crate) fn set_registry(&mut self, resolver: Rc<dyn ar::Resolver>, formats: sdf::layer_registry::FormatSet) {
         self.resolver = Some(resolver);
+        self.formats = Some(formats);
+    }
+
+    /// The formats the layer reads and writes in: those of its registry, or
+    /// the built-in ones.
+    fn formats(&self) -> Rc<[&'static dyn super::FileFormat]> {
+        match &self.formats {
+            Some(formats) => formats.list(),
+            None => Rc::from(sdf::layer_registry::BUILTIN_FORMATS),
+        }
+    }
+
+    /// The format that writes the layer at `filename`: the one it was read in
+    /// when that claims the filename's extension (C++ `SdfLayer::Export` asks
+    /// `IsSupportedExtension` of the layer's format first), or else the first
+    /// of its formats that does.
+    fn export_format(&self, filename: &str) -> Result<&'static dyn super::FileFormat, ExportError> {
+        let own = self.format.as_slice();
+        if super::layer_registry::by_extension(own, ar::extension(filename)).is_some() {
+            return super::LayerRegistry::export_format(own, filename);
+        }
+        super::LayerRegistry::export_format(&self.formats(), filename)
     }
 
     /// Shared constructor backing [`new`](Self::new) and
@@ -299,6 +334,7 @@ impl Layer {
             changes: ChangeList::new(),
             sinks: sink::Set::default(),
             resolver: None,
+            formats: None,
             format: None,
             unsaved: false,
             modified: AssetTime::Unread,
@@ -536,7 +572,9 @@ impl Layer {
     /// binary (the C++ `USD_WRITE_NEW_USD_FILES_AS_BINARY` default), and
     /// `.usdz` writes an archive wrapping one crate-encoded layer. The reader
     /// auto-detects the format regardless of extension, so text written to a
-    /// `.usd` path still reads back correctly.
+    /// `.usd` path still reads back correctly. A layer a registry holds is
+    /// also written in the formats added to that registry, and the format the
+    /// layer was read in is the first asked.
     ///
     /// The file is written beside the destination and renamed over it once
     /// complete, keeping the destination's permissions. The destination is
@@ -546,7 +584,7 @@ impl Layer {
     /// rebinds the layer to what it wrote.
     pub fn export(&self, filename: impl AsRef<str>) -> Result<(), ExportError> {
         let filename = filename.as_ref();
-        let format = super::LayerRegistry::export_format(filename)?;
+        let format = self.export_format(filename)?;
         let mut temp = tf::SafeOutputFile::create(FsPath::new(filename)).map_err(|source| ExportError::Create {
             filename: filename.to_owned(),
             source,
@@ -564,9 +602,8 @@ impl Layer {
     /// layer's on-disk format. Named to avoid confusion with the infallible
     /// [`ToString::to_string`].
     pub fn export_to_string(&self) -> Result<String, ExportError> {
-        let format = super::layer_registry::builtin_format_by_id("usda").expect("usda is a built-in format");
         let mut buf = Cursor::new(Vec::new());
-        format.write(self.data(), &mut buf)?;
+        super::FileFormat::write(&usda::UsdaFileFormat, self.data(), &mut buf)?;
         Ok(String::from_utf8(buf.into_inner()).expect("the usda writer emits UTF-8 text"))
     }
 
@@ -632,13 +669,14 @@ impl Layer {
         // The destination is the file the identifier names, whatever the layer
         // was read in: its extension must name a format, and that format must
         // support in-place editing — unlike `export`, which only writes a copy.
-        // A package (usdz) is writable as a fresh archive but not editable in
-        // place: its other assets (textures, sibling layers) are not held by
-        // the layer, so saving over it would discard them. That holds for a
-        // layer opened from the package too, which reads in its root layer's
-        // format while its identifier names the archive.
-        let destination = super::LayerRegistry::export_format(&self.identifier)?;
-        if !destination.caps().can_edit() {
+        // A package is writable as a fresh archive but not editable in
+        // place, even when its format claims in-place editing: its other assets
+        // (textures, sibling layers) are not held by the layer, so saving
+        // over it would discard them. That holds for a layer opened from the
+        // package too, which reads in its root layer's format while its
+        // identifier names the archive.
+        let destination = self.export_format(&self.identifier)?;
+        if !destination.caps().can_edit() || destination.is_package() {
             return Err(ExportError::NotEditable {
                 identifier: self.identifier.clone(),
                 format: destination.format_id(),
@@ -722,7 +760,7 @@ impl Layer {
             // as C++ `SdfLayer::CreateAnonymous` takes it, whatever format
             // the content was read in; a tag naming none is the text
             // format's.
-            let format = super::layer_registry::builtin_format(ar::extension(&self.identifier));
+            let format = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.identifier));
             if format.is_some_and(|format| format.skip_anonymous_reload()) {
                 return Ok(None);
             }
@@ -743,12 +781,13 @@ impl Layer {
         else {
             return Ok(None);
         };
+        // The layer reads again among the formats it was read among, as a
+        // fresh open through its registry would. C++ `SdfLayer::Reload` reads
+        // with the layer's own `SdfFileFormat`, which for a `.usd` is the one
+        // format standing for both encodings.
+        let formats = self.formats();
         // The asset may have moved since it was read, so the identifier
         // resolves again.
-        // The layer reads again in the format it was read in, as C++
-        // `SdfLayer::Reload` reads with the layer's `SdfFileFormat`, beside the
-        // built-in ones for a `.usd` whose encoding changed.
-        let formats = super::layer_registry::formats_with(self.format);
         let resolved = super::LayerRegistry::resolve_layer_with(&formats, resolver.as_ref(), &self.identifier)
             .ok_or_else(|| crate::Error::UnresolvedAsset(self.identifier.clone()))?;
         // TODO: C++ reloads a layer from where its identifier resolves now
@@ -785,7 +824,7 @@ impl Layer {
                 modified,
             } => (resolver, resolved, modified),
         };
-        let formats = super::layer_registry::formats_with(self.format);
+        let formats = self.formats();
         let prepared =
             super::LayerRegistry::read(&formats, resolver.as_ref(), self.identifier.clone(), resolved, modified)?;
         let reloaded = Reloaded {
@@ -824,7 +863,7 @@ pub enum ExportError {
     },
 
     /// The destination path's extension names no registered format.
-    #[error("unsupported layer extension {extension:?} (expected usda/usdc/usd/usdz)")]
+    #[error("unsupported layer extension {extension:?}: no format the layer writes in claims it")]
     UnsupportedExtension {
         /// The unrecognized extension.
         extension: String,
