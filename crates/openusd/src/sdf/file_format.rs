@@ -5,7 +5,7 @@
 //! [`Layer`](super::Layer) and the loader stay decoupled from any single
 //! format. This module is the format abstraction (the trait); the registry that
 //! holds the formats a stage reads — the built-in ones and any added with
-//! [`with_format`](super::LayerRegistry::with_format) — and looks them up by
+//! [`add_format`](super::LayerRegistry::add_format) — and looks them up by
 //! extension/content lives with [`LayerRegistry`](super::LayerRegistry)
 //! (`find_by_extension` / `find_by_id`), mirroring C++
 //! `SdfFileFormat::FindByExtension` / `FindById`.
@@ -133,7 +133,7 @@ impl<T: Write + Seek + ?Sized> WriteSeek for T {}
 /// `Sync` so a format can live in a `static`, as the built-in ones do. Format
 /// objects are stateless; lookup hands out `&'static dyn FileFormat`, and
 /// another crate adds one to a registry the same way
-/// ([`LayerRegistry::with_format`](super::LayerRegistry::with_format)).
+/// ([`LayerRegistry::add_format`](super::LayerRegistry::add_format)).
 pub trait FileFormat: Sync {
     /// The format's stable identifier token (C++ `SdfFileFormat::GetFormatId`),
     /// e.g. `"usda"`.

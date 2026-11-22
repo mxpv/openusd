@@ -269,11 +269,11 @@ fn source_bytes(
                 Ok(rewrite(location, asset.path, uses, entries))
             })?;
             if edits.is_empty() {
-                serialize(layer.data(), location)
+                serialize(graph, layer.data(), location)
             } else {
                 let mut data = sdf::Data::from_abstract(layer.data())?;
                 apply_edits(&mut data, edits);
-                serialize(&data, location)
+                serialize(graph, &data, location)
             }
         }
         Content::Package { resolved, inside } => {
@@ -400,10 +400,12 @@ fn read_asset(graph: &pcp::LayerGraph, resolved: &ar::ResolvedPath) -> Result<Ve
     Ok(graph.layer_registry().open_asset(resolved)?.read_all()?)
 }
 
-/// Serializes `data` in the format the extension of `location` names.
-fn serialize(data: &dyn AbstractData, location: &str) -> Result<Vec<u8>> {
+/// Serializes `data` in the format of the graph's registry that the
+/// extension of `location` names.
+fn serialize(graph: &pcp::LayerGraph, data: &dyn AbstractData, location: &str) -> Result<Vec<u8>> {
     let mut bytes = Cursor::new(Vec::new());
-    sdf::LayerRegistry::export_format(location)?.write(data, &mut bytes)?;
+    let formats = graph.layer_registry().formats();
+    sdf::LayerRegistry::export_format(&formats, location)?.write(data, &mut bytes)?;
     Ok(bytes.into_inner())
 }
 
