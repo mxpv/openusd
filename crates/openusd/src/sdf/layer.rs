@@ -221,9 +221,10 @@ impl Layer {
         layer.ok_or(crate::Error::UnresolvedAsset(identifier))
     }
 
-    /// Decode `bytes` as an anonymous layer tagged `tag`, in whichever format
-    /// their content names (see
-    /// [`LayerRegistry::read_bytes`](sdf::LayerRegistry::read_bytes)).
+    /// Decode `bytes` as an anonymous layer tagged `tag`, in whichever
+    /// built-in format their content names.
+    /// [`LayerRegistry::read_bytes`](sdf::LayerRegistry::read_bytes) decodes
+    /// in the formats added to a registry too.
     ///
     /// For layer bytes that were never an asset — compiled into a program, or
     /// handed over by a host. The layer is anonymous because it resolved from
@@ -297,10 +298,16 @@ impl Layer {
     }
 
     /// Anchor, read and save the layer through `resolver` from then on, in
-    /// `formats`.
-    pub(crate) fn set_registry(&mut self, resolver: Rc<dyn ar::Resolver>, formats: sdf::layer_registry::FormatSet) {
-        self.resolver = Some(resolver);
-        self.formats = Some(formats);
+    /// `formats`. Returns the resolver and formats it had.
+    pub(crate) fn set_registry(
+        &mut self,
+        resolver: Option<Rc<dyn ar::Resolver>>,
+        formats: Option<sdf::layer_registry::FormatSet>,
+    ) -> (Option<Rc<dyn ar::Resolver>>, Option<sdf::layer_registry::FormatSet>) {
+        (
+            mem::replace(&mut self.resolver, resolver),
+            mem::replace(&mut self.formats, formats),
+        )
     }
 
     /// The formats the layer reads and writes in: those of its registry, or
@@ -674,9 +681,12 @@ impl Layer {
         // (textures, sibling layers) are not held by the layer, so saving
         // over it would discard them. That holds for a layer opened from the
         // package too, which reads in its root layer's format while its
-        // identifier names the archive.
+        // identifier names the archive, and when that format claims the
+        // archive's extension as well.
         let destination = self.export_format(&self.identifier)?;
-        if !destination.caps().can_edit() || destination.is_package() {
+        let reader = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.identifier));
+        let package = destination.is_package() || reader.is_some_and(|format| format.is_package());
+        if !destination.caps().can_edit() || package {
             return Err(ExportError::NotEditable {
                 identifier: self.identifier.clone(),
                 format: destination.format_id(),
