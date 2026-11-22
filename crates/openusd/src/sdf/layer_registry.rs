@@ -480,9 +480,12 @@ impl LayerRegistry {
     /// registry, or from a resolver a stage calls while it reads the registry's
     /// layers.
     pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
-        layer.set_registry(Rc::clone(&self.resolver), self.formats.clone());
+        let (resolver, formats) = layer.set_registry(Some(Rc::clone(&self.resolver)), Some(self.formats.clone()));
         let packages = self.package_listings(layer.real_path());
-        self.store().insert(layer, packages)
+        self.store().insert(layer, packages).map_err(|mut refused| {
+            refused.layer.set_registry(resolver, formats);
+            refused
+        })
     }
 
     /// What the package `package` holds, a package nested in another named
@@ -909,8 +912,8 @@ impl LayerRegistry {
     /// Reads the layer `identifier` resolved to at `resolved` through
     /// `resolver`, dispatching to the format of `formats` claiming its
     /// extension. The `.usd` extension is the one ambiguous case — binary
-    /// crate or text — so it reads the bytes once and lets them choose by
-    /// content, as [`read_bytes`](Self::read_bytes) does. C++
+    /// crate or text — so it reads the bytes once and lets them choose
+    /// among the built-in formats by content. C++
     /// `SdfFileFormat::FindByExtension` + `CanRead`.
     /// `modified` is the asset's modification time, taken before the read.
     pub(crate) fn read(
@@ -926,7 +929,7 @@ impl LayerRegistry {
                 .open_asset(&resolved)
                 .and_then(|asset| asset.into_buffer())
                 .map_err(sdf::FormatError::from)?;
-            read_bytes_in(formats, bytes, &resolved.to_string())?
+            read_bytes_in(BUILTIN_FORMATS, bytes, &resolved.to_string())?
         } else {
             let format = by_extension(formats, &ext).ok_or_else(|| LoadError::UnsupportedFormat {
                 resolved: resolved.to_string(),
@@ -1467,6 +1470,23 @@ pub(crate) mod tests {
         let text = dir.path().join("b.usda");
         layer.borrow().export(text.to_str().expect("utf-8 path"))?;
         assert!(fs::read_to_string(text)?.contains("def Scope \"A\""));
+        Ok(())
+    }
+
+    /// A layer the registry refuses is handed back reading the formats it
+    /// came with.
+    #[test]
+    fn adopt_refused_unbound() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("a.usda");
+        fs::write(&path, "#usda 1.0\n")?;
+        let path = path.to_str().expect("utf-8 path");
+        let registry = registry().with_format(&PLANTED);
+        let _held = registry.find_or_open(path)?.expect("resolves");
+        let refused = registry.adopt(sdf::Layer::open(path)?).expect_err("already open");
+        let copy = dir.path().join("b.planted");
+        let export = refused.layer.export(copy.to_str().expect("utf-8 path"));
+        assert!(matches!(export, Err(sdf::ExportError::UnsupportedExtension { .. })));
         Ok(())
     }
 
