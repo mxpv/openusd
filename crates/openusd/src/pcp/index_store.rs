@@ -139,8 +139,9 @@ pub(crate) struct ScopedInvalidation {
     pub scope: ValueScope,
     /// Whether the prim's composed property set may have changed, so the
     /// property-derived diagnostics recorded against it no longer describe it.
-    /// Set by a property spec appearing or vanishing; a value moving under an
-    /// unchanged spec leaves the set alone.
+    /// Set by a property spec appearing or vanishing and by a change to a
+    /// `propertyChildren` list; a value moving under an unchanged spec leaves
+    /// the set alone.
     pub properties: bool,
     /// Resolved-target memos to drop — a `targetPaths` / `connectionPaths` edit
     /// changed a relationship or connection this prim composes in place, or one
