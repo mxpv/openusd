@@ -7,8 +7,6 @@ use std::{cmp, convert::Infallible, fmt, iter, str::FromStr};
 
 use rustc_hash::FxBuildHasher;
 
-use crate::tf;
-
 /// Parses `str` into a validated [`Path`] — the terse form of [`Path::new`].
 #[inline]
 pub fn path(str: impl AsRef<str>) -> Result<Path, PathParseError> {
@@ -241,9 +239,8 @@ impl Path {
         self.path.is_empty()
     }
 
-    pub fn append_property(&self, property: impl Into<tf::Token>) -> Result<Path, PathParseError> {
-        let property = property.into();
-        let property = property.as_str();
+    pub fn append_property(&self, property: impl AsRef<str>) -> Result<Path, PathParseError> {
+        let property = property.as_ref();
         let fail = |offset, reason| PathParseError {
             input: format!("{}.{property}", self.path),
             offset,

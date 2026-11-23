@@ -1413,6 +1413,7 @@ impl Prim {
     /// empty path, so the returned handle resolves nothing — the analog of
     /// C++'s invalid `UsdProperty` handle.
     fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
+        let name: Token = name.into();
         self.path.append_property(name).unwrap_or_default()
     }
 
@@ -1649,6 +1650,7 @@ impl PrimIndexRef {
     /// The path of the property `name` on this prim, or the empty path for an
     /// invalid name, which composes nothing.
     fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
+        let name: Token = name.into();
         self.path.append_property(name).unwrap_or_default()
     }
 
