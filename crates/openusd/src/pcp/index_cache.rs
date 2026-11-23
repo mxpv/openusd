@@ -3628,7 +3628,7 @@ impl IndexCache {
     /// two owners are folded through one collection, so the diagnostic reads
     /// once however many passes found it.
     ///
-    /// Only a name that two of the prim's spec sites author can mix kinds
+    /// Only a name that two of the prim's spec sites list can mix kinds
     /// ([`property_type_conflicts`]), so a prim whose properties each come
     /// from one site is done after reading its sites' property lists.
     fn report_property_type_conflicts(&mut self, graph: &LayerView<'_>, prim_path: &Path) {
@@ -4389,12 +4389,19 @@ fn fold_property_children<'a>(
 /// `prim_path`'s property specs, by property in the order a second site is
 /// found for it, then by site strongest first.
 ///
-/// A property spec of one kind and one of the other need two sites, so only
-/// the names more than one live spec site lists can conflict. A site's names
-/// are its prim spec's `propertyChildren`, which lists every property spec the
-/// prim owns, and a name's specs are read only at the sites that list it.
-/// Inert and culled nodes are skipped (matching the structural node walk);
-/// permission-denied sites stay.
+/// The first spec's kind (attribute vs relationship) is the defining type;
+/// weaker specs of the other kind are inconsistent (C++
+/// `PcpErrorInconsistentPropertyType`).
+///
+/// Reads the memoized prim spec stack as the candidate set: a property spec
+/// requires its owning prim spec, so every layer that authors the property
+/// also authors the prim spec the stack records. A property spec of one kind
+/// and one of the other need two sites, so only the names more than one live
+/// spec site lists can conflict. A site's names are its prim spec's
+/// `propertyChildren`, which lists every property spec the prim owns, and a
+/// name's specs are read only at the sites that list it. Inert and culled
+/// nodes are skipped (matching the structural node walk); permission-denied
+/// sites stay.
 fn property_type_conflicts(graph: &LayerView<'_>, index: &PrimIndex, prim_path: &Path) -> Diagnostics {
     let mut conflicts = Diagnostics::default();
     if index.live_spec_sites().nth(1).is_none() {
@@ -5063,6 +5070,47 @@ def "A" (
             "two conflicting specs are two failures, however alike, got {:?}",
             cache.composition_errors().iter().collect::<Vec<_>>()
         );
+        Ok(())
+    }
+
+    /// Two sublayers that author a property at the same node in different
+    /// kinds conflict, and a third site of the weaker kind conflicts too.
+    #[test]
+    fn conflicts_within_stack() -> Result<()> {
+        let root = "#usda 1.0\n(\n    subLayers = [@mid.usd@]\n)\ndef \"P\" (\n    references = @ref.usd@</R>\n) {\n    custom double x = 1\n}\n";
+        let graph = LayerGraph::from_layers(
+            vec![
+                parse_named_layer("root.usd", root),
+                parse_named_layer("mid.usd", "#usda 1.0\nover \"P\" {\n    add rel x\n}\n"),
+                parse_named_layer("ref.usd", "#usda 1.0\ndef \"R\" {\n    add rel x\n}\n"),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let mut cache = fresh_cache();
+        cache.ensure_index(&graph.read_view(), &sdf::path("/P")?)?;
+
+        let found: Vec<_> = cache
+            .composition_errors()
+            .iter()
+            .filter_map(|e| match e {
+                CompositionDiagnostic::InconsistentPropertyType {
+                    property,
+                    conflicting_layer,
+                    conflicting_path,
+                    ..
+                } => Some((
+                    property.to_string(),
+                    conflicting_layer.clone(),
+                    conflicting_path.to_string(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].0.as_str(), found[0].2.as_str()), ("/P.x", "/P.x"));
+        assert!(found[0].1.ends_with("mid.usd"));
+        assert_eq!((found[1].0.as_str(), found[1].2.as_str()), ("/P.x", "/R.x"));
         Ok(())
     }
 
