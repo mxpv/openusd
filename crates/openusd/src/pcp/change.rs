@@ -64,7 +64,10 @@
 //!   through the cached index's spec sites, so the new opinion is visible
 //!   without invalidating the graph.
 //! - a child-name list that grew or shrank, and nothing else → no effect:
-//!   bookkeeping the spec add or remove itself already accounts for.
+//!   bookkeeping the spec add or remove itself already accounts for. A
+//!   `propertyChildren` list is the exception: a prim's property-type
+//!   conflicts are found from the names its spec sites list, so any change to
+//!   the list is a value effect on the prim that refreshes them.
 //! - a child-name list permuted, or `primOrder` / `propertyOrder` edited → value
 //!   on the prim alone; no index drop.
 //!
@@ -325,8 +328,9 @@ struct InvalidationEffects {
     clips: bool,
     /// Resolved-target memos the edit restales.
     targets: Vec<TargetMemoKey>,
-    /// A property spec appeared or vanished, so the prim's composed property
-    /// set — and anything derived from it — must be recomputed.
+    /// A property spec appeared or vanished, or a `propertyChildren` list
+    /// changed, so the prim's composed property set — and anything derived
+    /// from it — must be recomputed.
     properties: bool,
     /// A prim's schema identity, or the stage's fallback map for one, moved.
     type_opinion: bool,
@@ -602,15 +606,25 @@ impl Changes {
     ///
     /// Effects accumulate rather than compete: a `connectionPaths` edit both
     /// moves a composed value and restales a target memo. Every entry is
-    /// classified — one that only maintains child names (a child spec came or
-    /// went, which the child's own entry reports) lands on no effect at all,
-    /// which is a decision rather than a gap. A prim to
+    /// classified — one that only maintains a child-name list other than
+    /// `propertyChildren` (a child spec came or went, which the child's own
+    /// entry reports) lands on no effect at all, which is a decision rather
+    /// than a gap. A change to `propertyChildren` restales the prim and
+    /// refreshes its property-type conflicts, which are found from the names
+    /// the list holds. A prim to
     /// [rebuild](Self::rebuilds) is reported as a resync of its subtree, as
     /// C++ `UsdStage` reports it, and a properties reorder names the prim as
     /// an info change. `stage_layer` says whether the edited layer is one the
     /// stage reads its own metadata from: its root or session layer.
     fn effects_of(path: &Path, entry: &ChangeEntry, stage_layer: bool) -> InvalidationEffects {
         let mut effects = InvalidationEffects::default();
+        // A prim's property-type conflicts are found from the names its spec
+        // sites list in `propertyChildren`, so a change to a list refreshes
+        // them. The refresh travels with the prim's value restale.
+        if entry.changed(sdf::ChildrenKey::PropertyChildren.as_str()) {
+            effects.value = Some(ValueScope::Prim);
+            effects.properties = true;
+        }
         if entry.is_child_bookkeeping() {
             return effects;
         }

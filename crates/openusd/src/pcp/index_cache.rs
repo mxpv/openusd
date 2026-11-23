@@ -5285,6 +5285,47 @@ def \"R\" {
         Ok(())
     }
 
+    /// A spec authored through the raw data calls in one edit and listed in
+    /// `propertyChildren` in the next conflicts on a warm index once it is
+    /// listed.
+    #[test]
+    fn conflict_on_listing() -> Result<()> {
+        let (mut graph, mut cache) = two_layer_stack(
+            CONFLICT_ROOT,
+            "#usda 1.0
+def \"R\" {
+}
+",
+        );
+        cache.ensure_index(&graph.read_view(), &sdf::path("/P")?)?;
+
+        let model = graph.all_ids()[1];
+        let cl = edit_layer(graph.handle(model), |e| {
+            e.data_mut()
+                .create_spec(sdf::path("/R.x").unwrap(), sdf::SpecType::Relationship);
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+        assert_eq!(conflict_count(&cache), 0, "no prim lists the spec yet");
+
+        let cl = edit_layer(graph.handle(model), |e| {
+            e.data_mut().set_field(
+                &sdf::path("/R").unwrap(),
+                ChildrenKey::PropertyChildren.as_str(),
+                Value::TokenVec(vec![Token::from("x")]),
+            );
+            Ok(())
+        })?;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &graph, &[LayerChanges::plain(model, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+        assert!(cache.is_indexed(&sdf::path("/P")?), "the index must stay warm");
+        assert_eq!(conflict_count(&cache), 1, "the listed spec conflicts");
+        Ok(())
+    }
+
     /// How many inconsistent-property-type diagnostics the cache currently
     /// reports.
     fn conflict_count(cache: &IndexCache) -> usize {
