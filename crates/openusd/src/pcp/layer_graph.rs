@@ -1249,14 +1249,6 @@ impl LayerGraph {
             self.file_stack_discoveries(LayerStackId::ROOT, sink);
         }
 
-        // Re-resolve each already-interned target stack whose composition an
-        // edited layer can reach; a full pass (`None`) re-resolves them all. A
-        // target rebuilds when an edited layer is its target root (checked
-        // explicitly because a muted root's member set is empty — disjoint from
-        // everything — while its layer data still feeds the stack's composed
-        // variables), a member, or when its seed shifted: its key source's
-        // referent changed this pass. The seed is read live from that referent,
-        // already refreshed by this pass's ascending order.
         // The stacks holding an edited layer, read from the registry's
         // layer-to-stacks index. A target's members change only when it
         // rebuilds, so the set holds for the whole loop.
@@ -1265,6 +1257,20 @@ impl LayerGraph {
             .flatten()
             .flat_map(|&layer| self.stacks.stacks_using(layer))
             .collect();
+        // Re-resolve each already-interned target stack whose composition an
+        // edited layer can reach; a full pass (`None`) re-resolves them all. A
+        // target rebuilds when an edited layer is its target root (checked
+        // explicitly because a muted root's stack has no members, so the index
+        // lists it under no layer, while its layer data still feeds the
+        // stack's composed variables), a member, or when its seed shifted: its
+        // key source's referent changed this pass. The seed is read live from
+        // that referent, already refreshed by this pass's ascending order.
+        //
+        // TODO(perf): each pass visits every interned target and scans
+        // `vars_deltas` for its referent. The candidates are `unsettled`,
+        // `reached`, the stacks rooted at an edited layer and the stacks
+        // seeded from one that emitted a delta; walking those alone needs an
+        // index from a root layer and from a source referent to their stacks.
         for (id, root, source) in self.stacks.targets() {
             let rebuild = match affected {
                 None => true,
@@ -2483,7 +2489,7 @@ impl LayerGraph {
     }
 
     /// The composed stacks `layer` is a member of, in id order (C++
-    /// `PcpLayerStackRegistry::FindAllUsingLayer`). A change to `layer`
+    /// `Pcp_LayerStackRegistry::FindAllUsingLayer`). A change to `layer`
     /// reaches the dependencies registered against these stacks.
     pub(crate) fn stacks_using(&self, layer: LayerId) -> impl Iterator<Item = LayerStackId> + '_ {
         self.stacks.stacks_using(layer)
