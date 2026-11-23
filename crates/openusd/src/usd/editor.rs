@@ -40,8 +40,11 @@
 //!
 //! In both shapes the structural move is [`copy_spec_within`](crate::sdf::copy_spec_within)
 //! plus [`Layer::remove_spec`](crate::sdf::Layer::remove_spec). A rename then
-//! returns the new name to the old one's place in the owner's child list. The
-//! fixup remaps embedded paths in place through
+//! returns the new name to the old one's place in the owner's child list. A
+//! reparent removes the ancestors of its source it leaves as inert `over`s in
+//! each layer it moved the source out of, as C++ applies each reparent under
+//! `SdfCleanupEnabler`, so a later edit in the batch finds no spec there to
+//! move or delete. The fixup remaps embedded paths in place through
 //! [`Value::filter_map_paths`](crate::vt::Value::filter_map_paths), preserving
 //! list-op structure rather than flattening opinions. The local-stack fixup
 //! remaps in stage namespace; the mapped fixup lifts each path to stage
@@ -918,6 +921,12 @@ impl<'a> NamespaceProjection<'a> {
     /// composed-only occupants the staged per-layer check cannot see, including a
     /// property arriving across a reference.
     fn occupied(&self, path: &sdf::Path, earlier: &[NamespaceEdit]) -> Result<bool, NamespaceEditError> {
+        // TODO: the projection reads the stage as it was before the batch, so an
+        // over an earlier reparent leaves inert, which `move_spec` removes,
+        // still occupies its path here and still counts as a local spec in
+        // `cross_arc_facts`. Projecting that cleanup needs each contributing
+        // layer's specs under the vacated parent after the earlier edits, a
+        // per-layer projection of the batch this composed one does not make.
         let Some(origin) = projected_origin(path, earlier) else {
             return Ok(false);
         };
@@ -1636,7 +1645,9 @@ fn apply_mapped_edit(layers: &mut [sdf::LayerEdit<'_>], edit: &MappedEdit) -> Re
 /// Move the spec subtree at `src` to `dst` within one layer: copy it then remove
 /// the source, returning whether a spec was present to move. The structural move
 /// shared by the local-stack and mapped authoring paths. A rename keeps its
-/// place among its siblings, as C++ moves with `SdfNamespaceEdit::Same`.
+/// place among its siblings, as C++ moves with `SdfNamespaceEdit::Same`. A
+/// reparent removes the source's ancestors it left as inert `over`s, nearest
+/// first, as C++ applies a reparent under `SdfCleanupEnabler`.
 // TODO(perf): a rename writes the owner's child list three times: the copy
 // appends the new name, the removal drops the old one, and the slot restore
 // moves the new name back. A move-with-index in `sdf` (C++
@@ -1652,8 +1663,10 @@ fn move_spec(layer: &mut sdf::LayerEdit<'_>, src: &sdf::Path, dst: &sdf::Path) -
         if let Some(slot) = slot {
             slot.restore(layer.data_mut())?;
         }
-        if src.parent() != dst.parent() {
-            remove_inert_ancestors(layer, src)?;
+        if let Some(parent) = src.parent()
+            && Some(&parent) != dst.parent().as_ref()
+        {
+            sdf::remove_inert(layer.data_mut(), &parent)?;
         }
     }
     Ok(moved)
@@ -1708,33 +1721,6 @@ impl Slot {
         data.set_field(&self.owner, self.key.as_str(), vt::Value::TokenVec(names));
         Ok(())
     }
-}
-
-/// Remove the ancestors of `src` that a reparent left as inert overs, nearest
-/// first, as C++ does under `SdfCleanupEnabler`: prim specs holding nothing but
-/// `specifier = over`.
-fn remove_inert_ancestors(layer: &mut sdf::LayerEdit<'_>, src: &sdf::Path) -> Result<(), sdf::AuthoringError> {
-    let mut cursor = src.parent();
-    while let Some(path) = cursor.filter(|p| !p.is_abs_root()) {
-        let data = layer.data();
-        let inert = data.spec_type(&path) == Some(sdf::SpecType::Prim)
-            && data
-                .list_fields(&path)
-                .is_some_and(|fields| fields == [sdf::FieldKey::Specifier.as_str()])
-            && matches!(
-                data.try_field(&path, sdf::FieldKey::Specifier.as_str())
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-                Some(vt::Value::Specifier(sdf::Specifier::Over))
-            );
-        if !inert {
-            break;
-        }
-        layer.remove_spec(&path)?;
-        cursor = path.parent();
-    }
-    Ok(())
 }
 
 /// Rewrite every embedded namespace path in `layer` for an identity local-stack
@@ -2262,6 +2248,83 @@ mod tests {
         assert!(!data.data().has_spec(&path("/A/Empty").unwrap()));
         assert!(data.data().has_spec(&path("/A/Kept").unwrap()));
         assert!(data.data().has_spec(&path("/A/Leaf").unwrap()));
+    }
+
+    /// A later edit in the batch sees the over an earlier reparent removed, as
+    /// two edits applied one after the other do.
+    #[test]
+    fn reparent_overs_sequential() {
+        let stage = Stage::builder().in_memory("root.usda").unwrap();
+        stage.define_prim("/A").unwrap();
+        stage.override_prim("/A/E/L").unwrap();
+        let result = NamespaceEditor::new(&stage)
+            .move_prim(path("/A/E/L").unwrap(), path("/X").unwrap())
+            .unwrap()
+            .move_prim(path("/A/E").unwrap(), path("/B").unwrap())
+            .unwrap()
+            .apply();
+        assert!(
+            matches!(result, Err(NamespaceEditError::SourceNotFound(_))),
+            "{result:?}"
+        );
+    }
+
+    /// An over a reparent leaves inert is gone before a later move of its
+    /// ancestor in the batch.
+    #[test]
+    fn reparent_overs_follow() {
+        let stage = Stage::builder().in_memory("root.usda").unwrap();
+        stage.define_prim("/A").unwrap();
+        stage.override_prim("/A/E/L").unwrap();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A/E/L").unwrap(), path("/X").unwrap())
+            .unwrap()
+            .move_prim(path("/A").unwrap(), path("/Z").unwrap())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let root = stage.root_layer();
+        assert!(authored(&root, "/Z"));
+        assert!(!authored(&root, "/Z/E"));
+    }
+
+    /// Moving a property to another prim removes the over it leaves holding
+    /// nothing.
+    #[test]
+    fn reparent_property_overs() {
+        let stage = Stage::builder().in_memory("root.usda").unwrap();
+        stage.define_prim("/A").unwrap();
+        stage.override_prim("/A/O").unwrap();
+        stage.create_attribute("/A/O.x", "double").unwrap();
+        NamespaceEditor::new(&stage)
+            .move_property(path("/A/O.x").unwrap(), path("/A.x").unwrap())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let root = stage.root_layer();
+        assert!(!authored(&root, "/A/O"));
+        assert!(authored(&root, "/A.x"));
+    }
+
+    /// A reparent removes the over it leaves only in a layer it moved the
+    /// source out of: a layer the batch writes to fix an embedded path keeps
+    /// its own empty over.
+    #[test]
+    fn reparent_overs_per_layer() {
+        let root = "(\n    subLayers = [@./sub.usda@]\n)\ndef \"A\" {\n    over \"O\" {}\n    \
+                    def \"R\" {\n        rel r = </A/O/Leaf>\n    }\n}\n";
+        let sub = "over \"A\" {\n    over \"O\" {\n        def \"Leaf\" {}\n    }\n}\n";
+        let (_dir, stage) = usd::stage::tests::scene(&[("root.usda", root), ("sub.usda", sub)]).unwrap();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A/O/Leaf").unwrap(), path("/A/Leaf").unwrap())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let sub = sublayer(&stage);
+        assert!(!authored(&sub, "/A/O"));
+        assert!(authored(&stage.root_layer(), "/A/O"));
+        let targets = stage.relationship("/A/R.r").unwrap().targets().unwrap();
+        assert_eq!(targets, [path("/A/Leaf").unwrap()], "the root layer was written");
     }
 
     #[test]
@@ -5219,13 +5282,23 @@ mod tests {
     fn guarded_stage(sub: &str) -> (TempDir, Stage, sdf::LayerHandle) {
         let root = "(\n    subLayers = [@./sub.usda@]\n)\ndef \"A\" {}";
         let (dir, stage) = usd::stage::tests::scene(&[("root.usda", root), ("sub.usda", sub)]).unwrap();
+        let sub = sublayer(&stage);
+        (dir, stage, sub)
+    }
+
+    /// The stage's `sub.usda` sublayer.
+    fn sublayer(stage: &Stage) -> sdf::LayerHandle {
         let sub = stage
             .layer_stack()
             .into_iter()
             .find(|id| id.ends_with("sub.usda"))
             .unwrap();
-        let sub = stage.layer(&sub).unwrap().expect("the sublayer is loaded");
-        (dir, stage, sub)
+        stage.layer(&sub).unwrap().expect("the sublayer is loaded")
+    }
+
+    /// Whether `layer` holds a spec at `p`.
+    fn authored(layer: &sdf::LayerHandle, p: &str) -> bool {
+        layer.borrow().data().has_spec(&path(p).unwrap())
     }
 
     /// The batch renaming `/A` to `/B`.
