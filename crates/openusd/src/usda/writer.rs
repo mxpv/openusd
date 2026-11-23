@@ -224,14 +224,15 @@ impl Emitter<'_> {
     // ---------- prim ----------
 
     fn emit_prim(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<(), FormatError> {
-        // Header: [specifier] [typeName] "name"
+        // Header: [specifier] [typeName] "name". A prim with no authored
+        // specifier is an `over`, the field's fallback in the C++ schema.
         self.write_indent()?;
         let specifier = get_value(data, path, FieldKey::Specifier.as_str())
             .and_then(|v| match v {
                 Value::Specifier(s) => Some(s),
                 _ => None,
             })
-            .unwrap_or(Specifier::Def);
+            .unwrap_or(Specifier::Over);
         self.out.write_all(specifier_keyword(specifier).as_bytes())?;
 
         // The type that stands for any type is written as no type (C++
@@ -2170,6 +2171,18 @@ def "Mesh"
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         assert!(text.contains("def Xform \"Foo\""));
+    }
+
+    /// A prim with no authored specifier is written as an `over`.
+    #[test]
+    fn writes_fallback_over() {
+        let mut data = Data::new();
+        data.create_spec(Path::abs_root(), SpecType::PseudoRoot)
+            .add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["Foo".into()]));
+        data.create_spec(path("/Foo").unwrap(), SpecType::Prim);
+
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
+        assert!(text.contains("over \"Foo\""), "{text}");
     }
 
     /// An `asset[]` attribute keeps its type through parse → emit → re-parse,
