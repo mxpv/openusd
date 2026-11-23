@@ -78,12 +78,12 @@ pub use schema::{
     ANY_TYPE, ChildrenKey, FieldKey, FieldType, folds_list_ops, is_vector_field, registered_field_type,
     schema_field_type,
 };
-pub(crate) use spec::prim_chain;
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
     RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
+pub(crate) use spec::{prim_chain, remove_inert};
 pub use unit::{Unit, UnitCategory};
 pub use value_type::{Dimensions, Role, ValueTypeError, ValueTypeName};
 

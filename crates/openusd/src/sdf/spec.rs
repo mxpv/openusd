@@ -1819,9 +1819,58 @@ pub(crate) fn remove_spec(data: &mut dyn sdf::AbstractData, path: &sdf::Path) ->
         }
         _ => return Ok(false),
     };
-    data.erase_spec(path);
-    remove_from_token_vec(data, &owner, child_key, &name)?;
+    erase_child(data, path, &owner, child_key, &name)?;
     Ok(true)
+}
+
+/// Erase the spec at `path` and drop `name` from its owner's `key` list, the
+/// last step of every removal.
+fn erase_child(
+    data: &mut dyn sdf::AbstractData,
+    path: &sdf::Path,
+    owner: &sdf::Path,
+    key: sdf::ChildrenKey,
+    name: &str,
+) -> Result<(), sdf::AuthoringError> {
+    data.erase_spec(path);
+    remove_from_token_vec(data, owner, key, name)
+}
+
+/// Remove the prim spec at `path`, then each ancestor in turn, while it is an
+/// inert `over`: one holding no field besides its specifier, so no children
+/// either, whose specifier is `over` or not authored (C++
+/// `SdfLayer::_RemoveInertToRootmost` with `SdfLayer::_IsInert`). A defining
+/// prim, a variant spec or the pseudo-root ends the walk.
+pub(crate) fn remove_inert(data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+    let mut path = path.clone();
+    loop {
+        let (Some(parent), Some(name)) = (path.parent(), path.name()) else {
+            return Ok(());
+        };
+        if !is_inert_prim(data, &path)? {
+            return Ok(());
+        }
+        // An inert prim holds no children to erase with it.
+        erase_child(data, &path, &parent, sdf::ChildrenKey::PrimChildren, name)?;
+        path = parent;
+    }
+}
+
+/// Whether the spec at `path` is a prim holding nothing but a specifier of
+/// `over`, the fallback when it holds none.
+fn is_inert_prim(data: &dyn sdf::AbstractData, path: &sdf::Path) -> Result<bool, sdf::AuthoringError> {
+    let specifier = sdf::FieldKey::Specifier.as_str();
+    if data.spec_type(path) != Some(sdf::SpecType::Prim)
+        || data
+            .list_fields(path)
+            .is_some_and(|fields| fields.iter().any(|field| field != specifier))
+    {
+        return Ok(false);
+    }
+    Ok(matches!(
+        data.try_field(path, specifier)?.as_deref(),
+        None | Some(vt::Value::Specifier(sdf::Specifier::Over))
+    ))
 }
 
 /// Verify that an authored child-list field is either absent or a `TokenVec`.
