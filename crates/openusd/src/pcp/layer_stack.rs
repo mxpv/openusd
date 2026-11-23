@@ -357,7 +357,7 @@ pub(crate) struct LayerStackRegistry {
     instances: BTreeMap<LayerStackId, LayerStackInstance>,
     by_key: HashMap<LayerStackKey, LayerStackId>,
     /// The stacks each layer is a member of, in id order (C++
-    /// `PcpLayerStackRegistry::FindAllUsingLayer`): how a change to a layer
+    /// `Pcp_LayerStackRegistry::FindAllUsingLayer`): how a change to a layer
     /// reaches the dependencies registered against the stacks holding it.
     using: HashMap<LayerId, BTreeSet<LayerStackId>>,
     /// The interned composed expression-variable sets, keyed by [`ExprVarId`].
