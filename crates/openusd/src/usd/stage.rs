@@ -3648,7 +3648,7 @@ impl Stage {
 
     /// Resolves the cacheable value source for an attribute, the source half of
     /// [`Self::resolve_at`], paired with the stamp it stays replayable under.
-    /// Backs [`AttributeQuery`](super::AttributeQuery), which snapshots both and
+    /// Backs [`AttributeQuery`](super::AttributeQuery), which keeps both and
     /// replays the source across time codes. Resolves to
     /// [`AttributeValueSource::Static`](pcp::AttributeValueSource::Static)
     /// `None` with no stamp when the attribute's prim is outside the population

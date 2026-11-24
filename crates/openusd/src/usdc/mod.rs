@@ -217,10 +217,15 @@ impl CrateData {
         Ok(Self { file, data })
     }
 
-    /// Where the value of `field` at `path` is stored, or `None` if the field
-    /// is not authored.
     /// Reads the `timeSamples` field at `path` as far as a read of single
     /// samples needs: its sample times and where each value is.
+    ///
+    /// TODO(perf): every call decodes the field's times and reps and checks
+    /// their order, so a read at a time costs a copy of both arrays, linear
+    /// in the sample count. C++ decodes a field's times once and shares them
+    /// (`CrateFile::TimeSamples`). The times and reps are independent per
+    /// field, so decoding them once, at open or into what the caller keeps
+    /// between reads, would leave a binary search per read.
     fn time_sample_reps(&self, path: &sdf::Path) -> Result<Samples, sdf::DataError> {
         let field = sdf::FieldKey::TimeSamples.as_str();
         let rep = match self.stored(path, field) {
@@ -240,6 +245,8 @@ impl CrateData {
         Ok(Samples::Crate(times, reps))
     }
 
+    /// Where the value of `field` at `path` is stored, or `None` if the field
+    /// is not authored.
     fn stored(&self, path: &sdf::Path, field: &str) -> Option<Stored<'_>> {
         let spec = self.data.get(path)?;
         if let Some(authored) = spec.authored(field) {
@@ -319,7 +326,7 @@ impl sdf::AbstractData for CrateData {
                     return Ok(None);
                 };
                 let field = sdf::FieldKey::TimeSamples.as_str();
-                let value = self.file.value(reps[i]).map_err(decode_error(path, field))?;
+                let value = self.file.sample_value(reps[i]).map_err(decode_error(path, field))?;
                 Ok(Some(Cow::Owned(value)))
             }
             Samples::Whole => sdf::field_sample(self, path, time),
@@ -351,6 +358,32 @@ impl sdf::AbstractData for CrateData {
             }
             Samples::Whole => sdf::field_kinds(self, path),
         }
+    }
+
+    fn bracketing_samples(&self, path: &sdf::Path, time: f64) -> Result<Option<Cow<'_, vt::Value>>, sdf::DataError> {
+        let field = sdf::FieldKey::TimeSamples.as_str();
+        let (times, reps) = match self.time_sample_reps(path)? {
+            Samples::Absent => return Ok(None),
+            Samples::Crate(times, reps) => (times, reps),
+            Samples::Whole => return self.try_field(path, field),
+        };
+        // A field of no samples is read whole, as the map it is.
+        let Some((lower, upper)) = sdf::bracketing_indices(&times, time) else {
+            return self.try_field(path, field);
+        };
+        let sample = |at: usize| {
+            Ok((
+                times[at],
+                self.file.sample_value(reps[at]).map_err(decode_error(path, field))?,
+            ))
+        };
+        // Both samples of a pair are decoded; C++ reads only the lower one
+        // under held interpolation, a mode this read is not told.
+        let mut samples = vec![sample(lower)?];
+        if upper != lower {
+            samples.push(sample(upper)?);
+        }
+        Ok(Some(Cow::Owned(vt::Value::TimeSamples(samples))))
     }
 
     fn field_kind(&self, path: &sdf::Path, field: &str) -> Result<Option<vt::ValueKind>, sdf::DataError> {
@@ -554,7 +587,7 @@ mod tests {
     /// A crate's samples read one by one agree with its field read whole, at
     /// every kind of time, and an edit made after load is read as authored.
     #[test]
-    fn time_samples_one_by_one() -> Result<()> {
+    fn samples_one_by_one() -> Result<()> {
         let mut layer = sdf::Data::new();
         layer.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
         let (x, y) = (sdf::path("/A.x")?, sdf::path("/A.y")?);
@@ -564,6 +597,16 @@ mod tests {
         let samples = [0.0, 1.0, 2.5, 4.0].map(|t| (t, vt::Value::FloatVec(vec![t as f32; 3])));
         layer.set_field(&x, "timeSamples", vt::Value::TimeSamples(samples.to_vec()));
         layer.set_field(&y, "timeSamples", vt::Value::ValueBlock);
+        let kinds = sdf::path("/A.kinds")?;
+        layer.create_spec(kinds.clone(), sdf::SpecType::Attribute);
+        let of_each_kind = vec![
+            (0.0, vt::Value::ValueBlock),
+            (1.0, vt::Value::Dictionary(vt::Dictionary::default())),
+            (2.0, vt::Value::PathExpression(sdf::PathExpression::parse("/a"))),
+            (3.0, vt::Value::String("/a".into())),
+            (4.0, vt::Value::Token("/a".into())),
+        ];
+        layer.set_field(&kinds, "timeSamples", vt::Value::TimeSamples(of_each_kind));
         let mut bytes = io::Cursor::new(Vec::new());
         CrateWriter::write(&layer, &mut bytes)?;
         let mut data = CrateData::open(bytes.into_inner(), true)?;
@@ -598,6 +641,32 @@ mod tests {
             assert_eq!(data.sample_kinds(p)?, each, "{p}");
         }
         assert_eq!(data.sample_kinds(&x)?, [vt::ValueKind::FloatVec; 4]);
+        // A sample's kind read from its rep is the kind of the value decoded.
+        for p in [&x, &kinds] {
+            assert_eq!(data.sample_kinds(p)?, sdf::field_kinds(&data, p)?, "{p}");
+        }
+        assert_eq!(data.sample_kinds(&kinds)?.len(), 5);
+        // A read at a time decodes the samples that bracket it and no others.
+        for time in [-1.0, 0.0, 1.0, 1.5, 2.5, 3.0, 4.0, 9.0] {
+            let (lower, upper) = data.bracketing_time_samples(&x, time)?.expect("x holds samples");
+            let mut pair = vec![(lower, vt::Value::FloatVec(vec![lower as f32; 3]))];
+            if upper != lower {
+                pair.push((upper, vt::Value::FloatVec(vec![upper as f32; 3])));
+            }
+            assert_eq!(
+                data.bracketing_samples(&x, time)?.as_deref(),
+                Some(&vt::Value::TimeSamples(pair)),
+                "at {time}"
+            );
+        }
+        assert_eq!(
+            data.bracketing_samples(&y, 1.0)?.as_deref(),
+            Some(&vt::Value::ValueBlock)
+        );
+        assert_eq!(data.bracketing_samples(&absent, 1.0)?, None);
+        for (p, count) in [(&x, 4), (&y, 0), (&absent, 0)] {
+            assert_eq!(data.num_time_samples(p)?, count, "{p}");
+        }
         assert_eq!(data.bracketing_time_samples(&x, 1.5)?, Some((1.0, 2.5)));
         assert_eq!(data.query_time_sample(&x, 2.5)?.as_deref(), Some(&samples[2].1));
 

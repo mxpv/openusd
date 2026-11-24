@@ -13,7 +13,7 @@ use rustc_hash::FxHashSet;
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, Specifier};
-use crate::vt::Value;
+use crate::vt::{self, Value};
 
 use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip;
@@ -260,6 +260,18 @@ impl Supplied {
             false => Self::Opaque,
         }
     }
+
+    /// What a value of `kind` supplies, where the kind alone says so. `None`
+    /// for a kind composition reads, which [`classify`](Self::classify) judges
+    /// from the value.
+    pub(crate) fn of_kind(kind: vt::ValueKind) -> Option<Self> {
+        match kind {
+            kind if value_resolve::is_block_kind(kind) => Some(Self::Blocked),
+            // A string or a token may spell an expression.
+            kind if kind_rewrites(kind) || matches!(kind, vt::ValueKind::String | vt::ValueKind::Token) => None,
+            _ => Some(Self::Opaque),
+        }
+    }
 }
 
 /// A composition as it stands at one time.
@@ -456,21 +468,21 @@ pub(crate) fn rooted_at(value: Value, site: &OpinionSite<'_>) -> Value {
 /// composes, or as one a composing value draws on. A kind it would pass over
 /// is never carried past the source that authored it.
 pub(crate) fn reads_into_composition(value: &Value) -> bool {
-    composition_rewrites(value) || value.as_path_expression().is_some()
+    kind_rewrites(vt::ValueKind::from(value)) || value.as_path_expression().is_some()
 }
 
-/// Whether composition reports a value of this kind as something other than
+/// Whether composition reports a value of `kind` as something other than
 /// what the site authored: it merges weaker opinions into it, or places its
 /// paths in the root namespace.
 ///
 /// A kind composition leaves alone is exactly what the site that authored it
 /// holds, so a reader that has that is holding the composed value already —
-/// which is what lets one be snapshotted and replayed. Every kind
+/// which is what lets one be replayed from its layer. Every kind
 /// [`composes_over_weaker`] accepts is one of these.
-pub(crate) fn composition_rewrites(value: &Value) -> bool {
+pub(crate) fn kind_rewrites(kind: vt::ValueKind) -> bool {
     matches!(
-        value,
-        Value::Dictionary(_) | Value::PathExpression(_) | Value::PathExpressionVec(_)
+        kind,
+        vt::ValueKind::Dictionary | vt::ValueKind::PathExpression | vt::ValueKind::PathExpressionVec
     )
 }
 
@@ -1514,6 +1526,8 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+
     use super::*;
     use crate::tf;
     use crate::vt;
@@ -1526,6 +1540,30 @@ mod tests {
 
     fn expr(text: &str) -> Value {
         Value::PathExpression(sdf::PathExpression::parse(text))
+    }
+
+    /// A kind says what a sample supplies exactly where the value would say
+    /// the same, and defers to the value for every kind composition reads.
+    #[test]
+    fn supplied_of_kind() {
+        let values = [
+            Value::Double(1.0),
+            Value::FloatVec(vec![1.0]),
+            Value::ValueBlock,
+            Value::None,
+            Value::String("/a".into()),
+            Value::Token("/a".into()),
+            Value::Dictionary(vt::Dictionary::default()),
+            Value::PathExpression(sdf::PathExpression::parse("/a")),
+            Value::PathExpressionVec(Vec::new()),
+        ];
+        for value in values {
+            let whole = Supplied::classify(&value, &|value| value);
+            match Supplied::of_kind(vt::ValueKind::from(&value)) {
+                Some(by_kind) => assert_eq!(mem::discriminant(&by_kind), mem::discriminant(&whole), "{value:?}"),
+                None => assert!(matches!(whole, Supplied::Composable(_)), "{value:?}"),
+            }
+        }
     }
 
     /// A dictionary merges every weaker dictionary, ignores a source of another
@@ -1747,7 +1785,7 @@ mod tests {
                 "{value:?} composes but is not read into a composition"
             );
             assert!(
-                !composes_over_weaker(&value) || composition_rewrites(&value),
+                !composes_over_weaker(&value) || kind_rewrites(vt::ValueKind::from(&value)),
                 "{value:?} composes but is reported as authored"
             );
             // A value a composition reads is carried by the classification;

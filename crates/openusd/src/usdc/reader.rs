@@ -204,12 +204,20 @@ impl CrateFile {
         Decoder::new(self).decode(rep)
     }
 
+    /// Decodes the value of one sample of a time-samples value, from the rep
+    /// [`time_samples`](Self::time_samples) returned for it. The sample is
+    /// decoded as the value nested in the time samples that it is, so it meets
+    /// the nesting limit where a read of the whole value would.
+    pub fn sample_value(&self, rep: ValueRep) -> Result<vt::Value, ReadError> {
+        Decoder::new(self).nested_value(rep)
+    }
+
     /// Decodes the sample times of the time-samples value `rep` describes,
     /// and the rep of each sample's value, in the order the file stores them.
     ///
-    /// No sample's value is decoded; [`CrateFile::value`] decodes one from its
-    /// rep. C++ reads a crate's time samples the same way: their times when
-    /// the field is read, a value when it is asked for
+    /// No sample's value is decoded; [`CrateFile::sample_value`] decodes one
+    /// from its rep. C++ reads a crate's time samples the same way: their
+    /// times when the field is read, a value when it is asked for
     /// (`CrateFile::GetTimeSampleValue`).
     pub fn time_samples(&self, rep: ValueRep) -> Result<(Vec<f64>, Vec<ValueRep>), ReadError> {
         Decoder::new(self).time_sample_reps(rep)

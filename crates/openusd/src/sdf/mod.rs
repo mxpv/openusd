@@ -501,17 +501,19 @@ pub fn normalize_sample_times(times: &mut Vec<f64>) {
 /// `time` is compared in that same order, so a query outside the sampled
 /// range, a NaN included, pairs with the end on its sign bit's side.
 pub fn bracketing_time_samples(times: &[f64], time: f64) -> Option<(f64, f64)> {
-    let (&first, &last) = (times.first()?, times.last()?);
-    if compare_sample_times(time, first).is_le() {
-        return Some((first, first));
-    }
-    if compare_sample_times(time, last).is_ge() {
-        return Some((last, last));
-    }
-    match times.binary_search_by(|t| compare_sample_times(*t, time)) {
-        Ok(i) => Some((times[i], times[i])),
-        Err(i) => Some((times[i - 1], times[i])),
-    }
+    bracketing_indices(times, time).map(|(lower, upper)| (times[lower], times[upper]))
+}
+
+/// Returns where in `times` the pair [`bracketing_time_samples`] finds for
+/// `time` sits, or `None` when `times` is empty.
+pub(crate) fn bracketing_indices(times: &[f64], time: f64) -> Option<(usize, usize)> {
+    let last = times.len().checked_sub(1)?;
+    Some(match times.binary_search_by(|t| compare_sample_times(*t, time)) {
+        Ok(at) => (at, at),
+        Err(0) => (0, 0),
+        Err(after) if after > last => (last, last),
+        Err(upper) => (upper - 1, upper),
+    })
 }
 
 /// Orders `samples` as a [`TimeSampleMap`] requires. A repeated time keeps
