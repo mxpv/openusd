@@ -274,7 +274,7 @@ def "MaterialX"
 
             def Shader "mtlxnormalmap8"
             {
-                uniform token info:id = "ND_normalmap_float"
+                uniform token info:id = "ND_normalmap_vector2"
                 float3 inputs:in.connect = </MaterialX/NodeGraphs/NG_RookBlack/normal6.outputs:out>
                 float3 outputs:out
             }
@@ -319,7 +319,7 @@ def "MaterialX"
 
             def Shader "mtlxnormalmap9"
             {
-                uniform token info:id = "ND_normalmap_float"
+                uniform token info:id = "ND_normalmap_vector2"
                 float3 inputs:in.connect = </MaterialX/NodeGraphs/NG_RookWhite/normal7.outputs:out>
                 float3 outputs:out
             }

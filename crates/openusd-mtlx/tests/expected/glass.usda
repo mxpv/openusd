@@ -30,17 +30,13 @@ def "MaterialX"
             color3f inputs:emission_color
             float inputs:metalness
             float3 inputs:normal
-            color3f inputs:opacity = (1, 1, 1) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:opacity = (1, 1, 1)
             float inputs:sheen
             color3f inputs:sheen_color
             float inputs:sheen_roughness
             float inputs:specular = 1
             float inputs:specular_anisotropy
-            color3f inputs:specular_color = (1, 1, 1) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:specular_color = (1, 1, 1)
             float inputs:specular_IOR = 1.54107
             float inputs:specular_rotation
             float inputs:specular_roughness = 0.01625
@@ -54,15 +50,11 @@ def "MaterialX"
             float inputs:thin_film_thickness
             bool inputs:thin_walled
             float inputs:transmission = 1
-            color3f inputs:transmission_color = (0.942, 1, 0.9884) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:transmission_color = (0.942, 1, 0.9884)
             float inputs:transmission_depth = 0
             float inputs:transmission_dispersion = 0
             float inputs:transmission_extra_roughness = 0
-            color3f inputs:transmission_scatter = (0, 0, 0) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:transmission_scatter = (0, 0, 0)
             float inputs:transmission_scatter_anisotropy = 0
             token outputs:mtlx:surface.connect = </MaterialX/Materials/glass/mtlxstandard_surface1.outputs:surface>
 

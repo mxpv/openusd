@@ -1,26 +1,45 @@
 //! Node definitions: the signatures a node's `info:id`, its inputs' types and
 //! its outputs come from.
 //!
-//! The standard ones are MaterialX 1.39's `stdlib`, `pbrlib`, `nprlib` and
-//! `bxdf` libraries, embedded and parsed once; a document's own `<nodedef>`s come
-//! before them for that document. C++ `usdMtlx` reads the same libraries
-//! through `UsdMtlxGetDocument("")`.
+//! The standard ones are those of MaterialX 1.39's libraries (`stdlib`,
+//! `pbrlib`, `nprlib`, `cmlib`, `lights` and `bxdf`), embedded and parsed
+//! once; a document's own `<nodedef>`s come before them for that document.
+//! C++ `usdMtlx` reads the same libraries through `UsdMtlxGetDocument("")`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use crate::document::Node;
+use crate::document::{self, Included, Node};
 
 /// The embedded definition documents, in the order a lookup reads them.
 const LIBRARIES: &[&str] = &[
     include_str!("../libraries/stdlib/stdlib_defs.mtlx"),
     include_str!("../libraries/pbrlib/pbrlib_defs.mtlx"),
     include_str!("../libraries/nprlib/nprlib_defs.mtlx"),
+    include_str!("../libraries/cmlib/cmlib_defs.mtlx"),
+    include_str!("../libraries/lights/lights_defs.mtlx"),
     include_str!("../libraries/bxdf/standard_surface.mtlx"),
     include_str!("../libraries/bxdf/open_pbr_surface.mtlx"),
     include_str!("../libraries/bxdf/gltf_pbr.mtlx"),
     include_str!("../libraries/bxdf/usd_preview_surface.mtlx"),
     include_str!("../libraries/bxdf/disney_principled.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_add.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_conductor.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_dielectric.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_diffuse.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_emission.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_generalized_schlick.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_iridescence.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_layer.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_mix.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_sheen.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_sss.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_surface.mtlx"),
+    include_str!("../libraries/bxdf/lama/lama_translucent.mtlx"),
+    include_str!("../libraries/bxdf/translation/open_pbr_to_standard_surface.mtlx"),
+    include_str!("../libraries/bxdf/translation/standard_surface_to_gltf_pbr.mtlx"),
+    include_str!("../libraries/bxdf/translation/standard_surface_to_open_pbr.mtlx"),
+    include_str!("../libraries/bxdf/translation/standard_surface_to_usd.mtlx"),
 ];
 
 /// A `<nodedef>`: a node category's signature.
@@ -45,7 +64,10 @@ pub(crate) struct NodeDef {
 #[derive(Debug, Default)]
 pub(crate) struct Library {
     defs: Vec<NodeDef>,
+    /// Nodedef name → its index in `defs`.
     by_name: HashMap<String, usize>,
+    /// Node category → the indices in `defs` of its nodedefs, in order.
+    by_category: HashMap<String, Vec<usize>>,
 }
 
 /// How well a nodedef matches a node.
@@ -60,17 +82,15 @@ pub(crate) enum Match<'d> {
 }
 
 impl NodeDef {
-    /// The nodedef `el` declares, its own ports only.
-    pub(crate) fn from_element(el: roxmltree::Node<'_, '_>) -> Self {
+    /// The nodedef `el` declares, its own ports only. Each child the read
+    /// leaves out is noted in `notes`.
+    pub(crate) fn from_element(el: roxmltree::Node<'_, '_>, name: String, notes: &mut Vec<String>) -> Self {
+        let children = document::children(el, &name, HashSet::new(), notes);
         let ports = |tag: &str| {
-            el.children()
-                .filter(|c| c.has_tag_name(tag))
-                .map(|c| {
-                    (
-                        c.attribute("name").unwrap_or_default().to_owned(),
-                        c.attribute("type").unwrap_or_default().to_owned(),
-                    )
-                })
+            children
+                .iter()
+                .filter(|(c, _)| c.has_tag_name(tag))
+                .map(|(c, name)| (name.clone(), c.attribute("type").unwrap_or_default().to_owned()))
                 .collect::<Vec<_>>()
         };
         let mut outputs = ports("output");
@@ -81,7 +101,7 @@ impl NodeDef {
             outputs.push(("out".to_owned(), ty.to_owned()));
         }
         Self {
-            name: el.attribute("name").unwrap_or_default().to_owned(),
+            name,
             node: el.attribute("node").unwrap_or_default().to_owned(),
             version: el.attribute("version").map(str::to_owned),
             default_version: el.attribute("isdefaultversion") == Some("true"),
@@ -105,29 +125,8 @@ impl NodeDef {
         self.inputs.iter().find(|(n, _)| n == name).map(|(_, t)| t.as_str())
     }
 
-    /// The output a connection naming none reads: the only one, whatever
-    /// it is called, else `out`.
-    pub(crate) fn default_output(&self) -> &str {
-        match self.outputs.as_slice() {
-            [(name, _)] => name,
-            _ => "out",
-        }
-    }
-
-    /// Whether the node instantiates this nodedef's category at this type and
-    /// version: the nodedef the node's own version names, or else the
-    /// category's default version.
-    fn fits(&self, node: &Node) -> bool {
-        self.node == node.category
-            && self.type_name() == node.type_name
-            && match &node.version {
-                Some(version) => self.version.as_ref() == Some(version),
-                None => self.version.is_none() || self.default_version,
-            }
-    }
-
     /// Whether every input `node` authors is one of this nodedef's, of the
-    /// same type.
+    /// same type (MaterialX `hasExactInputMatch`).
     fn takes_inputs(&self, node: &Node) -> bool {
         node.inputs
             .iter()
@@ -140,25 +139,15 @@ impl Library {
     pub(crate) fn standard() -> &'static Library {
         static STANDARD: OnceLock<Library> = OnceLock::new();
         STANDARD.get_or_init(|| {
+            // TODO(rayon): the libraries are independent and can be parsed
+            // in parallel.
             let defs = LIBRARIES
                 .iter()
-                .filter_map(|text| roxmltree::Document::parse(text).ok())
-                .flat_map(|doc| {
-                    doc.root_element()
-                        .children()
-                        .filter(|c| c.has_tag_name("nodedef"))
-                        .map(NodeDef::from_element)
-                        .collect::<Vec<_>>()
-                })
+                .filter_map(|text| document::parse(text, "an embedded library", &mut |_| Ok(Included::Unfound)).ok())
+                .flat_map(|doc| doc.nodedefs)
                 .collect();
-            Library::new(defs)
+            Self::with_base(defs, None)
         })
-    }
-
-    /// A library of `defs`, each one's inherited ports resolved over the
-    /// others and `base`'s.
-    pub(crate) fn new(defs: Vec<NodeDef>) -> Self {
-        Self::with_base(defs, None)
     }
 
     /// A document's library: its `defs`, inheriting from the standard ones
@@ -167,36 +156,66 @@ impl Library {
         Self::with_base(defs, Some(Self::standard()))
     }
 
+    /// A library of `defs`, each one's inherited ports resolved over the
+    /// others and `base`'s.
     fn with_base(mut defs: Vec<NodeDef>, base: Option<&Library>) -> Self {
-        let own: HashMap<String, NodeDef> = defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
-        let lookup = |name: &str| own.get(name).or_else(|| base.and_then(|b| b.by_name(name)));
-        for def in &mut defs {
-            // The chain from the most derived, a cycle cut where it repeats.
-            let mut chain = vec![def.clone()];
-            let mut seen = vec![def.name.clone()];
-            while let Some(parent) = chain.last().and_then(|d| d.inherit.as_deref()).and_then(lookup) {
-                if seen.contains(&parent.name) {
-                    break;
+        let by_name: HashMap<String, usize> = defs.iter().enumerate().map(|(i, d)| (d.name.clone(), i)).collect();
+        let lookup = |name: &str| {
+            let own = by_name.get(name).map(|&i| &defs[i]);
+            own.or_else(|| base.and_then(|b| b.by_name(name)))
+        };
+        // Each nodedef's ports are worked out from the declared ones of its
+        // chain before any is replaced.
+        let ports: Vec<_> = defs
+            .iter()
+            .map(|def| {
+                // The chain from the most derived, a cycle cut where it
+                // repeats.
+                let mut chain = vec![def];
+                while let Some(parent) = chain.last().and_then(|d| d.inherit.as_deref()).and_then(lookup) {
+                    if chain.iter().any(|d| d.name == parent.name) {
+                        break;
+                    }
+                    chain.push(parent);
                 }
-                seen.push(parent.name.clone());
-                chain.push(parent.clone());
-            }
-            let mut inputs: Vec<(String, String)> = Vec::new();
-            let mut outputs: Vec<(String, String)> = Vec::new();
-            for d in chain.iter().rev() {
-                for (port, into) in [(&d.inputs, &mut inputs), (&d.outputs, &mut outputs)] {
-                    for p in port {
-                        if !into.iter().any(|(n, _)| *n == p.0) {
-                            into.push(p.clone());
+                let mut inputs: Vec<(String, String)> = Vec::new();
+                let mut outputs: Vec<(String, String)> = Vec::new();
+                for d in chain.iter().rev() {
+                    for (port, into) in [(&d.inputs, &mut inputs), (&d.outputs, &mut outputs)] {
+                        for p in port {
+                            if !into.iter().any(|(n, _)| *n == p.0) {
+                                into.push(p.clone());
+                            }
                         }
                     }
                 }
-            }
+                (inputs, outputs)
+            })
+            .collect();
+        for (def, (inputs, outputs)) in defs.iter_mut().zip(ports) {
             def.inputs = inputs;
             def.outputs = outputs;
         }
-        let by_name = defs.iter().enumerate().map(|(i, d)| (d.name.clone(), i)).collect();
-        Self { defs, by_name }
+        let mut by_category: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, def) in defs.iter().enumerate() {
+            by_category.entry(def.node.clone()).or_default().push(i);
+        }
+        Self {
+            defs,
+            by_name,
+            by_category,
+        }
+    }
+
+    /// The nodedefs `node` may be written as an instance of, in the order
+    /// they are declared.
+    fn instantiated_by<'a>(&'a self, node: &Node) -> impl Iterator<Item = &'a NodeDef> {
+        self.by_category
+            .get(&node.category)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.defs[i])
+            .filter(|def| def.type_name() == node.type_name)
     }
 
     /// The nodedef called `name`.
@@ -204,37 +223,75 @@ impl Library {
         self.by_name.get(name).map(|&i| &self.defs[i])
     }
 
-    /// The nodedef `node` instantiates (C++ `usdMtlx`'s `_FindMatchingNodeDef`
-    /// over a document, then over the standard library): the one it names,
-    /// or the first of its category, type and version whose inputs take every
-    /// input it authors. Failing that, the first of its category, type and
-    /// version, as [`Match::Closest`].
-    pub(crate) fn find(&self, node: &Node) -> Option<Match<'_>> {
-        if let Some(def) = node.nodedef.as_deref().and_then(|n| self.by_name(n)) {
-            return Some(Match::Exact(def));
+    /// The nodedef `node` resolves to among these alone, as MaterialX
+    /// resolves it (`Node::getNodeDef`): the one it names, or the first it
+    /// instantiates at its version whose inputs take every input it authors.
+    /// An unversioned node is at a nodedef's version when the nodedef has
+    /// none or is its category's default.
+    fn declared(&self, node: &Node) -> Option<&NodeDef> {
+        if let Some(name) = &node.nodedef {
+            return self.by_name(name);
         }
-        let mut candidates: Vec<&NodeDef> = self.defs.iter().filter(|d| d.fits(node)).collect();
-        // An unversioned node means its category's default version: a
-        // nodedef marked so comes before one that declares no version.
-        candidates.sort_by_key(|d| node.version.is_none() && !d.default_version);
-        candidates
-            .iter()
-            .find(|d| d.takes_inputs(node))
-            .map(|d| Match::Exact(d))
-            .or_else(|| candidates.first().map(|d| Match::Closest(d)))
+        self.instantiated_by(node).find(|d| {
+            (d.version == node.version || (d.default_version && node.version.is_none())) && d.takes_inputs(node)
+        })
+    }
+
+    /// The nodedef `node` instantiates among these (C++ `usdMtlx`'s
+    /// `_FindMatchingNodeDef` over one document), with `inputs` only one
+    /// whose inputs take every input the node authors. A versioned node
+    /// takes the first nodedef of its version. An unversioned one, or one
+    /// whose version is none C++ reads, takes the first marked its
+    /// category's default version, or else the last not marked so.
+    fn matching(&self, node: &Node, inputs: bool) -> Option<&NodeDef> {
+        let mut found = None;
+        // TODO: match the `target` of the node against the nodedef's too
+        // (MaterialX `targetStringsMatch`); neither is read.
+        let candidates = self.instantiated_by(node).filter(|d| !inputs || d.takes_inputs(node));
+        let version = node.version.as_deref().and_then(parse_version);
+        for def in candidates {
+            match version {
+                None if def.default_version => return Some(def),
+                None => found = Some(def),
+                Some(_) if def.version.as_deref().and_then(parse_version) == version => return Some(def),
+                Some(_) => {}
+            }
+        }
+        found
     }
 }
 
-/// The nodedef `node` instantiates, looked up in the document's `local`
-/// library and then the standard one: an exact match in either before a
-/// closest one.
+/// The nodedef `node` instantiates, in the order C++ `usdMtlx` looks
+/// (`_GetNodeDef`): what the node resolves to in the document's `local`
+/// library, the nodedef matching it there, the standard nodedef it names,
+/// then the standard nodedef matching it. Failing all four, the nodedef
+/// matching it but for its inputs, as [`Match::Closest`].
 pub(crate) fn find<'d>(local: &'d Library, node: &Node) -> Option<Match<'d>> {
+    // TODO(perf): a node is looked up once for its own prim and once for
+    // each connection reading it; the result depends on the node alone and
+    // could be kept per node.
     let standard = Library::standard();
-    match (local.find(node), standard.find(node)) {
-        (Some(Match::Exact(def)), _) | (_, Some(Match::Exact(def))) => Some(Match::Exact(def)),
-        (Some(closest), _) => Some(closest),
-        (None, standard) => standard,
-    }
+    let named = || node.nodedef.as_deref().and_then(|name| standard.by_name(name));
+    local
+        .declared(node)
+        .or_else(|| local.matching(node, true))
+        .or_else(named)
+        .or_else(|| standard.matching(node, true))
+        .map(Match::Exact)
+        .or_else(|| {
+            local
+                .matching(node, false)
+                .or_else(|| standard.matching(node, false))
+                .map(Match::Closest)
+        })
+}
+
+/// `text` as the version C++ reads it as (`SdrVersion`): `major` or
+/// `major.minor`, not both zero. `None` for anything else, `1.0.1` included.
+fn parse_version(text: &str) -> Option<(u32, u32)> {
+    let (major, minor) = text.split_once('.').unwrap_or((text, "0"));
+    let version = (major.parse().ok()?, minor.parse().ok()?);
+    (version != (0, 0)).then_some(version)
 }
 
 #[cfg(test)]
@@ -298,11 +355,14 @@ mod tests {
             exact(&node("convert", "vector2", &[("in", "float")])),
             "ND_convert_float_vector2"
         );
-        // Both `normalmap` nodedefs take `in` alone: the first declared wins.
+        // Both `normalmap` nodedefs take `in` alone, and neither is marked
+        // the default version: the last declared wins.
         assert_eq!(
             exact(&node("normalmap", "vector3", &[("in", "vector3")])),
-            "ND_normalmap_float"
+            "ND_normalmap_vector2"
         );
+        // `UsdUVTexture` has a nodedef marked the default version.
+        assert_eq!(exact(&node("UsdUVTexture", "multioutput", &[])), "ND_UsdUVTexture_23");
         assert_eq!(
             exact(&node("standard_surface", "surfaceshader", &[])),
             "ND_standard_surface_surfaceshader"
@@ -319,11 +379,50 @@ mod tests {
         assert!(find(&Library::default(), &node("no_such", "float", &[])).is_none());
     }
 
+    /// A document's own nodedefs resolve as MaterialX resolves them, the
+    /// first match winning, and come before the standard ones.
     #[test]
-    fn single_output_default() {
+    fn local_first_match() {
+        let def = |name: &str| NodeDef {
+            name: name.into(),
+            node: "normalmap".into(),
+            inputs: vec![("in".into(), "vector3".into())],
+            outputs: vec![("out".into(), "vector3".into())],
+            ..NodeDef::default()
+        };
+        let local = Library::local(vec![def("ND_mine_a"), def("ND_mine_b")]);
+        match find(&local, &node("normalmap", "vector3", &[("in", "vector3")])) {
+            Some(Match::Exact(def)) => assert_eq!(def.name, "ND_mine_a"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn versions_compare() {
+        assert_eq!(parse_version("1"), parse_version("1.0"));
+        assert_eq!(parse_version("2.3"), Some((2, 3)));
+        assert_eq!(parse_version("1.0.1"), None);
+        assert_eq!(parse_version("beta"), None);
+        let mut texture = node("UsdUVTexture", "multioutput", &[]);
+        texture.version = Some("2.2".into());
+        assert_eq!(exact(&texture), "ND_UsdUVTexture");
+    }
+
+    /// Every embedded library parses, and the libraries beside `stdlib`
+    /// contribute their nodedefs.
+    #[test]
+    fn libraries_parse() {
+        for text in LIBRARIES {
+            roxmltree::Document::parse(text).expect("an embedded library parses");
+        }
         let lib = Library::standard();
-        let absorption = lib.by_name("ND_chiang_hair_absorption_from_color").expect("defined");
-        assert_eq!(absorption.default_output(), "absorption");
-        assert_eq!(lib.by_name("ND_artistic_ior").expect("defined").default_output(), "out");
+        for name in [
+            "ND_point_light",
+            "ND_lama_conductor",
+            "ND_g22_rec709_to_lin_rec709_color3",
+            "ND_standard_surface_to_open_pbr_surface",
+        ] {
+            assert!(lib.by_name(name).is_some(), "{name}");
+        }
     }
 }

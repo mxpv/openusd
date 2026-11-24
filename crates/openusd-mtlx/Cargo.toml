@@ -15,8 +15,8 @@ include = ["src/**", "libraries/**", "README.md"]
 
 [dependencies]
 openusd.workspace = true
-# The XML reader. Pure safe Rust with no dependencies of its own; a document
-# is small next to the scene that binds it, so it is read whole.
+# The XML reader, safe Rust whose one dependency is `memchr`. A document is
+# small next to the scene that binds it, so it is read whole.
 roxmltree = "0.21"
 thiserror.workspace = true
 

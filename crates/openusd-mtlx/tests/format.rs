@@ -2,8 +2,11 @@
 //! composed by reference, by payload and as a root layer, and their
 //! translations pinned against the layers under `tests/expected/`.
 //!
-//! The goldens regenerate with `UPDATE_EXPECTED=1`.
+//! The goldens regenerate with `UPDATE_EXPECTED=1`. `fixtures/usd_mtlx`
+//! holds documents of C++ `testUsdMtlxFileFormat` with the layers C++
+//! `usdMtlx` wrote for them.
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +29,23 @@ fn stage(root: &Path) -> Result<usd::Stage> {
 /// The value of `attr` on the prim at `prim`.
 fn value(stage: &usd::Stage, prim: &str, attr: &str) -> Result<Option<vt::Value>> {
     Ok(stage.prim(prim)?.attribute(attr).get::<vt::Value>()?)
+}
+
+/// The asset path `attr` holds on the prim at `prim`.
+fn asset(stage: &usd::Stage, prim: &str, attr: &str) -> Result<sdf::AssetPath> {
+    Ok(value(stage, prim, attr)?
+        .and_then(vt::Value::try_as_asset_path)
+        .expect("an asset path"))
+}
+
+/// The layer the document at `path` reads as, in `usda` text.
+fn exported(path: &Path) -> Result<String> {
+    let registry = sdf::LayerRegistry::default().with_format(&openusd_mtlx::MTLX);
+    let layer = registry
+        .find_or_open(path.to_str().expect("utf-8 path"))?
+        .expect("resolves");
+    let text = layer.borrow().export_to_string()?;
+    Ok(text)
 }
 
 /// The one connection of `attr` on the prim at `prim`.
@@ -73,9 +93,15 @@ fn referenced_documents() -> Result {
     let file = image.attribute("inputs:file");
     assert_eq!(file.color_space()?.as_ref().map(|t| t.as_str()), Some("srgb_texture"));
     // `fileprefix` is folded in, as MaterialX's `flattenFilenames` folds it.
-    let Some(vt::Value::AssetPath(asset)) = file.get::<vt::Value>()? else {
-        panic!("no file")
-    };
+    let asset = asset(&stage, &format!("{graph}/image_color"), "inputs:file")?;
+    // The document's own `colorspace` is not written on an input.
+    assert_eq!(
+        stage
+            .prim(format!("{brass}/SR_brass1"))?
+            .attribute("inputs:base_color")
+            .color_space()?,
+        None
+    );
     assert_eq!(asset.asset_path(), "./textures/./textures/brass_color.jpg");
 
     let plastic = "/MaterialX/Materials/USD_Plastic";
@@ -110,10 +136,7 @@ fn payload_anchors_at_document() -> Result {
         source(&stage, "/Look", "outputs:mtlx:surface")?,
         "/Look/surf.outputs:surface"
     );
-    let file = stage.prim("/Look/NodeGraphs/albedo")?.attribute("inputs:file");
-    let Some(vt::Value::AssetPath(asset)) = file.get::<vt::Value>()? else {
-        panic!("no file")
-    };
+    let asset = asset(&stage, "/Look/NodeGraphs/albedo", "inputs:file")?;
     let resolved = asset.resolved_path().expect("resolves");
     assert_eq!(
         Path::new(resolved).canonicalize()?,
@@ -187,7 +210,7 @@ fn needs_format() {
 fn vendor_goldens() -> Result {
     let registry = sdf::LayerRegistry::default().with_format(&openusd_mtlx::MTLX);
     let expected = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/expected");
-    let update = std::env::var_os("UPDATE_EXPECTED").is_some();
+    let update = env::var_os("UPDATE_EXPECTED").is_some();
     let mut documents = Vec::new();
     for dir in [
         "test_assets/MaterialXTest",
@@ -242,15 +265,16 @@ fn reports_warnings() -> Result {
         .find_or_open(path.to_str().expect("utf-8 path"))?
         .expect("resolves");
     let layer = layer.borrow();
-    let Some(Ok(Some(vt::Value::Dictionary(data)))) = layer
+    let data = layer
         .pseudo_root()
-        .map(|root| root.field(sdf::FieldKey::CustomLayerData.as_str()))
-    else {
-        panic!("no customLayerData")
-    };
-    let Some(vt::Value::StringVec(warnings)) = data.get_at("mtlx:warnings") else {
-        panic!("no warnings: {data:?}")
-    };
+        .expect("a pseudo-root")
+        .field(sdf::FieldKey::CustomLayerData.as_str())?
+        .and_then(vt::Value::try_as_dictionary)
+        .expect("customLayerData");
+    let warnings = data
+        .get_at("mtlx:warnings")
+        .and_then(vt::Value::try_as_string_vec_ref)
+        .expect("warnings");
     assert_eq!(
         warnings,
         &[
@@ -264,5 +288,211 @@ fn reports_warnings() -> Result {
         value(&stage, "/MaterialX/NodeGraphs/b", "info:id")?,
         Some(vt::Value::token("ND_subsurface_bsdf"))
     );
+    Ok(())
+}
+
+/// Documents of C++ `testUsdMtlxFileFormat` translate into the layers C++
+/// `usdMtlx` wrote for them, but for the version: C++ writes the one
+/// MaterialX upgraded the document to.
+#[test]
+fn cpp_baselines() -> Result {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/usd_mtlx");
+    for name in ["GraphlessNodes", "usd_preview_surface_gold"] {
+        let text = exported(&fixtures.join(name).with_extension("mtlx"))?;
+        let expected = fs::read_to_string(fixtures.join(name).with_extension("usda"))?
+            .replace("\r\n", "\n")
+            .replace("config:mtlx:version = \"1.39\"", "config:mtlx:version = \"1.38\"");
+        assert_eq!(text, expected, "{name}");
+    }
+    Ok(())
+}
+
+/// A document reads the documents it includes, each found from the one
+/// including it, whether or not it declares the `xi` prefix.
+#[test]
+fn includes_read() -> Result {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir_all(dir.path().join("lib/deep"))?;
+    fs::write(
+        dir.path().join("lib/deep/defs.mtlx"),
+        r#"<materialx version="1.39">
+             <nodedef name="ND_mine" node="mine"><input name="tint" type="color3" /><output name="out" type="surfaceshader" /></nodedef>
+           </materialx>"#,
+    )?;
+    fs::write(
+        dir.path().join("lib/shaders.mtlx"),
+        r#"<materialx version="1.39" xmlns:xi="http://www.w3.org/2001/XInclude">
+             <xi:include href="deep/defs.mtlx" />
+             <mine name="s" type="surfaceshader"><input name="tint" type="color3" value="1, 0, 0" /></mine>
+           </materialx>"#,
+    )?;
+    let path = dir.path().join("look.mtlx");
+    fs::write(
+        &path,
+        r#"<materialx version="1.39">
+             <xi:include href="lib/shaders.mtlx" />
+             <surfacematerial name="m" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s" /></surfacematerial>
+           </materialx>"#,
+    )?;
+    let stage = stage(&path)?;
+    assert_eq!(
+        value(&stage, "/MaterialX/Materials/m/s", "info:id")?,
+        Some(vt::Value::token("ND_mine"))
+    );
+    assert_eq!(
+        value(&stage, "/MaterialX/Materials/m", "inputs:tint")?,
+        Some(vt::Value::Vec3f([1.0, 0.0, 0.0].into()))
+    );
+    Ok(())
+}
+
+/// A document that includes itself, or a document that is not there, does
+/// not read.
+#[test]
+fn bad_includes_fail() -> Result {
+    let dir = tempfile::tempdir()?;
+    let registry = sdf::LayerRegistry::default().with_format(&openusd_mtlx::MTLX);
+    for (name, href, reason) in [
+        ("cycle.mtlx", "cycle.mtlx", "forms a cycle"),
+        ("lost.mtlx", "none.mtlx", "does not resolve"),
+    ] {
+        let path = dir.path().join(name);
+        fs::write(
+            &path,
+            format!(r#"<materialx version="1.39"><xi:include href="{href}" /></materialx>"#),
+        )?;
+        let error = registry
+            .find_or_open(path.to_str().expect("utf-8 path"))
+            .expect_err("does not read")
+            .to_string();
+        assert!(error.contains(reason), "{error}");
+    }
+    Ok(())
+}
+
+/// What a material carries beside its surface: the base it inherits from,
+/// a light shader's terminal, a token as a primvar, and the documentation
+/// and interface metadata of its inputs.
+#[test]
+fn material_extras() -> Result {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("m.mtlx");
+    fs::write(
+        &path,
+        r#"<materialx version="1.39" colorspace="acescg" cms="ocio">
+             <nodegraph name="g" doc="A graph">
+               <input name="gain" type="float" value="2" uiname="Gain" uifolder="Look/Main" helptext="How bright" />
+               <input name="tint" type="color3" value="1, 1, 1" colorspace="lin_rec709" />
+               <input name="plain" type="color3" value="1, 1, 1" />
+               <multiply name="ns:mul" type="float"><input name="in1" type="float" interfacename="gain" /></multiply>
+               <output name="out" type="float" nodename="ns:mul" />
+             </nodegraph>
+             <point_light name="lamp" type="lightshader" doc="A lamp">
+               <input name="intensity" type="float" nodegraph="g" output="out" />
+               <token name="mumble" type="string" value="shout" />
+             </point_light>
+             <surfacematerial name="base" type="material" />
+             <surfacematerial name="m" type="material" inherit="base" doc="A material">
+               <input name="lightshader" type="lightshader" nodename="lamp" />
+             </surfacematerial>
+           </materialx>"#,
+    )?;
+    let text = exported(&path)?;
+    for expected in [
+        "colorManagementSystem = \"ocio\"",
+        "doc = \"A material\"",
+        "prepend specializes = </MaterialX/Materials/base>",
+        "token outputs:light.connect = </MaterialX/Materials/m/lamp.outputs:light>",
+        "string primvars:mumble = \"shout\"",
+        "float inputs:intensity.connect = </MaterialX/Materials/m/g.outputs:out>",
+        "uniform token info:id = \"ND_point_light\"",
+        "doc = \"A graph\"",
+        "displayGroup = \"Look:Main\"",
+        "displayName = \"Gain\"",
+        "doc = \"How bright\"",
+        "def Shader \"ns__mul\"",
+        "float outputs:out.connect = </MaterialX/NodeGraphs/g/ns__mul.outputs:out>",
+    ] {
+        assert!(text.contains(expected), "no {expected} in:\n{text}");
+    }
+    // A colour space is written where it is not the document's.
+    let stage = stage(&path)?;
+    let graph = stage.prim("/MaterialX/NodeGraphs/g")?;
+    assert_eq!(
+        graph
+            .attribute("inputs:tint")
+            .color_space()?
+            .as_ref()
+            .map(|t| t.as_str()),
+        Some("lin_rec709")
+    );
+    assert_eq!(graph.attribute("inputs:plain").color_space()?, None);
+    Ok(())
+}
+
+/// A file an included document names beside itself resolves there, not
+/// beside the document that includes it, by a path that stays relative to
+/// the document opened; a document two others include is read once.
+#[test]
+fn included_files_anchor() -> Result {
+    let dir = tempfile::tempdir()?;
+    for sub in ["lib/tex", "tex"] {
+        fs::create_dir_all(dir.path().join(sub))?;
+        fs::write(dir.path().join(sub).join("a.png"), b"")?;
+    }
+    fs::write(
+        dir.path().join("lib/shared.mtlx"),
+        r#"<materialx version="1.39" fileprefix="tex/">
+             <image name="albedo" type="color3"><input name="file" type="filename" value="a.png" /></image>
+             <image name="tiles" type="color3"><input name="file" type="filename" value="t.<UDIM>.png" /></image>
+           </materialx>"#,
+    )?;
+    for name in ["one", "two"] {
+        fs::write(
+            dir.path().join("lib").join(name).with_extension("mtlx"),
+            r#"<materialx version="1.39"><xi:include href="shared.mtlx" /></materialx>"#,
+        )?;
+    }
+    let path = dir.path().join("look.mtlx");
+    fs::write(
+        &path,
+        r#"<materialx version="1.39">
+             <xi:include href="lib/one.mtlx" />
+             <xi:include href="lib/two.mtlx" />
+             <standard_surface name="s" type="surfaceshader">
+               <input name="base_color" type="color3" nodename="albedo" />
+               <input name="coat_color" type="color3" nodename="tiles" />
+             </standard_surface>
+             <surfacematerial name="m" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s" /></surfacematerial>
+           </materialx>"#,
+    )?;
+    let composed = stage(&path)?;
+    let asset = asset(&composed, "/MaterialX/Materials/m/NodeGraphs/albedo", "inputs:file")?;
+    assert_eq!(
+        Path::new(asset.resolved_path().expect("resolves")).canonicalize()?,
+        dir.path().join("lib/tex/a.png").canonicalize()?
+    );
+    // A pattern naming no file anchors beside the library too.
+    let tiles = self::asset(&composed, "/MaterialX/Materials/m/NodeGraphs/tiles", "inputs:file")?;
+    assert_eq!(tiles.asset_path(), "lib/tex/t.<UDIM>.png");
+
+    // A library included by an absolute path anchors its names at itself.
+    let absolute = dir.path().join("absolute.mtlx");
+    fs::write(
+        &absolute,
+        format!(
+            r#"<materialx version="1.39">
+                 <xi:include href="{}" />
+                 <standard_surface name="s" type="surfaceshader"><input name="coat_color" type="color3" nodename="tiles" /></standard_surface>
+                 <surfacematerial name="m" type="material"><input name="surfaceshader" type="surfaceshader" nodename="s" /></surfacematerial>
+               </materialx>"#,
+            dir.path().join("lib/shared.mtlx").display()
+        ),
+    )?;
+    let composed = stage(&absolute)?;
+    let tiles = self::asset(&composed, "/MaterialX/Materials/m/NodeGraphs/tiles", "inputs:file")?;
+    let pattern = Path::new(tiles.asset_path());
+    assert!(pattern.is_absolute(), "{pattern:?}");
+    assert!(pattern.ends_with("lib/tex/t.<UDIM>.png"), "{pattern:?}");
     Ok(())
 }
