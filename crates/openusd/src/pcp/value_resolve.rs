@@ -266,6 +266,11 @@ pub(crate) fn is_block(value: &vt::Value) -> bool {
     matches!(value, vt::Value::ValueBlock | vt::Value::None)
 }
 
+/// [`is_block`] of any value of `kind`.
+pub(crate) fn is_block_kind(kind: vt::ValueKind) -> bool {
+    matches!(kind, vt::ValueKind::ValueBlock | vt::ValueKind::None)
+}
+
 /// An owned, alias-free record of the composition node an opinion came from
 /// (C++ `PcpNodeRef`'s identifying facts).
 ///
@@ -520,7 +525,7 @@ impl ClipProbe<'_> {
 /// Every hook borrows what it is handed and returns a [`Step`]; nothing is
 /// cloned on the resolver's behalf, so a resolver that needs an owned copy
 /// clones it itself. That is what lets a per-time read borrow a sample map
-/// while the cached-source resolver clones it once.
+/// its layer lends.
 pub(crate) trait OpinionResolver {
     /// Fires for every visited site before any field is probed, whether or not
     /// the site authors a value. The property stack answers here; the value
@@ -565,30 +570,34 @@ pub(crate) trait OpinionResolver {
 
     /// Returns the stage time this resolver interpolates `timeSamples` at.
     ///
-    /// With a time, the walk reads from each layer only the samples that
-    /// bracket it. The default is `None`, for a resolver that lists or keeps
-    /// every sample; the walk then reads the whole map.
+    /// With a time, the map the walk hands
+    /// [`on_time_samples`](Self::on_time_samples) holds the samples that
+    /// bracket it and may hold no others
+    /// ([`sdf::AbstractData::bracketing_samples`]), so such a resolver judges
+    /// the map only by interpolating it at that time. The default is `None`,
+    /// for a resolver that lists or keeps every sample; the walk then reads
+    /// the whole map.
     fn sample_time(&self) -> Option<f64> {
         None
     }
 
-    /// Returns whether a `timeSamples` field's sample count answers this
-    /// resolver at the next site, without the samples' values.
+    /// Returns whether the kinds of a `timeSamples` map's samples may answer
+    /// this resolver at the next site, without the samples' values.
     ///
-    /// The walk then reads a field's sample times and their kinds, and calls
-    /// [`on_sample_count`](Self::on_sample_count) for one holding more than one
-    /// sample, at least one of them a value; any other field it reads whole.
-    /// C++ `UsdStage::_ValueMightBeTimeVaryingFromResolveInfo` answers from the
-    /// count the same way.
-    fn counts_samples(&self) -> bool {
+    /// The walk then reads the kinds of a map that holds samples and offers
+    /// them to [`on_sample_kinds`](Self::on_sample_kinds); any other field it
+    /// reads whole.
+    fn reads_sample_kinds(&self) -> bool {
         false
     }
 
-    /// Receives the sample count of a `timeSamples` field at `site` that holds
-    /// more than one sample, at least one of them a value. Called only while
-    /// [`counts_samples`](Self::counts_samples) is `true`.
-    fn on_sample_count(&mut self, _count: usize, _site: &OpinionSite<'_>) -> Step {
-        Step::Continue
+    /// Receives the kind of each sample of the `timeSamples` map at `site`,
+    /// in time order, and answers from them, or returns `None` to be handed
+    /// the map itself through [`on_time_samples`](Self::on_time_samples).
+    /// Called only while [`reads_sample_kinds`](Self::reads_sample_kinds) is
+    /// `true`, and never with no kinds.
+    fn on_sample_kinds(&mut self, _kinds: &[vt::ValueKind], _site: &OpinionSite<'_>) -> Option<Step> {
+        None
     }
 
     /// Whether the walk visits the layers that author no spec for the prim

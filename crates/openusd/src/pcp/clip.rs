@@ -1032,14 +1032,14 @@ impl ClipCache {
         };
         let path = &clip.clip_path;
         let excluded = self.excluded_activations(graph, resolved, &clip.manifest, path);
-        let samples = match excludes(&excluded, clip.activation) {
-            false => self
-                .clip_time_samples(graph, clip.asset.asset_path(), resolved.source.layer, path)?
-                .map(|(_, samples)| samples),
-            true => None,
+        let samples = if !excludes(&excluded, clip.activation)
+            && let Some((_, layer)) = self.held_clip(graph, clip.asset.asset_path(), resolved.source.layer)?
+        {
+            layer.data().sample_times(path)?
+        } else {
+            Vec::new()
         };
-        let samples = samples.iter().flatten().map(|(time, _)| *time);
-        let mut times = set.window_sample_times(position, samples);
+        let mut times = set.window_sample_times(position, samples.iter().copied());
         if let Some(&(next, _)) = set.active.get(position + 1) {
             times.push(next);
         }
@@ -1217,9 +1217,8 @@ impl ClipCache {
         // spec to report.
         let excluded = self.excluded_activations(graph, resolved, &manifest, &clip_path);
         if !excludes(&excluded, activation)
-            && let Some((clip_id, samples)) =
-                self.clip_time_samples(graph, asset.asset_path(), resolved.source.layer, &clip_path)?
-            && !samples.is_empty()
+            && let Some((clip_id, layer)) = self.held_clip(graph, asset.asset_path(), resolved.source.layer)?
+            && layer.data().num_time_samples(&clip_path)? != 0
         {
             let id = graph.id_of(&clip_id);
             debug_assert!(id.is_some(), "a clip that supplied samples is in the graph");
@@ -1859,10 +1858,12 @@ impl ClipCache {
     }
 
     /// The in-clip authored sample times for `clip_path` in a single clip layer,
-    /// with what each supplies: the map is read whole to list the times, so
-    /// what it holds is classified while it is in hand rather than fetched
-    /// again per time. Empty when the layer is unresolved or authors no samples
-    /// there.
+    /// with what each supplies. Empty when the layer is unresolved or authors
+    /// no samples there.
+    ///
+    /// The samples' kinds say what they supply wherever no sample is of a kind
+    /// composition reads, so no value is read; a map holding such a sample is
+    /// read whole and classified from its values.
     ///
     /// The times are the clip's own, which the set's schedule maps to stage
     /// time.
@@ -1873,52 +1874,49 @@ impl ClipCache {
         anchor_layer: LayerId,
         clip_path: &Path,
     ) -> Result<Vec<(f64, Supplied)>, QueryError> {
-        let Some((_, samples)) = self.clip_time_samples(graph, asset, anchor_layer, clip_path)? else {
+        let Some((_, layer)) = self.held_clip(graph, asset, anchor_layer)? else {
             return Ok(Vec::new());
         };
-        Ok(samples
-            .iter()
-            .map(|(time, value)| (*time, Supplied::classify(value, &|value| value)))
-            .collect())
-    }
-
-    /// Reads the `timeSamples` map authored for `clip_path` in a single clip
-    /// layer, with the identifier the clip resolved to, or `None` when the layer
-    /// is unresolved or authors no samples there. The shared read behind
-    /// [`Self::clip_sample_at`] (which interpolates) and
-    /// [`Self::clip_in_clip_samples`] (which lists the times).
-    ///
-    /// The identifier travels with the samples because resolving an `asset`
-    /// value out of them anchors on that same clip, and re-deriving it would
-    /// repeat the resolver's filesystem work.
-    fn clip_time_samples(
-        &mut self,
-        graph: &LayerView<'_>,
-        asset: &str,
-        anchor_layer: LayerId,
-        clip_path: &Path,
-    ) -> Result<Option<(String, sdf::TimeSampleMap)>, QueryError> {
-        let ClipLayer::Held(id) = self.ensure_clip_layer(graph, asset, anchor_layer)? else {
-            return Ok(None);
-        };
-        let Some(layer) = self.layer(graph, &id) else {
-            return Ok(None);
-        };
+        let data = layer.data();
+        let kinds = data.sample_kinds(clip_path)?;
+        if let Some(supplied) = kinds.into_iter().map(Supplied::of_kind).collect::<Option<Vec<_>>>() {
+            return Ok(data.sample_times(clip_path)?.into_iter().zip(supplied).collect());
+        }
         Ok(
-            match layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str())? {
-                Some(value) => match value.into_owned() {
-                    Value::TimeSamples(samples) => Some((id, samples)),
-                    _ => None,
-                },
-                None => None,
+            match data.try_field(clip_path, FieldKey::TimeSamples.as_str())?.as_deref() {
+                Some(Value::TimeSamples(samples)) => samples
+                    .iter()
+                    .map(|(time, value)| (*time, Supplied::classify(value, &|value| value)))
+                    .collect(),
+                _ => Vec::new(),
             },
         )
     }
 
-    /// Reads the time samples for `clip_path` from a single clip layer and
-    /// interpolates at `clip_time`, returning the value with the identifier of
-    /// the clip that sourced it, a block where the sample held there is one.
-    /// `None` when the layer is unresolved or no sample answers there.
+    /// The clip layer `asset` names, anchored at `anchor_layer`, with the
+    /// identifier the clip resolved to, or `None` when the layer is unresolved
+    /// or still to open.
+    ///
+    /// The identifier travels with the layer because resolving an `asset`
+    /// value read out of it anchors on that same clip, and re-deriving it would
+    /// repeat the resolver's filesystem work.
+    fn held_clip<'a>(
+        &'a mut self,
+        graph: &'a LayerView<'a>,
+        asset: &str,
+        anchor_layer: LayerId,
+    ) -> Result<Option<(String, &'a sdf::Layer)>, QueryError> {
+        let ClipLayer::Held(id) = self.ensure_clip_layer(graph, asset, anchor_layer)? else {
+            return Ok(None);
+        };
+        Ok(self.layer(graph, &id).map(|layer| (id, layer)))
+    }
+
+    /// Reads the samples for `clip_path` that bracket `clip_time` from a single
+    /// clip layer and interpolates there, returning the value with the
+    /// identifier of the clip that sourced it, a block where the sample held
+    /// there is one. `None` when the layer is unresolved or no sample answers
+    /// there.
     ///
     /// The value comes back unresolved so the caller can resolve only what it
     /// keeps: a gap fill reads both brackets but returns one, and resolving the
@@ -1934,10 +1932,16 @@ impl ClipCache {
         clip_time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<(String, Value)>, QueryError> {
-        let Some((clip_id, samples)) = self.clip_time_samples(graph, asset, resolved.source.layer, clip_path)? else {
+        let Some((clip_id, layer)) = self.held_clip(graph, asset, resolved.source.layer)? else {
             return Ok(None);
         };
-        if let Some(value) = interp(&samples, clip_time) {
+        let Some(field) = layer.data().bracketing_samples(clip_path, clip_time)? else {
+            return Ok(None);
+        };
+        let Value::TimeSamples(samples) = &*field else {
+            return Ok(None);
+        };
+        if let Some(value) = interp(samples, clip_time) {
             return Ok(Some((clip_id, value)));
         }
         // `interp` reads nothing where the sample held at `clip_time` is a

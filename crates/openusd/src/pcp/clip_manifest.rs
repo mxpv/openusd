@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 
-use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AttributeSpec, AttributeSpecMut, Path, Variability};
 use crate::vt::Value;
 
@@ -154,18 +153,11 @@ fn sampled_attributes(
 /// Whether `layer` authors a non-empty `timeSamples` map for the attribute at
 /// `path`.
 ///
-/// Reads the field through [`sdf::AbstractData::try_field`] and inspects the
-/// borrowed value, so testing a clip that animates dense array attributes does
-/// not copy their samples (C++ `SdfLayer::GetNumTimeSamplesForPath`).
-//
-// TODO(perf): a backend that decodes lazily still materializes the map to hand
-// back a `Cow::Owned`. An `AbstractData::num_time_samples` hook, defaulting to
-// this and overridden by the crate reader, would make the test O(1) everywhere.
+/// Counts the samples without reading their values, so testing a clip that
+/// animates dense array attributes neither copies nor decodes them (C++
+/// `SdfLayer::GetNumTimeSamplesForPath`).
 fn has_time_samples(layer: &sdf::Layer, path: &Path) -> bool {
-    match layer.data().try_field(path, FieldKey::TimeSamples.as_str()) {
-        Ok(Some(field)) => matches!(&*field, Value::TimeSamples(samples) if !samples.is_empty()),
-        _ => false,
-    }
+    layer.data().num_time_samples(path).is_ok_and(|count| count != 0)
 }
 
 #[cfg(test)]

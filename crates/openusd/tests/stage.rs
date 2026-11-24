@@ -8818,6 +8818,159 @@ fn vary_from_sample_counts() -> Result<()> {
     Ok(())
 }
 
+/// Writes each `(name, text)` layer under `dir` as `name.usda` and again as
+/// `name.usdc`, then a root layer for each format from `root`, in which
+/// `{ext}` stands for the format's extension. Returns a stage over the text
+/// layers and one over the crates.
+fn text_and_crate_stages(dir: &FsPath, layers: &[(&str, impl AsRef<str>)], root: &str) -> Result<[Stage; 2]> {
+    for (name, text) in layers {
+        let file = dir.join(format!("{name}.usda"));
+        fs::write(&file, text.as_ref())?;
+        let crate_file = dir.join(format!("{name}.usdc"));
+        sdf::Layer::open(file.to_str().unwrap())?.export(crate_file.to_str().unwrap())?;
+    }
+    let open = |ext: &str| {
+        let file = dir.join(format!("root_{ext}.usda"));
+        fs::write(&file, root.replace("{ext}", ext))?;
+        Stage::open(file.to_str().unwrap())
+    };
+    Ok([open("usda")?, open("usdc")?])
+}
+
+/// A read at a time answers alike from a text layer and from a crate, which
+/// decodes only the samples bracketing the time: under a layer offset, beside
+/// a block, outside the sampled range, and under held interpolation.
+#[test]
+fn timed_read_crate_parity() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let anim = "#usda 1.0\ndef \"A\"\n{\n    \
+        double x.timeSamples = { 0: 1.0, 10: 3.0, 20: None, 30: 7.0, 40: 9.0 }\n    \
+        float[] pts.timeSamples = { 0: [0, 0], 10: [10, 20] }\n    \
+        double blocks.timeSamples = { 0: None, 10: None }\n}\n";
+    // A stage time is `5 + 2 * layer time`.
+    let root = "#usda 1.0\ndef \"A\" (\n    references = @./anim.{ext}@</A> (offset = 5; scale = 2)\n)\n{\n}\n";
+    let stages = text_and_crate_stages(dir.path(), &[("anim", anim)], root)?;
+    let times = [-10.0, 5.0, 15.0, 25.0, 35.0, 45.0, 55.0, 65.0, 75.0, 85.0, 100.0];
+    let read = |stage: &Stage, name: &str, time: f64| {
+        stage
+            .attribute(format!("/A.{name}").as_str())?
+            .get_at::<vt::Value>(usd::TimeCode::new(time))
+    };
+    for mode in [usd::InterpolationType::Linear, usd::InterpolationType::Held] {
+        for stage in &stages {
+            stage.set_interpolation(mode);
+        }
+        for name in ["x", "pts", "blocks"] {
+            // One query for every time, so each read after the first replays
+            // the source the query cached.
+            let path = format!("/A.{name}");
+            let queries = [
+                stages[0].attribute_query(path.as_str())?,
+                stages[1].attribute_query(path.as_str())?,
+            ];
+            for time in times {
+                assert_eq!(
+                    read(&stages[1], name, time)?,
+                    read(&stages[0], name, time)?,
+                    "{name} at {time}, {mode:?}"
+                );
+                for (stage, query) in stages.iter().zip(&queries) {
+                    assert_eq!(
+                        query.get_at::<vt::Value>(usd::TimeCode::new(time))?,
+                        read(stage, name, time)?,
+                        "query of {name} at {time}, {mode:?}"
+                    );
+                }
+                let info = |stage: &Stage| -> Result<_> {
+                    let attr = stage.attribute(format!("/A.{name}").as_str())?;
+                    Ok(attr.resolve_info_at(usd::TimeCode::new(time))?.source())
+                };
+                assert_eq!(info(&stages[1])?, info(&stages[0])?, "{name} at {time}, {mode:?}");
+            }
+        }
+    }
+    let [_, crate_stage] = &stages;
+    // Held is the mode the loop left set.
+    assert_eq!(read(crate_stage, "x", 15.0)?, Some(vt::Value::Double(1.0)));
+    assert_eq!(read(crate_stage, "x", 75.0)?, Some(vt::Value::Double(7.0)));
+    crate_stage.set_interpolation(usd::InterpolationType::Linear);
+    assert_eq!(read(crate_stage, "x", -10.0)?, Some(vt::Value::Double(1.0)));
+    assert_eq!(read(crate_stage, "x", 15.0)?, Some(vt::Value::Double(2.0)));
+    // A block as the later sample holds the earlier value, and as the earlier
+    // one withholds it.
+    assert_eq!(read(crate_stage, "x", 35.0)?, Some(vt::Value::Double(3.0)));
+    assert_eq!(read(crate_stage, "x", 55.0)?, None);
+    assert_eq!(read(crate_stage, "x", 75.0)?, Some(vt::Value::Double(8.0)));
+    assert_eq!(read(crate_stage, "x", 100.0)?, Some(vt::Value::Double(9.0)));
+    assert_eq!(
+        read(crate_stage, "pts", 15.0)?,
+        Some(vt::Value::FloatVec(vec![5.0, 10.0]))
+    );
+    Ok(())
+}
+
+/// Value clips answer alike from text clips and from crates, whose samples
+/// are read by time, count and kind: the value at a time, across a clip the
+/// manifest blocks and a gap filled from its neighbours, the sample times,
+/// and whether the value may vary.
+#[test]
+fn clip_read_crate_parity() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let clip = |samples: &str| format!("#usda 1.0\ndef \"Model\"\n{{\n{samples}}}\n");
+    let layers = [
+        (
+            "clipA",
+            clip(
+                "    float size.timeSamples = { 0: 1.0, 5: 2.0, 8: None }\n    float extra.timeSamples = { 0: 4.0 }\n",
+            ),
+        ),
+        ("clipB", clip("    float extra.timeSamples = { 10: 6.0, 15: 8.0 }\n")),
+        (
+            "clipC",
+            clip("    float size.timeSamples = { 20: 10.0, 25: 20.0 }\n    float extra.timeSamples = { 20: 9.0 }\n"),
+        ),
+        (
+            "manifest",
+            clip("    float size.timeSamples = { 10: None }\n    float extra\n"),
+        ),
+    ];
+    let root = "#usda 1.0\ndef \"Model\" (\n    clips = {\n        dictionary default = {\n            \
+        asset[] assetPaths = [@./clipA.{ext}@, @./clipB.{ext}@, @./clipC.{ext}@]\n            \
+        string primPath = \"/Model\"\n            asset manifestAssetPath = @./manifest.{ext}@\n            \
+        double2[] active = [(0, 0), (10, 1), (20, 2)]\n            \
+        bool interpolateMissingClipValues = true\n        }\n    }\n)\n{\n    float size\n    float extra\n}\n";
+    let [text, crate_stage] = text_and_crate_stages(dir.path(), &layers, root)?;
+    for mode in [usd::InterpolationType::Linear, usd::InterpolationType::Held] {
+        for name in ["size", "extra"] {
+            let path = format!("/Model.{name}");
+            let (in_text, in_crate) = (text.attribute(path.as_str())?, crate_stage.attribute(path.as_str())?);
+            text.set_interpolation(mode);
+            crate_stage.set_interpolation(mode);
+            for step in -2..=14 {
+                let time = usd::TimeCode::new(f64::from(step) * 2.5);
+                assert_eq!(
+                    in_crate.get_at::<vt::Value>(time)?,
+                    in_text.get_at::<vt::Value>(time)?,
+                    "{name} at {time:?}, {mode:?}"
+                );
+            }
+            assert_eq!(in_crate.time_sample_times()?, in_text.time_sample_times()?, "{name}");
+            assert_eq!(
+                in_crate.might_be_time_varying()?,
+                in_text.might_be_time_varying()?,
+                "{name}"
+            );
+        }
+    }
+    text.set_interpolation(usd::InterpolationType::Linear);
+    crate_stage.set_interpolation(usd::InterpolationType::Linear);
+    let size = crate_stage.attribute("/Model.size")?;
+    assert_eq!(size.get_at::<f32>(usd::TimeCode::new(2.5))?, Some(1.5));
+    assert_eq!(size.get_at::<f32>(usd::TimeCode::new(22.5))?, Some(15.0));
+    assert!(!size.time_sample_times()?.is_empty());
+    Ok(())
+}
+
 /// A stronger layer's `default` hides a weaker sublayer's `timeSamples`.
 #[test]
 fn default_hides_weaker_samples() -> Result<()> {

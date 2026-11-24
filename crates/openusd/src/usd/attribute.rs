@@ -1439,8 +1439,9 @@ impl AttributeAuthoringPlan {
 /// walk down the composition graph — on every call. When the same attribute is
 /// sampled at many time codes (motion blur, baking, a playback scrub), an
 /// `AttributeQuery` resolves that source once and replays it, so each
-/// [`get_at`](AttributeQuery::get_at) is just an interpolation rather than a
-/// fresh composition.
+/// [`get_at`](AttributeQuery::get_at) reads the samples around its time from
+/// the layer that source names and interpolates them, with no fresh
+/// composition.
 ///
 /// The cached source is stamped with the composed prim it was resolved from: a
 /// timed [`get_at`](AttributeQuery::get_at) reuses it until an edit moves that
@@ -1540,6 +1541,11 @@ impl AttributeQuery {
     /// A timed read reuses the cached value source; the default read delegates
     /// to the attribute, since a `default` opinion is resolved from a separate
     /// field. Both are typed as [`Attribute::get_at`] is.
+    ///
+    /// A timed read of sampled values reads them from their layer, so from
+    /// inside a [`LayerHandle::edit`](sdf::LayerHandle::edit) closure on one of
+    /// the stage's layers it fails with [`sdf::LayerError::Busy`], as
+    /// [`Attribute::get_at`] does.
     pub fn get_at<T>(&self, time: impl Into<Option<TimeCode>>) -> Result<Option<T>>
     where
         T: vt::FromValue,
@@ -1618,31 +1624,39 @@ impl AttributeQuery {
     /// it when the stamp it was resolved under no longer holds.
     fn value_at(&self, time: f64) -> Result<pcp::TimedValue> {
         let stage = self.attr.stage();
-        // Settle before the memo is borrowed, not while: draining commits queued
-        // edits and fires the stage sinks, and a sink that reads this very query
-        // would find the memo already borrowed.
-        stage.settle()?;
+        // A second pass evaluates the source the first one memoized, once the
+        // stage has settled whatever resolving it queued.
+        for _ in 0..2 {
+            // Settle before the memo is borrowed, not while: draining commits
+            // queued edits and fires the stage sinks, and a sink that reads this
+            // very query would find the memo already borrowed.
+            stage.settle()?;
 
-        // Reuse a cached source whose stamp still stands.
-        if let Some(cached) = self.cached.borrow().as_ref()
-            && cached.is_current(stage)
-        {
-            return self.evaluate(&cached.source, time);
-        }
+            // Reuse a cached source whose stamp still stands. A sampled source
+            // names the layer its samples are read from, and the stamp is what
+            // vouches for that layer.
+            if let Some(cached) = self.cached.borrow().as_ref()
+                && cached.is_current(stage)
+            {
+                return self.evaluate(&cached.source, time);
+            }
 
-        // Miss: resolve the source once and evaluate it. An empty source is as
-        // final as any other — a query on a `/__Prototype_N` path completes
-        // stage population before it is answered
-        // (`Stage::resolve_prototype_path`), so nothing composes into that
-        // namespace afterwards without an edit.
-        let resolved = stage.resolve_value_source(self.attr.path())?;
-        let value = self.evaluate(&resolved.source, time)?;
-        // The stamp travels with the source out of the resolving borrow, so an
-        // edit a sink authored while the pending queue drained cannot slip
-        // between the answer and the token guarding it. Without a stamp — no
-        // index is cached at the answering prim, so nothing can say when the
-        // answer expires — the source is used once and not memoized.
-        if let Some(revision) = resolved.revision {
+            // Miss: resolve the source once. An empty source is as final as any
+            // other — a query on a `/__Prototype_N` path completes stage
+            // population before it is answered
+            // (`Stage::resolve_prototype_path`), so nothing composes into that
+            // namespace afterwards without an edit.
+            let resolved = stage.resolve_value_source(self.attr.path())?;
+            // The stamp travels with the source out of the resolving borrow, so
+            // an edit a sink authored while the pending queue drained cannot
+            // slip between the answer and the token guarding it. Without a
+            // stamp — no index is cached at the answering prim, so nothing can
+            // say when the answer expires — the source is used once and not
+            // memoized; a sampled one whose layer has gone by then reads no
+            // value.
+            let Some(revision) = resolved.revision else {
+                return self.evaluate(&resolved.source, time);
+            };
             self.cached.replace(Some(CachedSource {
                 prim: resolved.prim,
                 revision,
@@ -1650,7 +1664,9 @@ impl AttributeQuery {
                 source: resolved.source,
             }));
         }
-        Ok(value)
+        // The stamp moved under both passes, so the value is resolved for this
+        // one time and the memo is left for the next read to judge.
+        self.evaluate(&AttributeValueSource::PerTime, time)
     }
 
     /// Evaluates an already-resolved value source at stage `time`.
@@ -1661,19 +1677,30 @@ impl AttributeQuery {
                 Some(value) => pcp::TimedValue::Value(value.clone()),
                 None => pcp::TimedValue::Fallback,
             }),
-            AttributeValueSource::TimeSamples { samples, offset, site } => {
+            AttributeValueSource::TimeSamples {
+                layer,
+                path,
+                offset,
+                site,
+            } => {
+                let interpolation = stage.interpolation();
+                let interp =
+                    |map: &sdf::TimeSampleMap, layer_time: f64| interp::evaluate(map, layer_time, interpolation);
+                // The layers are read as the stamp check left them: the view
+                // loads nothing, so no opinion can change between that check
+                // and this read.
+                let view = stage.layer_view()?;
+                let sampled = AttributeValueSource::sample_at(&view, *layer, path, *offset, time, &interp)?;
+                drop(view);
                 // The map answers even where its sample is blocked, so a missing
                 // value is withheld, not unauthored.
-                let Some(value) = offset.sample_in_stage_time(samples, time, |map, layer_time| {
-                    interp::evaluate(map, layer_time, stage.interpolation())
-                }) else {
+                let Some(value) = sampled else {
                     return Ok(pcp::TimedValue::NoValue);
                 };
                 // Only the interpolated result is anchored and evaluated, not
-                // the held map: resolving every sample here would report a
-                // malformed expression authored at a time this read never
-                // selected. A non-asset value skips the cache borrow entirely,
-                // which is what keeps an ordinary animated read off this path.
+                // the map it came from: resolving every sample here would
+                // report a malformed expression authored at a time this read
+                // never selected. A non-asset value is returned as read.
                 if !value.is_asset_valued() {
                     return Ok(pcp::TimedValue::Value(value));
                 }

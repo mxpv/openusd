@@ -40,7 +40,7 @@ use super::prim_index::{
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::{
     self, Composed, Composing, Folded, InstanceTargets, InvalidTargetKind, Series, Supplied, composes_over_weaker,
-    composition_rewrites,
+    kind_rewrites,
 };
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::value_resolve::{
@@ -182,8 +182,8 @@ pub(crate) struct OwnStatus {
 /// The resolved source of an attribute's value at a time code, the cacheable
 /// half of [`IndexCache::value_at`]. A cached view
 /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
-/// this once — paying the opinion walk and the one sample-map clone — then
-/// replays it across many time codes.
+/// this once, paying the opinion walk, then replays it across many time
+/// codes.
 pub(crate) enum AttributeValueSource {
     /// A time-independent value: a `default` opinion (local or fallback), or
     /// `None` when the attribute is unauthored, masked out, or blocked. The
@@ -193,13 +193,13 @@ pub(crate) enum AttributeValueSource {
     /// nothing" — which is what a query on a prim the stage does not hold
     /// returns.
     Static(Option<Value>),
-    /// A time-sampled source — the matched map, its node's layer offset, and
-    /// where it was authored. The map is in the node's layer time frame and is
-    /// replayed per query through
-    /// [`sdf::LayerOffset::sample_in_stage_time`], which both selects the
-    /// samples and returns the value in stage time.
+    /// A time-sampled source: the layer and spec path of the matched map, its
+    /// node's layer offset, and where it was authored. The map stays in its
+    /// layer, in the node's layer time frame, and each query reads from it
+    /// the samples it interpolates from ([`Self::sample_at`]), as C++
+    /// `UsdAttributeQuery` reads through the layer its resolve info names.
     ///
-    /// The site travels with the map so a replayed read resolves an `asset`
+    /// The site travels with the source so a replayed read resolves an `asset`
     /// value exactly as a direct one does. Only the interpolated value is
     /// resolved, never the whole map: an expression authored at one time must
     /// not be reported by a read that selected another
@@ -211,7 +211,8 @@ pub(crate) enum AttributeValueSource {
     /// stack in its arena — so the handles are valid exactly while the prim's
     /// [`PrimRevision`] stamp still validates, which is what gates the replay.
     TimeSamples {
-        samples: sdf::TimeSampleMap,
+        layer: LayerId,
+        path: Path,
         offset: LayerOffset,
         site: AssetSite,
     },
@@ -225,6 +226,32 @@ pub(crate) enum AttributeValueSource {
 impl Default for AttributeValueSource {
     fn default() -> Self {
         Self::Static(None)
+    }
+}
+
+impl AttributeValueSource {
+    /// Reads the sample map at `path` in `layer` at stage `time`: the value
+    /// `interp` makes of the samples bracketing it, in stage time, or `None`
+    /// where the sample that answers is a block. The read of a
+    /// [`TimeSamples`](Self::TimeSamples) source.
+    pub(crate) fn sample_at(
+        graph: &LayerView<'_>,
+        layer: LayerId,
+        path: &Path,
+        offset: LayerOffset,
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>, QueryError> {
+        // A source is replayed under the stamp that vouches for its layer; one
+        // the stage could not stamp may outlive it, and then reads no value.
+        let Some(layer) = graph.try_layer(layer) else {
+            return Ok(None);
+        };
+        let field = layer.data().bracketing_samples(path, offset.inverse().apply(time))?;
+        Ok(match field.as_deref() {
+            Some(Value::TimeSamples(samples)) => offset.sample_in_stage_time(samples, time, interp),
+            _ => None,
+        })
     }
 }
 
@@ -672,29 +699,36 @@ impl SourceResolver<'_> {
 }
 
 impl OpinionResolver for SourceResolver<'_> {
+    fn reads_sample_kinds(&self) -> bool {
+        true
+    }
+
+    /// The samples' kinds decide the source, so the map stays unread in its
+    /// layer.
+    ///
     /// TODO(perf): the asset site copies two strings for every sampled
     /// attribute, where the per-time read builds one only for a value that turns
     /// out to hold asset paths. The samples are not yet interpolated here, so
     /// the same guard does not apply; carrying the site's `layer` and stack id
     /// instead and resolving them when a replayed value first needs them would
     /// pay the copies only where they are read.
-    fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
-        // A map is replayed from one snapshot only where the samples are what
+    fn on_sample_kinds(&mut self, kinds: &[vt::ValueKind], site: &OpinionSite<'_>) -> Option<Step> {
+        // A map is replayed from its layer only where the samples are what
         // resolution reports: a value composition rewrites — one that draws on
         // weaker sources, or whose paths reach the stage through this node — is
         // resolved per time instead, as is anything a stronger composing value
-        // draws on. Scanning the map costs what cloning it does, which this is
-        // about to pay anyway.
-        if !self.composing.is_empty() || samples.iter().any(|(_, value)| composition_rewrites(value)) {
+        // draws on.
+        if !self.composing.is_empty() || kinds.iter().any(|kind| kind_rewrites(*kind)) {
             self.source = Some(AttributeValueSource::PerTime);
-            return Step::Stop;
+            return Some(Step::Stop);
         }
         self.source = Some(AttributeValueSource::TimeSamples {
-            samples: samples.clone(),
+            layer: site.layer,
+            path: site.query_path.clone(),
             offset: site.offset,
             site: site.asset_site(self.graph),
         });
-        Step::Stop
+        Some(Step::Stop)
     }
 
     /// A `default` answers with the value composed from the site it won at, so
@@ -812,17 +846,27 @@ impl SampleTimesResolver {
 }
 
 impl OpinionResolver for SampleTimesResolver {
-    /// A winning map of several samples may vary whatever they compose with,
-    /// so the count alone answers [`Want::Vary`] while nothing stronger has
-    /// composed.
-    fn counts_samples(&self) -> bool {
+    // TODO(perf): a count or a list of times reads the whole map, which a
+    // crate decodes to hand over. The kinds say whether any sample composes
+    // (a dictionary or a path expression may), and where none does the
+    // count is theirs and the times are `sdf::AbstractData::sample_times`.
+    fn reads_sample_kinds(&self) -> bool {
         self.want == Want::Vary && self.series.is_empty()
     }
 
-    fn on_sample_count(&mut self, count: usize, _site: &OpinionSite<'_>) -> Step {
+    /// A winning map of several samples, at least one of them a value, may
+    /// vary whatever they compose with, so their count answers
+    /// [`Want::Vary`] while nothing stronger has composed (C++
+    /// `UsdStage::_ValueMightBeTimeVaryingFromResolveInfo` counts them with
+    /// `SdfLayer::GetNumTimeSamplesForPath`). A single sample, or a map of
+    /// blocks, is judged from the map.
+    fn on_sample_kinds(&mut self, kinds: &[vt::ValueKind], _site: &OpinionSite<'_>) -> Option<Step> {
+        if kinds.len() < 2 || kinds.iter().all(|kind| value_resolve::is_block_kind(*kind)) {
+            return None;
+        }
         self.answered = true;
-        self.count = Some(count);
-        Step::Stop
+        self.count = Some(kinds.len());
+        Some(Step::Stop)
     }
 
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
@@ -1001,6 +1045,10 @@ impl InfoResolver<'_> {
 }
 
 impl OpinionResolver for InfoResolver<'_> {
+    fn sample_time(&self) -> Option<f64> {
+        self.time
+    }
+
     fn on_time_samples(&mut self, samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
         self.resolution.authored = true;
         // The sample that answers is read once, and interpolated exactly as the
@@ -1828,30 +1876,35 @@ impl IndexCache {
                 // At the default time the field is read only for a resolver
                 // that reports what it walked past; the value read skips it.
                 let probes_samples = mode.visits_time_samples() || resolver.wants_unresolved_samples();
-                // A resolver a sample count answers reads the sample times and
-                // their kinds alone.
-                let mut counted = false;
-                if !samples_blocked
-                    && probes_samples
-                    && mode.visits_time_samples()
-                    && resolver.counts_samples()
-                    && let Some(count) = varying_sample_count(data, &site.query_path)?
-                {
-                    counted = true;
-                    found_opinion = true;
-                    match resolver.on_sample_count(count, &site) {
-                        Step::Stop => return Ok(()),
-                        Step::NextSite => continue,
-                        Step::Continue => {}
+                // A resolver the samples' kinds may answer is offered those
+                // first, and reads no value where they do.
+                let mut answered = false;
+                if !samples_blocked && probes_samples && mode.visits_time_samples() && resolver.reads_sample_kinds() {
+                    let kinds = data.sample_kinds(&site.query_path)?;
+                    if !kinds.is_empty()
+                        && let Some(step) = resolver.on_sample_kinds(&kinds, &site)
+                    {
+                        answered = true;
+                        found_opinion = true;
+                        match step {
+                            Step::Stop => return Ok(()),
+                            Step::NextSite => continue,
+                            Step::Continue => {}
+                        }
                     }
                 }
-                // A read at one time reads only the samples it interpolates
-                // from, at the time mapped into the layer's; any other read
-                // takes the whole map.
+                // A read at one time asks the layer for the samples it
+                // interpolates from, at the time mapped into the layer's (C++
+                // `UsdStage_ResolveInfoAccess::_GetInterpolatingTimeSamples`).
+                // Any other read takes the whole map.
+                // TODO(perf): that includes a resolver that only records the
+                // site (the property stack, the standing opinion), for which a
+                // crate decodes every sample. The samples' kinds would tell
+                // such a resolver a map is there.
                 let samples = match resolver.sample_time() {
-                    _ if counted => None,
+                    _ if answered => None,
                     Some(time) if !samples_blocked && probes_samples => {
-                        interpolating_samples(data, &site.query_path, site.offset.inverse().apply(time))?
+                        data.bracketing_samples(&site.query_path, site.offset.inverse().apply(time))?
                     }
                     _ if !samples_blocked && probes_samples => {
                         data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
@@ -2042,8 +2095,8 @@ impl IndexCache {
 
     /// Resolves the cacheable value source for an attribute (the source half of
     /// [`Self::value_at`]), so a [`Stage::attribute_query`] can replay it across
-    /// time codes. A source no snapshot can stand in for — value clips, or a
-    /// value that composes — resolves as
+    /// time codes. A source no one layer's samples stand in for — value clips,
+    /// or a value that composes — resolves as
     /// [`AttributeValueSource::PerTime`], and the query falls back to
     /// `value_at` per call. `declared` is whether a schema declares the
     /// attribute ([`Self::ensure_attr_index`]).
@@ -4603,56 +4656,6 @@ enum Settlement {
 /// The order to transfer `records` in: each after every record whose root
 /// encloses one of its instances. A prototype root is a root prim, so an
 /// instance's enclosing record is the one rooted at its root prim.
-/// Reads the samples of the `timeSamples` field at `path` that a value at
-/// `time` (in the layer's time) interpolates from: the pair bracketing it, or
-/// the one sample at or nearest it. C++ `UsdStage` reads them the same way
-/// (`_GetInterpolatingTimeSamples`), through
-/// `SdfLayer::GetBracketingTimeSamplesForPath` and `SdfLayer::QueryTimeSample`.
-///
-/// A field that holds no samples (a block, or another kind of value) is read
-/// whole, for the walk to classify. Both samples of a pair are read; C++ reads
-/// only the lower one under held interpolation.
-fn interpolating_samples<'a>(
-    data: &'a dyn sdf::AbstractData,
-    path: &Path,
-    time: f64,
-) -> Result<Option<Cow<'a, Value>>, sdf::DataError> {
-    let field = FieldKey::TimeSamples.as_str();
-    let Some((lower, upper)) = data.bracketing_time_samples(path, time)? else {
-        return data.try_field(path, field);
-    };
-    let mut samples = sdf::TimeSampleMap::with_capacity(2);
-    for at in [lower, upper] {
-        if samples
-            .last()
-            .is_some_and(|(t, _)| sdf::compare_sample_times(*t, at).is_eq())
-        {
-            continue;
-        }
-        let Some(value) = data.query_time_sample(path, at)? else {
-            return data.try_field(path, field);
-        };
-        samples.push((at, value.into_owned()));
-    }
-    Ok(Some(Cow::Owned(Value::TimeSamples(samples))))
-}
-
-/// Returns the number of samples in the `timeSamples` field at `path` when it
-/// holds more than one and at least one of them is a value, read from the
-/// samples' kinds alone, in one read of the field; `None` for any other
-/// field. C++ counts them with `SdfLayer::GetNumTimeSamplesForPath` and
-/// reads a sample's kind with `SdfLayer::QueryTimeSampleTypeid`.
-fn varying_sample_count(data: &dyn sdf::AbstractData, path: &Path) -> Result<Option<usize>, sdf::DataError> {
-    let kinds = data.sample_kinds(path)?;
-    if kinds.len() < 2 {
-        return Ok(None);
-    }
-    let valued = kinds
-        .iter()
-        .any(|kind| !matches!(kind, vt::ValueKind::ValueBlock | vt::ValueKind::None));
-    Ok(valued.then_some(kinds.len()))
-}
-
 fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {
     let by_root: HashMap<&Path, usize, sdf::PathHasher> = records
         .iter()
@@ -6834,14 +6837,19 @@ def "Anchor" (inherits = </Rig>) {}
         ));
         // `extra` is not in the manifest, so the clip set does not own it; the
         // source is the reference's time samples, queryable on the fast path.
-        let AttributeValueSource::TimeSamples { samples, .. } = cache
+        let AttributeValueSource::TimeSamples {
+            layer, path, offset, ..
+        } = cache
             .resolve_value_source(&graph.read_view(), &sdf::path("/Model.extra")?, false)?
             .answer()
             .source
         else {
             panic!("undeclared clip attribute must resolve as arc time samples");
         };
-        assert_eq!(samples.as_slice(), &[(3.0, Value::Float(42.0))]);
+        assert_eq!(
+            AttributeValueSource::sample_at(&graph.read_view(), layer, &path, offset, 3.0, &exact)?,
+            Some(Value::Float(42.0))
+        );
         Ok(())
     }
 
