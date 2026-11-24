@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 use std::{error, io, mem, result};
 
-use crate::{pcp, sdf, usd, usd_utils, usda, usdc, usdz, vt};
+use crate::{pcp, sdf, ts, usd, usd_utils, usda, usdc, usdz, vt};
 
 /// Largest module error nested directly in [`enum@Error`]; anything bigger is
 /// boxed so the enum stays within the size the assertion below pins. The
@@ -53,6 +53,14 @@ pub enum Error {
     /// accessors' `T::Error: Into<Error>` bound.
     #[error(transparent)]
     Convert(Box<dyn error::Error + Send + Sync>),
+
+    /// A spline refused a knot or a retiming.
+    #[error(transparent)]
+    Spline(#[from] ts::Error),
+
+    /// Bytes do not decode as a spline.
+    #[error(transparent)]
+    SplineDecode(#[from] ts::DecodeError),
 
     /// A variable expression failed to parse.
     #[error(transparent)]

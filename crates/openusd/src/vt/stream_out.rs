@@ -235,7 +235,7 @@ fn vector<T>(s: &mut String, items: &[T], item: impl Fn(&mut String, &T)) {
 
 /// `{'key': value}`, a `VtDictionary`'s stream, sorted by key as its
 /// `std::map` is.
-fn dictionary(s: &mut String, dict: &Dictionary) {
+pub(crate) fn dictionary(s: &mut String, dict: &Dictionary) {
     let mut entries: Vec<_> = dict.iter().collect();
     entries.sort_by_key(|(key, _)| *key);
     separated(s, ["{", "}"], &entries, |s, (key, value)| {

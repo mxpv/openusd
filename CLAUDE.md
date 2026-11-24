@@ -41,6 +41,12 @@ source of truth for specifics.
   `Value` is a closed enum, so it names the `sdf` value types it holds. Start
   at `vt/mod.rs`.
 
+- **`ts/`** - Time Splines (C++ `Ts`): `ts::Spline` (C++ `TsSpline`), the
+  scalar curve over time an attribute's `spline` field holds, built from
+  `ts::Knot`s. `eval.rs` is the evaluator, `regression.rs` the anti-regression
+  that shortens Bezier tangents, and `binary.rs` the encoding a `usdc` layer
+  stores. It depends on `gf`, `tf` and `vt`. Start at `ts/mod.rs`.
+
 - **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model.
   `AbstractData` is the unified read/write backend interface the text, binary,
   and archive readers all implement; `Path` and `Layer` (C++ `SdfLayer`) are
@@ -383,14 +389,16 @@ When implementing a new feature from the spec:
 ## Testing
 
 Integration tests live in each crate's `tests/` directory and read fixture
-files from its `fixtures/`. Four suites in the core crate are compliance
+files from its `fixtures/`. Five suites in the core crate are compliance
 checks against external references: `composition.rs` regenerates the vendor
 `pcp.txt` composition dumps byte-for-byte, `text_format.rs` compares parsed
 `.usda` files with the Python reference implementation's output,
 `text_writer_baselines.rs` writes C++ `testSdfParsing` baselines back
-byte-for-byte, and `flatten_baselines.rs` flattens the C++ `testUsdFlatten2`
+byte-for-byte, `flatten_baselines.rs` flattens the C++ `testUsdFlatten2`
 and `testUsdValueClips` cases, and cases of its own, into the text C++ wrote
-for them. The `openusd-build` goldens under its `tests/` regenerate with
+for them, and `spline_eval.rs` evaluates the splines of the C++
+`testTsSplineSampling` baseline at the points C++ sampled on them. The
+`openusd-build` goldens under its `tests/` regenerate with
 `UPDATE_EXPECTED=1`.
 
 Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a

@@ -27,6 +27,7 @@
 //! | [`usd_utils`] | Utilities over layers and stages (C++ `UsdUtils`). [`all_dependencies`](usd_utils::all_dependencies) lists the layers and assets a layer reaches, [`create_usdz_package`](usd_utils::create_usdz_package) packages them into a `.usdz`, and [`modify_asset_paths`](usd_utils::modify_asset_paths) rewrites the asset paths a layer authors. |
 //! | [`kind`] | Kinds. [`Registry`](kind::Registry) holds the built-in model hierarchy and the kinds a site declares, and answers which kinds are models, groups and components. |
 //! | [`gf`] | Graphics foundations — linear algebra types (`Vec3f`, `Mat4d`, …) and the [`Interval`](gf::Interval) a time-sample query is asked over. |
+//! | [`ts`] | Time splines — [`Spline`](ts::Spline), a scalar curve over time built from [`Knot`](ts::Knot)s, which an attribute reads its value from at a time. |
 //! | [`tf`] | Tools foundation — [`Token`](tf::Token), the interned-identifier string. |
 //!
 //! # Quick start
@@ -115,6 +116,7 @@ pub mod kind;
 pub mod pcp;
 pub mod sdf;
 pub mod tf;
+pub mod ts;
 pub mod usd;
 pub mod usd_utils;
 pub mod usda;
