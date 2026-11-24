@@ -27,7 +27,7 @@ use super::index_cache::{IndexCache, OwnStatus};
 use super::layer_graph::{LayerGraph, LayerView};
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
-use super::prim_graph::{ArcType, NodeId, extend_reversed};
+use super::prim_graph::{NodeId, extend_reversed};
 use super::prim_index::{CompositionContext, PrimIndex};
 use super::prim_indexer::ExprVarDeps;
 use super::{LayerStackId, QueryError};
@@ -475,10 +475,10 @@ pub(super) fn prototype_root_index(
 /// ([`PrimIndex::instanceable_nodes`]). A node without specs adds nothing to the
 /// prototype, so two instances whose implied arcs differ only in such nodes —
 /// an ancestor's class implied down to each instance's own path, say — still
-/// share. Below an instanceable node the walk stops unless the index holds a
-/// payload arc anywhere (C++ `PcpPrimIndex::HasAnyPayloads`), whose inclusion
-/// can differ between instances: the node's site already determines what lies
-/// under it.
+/// share. Below an instanceable node the walk stops, since the node's site
+/// already determines what lies under it, unless the index has a payload
+/// ([`PrimIndex::has_payloads`], C++ `PcpPrimIndex::HasAnyPayloads`), whose
+/// inclusion can differ between instances.
 ///
 /// Each arc keeps its site path as composed, variant selections included, and
 /// the resolved selection set is folded in as well (see [`InstanceKey`]).
@@ -488,7 +488,7 @@ pub(super) fn prototype_root_index(
 /// prototype when their load state and their exposure agree.
 fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, mask: PopulationMask) -> InstanceKey {
     let instanceable = index.instanceable_nodes(instance_depth);
-    let has_payload = index.arena().any(|node| node.arc() == ArcType::Payload);
+    let has_payload = index.has_payloads();
     let mut arcs = Vec::new();
     let mut stack: Vec<NodeId> = index.root().into_iter().collect();
     while let Some(id) = stack.pop() {

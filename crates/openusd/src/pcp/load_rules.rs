@@ -475,9 +475,9 @@ impl IndexCache {
     /// flip — an ancestor already at [`Rule::All`] is provably unaffected by
     /// anything below it, since that conclusion never consults descendants.
     /// Of the ones whose inclusion flipped, one that composes a payload
-    /// ([`PrimIndex::has_payloads`](super::PrimIndex::has_payloads)), or has
-    /// no index cached to tell, is dropped as a subtree; the rest are
-    /// reported as prims. One whose inclusion holds composes as it did.
+    /// ([`PrimIndex::reads_load_rule`](super::PrimIndex::reads_load_rule)),
+    /// or has no index cached to tell, is dropped as a subtree; the rest
+    /// are reported as prims. One whose inclusion holds composes as it did.
     pub(crate) fn set_load_rules(&mut self, rules: LoadRules) -> RuleVictims {
         let before = mem::replace(&mut self.load_rules, canonical(rules));
         let touched = diff_entries(&before, &self.load_rules);
@@ -507,15 +507,14 @@ impl IndexCache {
     }
 
     /// Whether `path`'s composition may read its own load rule: its cached
-    /// index has a payload
-    /// ([`PrimIndex::has_payloads`](super::PrimIndex::has_payloads)), or it
-    /// has none
-    /// cached to tell.
+    /// index does
+    /// ([`PrimIndex::reads_load_rule`](super::PrimIndex::reads_load_rule)),
+    /// or it has none cached to tell.
     fn reads_rule(&self, path: &Path) -> bool {
         self.store()
             .entries()
             .get(path)
-            .is_none_or(|entry| entry.index.has_payloads())
+            .is_none_or(|entry| entry.index.reads_load_rule())
     }
 
     /// The ancestors whose inclusion installing `rules` would flip

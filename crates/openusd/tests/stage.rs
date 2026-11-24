@@ -1632,6 +1632,176 @@ def "S1" {
     Ok(())
 }
 
+/// An instance keeps its prototype when a load includes a payload an
+/// ancestor authors, the payload adding no arc at the instance. It reaches
+/// the instance as an ancestral arc, and C++ `PcpPrimIndex::HasAnyPayloads`
+/// is set only by a payload the prim itself introduces.
+#[test]
+fn prototype_kept_ancestor_payload() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("set.usda"),
+        r#"#usda 1.0
+over "set" {
+    over "inst" {
+        double side = 2
+    }
+}
+"#,
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+def "world" (
+    payload = @./set.usda@</set>
+) {
+    def "other" {}
+    def "inst" (
+        references = </model>
+        instanceable = true
+    ) {}
+}
+def "model" (
+    references = </base>
+) {}
+def "base" {}
+"#,
+    )?;
+    let root = dir.path().join("root.usda");
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+    let inst = stage.prim("/world/inst")?;
+    let before = inst.prototype()?.expect("an instance");
+    assert!(!stage.prim("/world")?.is_loaded()?);
+
+    stage.load("/world/other", LoadPolicy::WithDescendants)?;
+
+    assert!(stage.prim("/world")?.is_loaded()?, "the load includes the ancestor");
+    assert_eq!(prop_names(&stage, "/world/inst")?, vec!["side"], "the payload composes");
+    assert_eq!(inst.prototype()?, Some(before.clone()));
+    assert_eq!(stage.prototypes()?, vec![before]);
+    Ok(())
+}
+
+/// Under `LoadNone`, a payload an instance authors gives it a prototype of
+/// its own, and a payload opinion that composes no arc does not (C++
+/// `PcpPrimIndex::HasAnyPayloads`).
+#[test]
+fn prototype_payload_opinions() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("content.usda"),
+        "#usda 1.0
+def \"box\" {}
+",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+def "plain" (
+    references = </model>
+    instanceable = true
+) {}
+def "deleting" (
+    references = </model>
+    delete payload = @./content.usda@</box>
+    instanceable = true
+) {}
+def "payloaded" (
+    references = </model>
+    payload = @./content.usda@</box>
+    instanceable = true
+) {}
+def "model" (
+    references = </base>
+) {}
+def "base" {}
+"#,
+    )?;
+    let root = dir.path().join("root.usda");
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+    let plain = stage.prim("/plain")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/deleting")?.prototype()?, Some(plain.clone()));
+    let payloaded = stage.prim("/payloaded")?.prototype()?.expect("an instance");
+    assert_ne!(payloaded, plain);
+    Ok(())
+}
+
+/// An invalid expression in the payload list of an unloaded prim is
+/// reported, and the prim composes (C++ `_EvalNodePayloads` composes the
+/// list before it consults the included payloads).
+#[test]
+fn unloaded_payload_expression_reported() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0
+def \"holder\" (
+    payload = @`${MISSING}.usda`@</box>
+) {}
+",
+    )?;
+    let root = dir.path().join("root.usda");
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+    assert!(stage.prim("/holder")?.is_valid()?);
+    assert!(
+        stage
+            .composition_errors()
+            .iter()
+            .any(|error| matches!(error, pcp::CompositionDiagnostic::InvalidExpression { .. }))
+    );
+    Ok(())
+}
+
+/// A payload an ancestor of a sub-root reference target authors is not one
+/// the referencing instance introduces (C++
+/// `_BuildInitialPrimIndexFromAncestor` resets the flag behind
+/// `PcpPrimIndex::HasAnyPayloads`). The instance shares a prototype with
+/// one that differs only by that reference, whose target has no spec with
+/// or without the payload.
+#[test]
+fn prototype_subroot_ancestor_payload() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("content.usda"),
+        "#usda 1.0
+def \"box\" {}
+",
+    )?;
+    fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+def "plain" (
+    references = </model>
+    instanceable = true
+) {}
+def "deep" (
+    references = [</model>, </holder/child>]
+    instanceable = true
+) {}
+def "holder" (
+    payload = @./content.usda@</box>
+) {}
+def "model" (
+    references = </base>
+) {}
+def "base" {}
+"#,
+    )?;
+    let root = dir.path().join("root.usda");
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+    let plain = stage.prim("/plain")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/deep")?.prototype()?, Some(plain));
+    Ok(())
+}
+
 /// A cold direct query into a descendant of an instanceable reference (no prior
 /// traversal) composes through the prototype, not an empty namespace: the
 /// instance-proxy redirect is not memoized while the reference layer is still

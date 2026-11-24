@@ -389,10 +389,14 @@ pub(crate) struct BuildOutput {
     /// Whether the build dropped a cycle-closing arc, so a sub-root reference
     /// that grafted nothing can tell an unresolvable target from a cyclic one.
     pub(crate) hit_cycle: bool,
-    /// Whether a node of the build authors a payload, included or not
+    /// Whether the built prim introduces a payload, included or not
     /// ([`PrimIndex::has_payloads`](super::PrimIndex::has_payloads)). Merged up
-    /// from nested sub-builds.
+    /// from an arc target's sub-build once its graph is grafted.
     pub(crate) has_payloads: bool,
+    /// Whether the build met a payload
+    /// ([`PrimIndex::reads_load_rule`](super::PrimIndex::reads_load_rule)).
+    /// Merged up from every nested sub-build.
+    pub(crate) reads_load_rule: bool,
     /// [`Demand`]s raised by a reference/payload arc whose target layer is not
     /// yet loaded. Non-empty means the build is incomplete and its `graph` must
     /// not be cached; the cache loads these and recomposes.
@@ -505,9 +509,12 @@ pub(crate) struct Indexer<'a, 'f> {
     /// unresolved only when this is set, so it is composition state rather than
     /// a property of the diagnostics the build happened to record.
     hit_cycle: bool,
-    /// Whether a node of this build authors a payload (see
-    /// [`BuildOutput::has_payloads`]), set where its tasks are enqueued.
+    /// Whether the prim this build composes introduces a payload (see
+    /// [`BuildOutput::has_payloads`]).
     has_payloads: bool,
+    /// Whether this build met a payload (see
+    /// [`BuildOutput::reads_load_rule`]), in this build or one nested in it.
+    reads_load_rule: bool,
     /// [`Demand`]s a reference/payload arc raised for a target layer that is not
     /// yet loaded. Returned in [`BuildOutput`] (like [`errors`](Self::errors)) —
     /// a non-empty list means the build is incomplete and its graph must not be
@@ -560,6 +567,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             errors: Diagnostics::default(),
             hit_cycle: false,
             has_payloads: false,
+            reads_load_rule: false,
             pending_loads: Vec::new(),
             expr_var_deps: ExprVarDeps::default(),
             seed: None,
@@ -581,6 +589,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             errors: self.errors,
             hit_cycle: self.hit_cycle,
             has_payloads: self.has_payloads,
+            reads_load_rule: self.reads_load_rule,
             pending_loads: self.pending_loads,
             expr_var_deps: self.expr_var_deps,
             nodes_copied,
@@ -812,6 +821,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         frame: Option<&'g Frame<'g>>,
         root_contributes: bool,
     ) -> Indexer<'a, 'g> {
+        // TODO: every nested build takes the composed prim's own inclusion
+        // decision. C++ decides each payload by its inclusion path, the
+        // node's path mapped back across the stack frames to the composed
+        // namespace (`Pcp_PrimIndexer::MapNodePathToPayloadInclusionPath`),
+        // and always includes one whose path does not map, such as a payload
+        // an ancestor of a sub-root arc target authors. Porting it needs the
+        // load rules in the build's inputs in place of one decision. Once
+        // ported, `reads_load_rule` equals `has_payloads`.
         let mut sub = Indexer::new(
             self.inputs.stack,
             self.inputs.ctx,
@@ -872,7 +889,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // is missing from the graph being merged in here.
         self.hit_cycle |= out.hit_cycle;
         // A payload a nested build met is decided by this prim's load rule.
-        self.has_payloads |= out.has_payloads;
+        self.reads_load_rule |= out.reads_load_rule;
         // A layer demanded only inside the sub-build is still needed to compose
         // this prim, so carry the demand up even when the sub-build's graph is
         // `None` (the sub-build was itself left incomplete by the missing layer).
@@ -927,12 +944,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
     ) -> BuildResult<GraftOutcome> {
         let out = self.compose_subindex(target, ambient, skip, true, arc)?;
         let hit_cycle = out.hit_cycle;
+        let has_payloads = out.has_payloads;
         let Some(sub) = self.merge_subindex(out) else {
             return Ok(GraftOutcome { node: None, hit_cycle });
         };
         let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling, depth, flags) else {
             return Ok(GraftOutcome { node: None, hit_cycle });
         };
+        // A payload the grafted target introduces is one this index has (C++
+        // `PcpPrimIndex::AddChildPrimIndex`).
+        self.has_payloads |= has_payloads;
         self.add_grafted_subtree_tasks(grafted);
         Ok(GraftOutcome {
             node: Some(grafted),
@@ -1123,18 +1144,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let authored = self.authored_arc_fields(node);
         for (bit, &(kind, _)) in EXPRESSED_ARCS.iter().enumerate() {
             let authors = authored & (1 << bit) != 0;
-            self.has_payloads |= authors && kind == TaskKind::EvalNodePayloads;
-            let runs = match kind {
-                TaskKind::EvalNodePayloads => self.inputs.load_payloads,
-                // The node's own (local) variant sets. A recursive sub-build
-                // defers variants to the top-level build (C++
-                // `evaluateVariantsAndDynamicPayloads == false`), so a node
-                // composed inside a frame enqueues no variant work. Ancestral
-                // variant sets are added only when a sub-index is grafted (C++
-                // `_AddArc`'s `includeAncestralOpinions` branch), not here.
-                TaskKind::EvalNodeVariantSets => self.frame.is_none(),
-                _ => true,
-            };
+            // The node's own (local) variant sets. A recursive sub-build
+            // defers variants to the top-level build (C++
+            // `evaluateVariantsAndDynamicPayloads == false`), so a node
+            // composed inside a frame enqueues no variant work. Ancestral
+            // variant sets are added only when a sub-index is grafted (C++
+            // `_AddArc`'s `includeAncestralOpinions` branch), not here.
+            let runs = kind != TaskKind::EvalNodeVariantSets || self.frame.is_none();
             if runs && authors {
                 self.tasks.push(Task::new(kind, node));
             }
@@ -1422,13 +1438,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // the target). Its root is salted-earth inert; opinions and implied
         // classes carried up across the relocate node translate the source
         // namespace to the target.
-        let Some(sub) = self.merge_subindex(self.compose_subindex(
-            &source,
-            node_ambient,
-            self.frame_skip(),
-            false,
-            ArcType::Relocate,
-        )?) else {
+        let out = self.compose_subindex(&source, node_ambient, self.frame_skip(), false, ArcType::Relocate)?;
+        let has_payloads = out.has_payloads;
+        let Some(sub) = self.merge_subindex(out) else {
             return Ok(());
         };
 
@@ -1485,6 +1497,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         ) else {
             return Ok(());
         };
+        self.has_payloads |= has_payloads;
         if let Some(layer) = opinion_layer {
             self.pending_relocation_diagnostics.push((
                 grafted,
@@ -1676,9 +1689,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
     }
 
     /// Composes the references or payloads authored at `node`'s site and adds an
-    /// arc for each (C++ `_EvalNodeReferences` / `_EvalNodePayloads`). Both
-    /// resolve to a uniform `(asset, prim, offset)` list and share the arc-add
-    /// loop.
+    /// arc for each, the payloads' only when the prim's are included (C++
+    /// `_EvalNodeReferences` / `_EvalNodePayloads`). Both resolve to a uniform
+    /// `(asset, prim, offset)` list and share the arc-add loop.
     fn eval_arcs(&mut self, node: NodeId, kind: TaskKind) -> BuildResult<()> {
         // An inert node (an implied-class placeholder) contributes no opinions
         // and must not re-express the arcs its origin site already composed; an
@@ -1724,10 +1737,29 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     &mut arc_errors,
                     &mut used_vars,
                 )?;
-                let arcs = payloads
-                    .into_iter()
-                    .map(|p| (p.asset_path, p.prim_path, p.layer_offset.sanitized()))
-                    .collect::<Vec<_>>();
+                // The index has a payload whether or not the load rule
+                // includes it (C++ `_EvalNodePayloads` marks the graph before
+                // it consults the included set). A culled node's payload
+                // adds its arcs when included, which makes the build read
+                // the rule. The index does not count that payload as one it
+                // has.
+                //
+                // TODO(perf): an unloaded prim anchors every payload asset
+                // path, one resolver `create_identifier` per item, only to
+                // learn whether the list is empty. Anchoring decides that
+                // only through a `delete` matching. A list with no deleted
+                // items could evaluate its expressions alone.
+                let composes = !payloads.is_empty();
+                self.reads_load_rule |= composes;
+                self.has_payloads |= composes && !self.node(node).is_culled();
+                let arcs = if self.inputs.load_payloads {
+                    payloads
+                        .into_iter()
+                        .map(|p| (p.asset_path, p.prim_path, p.layer_offset.sanitized()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 (ArcType::Payload, arcs)
             }
             // `eval_arcs` is dispatched only for reference and payload tasks.
