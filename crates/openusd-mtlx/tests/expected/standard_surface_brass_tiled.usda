@@ -2,9 +2,6 @@
 (
     customLayerData = {
         string colorSpace = "lin_rec709"
-        dictionary mtlx = {
-            string[] warnings = ['realworldimagesize: "0.5 0.5" is not a vector2 value', 'realworldtilesize: "0.5 0.5" is not a vector2 value']
-        }
     }
 )
 
@@ -18,9 +15,7 @@ def "MaterialX"
         {
             string config:mtlx:version = "1.38"
             float inputs:base = 1
-            color3f inputs:base_color = (1, 1, 1) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:base_color = (1, 1, 1)
             float inputs:coat = 1
             float inputs:coat_affect_color
             float inputs:coat_affect_roughness
@@ -141,8 +136,8 @@ def "MaterialX"
                 asset inputs:file = @./textures/./textures/brass_color.jpg@ (
                     colorSpace = "srgb_texture"
                 )
-                float2 inputs:realworldimagesize
-                float2 inputs:realworldtilesize
+                float2 inputs:realworldimagesize = (0.5, 0.5)
+                float2 inputs:realworldtilesize = (0.5, 0.5)
                 float2 inputs:uvtiling = (1, 1)
                 color3f outputs:out
             }

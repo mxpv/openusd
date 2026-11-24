@@ -16,9 +16,7 @@ def "MaterialX"
             string config:mtlx:version = "1.38"
             float inputs:clearcoat
             float inputs:clearcoatRoughness
-            color3f inputs:diffuseColor = (0.10470402, 0.24188282, 0.818) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:diffuseColor = (0.10470402, 0.24188282, 0.818)
             float inputs:displacement
             color3f inputs:emissiveColor
             float inputs:ior = 1.5

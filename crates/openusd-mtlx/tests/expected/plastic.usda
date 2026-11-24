@@ -15,9 +15,7 @@ def "MaterialX"
         {
             string config:mtlx:version = "1.38"
             float inputs:base = 1
-            color3f inputs:base_color = (0.209884, 0.562091, 0.766) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:base_color = (0.209884, 0.562091, 0.766)
             float inputs:coat
             float inputs:coat_affect_color
             float inputs:coat_affect_roughness

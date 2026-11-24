@@ -15,9 +15,7 @@ def "MaterialX"
         {
             string config:mtlx:version = "1.38"
             float inputs:base = 1
-            color3f inputs:base_color = (0.910751, 0.793992, 0.405919) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:base_color = (0.910751, 0.793992, 0.405919)
             float inputs:coat
             float inputs:coat_affect_color
             float inputs:coat_affect_roughness
@@ -38,9 +36,7 @@ def "MaterialX"
             float inputs:sheen_roughness
             float inputs:specular = 1
             float inputs:specular_anisotropy
-            color3f inputs:specular_color = (0.995348, 0.983757, 0.765725) (
-                colorSpace = "lin_rec709"
-            )
+            color3f inputs:specular_color = (0.995348, 0.983757, 0.765725)
             float inputs:specular_IOR
             float inputs:specular_rotation
             float inputs:specular_roughness = 0.01
