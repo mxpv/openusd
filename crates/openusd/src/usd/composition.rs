@@ -178,7 +178,25 @@ pub(super) trait CompositionHooks {
     }
 }
 
-/// One notice waiting in the outbox for delivery.
+/// One notice waiting in the outbox for delivery, with the prototype mark
+/// ([`pcp::IndexCache::prototype_mark`]) taken when the change it reports
+/// began: a prototype minted after it is one the change composed.
+struct Queued {
+    notice: Notice,
+    since: usize,
+}
+
+/// Where a notice goes in the outbox: at the outbox's length when the
+/// operation it reports began ([`StageComposition::mark`]), ahead of the
+/// notices of edits the operation itself reconciled, or behind every notice
+/// queued with none; and the prototype mark of that beginning.
+#[derive(Debug, Clone, Copy)]
+struct Mark {
+    at: Option<usize>,
+    since: usize,
+}
+
+/// One notice the outbox holds.
 enum Notice {
     /// A transaction that landed.
     Committed(Box<CompositionNotice>),
@@ -316,7 +334,7 @@ pub(super) struct StageComposition {
     /// [`deliver_notices`](Self::deliver_notices). A drain made from inside a
     /// delivery only reconciles: what it adds waits behind the notices already
     /// here.
-    outbox: RefCell<VecDeque<Notice>>,
+    outbox: RefCell<VecDeque<Queued>>,
     /// What reads and other operations outside a drain found that no notice
     /// carries ([`discover`](Self::discover)): the next drain's snapshot
     /// reports it with its own findings.
@@ -853,20 +871,24 @@ impl StageComposition {
             let mut found = self.discovered.take();
             let mut covered = sdf::Covering::default();
             let mut retries_sublayers = false;
+            // Every notice of the snapshot counts the prototypes minted from
+            // here on, before any of its transactions applies, as its own.
+            let since = self.cache.borrow().prototype_mark();
+            let back = Mark { at: None, since };
             while let Some(group) = next_group(&mut drained) {
                 match group {
                     Group::Aborted(generation) => {
                         hooks.observe_abort(generation);
                         if hooks.delivers() {
-                            self.outbox.borrow_mut().push_back(Notice::Aborted(generation));
+                            self.enqueue(Notice::Aborted(generation), since);
                         }
                     }
-                    Group::Stage(notice) => self.outbox.borrow_mut().push_back(Notice::Stage(notice)),
+                    Group::Stage(notice) => self.enqueue(Notice::Stage(notice), since),
                     // A panic applying a transaction poisons the stage,
                     // naming it.
                     Group::Edit(mut group) => {
                         let generation = group[0].generation;
-                        let apply = || self.apply_change_sets(&mut group, &mut covered, hooks);
+                        let apply = || self.apply_change_sets(&mut group, since, &mut covered, hooks);
                         retries_sublayers |= self.guarded(Poisoned::Apply(generation), apply);
                     }
                 }
@@ -908,7 +930,7 @@ impl StageComposition {
             // with what its own composition found, less what they reported.
             found.extend(self.discovered.take());
             found.retain(|path| !covered.covers(path));
-            self.report(None, StageNotice::Recomposed, found, hooks);
+            self.report(back, StageNotice::Recomposed, found, hooks);
         }
         Ok(())
     }
@@ -989,7 +1011,7 @@ impl StageComposition {
             return Err(sdf::LayerError::Busy.into());
         }
         let found = self.discovered.take();
-        self.report(None, StageNotice::Recomposed, found, hooks);
+        self.report(self.back(), StageNotice::Recomposed, found, hooks);
         self.process_pending(hooks);
         Ok(())
     }
@@ -1009,12 +1031,11 @@ impl StageComposition {
     }
 
     /// Queues `notice` naming `found`, the subtrees an operation resynced, at
-    /// `mark` ([`queue_at`](Self::queue_at)), or behind every notice queued
-    /// with none. Nothing is queued when it found nothing, or with no sink
-    /// to tell.
+    /// `mark` ([`queue_at`](Self::queue_at)). Nothing is queued when it found
+    /// nothing, or with no sink to tell.
     fn report(
         &self,
-        mark: Option<usize>,
+        mark: Mark,
         notice: fn(ResyncPaths) -> StageNotice,
         found: Vec<sdf::Path>,
         hooks: &dyn CompositionHooks,
@@ -1022,21 +1043,35 @@ impl StageComposition {
         if found.is_empty() || !hooks.delivers() {
             return;
         }
-        let notice = notice(ResyncPaths::from_subtrees(found));
-        match mark {
-            Some(mark) => self.queue_at(mark, notice, hooks),
-            None => self.outbox.borrow_mut().push_back(Notice::Stage(notice)),
+        self.queue_at(mark, notice(ResyncPaths::from_subtrees(found)), hooks);
+    }
+
+    /// Queues `notice` behind every notice queued, under the prototype mark
+    /// `since` its change began at.
+    fn enqueue(&self, notice: Notice, since: usize) {
+        self.outbox.borrow_mut().push_back(Queued { notice, since });
+    }
+
+    /// A [`Mark`] behind every notice queued, for a change beginning now.
+    fn back(&self) -> Mark {
+        Mark {
+            at: None,
+            since: self.cache.borrow().prototype_mark(),
         }
     }
 
     /// Opens a mutation's notice: queues what operations found before it
     /// ([`discover`](Self::discover)) as a [`StageNotice::Recomposed`], and
-    /// returns the outbox's length, the mark its own notice goes at
-    /// ([`queue_at`](Self::queue_at)).
-    fn mark(&self, hooks: &dyn CompositionHooks) -> usize {
+    /// returns the mark its own notice goes at ([`queue_at`](Self::queue_at)):
+    /// the outbox's length and the prototype mark now.
+    fn mark(&self, hooks: &dyn CompositionHooks) -> Mark {
         let found = self.discovered.take();
-        self.report(None, StageNotice::Recomposed, found, hooks);
-        self.outbox.borrow().len()
+        let back = self.back();
+        self.report(back, StageNotice::Recomposed, found, hooks);
+        Mark {
+            at: Some(self.outbox.borrow().len()),
+            ..back
+        }
     }
 
     /// Joins `joined`, a layer an edit just sublayered, to the stage, then
@@ -1103,7 +1138,7 @@ impl StageComposition {
         // The stacks the settled prims released are swept too.
         self.reclaim_stale_stacks();
         again.extend(self.discovered.take());
-        self.report(Some(mark), StageNotice::LoadsRetried, again, hooks);
+        self.report(mark, StageNotice::LoadsRetried, again, hooks);
     }
 
     /// How many times the failed loads were retried
@@ -1133,14 +1168,158 @@ impl StageComposition {
                 self.outbox.take();
                 break;
             }
-            let next = self.outbox.borrow_mut().pop_front();
-            match next {
-                Some(Notice::Committed(notice)) => hooks.notify(*notice),
-                Some(Notice::Aborted(generation)) => hooks.aborted(generation),
-                Some(Notice::Stage(notice)) => hooks.notify_stage(&notice),
-                None => break,
+            let Some(Queued { mut notice, since }) = self.outbox.borrow_mut().pop_front() else {
+                break;
+            };
+            self.add_composed_prototypes(&mut notice, since, hooks);
+            match notice {
+                Notice::Committed(notice) => hooks.notify(*notice),
+                Notice::Aborted(generation) => hooks.aborted(generation),
+                Notice::Stage(notice) => hooks.notify_stage(&notice),
             }
         }
+    }
+
+    /// Adds to `notice`'s resyncs the prototypes the change it reports
+    /// composed: each minted since `since` that a walk of its resynced
+    /// subtrees reaches. C++ `UsdStage` composes every resynced subtree as it
+    /// processes a change, and names each prototype `Usd_InstanceCache` adds
+    /// on the way (`_ComposeSubtreesInParallel`). Composition here is
+    /// demand-driven, so the walk registers the instances in those subtrees
+    /// first ([`register_instances`](Self::register_instances)), and goes on
+    /// into each new prototype for the instances nested in it.
+    ///
+    /// The walk composes, and may load, the resynced subtrees, as C++ does.
+    /// One that fails stops, and the notice names the prototypes it reached.
+    //
+    // TODO(perf): a resynced subtree is walked whole whether or not the change
+    // could have made anything in it instanceable; the change set could
+    // narrow the walk to the subtrees whose instancing it touched.
+    fn add_composed_prototypes(&self, notice: &mut Notice, since: usize, hooks: &dyn CompositionHooks) {
+        let roots = match notice {
+            Notice::Committed(notice) => notice.payload.resynced_prims(),
+            Notice::Stage(
+                StageNotice::LoadRules(paths)
+                | StageNotice::LoadsRetried(paths)
+                | StageNotice::Recomposed(paths)
+                | StageNotice::Muting { resynced: paths, .. },
+            ) => paths.subtrees.clone(),
+            Notice::Aborted(_) | Notice::Stage(StageNotice::EditTarget) => return,
+        };
+        if roots.is_empty() {
+            return;
+        }
+        let mut reached = Vec::new();
+        let is_new = |cache: &pcp::IndexCache, root: &sdf::Path| cache.minted_since(root, since);
+        let _ = self.register_instances(roots, is_new, &mut reached, hooks);
+        {
+            let cache = self.cache.borrow();
+            reached.retain(|root| is_new(&cache, root));
+        }
+        if reached.is_empty() {
+            return;
+        }
+        match notice {
+            Notice::Committed(notice) => notice.payload.add_resynced(reached),
+            Notice::Stage(
+                StageNotice::LoadRules(paths)
+                | StageNotice::LoadsRetried(paths)
+                | StageNotice::Recomposed(paths)
+                | StageNotice::Muting { resynced: paths, .. },
+            ) => {
+                paths.subtrees.extend(reached);
+                paths.normalize();
+            }
+            Notice::Aborted(_) | Notice::Stage(StageNotice::EditTarget) => {}
+        }
+    }
+
+    /// Registers every instance at or below each of `roots`, and pushes the
+    /// prototype roots they resolve to onto `reached`, each once. The walk
+    /// then goes on through the namespace of each reached root `descend`
+    /// admits, for the instances nested in it.
+    ///
+    /// The walk takes the steps stage traversal takes, so mask, activeness,
+    /// and the stop at instances cannot drift from it: it descends only into
+    /// populated prims, so nothing below an inactive one is composed or
+    /// loaded, and stops at each instance, whose subtree belongs to its
+    /// prototype. Every subtree of `roots` is walked before any prototype
+    /// namespace, so prototypes mint in stage order. Each prim is one settled
+    /// read, against the cache, so a prim's own loads settle before its
+    /// children are read. An error stops the walk, leaving in `reached` what
+    /// it had found.
+    //
+    // TODO(rayon): sibling subtrees, and distinct prototype namespaces, are
+    // independent once their parent has composed, so their walks could run
+    // concurrently once materialization does (see
+    // `IndexCache::materialize_prototype`).
+    pub(super) fn register_instances(
+        &self,
+        roots: Vec<sdf::Path>,
+        mut descend: impl FnMut(&pcp::IndexCache, &sdf::Path) -> bool,
+        reached: &mut Vec<sdf::Path>,
+        hooks: &dyn CompositionHooks,
+    ) -> Result<(), pcp::QueryError> {
+        let mut seen = sdf::PathSet::default();
+        let mut namespaces = Vec::new();
+        let mut found = Vec::new();
+        let mut roots = roots.into_iter();
+        // A prototype's namespace can hold further instances, each minting a
+        // prototype to walk in turn; `seen` bounds the fixpoint however the
+        // composition nests.
+        while let Some(root) = roots.next().or_else(|| namespaces.pop()) {
+            self.walk_instances(root, &mut found, hooks)?;
+            for prototype in found.drain(..) {
+                if seen.insert(prototype.clone()) {
+                    if descend(&self.cache.borrow(), &prototype) {
+                        namespaces.push(prototype.clone());
+                    }
+                    reached.push(prototype);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Registers every instance in the subtree at `root`, pushing the
+    /// prototype root each resolves to onto `found`: one subtree of
+    /// [`register_instances`](Self::register_instances)'s walk.
+    fn walk_instances(
+        &self,
+        root: sdf::Path,
+        found: &mut Vec<sdf::Path>,
+        hooks: &dyn CompositionHooks,
+    ) -> Result<(), pcp::QueryError> {
+        let mut stack = vec![root];
+        while let Some(path) = stack.pop() {
+            // One settled pass per prim, straight against the cache. Going
+            // through the stage's composed handles instead would re-enter
+            // `Stage::resolve_prototype_path` the moment the walk reached a
+            // prototype namespace, so the walk sits below that gate rather
+            // than guarding against itself.
+            self.settle(hooks)?;
+            let step = self.query(
+                |g, c| match c.prototype_of(g, &path)? {
+                    Some(prototype) => Ok(Err(prototype)),
+                    None => Ok(Ok(c.populated_children(g, &path)?)),
+                },
+                hooks,
+            )?;
+            match step {
+                // An instance's subtree belongs to its prototype, so stop here.
+                Err(prototype) => found.push(prototype),
+                // Reversed, as `traverse` does, so the walk visits children in
+                // namespace order. A prim that is not populated has none.
+                Ok(children) => {
+                    for name in children.iter().rev() {
+                        if let Ok(child) = path.append_child(name) {
+                            stack.push(child);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Classify one transaction's committed [`sdf::ChangeList`]s — one per edited
@@ -1148,7 +1327,8 @@ impl StageComposition {
     /// a single [`pcp::Changes`] cycle and apply the resulting cache
     /// invalidation, queuing one [`CommittedChange`](super::CommittedChange)
     /// (tagged with the transaction's generation) for the stage's observers
-    /// and sinks. The subtrees a sink hears it resync join `covered`.
+    /// and sinks, under the prototype mark `since` its snapshot began at. The
+    /// subtrees a sink hears it resync join `covered`.
     ///
     /// [`pcp::Changes::did_change`] takes the per-layer split because
     /// classification is layer-relative; the event instead reports the merged
@@ -1157,6 +1337,7 @@ impl StageComposition {
     fn apply_change_sets(
         &self,
         group: &mut [PendingEdit],
+        since: usize,
         covered: &mut sdf::Covering,
         hooks: &dyn CompositionHooks,
     ) -> bool {
@@ -1263,7 +1444,7 @@ impl StageComposition {
         });
         hooks.observe(&notice);
         if hooks.delivers() {
-            self.outbox.borrow_mut().push_back(Notice::Committed(notice));
+            self.enqueue(Notice::Committed(notice), since);
         }
         retries_sublayers
     }
@@ -2141,22 +2322,28 @@ impl StageComposition {
         }
     }
 
-    /// Queues `notice` for the stage's sinks at `mark`, the outbox's length
-    /// when the operation it reports began: ahead of the notices of edits
-    /// the operation itself reconciled. Nothing is queued with no sink to
-    /// tell.
-    fn queue_at(&self, mark: usize, notice: StageNotice, hooks: &dyn CompositionHooks) {
+    /// Queues `notice` for the stage's sinks at `mark`. Nothing is queued
+    /// with no sink to tell.
+    fn queue_at(&self, mark: Mark, notice: StageNotice, hooks: &dyn CompositionHooks) {
         // A poisoned stage dropped its outbox, and delivers nothing more.
         if !hooks.delivers() || self.poisoned.get().is_some() {
             return;
         }
+        let queued = Queued {
+            notice: Notice::Stage(notice),
+            since: mark.since,
+        };
+        let Some(at) = mark.at else {
+            self.outbox.borrow_mut().push_back(queued);
+            return;
+        };
         // Nothing is delivered while the operation runs, a mutation
         // ([`quiet`](Self::quiet)) or a retry inside a drain, which
         // delivers once it has reconciled, so the outbox only grew since.
         let mut outbox = self.outbox.borrow_mut();
-        debug_assert!(mark <= outbox.len(), "the outbox was delivered past the mark");
-        let at = mark.min(outbox.len());
-        outbox.insert(at, Notice::Stage(notice));
+        debug_assert!(at <= outbox.len(), "the outbox was delivered past the mark");
+        let at = at.min(outbox.len());
+        outbox.insert(at, queued);
     }
 
     /// Resolves the layer stack an edit target authors into, loading whatever

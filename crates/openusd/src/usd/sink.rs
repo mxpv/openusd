@@ -800,6 +800,26 @@ impl Payload {
         &self.stage.subtree
     }
 
+    /// The prims the finished payload resyncs: its reported resyncs less the
+    /// properties.
+    pub(super) fn resynced_prims(&self) -> Vec<sdf::Path> {
+        self.stage
+            .resynced
+            .iter()
+            .filter(|path| path.is_abs() && (path.is_abs_root() || path.is_prim()))
+            .cloned()
+            .collect()
+    }
+
+    /// Adds `prototypes`, the `/__Prototype_N` roots the change composed, to
+    /// the finished payload's resyncs. A prototype root stands in its own
+    /// namespace, so no other reported path covers one or lies beneath it.
+    pub(super) fn add_resynced(&mut self, prototypes: Vec<sdf::Path>) {
+        self.stage.resynced.extend(prototypes);
+        self.stage.resynced.sort();
+        self.stage.resynced.dedup();
+    }
+
     /// Borrow this payload as a [`CommittedChange`] for the `after_commit` call.
     pub(super) fn committed_change<'a>(
         &'a self,

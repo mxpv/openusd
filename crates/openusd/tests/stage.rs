@@ -1463,6 +1463,126 @@ def "Source" {
     Ok(())
 }
 
+/// Two prims referencing one class, `B` instanceable when `b_instanceable`,
+/// for the edits that make `A` an instance too.
+fn two_referrers(dir: &tempfile::TempDir, b_instanceable: bool) -> Result<Stage> {
+    open_text(
+        dir,
+        &format!(
+            r#"#usda 1.0
+class "Lib"
+{{
+    def "P"
+    {{
+        def "Body" {{}}
+    }}
+}}
+over "W"
+{{
+    def "A" (
+        instanceable = false
+        references = </Lib/P>
+    ) {{}}
+    def "B" (
+        instanceable = {b_instanceable}
+        references = </Lib/P>
+    ) {{}}
+}}
+"#
+        ),
+    )
+}
+
+/// An edit that gives a prototype its first instance resyncs the prototype
+/// it composes, as C++ `UsdStage` names every prototype its
+/// `Usd_InstanceCache` adds.
+#[test]
+fn new_prototype_notified() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = two_referrers(&dir, false)?;
+    assert!(stage.prototypes()?.is_empty());
+    let notices = capture_notices(&stage);
+    stage.prim("/W/A")?.set_instanceable(true)?;
+    let prototype = first_prototype(&stage)?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/W/A")?, prototype]);
+    Ok(())
+}
+
+/// An instance joining a prototype that already exists resyncs only the
+/// instance.
+#[test]
+fn joined_prototype_quiet() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = two_referrers(&dir, true)?;
+    let prototype = first_prototype(&stage)?;
+    let notices = capture_notices(&stage);
+    stage.prim("/W/A")?.set_instanceable(true)?;
+    assert_eq!(stage.prim("/W/A")?.prototype()?, Some(prototype));
+    assert_eq!(notices.borrow().resynced, paths(&["/W/A"]));
+    Ok(())
+}
+
+/// A load whose payload holds instances resyncs the prototype they compose
+/// along with the payload's subtree, whether or not another prototype exists
+/// before it.
+#[test]
+fn load_notifies_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("asset.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "asset"
+)
+def "asset"
+{
+    def "i0" (
+        instanceable = true
+        references = </rock>
+    ) {}
+    def "i1" (
+        instanceable = true
+        references = </rock>
+    ) {}
+}
+def "rock"
+{
+    def "geo" {}
+}
+"#,
+    )?;
+    for existing in [false, true] {
+        let other = match existing {
+            true => "def \"o0\" ( instanceable = true\n references = </other> ) {}\ndef \"other\" { def \"x\" {} }\n",
+            false => "",
+        };
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            format!("#usda 1.0\ndef \"world\"\n{{\n    def \"a\" ( payload = @./asset.usda@ ) {{}}\n}}\n{other}"),
+        )?;
+        let stage = Stage::builder()
+            .load(InitialLoadSet::LoadNone)
+            .open(root.to_str().unwrap())?;
+        let before = stage.prototypes()?;
+        assert_eq!(before.len(), usize::from(existing));
+        let notices = capture_notices(&stage);
+        stage.load("/world/a", LoadPolicy::WithDescendants)?;
+        let added: Vec<sdf::Path> = stage
+            .prototypes()?
+            .into_iter()
+            .filter(|prototype| !before.contains(prototype))
+            .collect();
+        assert_eq!(added.len(), 1);
+        let mut expected = added;
+        expected.push(sdf::path("/world/a")?);
+        let notices = notices.borrow();
+        assert_eq!(notices.load_rules, expected, "with a prototype before: {existing}");
+        assert_eq!(notices.load_rules_prims, paths(&["/world"]));
+    }
+    Ok(())
+}
+
 /// An instance moving onto a prototype whose own source goes in the same edit
 /// keeps that prototype's work: the moved instance takes the root back, and
 /// the work the retired prototype held there settles, so its composition
@@ -2551,7 +2671,9 @@ fn mute_exposes_selection_loads() -> Result<()> {
     assert_eq!(stage.attribute("/B.y")?.get::<f64>()?, None, "b.usda is not loaded");
 
     let session_id = stage.session_layer().expect("session layer").identifier().to_string();
-    assert!(stage.is_indexed(&sdf::path("/A")?), "reading /A.x composed its index");
+    let a = sdf::path("/A")?;
+    let before = stage.index_revision(&a);
+    assert!(before.is_some(), "reading /A.x composed its index");
     let notices = capture_notices(&stage);
     stage.mute_layer(session_id);
     // A session mute reaches the root layer and so every cached index. It names
@@ -2565,7 +2687,7 @@ fn mute_exposes_selection_loads() -> Result<()> {
     // That blanket is what lets the mute path discard its variable deltas without
     // losing the asset-path channel a composed-variable move would publish (see
     // `LayerGraph::recompose_for_mute`).
-    assert!(!stage.is_indexed(&sdf::path("/A")?), "the mute dropped /A's index");
+    assert_ne!(stage.index_revision(&a), before, "the mute dropped /A's index");
     assert_eq!(
         stage.attribute("/B.y")?.get::<f64>()?,
         Some(2.0),
