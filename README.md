@@ -22,10 +22,6 @@ This repository contains the following crates:
 | [`openusd‑build`](crates/openusd-build) | Build-time Rust code generation from OpenUSD `schema.usda` files. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-build)](https://crates.io/crates/openusd-build)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-build)](https://docs.rs/crate/openusd-build/latest) |
 | [`openusd‑mtlx`](crates/openusd-mtlx) | Read-only MaterialX `.mtlx` file format: documents open as `UsdShade` layers. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-mtlx)](https://crates.io/crates/openusd-mtlx)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-mtlx)](https://docs.rs/crate/openusd-mtlx/latest) |
 
-This README describes the current development version. See the
-[roadmap](ROADMAP.md) for release versions, remaining work, and a comparison
-with the C++ reference implementation.
-
 ## Features
 
 - Read and write `.usda` (text), `.usdc` (binary), and `.usdz` (packages), with
@@ -65,8 +61,7 @@ and list-operation combining against reference tests and baselines from the
 [AOUSD Core Specification](docs/aousd_core_spec_1.0.1.pdf) supplemental material.
 CI runs the workspace tests on Linux, macOS, and Windows.
 
-Refer to the [compliance table](crates/openusd/README.md#compliance) for what
-is currently covered.
+Refer to the [compliance table](COMPLIANCE.md) for what is currently covered.
 
 ## Getting started
 

@@ -1,7 +1,7 @@
-# Docs, READMEs, plans, and the ROADMAP
+# Docs, READMEs, plans, and the feature tables
 
 Adapted from the samuelkarp/skills `writing-review` reference
-`docs-and-readmes.md` (Apache-2.0); the ROADMAP and plan sections are this
+`docs-and-readmes.md` (Apache-2.0); the feature-table and plan sections are this
 repository's.
 
 ## State the rule
@@ -61,15 +61,19 @@ GOOD  a naive per-prim bump would under-invalidate
 
 State the disqualifying property. Do not grant a merit first.
 
-## ROADMAP rows
+## Feature-table rows
 
-The ROADMAP tells a reader what is supported and what remains, laconically.
-CLAUDE.md's ROADMAP.md Style section gives the shape; the pass checks it:
+`COMPLIANCE.md` and the Schema families table in
+`crates/openusd-schemas/README.md` tell a reader what is supported and what
+remains, laconically. CLAUDE.md's Feature Tracking Style section gives the
+shape; the pass checks it:
 
 - The status emoji says whether the row is done. The Notes cell does not
   restate it.
-- The Notes cell names the key types or traits a reader would look for, and
-  does not describe what they do. Their doc comments are the source of truth.
+- The Notes cell says what is supported in a sentence or two of plain words,
+  naming the one or two entry-point types a reader would start from. It does
+  not inventory types or describe what they do. Their doc comments are the
+  source of truth.
 - Anything materially incomplete is a short `Remaining — X; Y` clause, or a
   `Remaining:` list when there are several distinct items. It goes once
   nothing is left.

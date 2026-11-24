@@ -12,8 +12,9 @@ bug reports, feature requests, and code improvements.
   - Write clean and idiomatic Rust code that follows existing patterns in the codebase
   - Unit test coverage is highly recommended
   - Make sure all CI checks pass (`cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`)
-- Spec Compliance: If your change implements a feature tracked in [ROADMAP.md](ROADMAP.md), update the
-  corresponding row to mark the status as :white_check_mark: and set the Version column to `main`
+- Spec Compliance: If your change implements a feature tracked in [COMPLIANCE.md](COMPLIANCE.md), update the
+  corresponding row to mark the status as :white_check_mark: and set the Version column to `main`. A schema
+  family is tracked in the [`openusd-schemas` README](crates/openusd-schemas/README.md#schema-families) instead
 - Issue References: If your PR fixes an existing issue, mention it in the PR description (e.g., "Fixes #123")
 - Commit Messages:
   - Each commit message represents a bullet in the release notes, so it must be descriptive and clear

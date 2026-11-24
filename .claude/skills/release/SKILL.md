@@ -25,7 +25,7 @@ Follow these steps:
 3. **Generate changelog**:
    - Run `git describe --tags --abbrev=0` to find the previous tag, then `git log <prev_tag>..HEAD --pretty=format:"- %s (%h)"` to list commits.
    - Start with a brief, natural summary (2-4 sentences). Write it like a human would in a project update — e.g. "This release introduces the PCP composition engine with full LIVRPS arc support including relocates." Don't enumerate changes in the summary — capture the overall narrative in plain language. Revise the summary with the `writing-review` skill before showing it.
-   - After the summary, add a "Compliance" section. Introduce it with "New [AOUSD Core Spec](docs/aousd_core_spec_1.0.1.pdf) coverage in this release:" then list newly covered spec items. Check ROADMAP.md for features marked with `main` (about to become this version). Format each item as `` `<section>` <name> `` (e.g. `` `10.3.2.6` Relocates ``). Skip this section if no new spec coverage was added.
+   - After the summary, add a "Compliance" section. Introduce it with "New [AOUSD Core Spec](docs/aousd_core_spec_1.0.1.pdf) coverage in this release:" then list newly covered spec items. Check COMPLIANCE.md for features marked with `main` (about to become this version). Format each item as `` `<section>` <name> `` (e.g. `` `10.3.2.6` Relocates ``). Skip this section if no new spec coverage was added.
    - Then list the detailed changes: group commits by area (composition engine, text parser, binary reader, stage, asset resolution, etc.) and then by type (features, fixes, dependencies). Keep each commit as its own line — do not merge distinct features into one bullet.
    - Filter out noise (formatting, CI, README updates, CLAUDE.md).
    - Wrap code identifiers (types, functions, methods, traits, modules, flags, etc.) and crate names/versions in backticks, e.g. `- Add \`ListOp::compose_over\` for list-edit composition (82845fd)`.
@@ -50,7 +50,7 @@ Follow these steps:
 
 5. **Tag**: Create tag `v<version>` on the version bump commit. Do NOT move the tag later — it must stay on this commit.
 
-6. **Update roadmap**: In ROADMAP.md, replace every occurrence of the literal string `` `main` `` with `` `<version>` `` — this includes both the Version column cells and any `` `main` — `` annotations inside the Notes column. Use the Edit tool to make each replacement individually and precisely, since a shell one-liner mangles the backticks. After editing, run `grep -n '`main`' ROADMAP.md` to confirm zero matches remain, then show the full `git diff ROADMAP.md` to the user and wait for confirmation before staging or committing anything. Commit with message `Update ROADMAP` only after the user approves the diff.
+6. **Update compliance**: In COMPLIANCE.md, replace every occurrence of the literal string `` `main` `` with `` `<version>` `` — this includes both the Version column cells and any `` `main` — `` annotations inside the Notes column. Use the Edit tool to make each replacement individually and precisely, since a shell one-liner mangles the backticks. After editing, run `grep -n '`main`' COMPLIANCE.md` to confirm zero matches remain, then show the full `git diff COMPLIANCE.md` to the user and wait for confirmation before staging or committing anything. Commit with message `Update COMPLIANCE` only after the user approves the diff.
 
 7. **Publish to crates.io**: Run `cargo publish --workspace` from the repository root. It publishes every member in dependency order, so `openusd` lands before `openusd-build`, and both before `openusd-schemas`, which builds with `openusd-build`. Wait for confirmation from the user before running this step.
 
@@ -64,6 +64,6 @@ Follow these steps:
 
 Important:
 - Always wait for user confirmation before publishing to crates.io (step 7) and pushing (step 8).
-- Always wait for user confirmation before committing the ROADMAP update (step 6).
+- Always wait for user confirmation before committing the COMPLIANCE update (step 6).
 - Run `--dry-run` only when the user asks for a dry run.
 - Do NOT add "Co-Authored-By" or "Generated with Claude Code" to commits or the release.

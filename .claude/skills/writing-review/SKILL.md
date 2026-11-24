@@ -3,7 +3,7 @@ name: writing-review
 description: |
   Revise drafted prose into the plain, reader-facing register this project
   uses: commit messages, doc comments and inline comments, README and docs/
-  pages, ROADMAP notes, and the prose in plans and reports. Use after writing
+  pages, COMPLIANCE notes, and the prose in plans and reports. Use after writing
   or editing any of those and before committing or handing them over, and
   whenever asked to review, tighten, or clean up wording. Covers framing the
   reader cannot verify (contrast tails, historical framing, restated
@@ -20,7 +20,7 @@ allowed-tools: Read Edit Grep Glob Bash(git *) Bash(rg *) Bash(cargo *)
 # Writing review
 
 A revision pass over text that already exists. The project's comment and doc
-rules live in CLAUDE.md's Code Quality and ROADMAP.md Style sections; this
+rules live in CLAUDE.md's Code Quality and Feature Tracking Style sections; this
 skill is the sentence-level pass on top of them, and where the two overlap
 CLAUDE.md wins. The reference files carry the longer derivations; open one
 when the summary here is not enough.
@@ -34,7 +34,7 @@ when the summary here is not enough.
 - [references/code-comments.md](references/code-comments.md): what to cut from
   a comment, what rustdoc needs, and what has to stay grammatical.
 - [references/docs-and-readmes.md](references/docs-and-readmes.md): stating the
-  rule, writing at the document's altitude, ROADMAP rows, self-standing plans,
+  rule, writing at the document's altitude, feature-table rows, self-standing plans,
   and README audience.
 
 The arguments are: $ARGUMENTS
@@ -61,7 +61,7 @@ the build, and `cargo doc -p <crate> --no-deps` when an intra-doc link moved.
 ## Scope
 
 Apply this to prose written for a reader: commit messages, `///` and `//!`
-doc comments, `//` comments, README files, `docs/` pages, ROADMAP notes, and
+doc comments, `//` comments, README files, `docs/` pages, COMPLIANCE notes, and
 the prose in plans and reports.
 
 Five kinds of text are out of scope.
@@ -91,7 +91,7 @@ Each rule below resolves differently depending on who is reading.
 | `//` comment | A reader of the code, who can see the next lines |
 | README | A user of the crate deciding whether and how to depend on it |
 | `docs/` page or plan | Someone who did not attend the discussion, deciding or implementing from the page alone |
-| ROADMAP row | Someone checking what is supported and what remains |
+| Feature-table row | Someone checking what is supported and what remains |
 | Report | A disinterested reader with no memory of the deliberation |
 
 ## Step 2: cut what the reader never asked for
@@ -212,7 +212,7 @@ Open the matching reference.
   [references/commit-messages.md](references/commit-messages.md)
 - Doc or inline comment:
   [references/code-comments.md](references/code-comments.md)
-- README, `docs/` page, plan, or ROADMAP row:
+- README, `docs/` page, plan, or feature-table row:
   [references/docs-and-readmes.md](references/docs-and-readmes.md)
 
 ## Step 5: re-verify every claim you rewrote

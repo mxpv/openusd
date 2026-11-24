@@ -219,20 +219,29 @@ cargo deny check
 cargo run -p openusd --example dump_usdc -- path/to/file.usd
 ```
 
-## ROADMAP.md Style
+## Feature Tracking Style
 
-Keep `ROADMAP.md` rows concise. Each Notes cell should cover three things only:
+Two tables track what is supported. `COMPLIANCE.md` covers the core
+specification, section by section, and the C++ SDK features of the core crate
+beyond it. The Schema families table in `crates/openusd-schemas/README.md`
+covers the domain schemas, one row per feature. A schema family never gets a
+row in `COMPLIANCE.md`.
+
+Keep rows in both laconic and readable at a glance. Each Notes cell should
+cover three things only:
 
 1. Whether it is done — the status emoji in the Status column handles this;
    the Notes cell does not need to restate it.
-2. What to read — name the key types or traits a reader would look for
-   (e.g. `sdf::ChangeList`, `usd::NamespaceEditor`). Do not describe what
-   those types do; their own doc comments are the source of truth.
+2. What is supported — the major features, in a sentence or two of plain
+   words, with the one or two entry-point types a reader would start from
+   (e.g. `usd::NamespaceEditor`). Do not inventory types or describe what they
+   do; their own doc comments are the source of truth.
 3. What is remaining — a short `Remaining — X; Y` clause, or a `Remaining:`
    bullet list when there are several distinct items, for anything materially
    incomplete. Drop it once nothing is left.
 
-Avoid enumerating every method, variant, or edge case handled. If the
+Avoid enumerating every type, method, variant, or edge case handled. A cell
+that needs a third line of supported features is listing too much. If the
 implementation is complete and unremarkable, a one-line entry is fine.
 
 ## Planning New Features

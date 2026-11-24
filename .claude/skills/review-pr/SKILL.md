@@ -136,7 +136,8 @@ things:
 - Does the PR make sense? Is the problem it solves real, and does the change
   solve it?
 - Is it worth having? Is it in scope for the core spec, the C++ SDK or a
-  schema family, and does it fit `ROADMAP.md`?
+  schema family, and does it fit `COMPLIANCE.md` or the schema crate's
+  Schema families table?
 - Is the architecture right? Check it against the Code Standards and Code
   Quality sections of `CLAUDE.md`. Does the fix sit at the layer that owns the
   concept, and does it follow the C++ model where a module mirrors it? Look

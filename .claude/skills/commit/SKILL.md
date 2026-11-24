@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Stage and commit changes with pre-flight checks, doc updates, and roadmap tracking.
+description: Stage and commit changes with pre-flight checks, doc updates, and compliance tracking.
 argument-hint: "[description]"
 disable-model-invocation: false
 allowed-tools: Bash(cargo *) Bash(git *)
@@ -32,10 +32,11 @@ Follow these steps:
    - If the changes affect module structure or public API, update the Architecture section in CLAUDE.md.
    - Stage any doc changes alongside the code changes.
 
-5. **Update roadmap**:
-   - If the changes implement a feature listed in ROADMAP.md, update the Version column to `main`.
-   - Keep the row's Notes cell laconic: it says what is supported and what remains, not every feature handled. The ROADMAP.md Style section in CLAUDE.md has the shape.
-   - Stage ROADMAP.md alongside the other changes.
+5. **Update feature tracking**:
+   - If the changes implement a feature listed in COMPLIANCE.md, update the Version column to `main`.
+   - If the changes add to a schema family, or close one of its `Remaining` items, update its row in the Schema families table of `crates/openusd-schemas/README.md`.
+   - Keep the row's Notes cell laconic: it says what is supported and what remains, not every feature handled. The Feature Tracking Style section in CLAUDE.md has the shape.
+   - Stage the edited file alongside the other changes.
 
 6. **Generate commit message**:
    - Draft the message, then revise it with the `writing-review` skill's commit-message rules (`references/commit-messages.md`): an imperative subject of 50 characters or fewer, a body wrapped at 72 only for what the subject and diff cannot say, present tense, no phantom history, and nothing about test status or the review.
