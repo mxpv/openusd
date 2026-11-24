@@ -81,6 +81,17 @@ pub trait AbstractData {
             .map(|value| vt::ValueKind::from(value.as_ref())))
     }
 
+    /// Returns the kind of each sample in the `timeSamples` field at `path`,
+    /// in the order of [`sample_times`](Self::sample_times), or none if the
+    /// field holds no samples: one read of the field however many samples it
+    /// holds.
+    ///
+    /// The default reads the whole field once. A format that stores each
+    /// sample's type answers from those, decoding no value.
+    fn sample_kinds(&self, path: &Path) -> Result<Vec<vt::ValueKind>, DataError> {
+        field_kinds(self, path)
+    }
+
     /// Returns the value for a field, erroring if not authored.
     ///
     /// Use [`AbstractData::try_field`] when absence is an expected condition.
@@ -373,6 +384,10 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
         (**self).time_sample_kind(path, time)
     }
 
+    fn sample_kinds(&self, path: &Path) -> Result<Vec<vt::ValueKind>, DataError> {
+        (**self).sample_kinds(path)
+    }
+
     fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
         (**self).field_kind(path, field)
     }
@@ -444,6 +459,10 @@ impl<T: AbstractData + Clone> AbstractData for Arc<T> {
 
     fn time_sample_kind(&self, path: &Path, time: f64) -> Result<Option<vt::ValueKind>, DataError> {
         (**self).time_sample_kind(path, time)
+    }
+
+    fn sample_kinds(&self, path: &Path) -> Result<Vec<vt::ValueKind>, DataError> {
+        (**self).sample_kinds(path)
     }
 
     fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
@@ -705,6 +724,13 @@ impl<T: AbstractData> AbstractData for CowData<T> {
         }
     }
 
+    fn sample_kinds(&self, path: &Path) -> Result<Vec<vt::ValueKind>, DataError> {
+        match self.staged_field(path, FieldKey::TimeSamples.as_str()) {
+            Staged::Overlay(_) => field_kinds(self, path),
+            Staged::Base => self.base.sample_kinds(path),
+        }
+    }
+
     fn field_kind(&self, path: &Path, field: &str) -> Result<Option<vt::ValueKind>, DataError> {
         match self.staged_field(path, field) {
             Staged::Overlay(value) => Ok(value.map(vt::ValueKind::from)),
@@ -860,6 +886,15 @@ pub(crate) fn field_times<D: AbstractData + ?Sized>(data: &D, path: &Path) -> Re
     })
 }
 
+/// The kind of each sample in the `timeSamples` field at `path`, in time
+/// order, read whole once.
+pub(crate) fn field_kinds<D: AbstractData + ?Sized>(data: &D, path: &Path) -> Result<Vec<vt::ValueKind>, DataError> {
+    Ok(match data.try_field(path, FieldKey::TimeSamples.as_str())?.as_deref() {
+        Some(Value::TimeSamples(samples)) => samples.iter().map(|(_, value)| vt::ValueKind::from(value)).collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// Finds the sample at exactly `time` in the `timeSamples` field at `path`,
 /// read whole.
 pub(crate) fn field_sample<'a, D: AbstractData + ?Sized>(
@@ -901,7 +936,12 @@ mod tests {
         assert_eq!(data.time_sample_kind(&x, 0.0)?, Some(vt::ValueKind::ValueBlock));
         assert_eq!(data.time_sample_kind(&x, 10.0)?, Some(vt::ValueKind::Double));
         assert_eq!(data.time_sample_kind(&x, 5.0)?, None);
+        assert_eq!(
+            data.sample_kinds(&x)?,
+            [vt::ValueKind::ValueBlock, vt::ValueKind::Double]
+        );
         assert!(data.sample_times(&y)?.is_empty());
+        assert!(data.sample_kinds(&y)?.is_empty());
         Ok(())
     }
 
