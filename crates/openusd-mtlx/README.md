@@ -1,6 +1,10 @@
 # openusd-mtlx
 
-A read-only `.mtlx` file format for [openusd](../openusd): a MaterialX
+[![Crates.io Version](https://img.shields.io/crates/v/openusd-mtlx)](https://crates.io/crates/openusd-mtlx)
+[![docs.rs](https://img.shields.io/docsrs/openusd-mtlx)](https://docs.rs/crate/openusd-mtlx/latest)
+[![CI](https://github.com/mxpv/openusd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mxpv/openusd/actions/workflows/ci.yml)
+
+A read-only `.mtlx` file format for [openusd](https://github.com/mxpv/openusd/tree/main/crates/openusd): a MaterialX
 document opens as a USD layer laid out the way C++ OpenUSD's `usdMtlx`
 plugin lays it out, so a reference, payload or sublayer naming a `.mtlx`
 composes into ordinary `UsdShade` prims.
