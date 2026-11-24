@@ -4113,19 +4113,15 @@ impl Stage {
     /// open-time `_ComposePrimIndexesInParallel` plus `Usd_InstanceChanges`,
     /// paid on demand instead).
     ///
-    /// The walk is the same shape as [`Self::walk_loadable`] and is built from
-    /// the same primitives [`Self::traverse`] uses, so mask, activeness, and
-    /// the stop at instances cannot drift from ordinary traversal. It descends
-    /// only into populated prims, so nothing below an inactive one is composed
-    /// or loaded, stops at each instance, whose subtree belongs to its
-    /// prototype, and then walks each newly registered prototype's namespace
-    /// the same way to reach nested instances.
+    /// The walk is the composition's
+    /// ([`register_instances`](super::composition::StageComposition::register_instances))
+    /// from the pseudo-root, into every prototype namespace it reaches.
     ///
-    /// The pass must be *epoch-stable*. It runs through many separate
-    /// [`Self::with_cache`] calls; each settles its own layer loading, but the
-    /// traversal as a whole does not, so a demand raised late can install a
-    /// layer whose invalidation drops prototypes and child names the walk
-    /// already consumed — a demanded layer that introduces relocates, or one
+    /// The pass must be *epoch-stable*. It runs through many separate settled
+    /// reads; each settles its own layer loading, but the traversal as a
+    /// whole does not, so a demand raised late can install a layer whose
+    /// invalidation drops prototypes and child names the walk already
+    /// consumed — a demanded layer that introduces relocates, or one
     /// whose own `${VAR}` sublayer resolves afterwards, both reach
     /// `IndexCache::invalidate_layers`. Restarting whenever the epoch moved is
     /// what keeps the stamped result a snapshot of one coherent population.
@@ -4140,62 +4136,17 @@ impl Stage {
     // and once per recompose; the generalization here is an incremental pass
     // keyed on the change set, registering only the subtrees an edit could have
     // made instanceable.
-    // TODO(rayon): distinct prototype namespaces in the fixpoint are
-    // independent subtrees, so their passes can run concurrently once
-    // materialization does (see `IndexCache::materialize_prototype`).
     fn discover_prototypes(&self) -> Result<(), pcp::QueryError> {
         loop {
             let epoch = self.population_epoch();
-            let mut roots: Vec<sdf::Path> = Vec::new();
-            let mut visited = sdf::PathSet::default();
-            self.register_instances_below(&sdf::Path::abs_root(), &mut roots)?;
-            // A prototype's own namespace can hold further instances, and each
-            // of those mints a prototype to walk in turn. The visited set
-            // bounds the fixpoint however the composition nests.
-            while let Some(root) = roots.pop() {
-                if visited.insert(root.clone()) {
-                    self.register_instances_below(&root, &mut roots)?;
-                }
-            }
+            let mut reached = Vec::new();
+            self.composition
+                .register_instances(vec![sdf::Path::abs_root()], |_, _| true, &mut reached, self)?;
             if self.population_epoch() == epoch {
                 self.prototypes_discovered.set(Some(epoch));
                 return Ok(());
             }
         }
-    }
-
-    /// Registers every instance in the subtree below `root`, collecting the
-    /// prototype roots they resolve to into `roots`. One pass of
-    /// [`Self::discover_prototypes`]'s walk.
-    fn register_instances_below(&self, root: &sdf::Path, roots: &mut Vec<sdf::Path>) -> Result<(), pcp::QueryError> {
-        let mut stack = vec![root.clone()];
-        while let Some(path) = stack.pop() {
-            // One settled pass per prim, straight against the cache. Going
-            // through the composed handles instead would re-enter
-            // [`Self::resolve_prototype_path`] the moment the walk reached a
-            // prototype namespace, so the walk sits below that gate rather than
-            // guarding against itself.
-            let step = self.with_cache(|g, c| match c.prototype_of(g, &path)? {
-                Some(prototype) => Ok(Err(prototype)),
-                None => Ok(Ok(c.populated_children(g, &path)?)),
-            })?;
-            match step {
-                // An instance's subtree belongs to its prototype, so stop here
-                // and walk that namespace in its own right.
-                Err(prototype) => roots.push(prototype),
-                // Reversed, as `traverse` does, so the walk visits children in
-                // namespace order and prototypes mint in stage order. A prim
-                // that is not populated has none.
-                Ok(children) => {
-                    for name in children.iter().rev() {
-                        if let Ok(child) = path.append_child(name) {
-                            stack.push(child);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Returns a handle to a prim's composition index (C++

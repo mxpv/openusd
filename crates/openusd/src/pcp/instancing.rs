@@ -850,6 +850,22 @@ impl IndexCache {
         self.prototypes.roots()
     }
 
+    /// A mark of how many prototypes have been minted so far, for
+    /// [`minted_since`](Self::minted_since) to compare a root against.
+    pub(crate) fn prototype_mark(&self) -> usize {
+        self.prototypes.count
+    }
+
+    /// Whether `root` is a registered `/__Prototype_N` root minted after
+    /// `mark` ([`prototype_mark`](Self::prototype_mark)). A root an instance
+    /// took back after its prototype was retired keeps its first mint, so it
+    /// counts only if that came after `mark`.
+    pub(crate) fn minted_since(&self, root: &Path, mark: usize) -> bool {
+        self.prototypes
+            .get(root)
+            .is_some_and(|prototype| prototype.index > mark)
+    }
+
     /// Returns `true` if `path` is a `/__Prototype_N` root.
     pub(crate) fn is_prototype(&self, path: &Path) -> bool {
         self.prototypes.is_root(path)
