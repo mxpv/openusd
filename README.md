@@ -20,6 +20,7 @@ This repository contains the following crates:
 | [`openusd`](crates/openusd) | File formats, scene composition, and the `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)<br>[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
 | [`openusd‑schemas`](crates/openusd-schemas) | Typed views for reading and authoring standard schemas, including `UsdGeom`, `UsdShade`, and `UsdSkel`. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-schemas)](https://crates.io/crates/openusd-schemas)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-schemas)](https://docs.rs/crate/openusd-schemas/latest) |
 | [`openusd‑build`](crates/openusd-build) | Build-time Rust code generation from OpenUSD `schema.usda` files. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-build)](https://crates.io/crates/openusd-build)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-build)](https://docs.rs/crate/openusd-build/latest) |
+| [`openusd‑mtlx`](crates/openusd-mtlx) | Read-only MaterialX `.mtlx` file format: documents open as `UsdShade` layers. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-mtlx)](https://crates.io/crates/openusd-mtlx)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-mtlx)](https://docs.rs/crate/openusd-mtlx/latest) |
 
 This README describes the current development version. See the
 [roadmap](ROADMAP.md) for release versions, remaining work, and a comparison
