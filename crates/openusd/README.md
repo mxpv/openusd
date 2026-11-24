@@ -21,11 +21,33 @@ physics, rendering, and more.
 
 ## Features
 
-- File formats — reads and writes `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
-- A fully featured [composition engine](https://github.com/mxpv/openusd/tree/main/crates/openusd/src/pcp) — [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering over a per-prim node graph, with [list editing](https://openusd.org/release/glossary.html#usdglossary-listediting), scene-graph [instancing](https://openusd.org/release/glossary.html#usdglossary-instancing), non-destructive [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates), and [variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html).
-- A composed [`Stage`](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/stage.rs) — lazy cached per-prim composition with typed value resolution, predicate-based traversal, and full prim/property query API over the composed scene.
-- An authoring API — build scenes through [layer](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/layer.rs)- and [stage](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/stage.rs)-tier APIs, with typed [spec views](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/spec.rs), composed [prim/attribute/relationship handles](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/prim.rs) with chained fluent edits, `EditTarget` routing to a specific layer, in-memory anonymous-root stages, and applied API schema authoring.
-- Live sync friendly — listen to `Stage` edit events and capture each edit as a transferable, replayable [`Diff`](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/diff.rs) for live mirroring across processes.
+- Read and write `.usda` (text), `.usdc` (binary), and `.usdz` (packages), with
+  automatic format detection for `.usd` files.
+- Compose sublayers, references, payloads, variants, inherits, and specializes
+  with [LIVERPS strength ordering](https://github.com/mxpv/openusd/tree/main/crates/openusd/src/pcp).
+  Supports [list editing](https://openusd.org/release/glossary.html#usdglossary-listediting),
+  scene-graph [instancing](https://openusd.org/release/glossary.html#usdglossary-instancing),
+  [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates), and
+  [variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html).
+- Query a composed [`Stage`](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/stage.rs)
+  through [prim, attribute, and relationship handles](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/prim.rs).
+  Composition is cached per prim, with traversal predicates, population masks,
+  and payload loading controls.
+- Resolve animated values with time-sample interpolation, layer offsets, and
+  value clips.
+- Author scenes through [layer](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/layer.rs)
+  and stage APIs, with typed [spec views](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/spec.rs).
+  Route edits to a chosen layer with `EditTarget`, apply API schemas, and
+  rename or reparent prims with the
+  [namespace editor](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/editor.rs).
+- Observe stage changes, [undo edits](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/capture.rs),
+  and capture replayable [diffs](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/diff.rs)
+  for live sync.
+- Define [collections](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/usd/collection.rs)
+  using explicit includes and excludes or path expressions, then query their
+  membership.
+- Integrate custom [asset resolvers](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/ar.rs)
+  and [file formats](https://github.com/mxpv/openusd/blob/main/crates/openusd/src/sdf/file_format.rs).
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 

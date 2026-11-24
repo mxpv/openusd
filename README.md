@@ -17,39 +17,10 @@ This repository contains the following crates:
 
 | Crate | Description | Release / docs |
 |-------|-------------|-|
-| [`openusd`](crates/openusd) | File formats, scene composition, and the `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)<br>[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
+| [`openusd`](crates/openusd) | The core USD library: implements the file formats, scene composition, and the `Stage` API. | [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)<br>[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest) |
 | [`openusd‑schemas`](crates/openusd-schemas) | Typed views for reading and authoring standard schemas, including `UsdGeom`, `UsdShade`, and `UsdSkel`. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-schemas)](https://crates.io/crates/openusd-schemas)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-schemas)](https://docs.rs/crate/openusd-schemas/latest) |
 | [`openusd‑build`](crates/openusd-build) | Build-time Rust code generation from OpenUSD `schema.usda` files. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-build)](https://crates.io/crates/openusd-build)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-build)](https://docs.rs/crate/openusd-build/latest) |
 | [`openusd‑mtlx`](crates/openusd-mtlx) | Read-only MaterialX `.mtlx` file format: documents open as `UsdShade` layers. | [![Crates.io Version](https://img.shields.io/crates/v/openusd-mtlx)](https://crates.io/crates/openusd-mtlx)<br>[![docs.rs](https://img.shields.io/docsrs/openusd-mtlx)](https://docs.rs/crate/openusd-mtlx/latest) |
-
-## Features
-
-- Read and write `.usda` (text), `.usdc` (binary), and `.usdz` (packages), with
-  automatic format detection for `.usd` files.
-- Compose sublayers, references, payloads, variants, inherits, and specializes
-  with [LIVERPS strength ordering](crates/openusd/src/pcp). Supports list
-  editing, scene instancing, relocates, and variable expressions.
-- Query a composed [`Stage`](crates/openusd/src/usd/stage.rs) through prim,
-  attribute, and relationship handles. Composition is cached per prim, with
-  traversal predicates, population masks, and payload loading controls.
-- Resolve animated values with time-sample interpolation, layer offsets, and
-  value clips.
-- Author scenes through [layer](crates/openusd/src/sdf/layer.rs) and stage
-  APIs, route edits to a chosen layer, and rename or reparent prims with the
-  [namespace editor](crates/openusd/src/usd/editor.rs).
-- Observe stage changes, [undo edits](crates/openusd/src/usd/capture.rs), and
-  capture replayable [diffs](crates/openusd/src/usd/diff.rs) for live sync.
-- Define [collections](crates/openusd/src/usd/collection.rs) using explicit
-  includes and excludes or path expressions, then query their membership.
-- Read and author the standard [schema families](crates/openusd-schemas),
-  enabled individually by feature flags. They cover geometry, lighting,
-  materials, skeletons, physics, rendering, volumes, media, UI, procedurals,
-  and semantic labels.
-- Generate typed views and registry declarations for custom schemas with
-  [`openusd-build`](crates/openusd-build), using the same workflow as the
-  standard schema crate.
-- Integrate custom [asset resolvers](crates/openusd/src/ar.rs) and
-  [file formats](crates/openusd/src/sdf/file_format.rs).
 
 If a file fails to load, please open an
 [issue](https://github.com/mxpv/openusd/issues) with the USD file and the error.
