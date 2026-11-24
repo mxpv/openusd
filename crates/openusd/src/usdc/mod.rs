@@ -340,6 +340,19 @@ impl sdf::AbstractData for CrateData {
         }
     }
 
+    fn sample_kinds(&self, path: &sdf::Path) -> Result<Vec<vt::ValueKind>, sdf::DataError> {
+        match self.time_sample_reps(path)? {
+            Samples::Absent => Ok(Vec::new()),
+            Samples::Crate(_, reps) => {
+                let field = sdf::FieldKey::TimeSamples.as_str();
+                reps.iter()
+                    .map(|rep| self.file.kind(*rep).map_err(decode_error(path, field)))
+                    .collect()
+            }
+            Samples::Whole => sdf::field_kinds(self, path),
+        }
+    }
+
     fn field_kind(&self, path: &sdf::Path, field: &str) -> Result<Option<vt::ValueKind>, sdf::DataError> {
         match self.stored(path, field) {
             None => Ok(None),
@@ -576,6 +589,15 @@ mod tests {
                 assert_eq!(data.query_time_sample(p, time)?, sample, "{p} at {time}");
             }
         }
+        for p in [&x, &y, &absent] {
+            let each: Vec<vt::ValueKind> = data
+                .sample_times(p)?
+                .into_iter()
+                .filter_map(|time| data.time_sample_kind(p, time).transpose())
+                .collect::<Result<_, _>>()?;
+            assert_eq!(data.sample_kinds(p)?, each, "{p}");
+        }
+        assert_eq!(data.sample_kinds(&x)?, [vt::ValueKind::FloatVec; 4]);
         assert_eq!(data.bracketing_time_samples(&x, 1.5)?, Some((1.0, 2.5)));
         assert_eq!(data.query_time_sample(&x, 2.5)?.as_deref(), Some(&samples[2].1));
 

@@ -4639,21 +4639,18 @@ fn interpolating_samples<'a>(
 
 /// Returns the number of samples in the `timeSamples` field at `path` when it
 /// holds more than one and at least one of them is a value, read from the
-/// sample times and kinds alone; `None` for any other field. C++ counts them
-/// with `SdfLayer::GetNumTimeSamplesForPath`, and reads a sample's kind with
-/// `SdfLayer::QueryTimeSampleTypeid`.
+/// samples' kinds alone, in one read of the field; `None` for any other
+/// field. C++ counts them with `SdfLayer::GetNumTimeSamplesForPath` and
+/// reads a sample's kind with `SdfLayer::QueryTimeSampleTypeid`.
 fn varying_sample_count(data: &dyn sdf::AbstractData, path: &Path) -> Result<Option<usize>, sdf::DataError> {
-    let times = data.sample_times(path)?;
-    if times.len() < 2 {
+    let kinds = data.sample_kinds(path)?;
+    if kinds.len() < 2 {
         return Ok(None);
     }
-    for time in &times {
-        let kind = data.time_sample_kind(path, *time)?;
-        if kind.is_some_and(|kind| !matches!(kind, vt::ValueKind::ValueBlock | vt::ValueKind::None)) {
-            return Ok(Some(times.len()));
-        }
-    }
-    Ok(None)
+    let valued = kinds
+        .iter()
+        .any(|kind| !matches!(kind, vt::ValueKind::ValueBlock | vt::ValueKind::None));
+    Ok(valued.then_some(kinds.len()))
 }
 
 fn nesting_order(records: &[RetiredPrototype]) -> Vec<usize> {

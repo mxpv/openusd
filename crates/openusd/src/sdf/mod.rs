@@ -52,7 +52,7 @@ pub use copy::{
 pub(crate) use copy::{author_spec, child_slot, is_children_field, is_ordered_children, join_child};
 pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
-pub(crate) use data::{field_sample, field_times};
+pub(crate) use data::{field_kinds, field_sample, field_times};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
 pub use file_format::{FileFormat, FileFormatCaps, FormatError, PackageFiles, WriteSeek, Written};
 pub use handle::{AttributeHandle, PrimHandle, PseudoRootHandle, RelationshipHandle};
