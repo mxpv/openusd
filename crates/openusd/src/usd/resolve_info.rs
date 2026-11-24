@@ -5,9 +5,6 @@ use crate::usd::SpecSite;
 
 /// The kind of source an attribute's resolved value came from (C++
 /// `UsdResolveInfoSource`).
-///
-/// These are the sources this crate resolves from. Upstream additionally has a
-/// spline source, which arrives with spline support.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ResolveInfoSource {
     /// No value at all.
@@ -19,15 +16,17 @@ pub enum ResolveInfoSource {
     Default,
     /// An authored `timeSamples` opinion.
     TimeSamples,
+    /// An authored `spline` opinion.
+    Spline,
     /// A value-clip set that owns the attribute.
     ValueClips,
 }
 
 impl ResolveInfoSource {
-    /// Whether an opinion of this kind answers over time: a sample map or a
-    /// clip set, whether it supplies the value or blocks it.
+    /// Whether an opinion of this kind answers over time: a sample map, a
+    /// spline or a clip set, whether it supplies the value or blocks it.
     pub(super) fn varies(self) -> bool {
-        matches!(self, Self::TimeSamples | Self::ValueClips)
+        matches!(self, Self::TimeSamples | Self::Spline | Self::ValueClips)
     }
 }
 
@@ -152,8 +151,9 @@ impl ResolveInfo {
     }
 
     /// The kind of opinion that blocked the value: a blocked `default`, a
-    /// `timeSamples` map that supplies no value, or a value clip set that owns
-    /// the attribute and supplies none. `None` where nothing blocked it.
+    /// `timeSamples` map that supplies no value, a spline with no value at
+    /// the time asked about, or a value clip set that owns the attribute and
+    /// supplies none. `None` where nothing blocked it.
     ///
     /// A blocking opinion is not the [`source`](Self::source). C++
     /// `GetResolveInfo` reports a blocking `timeSamples` map or clip set as the
@@ -170,7 +170,10 @@ impl ResolveInfo {
     pub fn has_authored_value(&self) -> bool {
         matches!(
             self.source,
-            ResolveInfoSource::Default | ResolveInfoSource::TimeSamples | ResolveInfoSource::ValueClips
+            ResolveInfoSource::Default
+                | ResolveInfoSource::TimeSamples
+                | ResolveInfoSource::Spline
+                | ResolveInfoSource::ValueClips
         )
     }
 

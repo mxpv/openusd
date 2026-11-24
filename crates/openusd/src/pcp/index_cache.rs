@@ -20,6 +20,7 @@ use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType};
 use crate::tf::Token;
+use crate::ts;
 use crate::vt::{self, Value};
 
 use super::asset_resolve::{self, AssetMode, AssetSite};
@@ -216,6 +217,10 @@ pub(crate) enum AttributeValueSource {
         offset: LayerOffset,
         site: AssetSite,
     },
+    /// A spline source: the spline, which shares its data with the layer's,
+    /// and its node's layer offset (C++ `UsdResolveInfo::_spline`). Each
+    /// query evaluates it at the time mapped into its layer's.
+    Spline { spline: ts::Spline, offset: LayerOffset },
     /// The value is resolved per time code through [`IndexCache::value_at`]
     /// rather than snapshotted: value clips select a different clip layer per
     /// time (spec 12.3.4), and a composing value can draw on a source that
@@ -624,6 +629,19 @@ impl OpinionResolver for ValueAtResolver<'_> {
         self.fold(value, site, true)
     }
 
+    fn on_spline(&mut self, spline: &ts::Spline, site: &OpinionSite<'_>) -> Step {
+        let Some(time) = self.time else {
+            return Step::Continue;
+        };
+        let Some(value) = value_resolve::spline_value_at(spline, site.offset, time) else {
+            // The spline answers the walk by being here, but has no value at
+            // this time, so nothing weaker is read either.
+            self.withheld = true;
+            return Step::Stop;
+        };
+        self.fold(value, site, false)
+    }
+
     fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
         // At the default time a typed read passes over an opinion of a kind it
         // does not accept and reads on, as C++ `UsdAttribute::Get<T>` does. Only
@@ -729,6 +747,19 @@ impl OpinionResolver for SourceResolver<'_> {
             site: site.asset_site(self.graph),
         });
         Some(Step::Stop)
+    }
+
+    /// A spline is replayed from the source itself. One a stronger composing
+    /// value draws on is resolved per time instead, as samples are.
+    fn on_spline(&mut self, spline: &ts::Spline, site: &OpinionSite<'_>) -> Step {
+        self.source = Some(match self.composing.is_empty() {
+            true => AttributeValueSource::Spline {
+                spline: spline.clone(),
+                offset: site.offset,
+            },
+            false => AttributeValueSource::PerTime,
+        });
+        Step::Stop
     }
 
     /// A `default` answers with the value composed from the site it won at, so
@@ -924,6 +955,16 @@ impl OpinionResolver for SampleTimesResolver {
         self.fold(source)
     }
 
+    /// A spline answers at every time and holds no samples, so it ends the
+    /// walk with no times of its own (C++ `_GetTimeSamplesInInterval` stops
+    /// at one). Whether it is constant would take analyzing it, so it counts
+    /// as varying.
+    fn on_spline(&mut self, _spline: &ts::Spline, _site: &OpinionSite<'_>) -> Step {
+        self.answered = true;
+        self.may_vary = true;
+        Step::Stop
+    }
+
     /// A `default` holds at every time, so it contributes no sample times of
     /// its own — but a composing one draws on sources that do.
     fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
@@ -1010,7 +1051,7 @@ impl InfoResolver<'_> {
         // time varies the composed value with it (C++ records the same of a
         // query that names no time, as
         // `_defaultCanComposeOverWeakerTimeVaryingSources`).
-        self.resolution.varies |= matches!(kind, ResolveSourceKind::TimeSamples | ResolveSourceKind::ValueClips);
+        self.resolution.varies |= kind.varies();
         let folded = self.compose(value, site);
         if folded.composed() && self.chains {
             let node = ResolveNode::capture(self.graph, site.node, self.stage);
@@ -1078,6 +1119,25 @@ impl OpinionResolver for InfoResolver<'_> {
         )
     }
 
+    fn on_spline(&mut self, spline: &ts::Spline, site: &OpinionSite<'_>) -> Step {
+        self.resolution.authored = true;
+        // Evaluated as the value read evaluates it, so the two agree about
+        // whether the spline has a value at the time asked about. A proximal
+        // query names no time, and the spline answers by being there.
+        let value = match self.time {
+            Some(time) => {
+                let Some(value) = value_resolve::spline_value_at(spline, site.offset, time) else {
+                    self.block(ResolveSourceKind::Spline);
+                    return Step::Stop;
+                };
+                Some(Cow::Owned(value))
+            }
+            None => None,
+        };
+        let spec = Some(site.spec_record(self.graph));
+        self.answer(ResolveSourceKind::Spline, site, spec, value)
+    }
+
     fn on_default(&mut self, value: Cow<'_, Value>, site: &OpinionSite<'_>) -> Step {
         self.resolution.authored = true;
         let spec = Some(site.spec_record(self.graph));
@@ -1100,8 +1160,9 @@ impl OpinionResolver for InfoResolver<'_> {
         }
     }
 
-    /// The samples are authored even though a default-time walk resolves from
-    /// `default` alone, so the opinion is recorded without becoming the source.
+    /// The samples or the spline are authored even though a default-time walk
+    /// resolves from `default` alone, so the opinion is recorded without
+    /// becoming the source.
     fn on_unresolved_samples(&mut self, _site: &OpinionSite<'_>) {
         self.resolution.authored = true;
     }
@@ -1327,6 +1388,11 @@ impl OpinionResolver for StandingResolver<'_> {
     }
 
     fn on_time_samples(&mut self, _samples: &sdf::TimeSampleMap, site: &OpinionSite<'_>) -> Step {
+        self.found(site);
+        Step::Continue
+    }
+
+    fn on_spline(&mut self, _spline: &ts::Spline, site: &OpinionSite<'_>) -> Step {
         self.found(site);
         Step::Continue
     }
@@ -1840,7 +1906,7 @@ impl IndexCache {
         let index = store.cached(prim);
         // Whether a `timeSamples` field block has withheld samples from every
         // weaker site (a `ValueBlock` blocks weaker opinions for any field).
-        let mut samples_blocked = false;
+        let mut animation_blocked = false;
 
         // The query path depends only on the node, and `live_sites` yields a
         // node's layers together, so each node's is built once.
@@ -1879,7 +1945,7 @@ impl IndexCache {
                 // A resolver the samples' kinds may answer is offered those
                 // first, and reads no value where they do.
                 let mut answered = false;
-                if !samples_blocked && probes_samples && mode.visits_time_samples() && resolver.reads_sample_kinds() {
+                if !animation_blocked && probes_samples && mode.visits_time_samples() && resolver.reads_sample_kinds() {
                     let kinds = data.sample_kinds(&site.query_path)?;
                     if !kinds.is_empty()
                         && let Some(step) = resolver.on_sample_kinds(&kinds, &site)
@@ -1903,10 +1969,10 @@ impl IndexCache {
                 // such a resolver a map is there.
                 let samples = match resolver.sample_time() {
                     _ if answered => None,
-                    Some(time) if !samples_blocked && probes_samples => {
+                    Some(time) if !animation_blocked && probes_samples => {
                         data.bracketing_samples(&site.query_path, site.offset.inverse().apply(time))?
                     }
-                    _ if !samples_blocked && probes_samples => {
+                    _ if !animation_blocked && probes_samples => {
                         data.try_field(&site.query_path, FieldKey::TimeSamples.as_str())?
                     }
                     _ => None,
@@ -1918,7 +1984,7 @@ impl IndexCache {
                     found_opinion = matches!(field, SampleField::Map(_));
                     // A block withholds samples from every weaker site whatever
                     // the query asked for, so the flag only ever latches on.
-                    samples_blocked |= matches!(field, SampleField::Blocked);
+                    animation_blocked |= matches!(field, SampleField::Blocked);
                     let step = match (field, mode.visits_time_samples()) {
                         (SampleField::Unusable, _) => Step::Continue,
                         // A default-time walk resolves from `default` alone, so
@@ -1935,6 +2001,37 @@ impl IndexCache {
                         Step::Stop => return Ok(()),
                         // This site has answered; a weaker source, if the
                         // answer still takes one, comes from the next site.
+                        Step::NextSite => continue,
+                        Step::Continue => {}
+                    }
+                }
+                // A site answers over time from its samples or else from its
+                // spline, so the spline is read only where no sample map was
+                // found (C++ `_ResolveInfoResolver::ProcessLayerAtTime`).
+                // TODO(perf): a timed read of an attribute with no samples
+                // pays this lookup at every site. One probe of the spec's
+                // field names would answer for the samples, the spline and
+                // the default together.
+                // TODO(perf): a crate layer decodes the spline on each read
+                // of it. A cached query holds the spline it resolved, and a
+                // direct read could hold one decoded on the crate data.
+                // A blocked `timeSamples` field withholds a spline as it
+                // withholds samples: both are the attribute's animation.
+                let probes_spline = probes_samples && !found_opinion && !animation_blocked;
+                let field = FieldKey::Spline.as_str();
+                if probes_spline && !mode.visits_time_samples() {
+                    // A default-time walk resolves from `default` alone, so a
+                    // spline is only reported as the authored opinion it is.
+                    if data.has_field(&site.query_path, field) {
+                        resolver.on_unresolved_samples(&site);
+                    }
+                } else if probes_spline
+                    && let Some(value) = data.try_field(&site.query_path, field)?
+                    && let Value::Spline(spline) = &*value
+                {
+                    found_opinion = true;
+                    match resolver.on_spline(spline, &site) {
+                        Step::Stop => return Ok(()),
                         Step::NextSite => continue,
                         Step::Continue => {}
                     }
@@ -2095,8 +2192,8 @@ impl IndexCache {
 
     /// Resolves the cacheable value source for an attribute (the source half of
     /// [`Self::value_at`]), so a [`Stage::attribute_query`] can replay it across
-    /// time codes. A source no one layer's samples stand in for — value clips,
-    /// or a value that composes — resolves as
+    /// time codes. A source no one layer's samples or spline stand in for —
+    /// value clips, or a value that composes — resolves as
     /// [`AttributeValueSource::PerTime`], and the query falls back to
     /// `value_at` per call. `declared` is whether a schema declares the
     /// attribute ([`Self::ensure_attr_index`]).

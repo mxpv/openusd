@@ -41,7 +41,7 @@ that broader spec behavior can be considered fully covered.
 | Core metadata fields (attribute spec) | `7.6.3` | :white_check_mark: | `0.1.2` | typeName, default, timeSamples, connectionPaths, variability, custom |
 | Core metadata fields (relationship spec) | `7.6.4` | :white_check_mark: | `0.1.2` | targetPaths, variability, custom |
 | Core metadata fields (variant set/variant spec) | `7.6.5-7` | :white_check_mark: | `0.2.0` | `sdf::PrimSpec::add_variant_set` / `add_variant` / `set_variant_selection` |
-| Spline specialized type | `7.4.2.4` | :construction: | | A USDA `.spline` block round-trips as a dictionary (`usda::types::parse_spline`)<br>Remaining — typed knots, interpolation and extrapolation; USDC encoding; evaluation during value resolution; authoring |
+| Spline specialized type | `7.4.2.4` | :white_check_mark: | `main` | `ts::Spline`, the value of an attribute's `spline` field, read and written in `usda` and `usdc`: knots, tangents and their algorithms, extrapolation and loops<br>Remaining — sampling, breakdown and loop baking |
 | Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | `0.1.2` — parsed from `subLayerOffsets`<br>`0.4.0` — composed through arcs<br>`0.5.0` — applied during value resolution (§12.3.2.1) |
 
 ## Paths (Spec 8)
@@ -131,7 +131,7 @@ that broader spec behavior can be considered fully covered.
 | Basic attribute resolution | `12.3` | :white_check_mark: | `0.7.0` | `0.2.0` — authored `default`, `timeSamples` and `ValueBlock`<br>`0.5.0` — layer-offset retiming<br>`0.7.0` — `asset` value resolution<br>Value clips and splines have their own rows |
 | Time-sample lookup and interpolation | `12.3, 12.5.1-2` | :white_check_mark: | `0.5.0` | `usd::Attribute::get_at`: held and linear interpolation over composed samples, with per-node retiming and value clips |
 | Layer-offset retiming during value resolution | `12.3.2.1` | :white_check_mark: | `0.7.0` | `0.5.0` — each node's sample times map to stage time through its composed offset<br>`0.7.0` — `timecode` values are retimed (`sdf::LayerOffset::apply_to_value`), and inversely on authoring<br>Remaining — a clip-sourced `timecode` still resolves in clip time |
-| Spline evaluation | `12.5.3` | :construction: | | Bezier/Hermite curve interpolation |
+| Spline evaluation | `12.5.3` | :white_check_mark: | `main` | `usd::Attribute::get_at` reads a spline at a time, retimed through layer offsets: Bezier and Hermite curves, extrapolation and loops. Authored with `usd::Attribute::set_spline`<br>Remaining — animation blocks; reading the value just before a time |
 | Interpolation (Held) | `12.5.1` | :white_check_mark: | `0.4.0` | `InterpolationType::Held`, chosen per stage by `Stage::set_interpolation` |
 | Interpolation (Linear) | `12.5.2` | :white_check_mark: | `0.4.0` | `InterpolationType::Linear` (the default): every §12.5.2 type, quaternions by slerp; held where a type cannot interpolate |
 | [Value clips](https://openusd.org/release/api/_usd__page__value_clips.html) | `12.3.4` | :white_check_mark: | `0.7.0` | `usd::ClipsAPI`, read and write: explicit and template clip sets, manifests (authored, synthesized or generated), time mapping with jumps, and `interpolateMissingClipValues` |

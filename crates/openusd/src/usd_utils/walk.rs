@@ -354,6 +354,21 @@ impl Walk<'_> {
                 }
                 false
             }
+            // A knot's custom data is a dictionary like any other.
+            Value::Spline(spline) => {
+                for index in 0..spline.knots().len() {
+                    let knot = &spline.knots()[index];
+                    if knot.custom_data.is_empty() {
+                        continue;
+                    }
+                    let (time, mut custom_data) = (knot.time, knot.custom_data.clone());
+                    self.dictionary(&mut custom_data, None)?;
+                    if custom_data != spline.knots()[index].custom_data {
+                        spline.set_custom_data(time, custom_data);
+                    }
+                }
+                false
+            }
             Value::TimeSamples(samples) => {
                 let had = !samples.is_empty();
                 self.retain(samples, |walk, (_, value)| walk.value(value))?;
@@ -430,6 +445,7 @@ fn may_hold_paths(kind: vt::ValueKind) -> bool {
             | vt::ValueKind::UnregisteredDictionary
             | vt::ValueKind::ValueVec
             | vt::ValueKind::TimeSamples
+            | vt::ValueKind::Spline
             | vt::ValueKind::ReferenceListOp
             | vt::ValueKind::PayloadListOp
             | vt::ValueKind::Payload

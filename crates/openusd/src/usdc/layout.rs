@@ -75,6 +75,12 @@ pub(crate) const PATH_EXPRESSION_VERSION: Version = version(0, 10, 0);
 /// The crate version that introduced relocates in layer metadata.
 pub(crate) const RELOCATES_VERSION: Version = version(0, 11, 0);
 
+/// The crate version that introduced splines.
+pub(crate) const SPLINE_VERSION: Version = version(0, 12, 0);
+
+/// The crate version that introduced tangent algorithms on spline knots.
+pub(crate) const TANGENT_ALGORITHM_VERSION: Version = version(0, 13, 0);
+
 /// Max section's name length.
 pub(crate) const SECTION_NAME_MAX_LENGTH: usize = 15;
 
@@ -316,6 +322,7 @@ pub enum Type {
     TimeCode = 56,
     PathExpression = 57,
     Relocates = 58,
+    Spline = 59,
 }
 
 #[cfg(test)]

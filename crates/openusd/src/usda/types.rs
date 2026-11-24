@@ -9,7 +9,7 @@ use std::{any::type_name, borrow::Cow, collections::HashMap, fmt::Debug, str::Fr
 
 use super::error::{Ctx, RawError, bail, ensure};
 
-use crate::{gf, sdf, vt};
+use crate::{gf, sdf, ts, vt};
 
 use super::cursor::Cursor;
 use super::token::Token;
@@ -393,17 +393,20 @@ pub(super) fn parse_time_samples(
     Ok(sdf::normalize_time_samples(samples))
 }
 
-/// Parse a spline value: `{ curveType, knots... }`.
+/// Parse the spline of an attribute of type `ty`: `{ curveType, pre: mode,
+/// post: mode, loop: (...), time: value; ..., }` (C++ `SplineValue`).
 ///
-/// The result is stored as a `Dictionary` matching the baseline JSON structure:
-/// `{ curveType, preExtrapolation, postExtrapolation, loopParameters, knots, knotCustomData }`.
-pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<vt::Value, RawError> {
-    let mut curve_type: Option<String> = None;
-    let mut pre_extrapolation = vt::Value::ValueBlock;
-    let mut post_extrapolation = vt::Value::ValueBlock;
-    let mut loop_params = vt::Value::ValueBlock;
-    let mut knots = Vec::new();
-    let mut knot_custom_data: HashMap<String, vt::Value> = HashMap::new();
+/// The knots are set as C++ sets them on read: of two at one time the first
+/// is kept (`TsKnotMap::insert`), no tangent is shortened for making its
+/// segment regress, and what a C++ knot setter refuses is dropped
+/// ([`ts::ValueType::sanitize`]).
+pub(super) fn parse_spline(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> Result<ts::Spline, RawError> {
+    let Some((value_type, time_valued)) = ty.spline_type() else {
+        bail!("A `{ty}` attribute cannot hold a spline");
+    };
+    let mut spline = ts::Spline::new(value_type);
+    spline.set_time_valued(time_valued);
+    let mut knots: Vec<ts::Knot> = Vec::new();
 
     parse_block(cursor, '{', '}', |c| {
         let token = c.bump()?;
@@ -411,122 +414,89 @@ pub(super) fn parse_spline(cursor: &mut Cursor<'_>) -> Result<vt::Value, RawErro
         // bare identifier with no `:` after it names the curve type.
         let keyed = matches!(token, Token::Identifier(_)) && c.at_punctuation(':')?;
         match token {
-            // Curve type: `bezier`, `hermite`, etc.
-            Token::Identifier(name) if !keyed && !matches!(name, "pre" | "post" | "loop") => {
-                curve_type = Some(name.to_owned());
+            Token::Identifier(name) if !keyed => {
+                let Ok(curve_type) = name.parse::<ts::CurveType>() else {
+                    bail!("Unknown spline curve type: {name}");
+                };
+                spline.set_curve_type(curve_type);
             }
-            // Extrapolation: `pre : mode` or `post: mode [(slope)]`
-            // With no space, the tokenizer produces `NamespacedIdentifier("pre:")`.
-            Token::Identifier(dir @ ("pre" | "post")) if keyed => {
-                c.expect_punctuation(':')?;
-                let extrap = parse_extrapolation(c)?;
-                if dir == "pre" {
-                    pre_extrapolation = extrap;
-                } else {
-                    post_extrapolation = extrap;
+            // `pre : mode`. With no space before the colon the tokenizer
+            // produces one namespaced identifier: `pre:`, or `pre:linear`
+            // where the mode follows with no space either.
+            _ if spline_side(&token).is_some() => {
+                let (pre, mode) = spline_side(&token).unwrap_or_default();
+                if matches!(token, Token::Identifier(_)) {
+                    c.expect_punctuation(':')?;
+                }
+                let extrapolation = parse_extrapolation(c, mode)?;
+                match pre {
+                    true => spline.set_pre_extrapolation(extrapolation),
+                    false => spline.set_post_extrapolation(extrapolation),
                 }
             }
-            Token::NamespacedIdentifier("pre:") => {
-                pre_extrapolation = parse_extrapolation(c)?;
-            }
-            Token::NamespacedIdentifier("post:") => {
-                post_extrapolation = parse_extrapolation(c)?;
-            }
-            // Loop parameters
             Token::Identifier("loop") | Token::NamespacedIdentifier("loop:") => {
                 if matches!(token, Token::Identifier(_)) {
                     c.expect_punctuation(':')?;
                 }
-                let vals = parse_tuple::<f64, 5>(c)?;
-                loop_params = vt::Value::Dictionary(vt::Dictionary::from([
-                    ("protoStart".to_owned(), vt::Value::Double(vals[0])),
-                    ("protoEnd".to_owned(), vt::Value::Double(vals[1])),
-                    ("numPreLoops".to_owned(), vt::Value::Double(vals[2])),
-                    ("numPostLoops".to_owned(), vt::Value::Double(vals[3])),
-                    ("valueOffset".to_owned(), vt::Value::Double(vals[4])),
-                ]));
+                let [proto_start, proto_end, pre_loops, post_loops, value_offset] = parse_tuple::<f64, 5>(c)?;
+                ensure!(
+                    pre_loops.fract() == 0.0 && post_loops.fract() == 0.0,
+                    "A spline loop count must be a whole number"
+                );
+                // A count past the range of an `i32` saturates.
+                #[allow(clippy::cast_possible_truncation)]
+                spline.set_loop_params(ts::LoopParams {
+                    proto_start,
+                    proto_end,
+                    num_pre_loops: pre_loops as i32,
+                    num_post_loops: post_loops as i32,
+                    value_offset,
+                });
             }
-            // Knot: `time : value [& preValue] [; pre (...)] [; post mode [...]] [; { customData }]`
-            Token::Number(time_str) => {
-                let time: f64 = time_str.parse()?;
+            // Knot: `time : [preValue &] value [; pre (...)] [; post mode [(...)]] [; { customData }]`
+            Token::Number(time) => {
+                let mut knot = ts::Knot::new(time.parse()?, 0.0);
+                ensure!(knot.time.is_finite(), "A spline knot time must be finite");
                 c.expect_punctuation(':')?;
                 let first: f64 = parse_token(c)?;
-
-                // A side with no tangent written has both numbers 0; one
-                // written with one number, as a Hermite one is, has no width.
-                let mut pre_slope = 0.0;
-                let mut pre_width = Some(0.0);
-                let mut post_slope = 0.0;
-                let mut post_width = Some(0.0);
-                let mut interp_mode = "held".to_owned();
-
-                // `time : value` or `time : preValue & value`
-                let (pre_value, value) = if c.eat_punctuation('&')? {
-                    let actual: f64 = parse_token(c)?;
-                    (first, actual)
+                if c.eat_punctuation('&')? {
+                    knot.pre_value = Some(first);
+                    knot.value = parse_token(c)?;
                 } else {
-                    (0.0, first)
-                };
+                    knot.value = first;
+                }
 
-                // Optional semicolon-separated knot attributes
                 while c.eat_punctuation(';')? {
                     if c.at_punctuation('{')? {
-                        // Per-knot custom data, keyed by the knot's time as
-                        // text: `14`, `0.5`.
-                        let dict = parse_dictionary(c)?;
-                        knot_custom_data.insert(time.to_string(), vt::Value::Dictionary(dict.into()));
+                        knot.custom_data = parse_dictionary(c)?.into();
                         continue;
                     }
-
-                    let dir = c.expect_identifier()?;
-                    match dir {
-                        "pre" => (pre_slope, pre_width) = parse_tangent(c)?,
+                    match c.expect_identifier()? {
+                        "pre" => knot.pre_tangent = parse_tangent(c)?,
                         "post" => {
-                            // `post mode` or `post mode (slope, width)`
                             let mode = c.expect_identifier()?;
-                            interp_mode = mode.to_owned();
+                            let Ok(next_interp) = mode.parse::<ts::InterpMode>() else {
+                                bail!("Unknown spline interpolation mode: {mode}");
+                            };
+                            knot.next_interp = next_interp;
                             if c.at_punctuation('(')? {
-                                (post_slope, post_width) = parse_tangent(c)?;
+                                knot.post_tangent = parse_tangent(c)?;
                             }
                         }
                         other => bail!("Unexpected knot attribute: {other}"),
                     }
                 }
-
-                let mut knot = vt::Dictionary::from([
-                    ("time".to_owned(), vt::Value::Double(time)),
-                    ("value".to_owned(), vt::Value::Double(value)),
-                    ("preValue".to_owned(), vt::Value::Double(pre_value)),
-                    ("preTangentSlope".to_owned(), vt::Value::Double(pre_slope)),
-                    ("postTangentSlope".to_owned(), vt::Value::Double(post_slope)),
-                    ("nextInterpolationMode".to_owned(), vt::Value::token(interp_mode)),
-                ]);
-                for (key, width) in [("preTangentWidth", pre_width), ("postTangentWidth", post_width)] {
-                    if let Some(width) = width {
-                        knot.insert(key.to_owned(), vt::Value::Double(width));
-                    }
-                }
-                knots.push(vt::Value::Dictionary(knot));
+                knots.push(value_type.sanitize(knot));
             }
             other => bail!("Unexpected spline token: {other:?}"),
         }
         Ok(())
     })?;
 
-    Ok(vt::Value::Dictionary(vt::Dictionary::from([
-        (
-            "curveType".to_owned(),
-            vt::Value::token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
-        ),
-        ("preExtrapolation".to_owned(), pre_extrapolation),
-        ("postExtrapolation".to_owned(), post_extrapolation),
-        ("loopParameters".to_owned(), loop_params),
-        ("knots".to_owned(), vt::Value::ValueVec(knots)),
-        (
-            "knotCustomData".to_owned(),
-            vt::Value::Dictionary(knot_custom_data.into()),
-        ),
-    ])))
+    // A spline keeps the last knot given at a time, which read backwards is
+    // the first the text holds.
+    spline.set_knots_with(knots.into_iter().rev(), ts::AntiRegression::None)?;
+    Ok(spline)
 }
 
 /// Parses a single `<...>` path reference token into an `sdf::Path`.
@@ -678,51 +648,87 @@ pub(super) fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> R
     Ok(())
 }
 
-/// Parse a knot tangent: two numbers, or the one a Hermite tangent writes
-/// (C++ `_WriteTangent`), which leaves the second `None`.
-fn parse_tangent(cursor: &mut Cursor<'_>) -> Result<(f64, Option<f64>), RawError> {
-    let (mut first, mut second) = (None, None);
-    parse_block(cursor, '(', ')', |c| {
-        let number = parse_token::<f64>(c)?;
-        match (first, second) {
-            (None, _) => first = Some(number),
-            (Some(_), None) => second = Some(number),
-            (Some(_), Some(_)) => bail!("a tangent has at most two numbers"),
+/// Reads the token that opens a spline's extrapolation entry: whether it
+/// is the `pre` one, and the mode where the token holds it (`pre:linear`).
+/// `None` for any other token.
+fn spline_side<'a>(token: &Token<'a>) -> Option<(bool, Option<&'a str>)> {
+    match token {
+        Token::Identifier("pre") => Some((true, None)),
+        Token::Identifier("post") => Some((false, None)),
+        Token::NamespacedIdentifier(entry) => {
+            let (side, mode) = entry.split_once(':')?;
+            let pre = match side {
+                "pre" => true,
+                "post" => false,
+                _ => return None,
+            };
+            Some((pre, Some(mode).filter(|mode| !mode.is_empty())))
         }
-        Ok(())
-    })?;
-    let first = first.context("a tangent has at least one number")?;
-    Ok((first, second))
+        _ => None,
+    }
 }
 
-/// Parse an extrapolation mode: `mode [(slope)]`.
-fn parse_extrapolation(cursor: &mut Cursor<'_>) -> Result<vt::Value, RawError> {
-    let mode = cursor.expect_identifier()?;
-    // The looping modes are two words, `loop repeat`, `loop reset`, and
-    // `loop oscillate`, held as one as the Python reference holds them
-    // (`looprepeat`).
-    let mode = if mode == "loop" {
-        let kind = cursor.expect_identifier()?;
-        ensure!(
-            matches!(kind, "repeat" | "reset" | "oscillate"),
-            "`loop {kind}` is not an extrapolation mode"
-        );
-        format!("loop{kind}")
-    } else {
-        mode.to_owned()
+/// Parse a knot tangent: `(width, slope)`, or the `(slope)` a Hermite
+/// tangent is written as, either followed by the algorithm that computes the
+/// tangent, `custom` or `autoEase` (C++ `SplineTangent`).
+fn parse_tangent(cursor: &mut Cursor<'_>) -> Result<ts::Tangent, RawError> {
+    cursor.expect_punctuation('(')?;
+    // One number is a slope, and two a width and a slope.
+    let (mut width, mut slope) = (0.0, parse_token::<f64>(cursor)?);
+    let mut numbers = 1;
+    let mut algorithm = ts::TangentAlgorithm::None;
+    while algorithm == ts::TangentAlgorithm::None && cursor.eat_punctuation(',')? {
+        match cursor.peek()? {
+            Some(Token::Custom) => algorithm = ts::TangentAlgorithm::Custom,
+            Some(Token::Identifier("autoEase")) => algorithm = ts::TangentAlgorithm::AutoEase,
+            // A second number, read as the first is: `inf` and `nan` are
+            // numbers here too.
+            _ if numbers < 2 => {
+                (width, slope) = (slope, parse_token::<f64>(cursor)?);
+                numbers += 1;
+                continue;
+            }
+            other => bail!("Unexpected token in a spline tangent: {other:?}"),
+        }
+        cursor.bump()?;
+    }
+    cursor.expect_punctuation(')')?;
+
+    Ok(ts::Tangent {
+        width,
+        slope,
+        algorithm,
+    })
+}
+
+/// Parse an extrapolation: `none`, `held`, `linear`, `sloped(slope)`, or
+/// `loop` followed by `repeat`, `reset` or `oscillate` (C++
+/// `SplineExtrapolationType`).
+///
+/// `mode` is the first word where the caller has read it already.
+fn parse_extrapolation(cursor: &mut Cursor<'_>, mode: Option<&str>) -> Result<ts::Extrapolation, RawError> {
+    let mode = match mode {
+        Some(mode) => mode,
+        None => cursor.expect_identifier()?,
     };
-    let slope = if cursor.at_punctuation('(')? {
-        cursor.expect_punctuation('(')?;
-        let v = parse_token::<f64>(cursor)?;
-        cursor.expect_punctuation(')')?;
-        v
-    } else {
-        0.0
-    };
-    Ok(vt::Value::Dictionary(vt::Dictionary::from([
-        ("mode".to_owned(), vt::Value::token(mode)),
-        ("slope".to_owned(), vt::Value::Double(slope)),
-    ])))
+    Ok(match mode {
+        "none" => ts::Extrapolation::ValueBlock,
+        "held" => ts::Extrapolation::Held,
+        "linear" => ts::Extrapolation::Linear,
+        "sloped" => {
+            cursor.expect_punctuation('(')?;
+            let slope = parse_token::<f64>(cursor)?;
+            cursor.expect_punctuation(')')?;
+            ts::Extrapolation::Sloped(slope)
+        }
+        "loop" => match cursor.expect_identifier()? {
+            "repeat" => ts::Extrapolation::LoopRepeat,
+            "reset" => ts::Extrapolation::LoopReset,
+            "oscillate" => ts::Extrapolation::LoopOscillate,
+            kind => bail!("`loop {kind}` is not an extrapolation mode"),
+        },
+        mode => bail!("Unknown spline extrapolation mode: {mode}"),
+    })
 }
 
 /// Parse `(offset = ...; scale = ...; customData = {...})` blocks attached to

@@ -134,7 +134,13 @@ impl<'a> Parser<'a> {
             Token::Magic(version) => version,
             other => bail!("Text file must start with magic token, got {other:?}"),
         };
-        ensure!(version.starts_with("1.0"), "Unsupported USDA version: {version:?}");
+        // 1.1 added tangent algorithms to spline knots. 1.2 added array edits,
+        // which this crate does not read.
+        let mut parts = version.split('.');
+        ensure!(
+            parts.next() == Some("1") && matches!(parts.next(), Some("0" | "1")),
+            "Unsupported USDA version: {version:?}"
+        );
 
         let mut root = sdf::SpecData::new(sdf::SpecType::PseudoRoot);
 
@@ -407,6 +413,18 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Checks that the spline an attribute spec holds is one its declared
+    /// type takes. The statements of one attribute each spell a type, and the
+    /// spec is written back as the last of them.
+    fn check_spline_type(spec: &sdf::SpecData) -> Result<(), RawError> {
+        if let Some(vt::Value::Spline(spline)) = spec.get(FieldKey::Spline.as_str())
+            && let Some(vt::Value::Token(declared)) = spec.get(FieldKey::TypeName.as_str())
+        {
+            sdf::ValueTypeName::from(declared.clone()).validate_spline(spline)?;
+        }
+        Ok(())
+    }
+
     /// Create an attribute spec with the standard type/custom/variability
     /// fields. The `typeName` keeps the declared spelling (`Color`,
     /// `double3d[]`), as C++ stores it.
@@ -525,13 +543,14 @@ impl<'a> Parser<'a> {
         if matches!(suffix, Some(Token::Spline)) {
             properties.push(name);
             self.cursor.expect_punctuation('=')?;
-            let spline = types::parse_spline(&mut self.cursor)?;
+            let spline = types::parse_spline(&mut self.cursor, &type_name)?;
             let path = current_path.append_property(name)?;
 
             let spec = data
                 .entry(path)
                 .or_insert_with(|| Self::make_attribute_spec(&type_name, custom, variability));
-            spec.add(FieldKey::Spline, spline);
+            spec.add(FieldKey::Spline, vt::Value::Spline(spline));
+            Self::check_spline_type(spec)?;
             return Ok(());
         }
 
@@ -546,7 +565,7 @@ impl<'a> Parser<'a> {
 
             let mut base = Self::make_attribute_spec(&type_name, custom, variability);
             base.extend_from(spec);
-            Self::merge_spec(data, path, base);
+            Self::check_spline_type(Self::merge_spec(data, path, base))?;
             return Ok(());
         }
 
@@ -573,7 +592,7 @@ impl<'a> Parser<'a> {
         let mut base = Self::make_attribute_spec(&type_name, custom, variability);
         base.extend_from(spec);
         base.add(FieldKey::Default, value);
-        Self::merge_spec(data, path, base);
+        Self::check_spline_type(Self::merge_spec(data, path, base))?;
 
         Ok(())
     }
@@ -1062,6 +1081,7 @@ fn list_op_type(op: &Token<'_>) -> Result<sdf::ListOpType, RawError> {
 mod tests {
     use super::*;
     use crate::gf;
+    use crate::ts;
     use std::error::Error as StdError;
     use std::fs;
     use std::path::PathBuf;
@@ -3228,106 +3248,159 @@ def \"Q\" (
         assert_eq!(spec.get("displayName"), Some(&vt::Value::String("\u{1F680}".into())));
     }
 
-    #[test]
-    fn parse_spline_empty() {
-        let parser = Parser::new(
-            r#"#usda 1.0
-def "p" { double x.spline = {} }
-"#,
-        );
-        let data = parser.parse().unwrap();
-        let d = data
-            .get(&sdf::path("/p.x").unwrap())
-            .unwrap()
-            .get(FieldKey::Spline.as_str())
-            .unwrap()
-            .try_as_dictionary_ref()
-            .unwrap();
-        assert_eq!(d.get("curveType"), Some(&vt::Value::Token("bezier".into())));
-        assert_eq!(d.get("preExtrapolation"), Some(&vt::Value::ValueBlock));
-        assert!(d.get("knots").unwrap().try_as_value_vec_ref().unwrap().is_empty());
+    /// The spline authored on `/p.x` of `text`.
+    fn spline_of(text: &str) -> ts::Spline {
+        let data = Parser::new(text).parse().expect("a layer that parses");
+        data.get(&sdf::path("/p.x").unwrap())
+            .and_then(|spec| spec.get(FieldKey::Spline.as_str()))
+            .and_then(|value| value.try_as_spline_ref())
+            .expect("a spline on /p.x")
+            .clone()
     }
 
     #[test]
+    fn parse_spline_empty() {
+        let spline = spline_of("#usda 1.0\ndef \"p\" { float x.spline = {} }\n");
+        assert_eq!(spline, ts::Spline::new(ts::ValueType::Float));
+        assert_eq!(spline.pre_extrapolation(), ts::Extrapolation::Held);
+    }
+
+    /// A tangent is a width and a slope. A Hermite tangent is written as its
+    /// slope alone, and its width follows from the segment it faces.
+    #[test]
     fn parse_spline_knot_with_tangents() {
-        let parser = Parser::new(
+        let spline = spline_of(
             r#"#usda 1.0
 def "p" {
     float x.spline = {
-        hermite,
-        10 : 5.0 ; pre (1.0, 2.0) ; post curve (3.0, 4.0)
+        bezier,
+        10 : 5.0 ; pre (1.0, 2.0) ; post curve (3.0, 4.0, autoEase),
+        20 : 6 ; pre (0.5, 1, custom) ; post none
     }
 }
 "#,
         );
-        let data = parser.parse().unwrap();
-        let d = data
-            .get(&sdf::path("/p.x").unwrap())
-            .unwrap()
-            .get(FieldKey::Spline.as_str())
-            .unwrap()
-            .try_as_dictionary_ref()
-            .unwrap();
-        assert_eq!(d.get("curveType"), Some(&vt::Value::Token("hermite".into())));
+        assert_eq!(spline.value_type(), ts::ValueType::Float);
+        let [first, second] = spline.knots() else {
+            panic!("two knots")
+        };
+        assert_eq!((first.time, first.value), (10.0, 5.0));
+        assert_eq!(first.pre_tangent, ts::Tangent::new(1.0, 2.0));
+        assert_eq!(first.next_interp, ts::InterpMode::Curve);
+        // The algorithm owns the tangent: flat, and a third of the segment.
+        assert_eq!(first.post_tangent.algorithm, ts::TangentAlgorithm::AutoEase);
+        assert_eq!((first.post_tangent.width, first.post_tangent.slope), (10.0 / 3.0, 0.0));
+        assert_eq!(second.pre_tangent.algorithm, ts::TangentAlgorithm::Custom);
+        assert_eq!(second.next_interp, ts::InterpMode::ValueBlock);
 
-        let knots = d.get("knots").unwrap().try_as_value_vec_ref().unwrap();
-        assert_eq!(knots.len(), 1);
-
-        let knot = knots[0].try_as_dictionary_ref().unwrap();
-        assert_eq!(knot.get("time"), Some(&vt::Value::Double(10.0)));
-        assert_eq!(knot.get("value"), Some(&vt::Value::Double(5.0)));
-        assert_eq!(knot.get("preTangentSlope"), Some(&vt::Value::Double(1.0)));
-        assert_eq!(knot.get("preTangentWidth"), Some(&vt::Value::Double(2.0)));
-        assert_eq!(knot.get("postTangentSlope"), Some(&vt::Value::Double(3.0)));
-        assert_eq!(knot.get("postTangentWidth"), Some(&vt::Value::Double(4.0)));
-        assert_eq!(
-            knot.get("nextInterpolationMode"),
-            Some(&vt::Value::Token("curve".into()))
+        let hermite = spline_of(
+            "#usda 1.0\ndef \"p\" { double x.spline = { hermite, 1: 8; pre (0); post curve (4), 7: 20; pre (2) } }\n",
         );
+        assert_eq!(hermite.curve_type(), ts::CurveType::Hermite);
+        let [first, second] = hermite.knots() else {
+            panic!("two knots")
+        };
+        assert_eq!(first.post_tangent, ts::Tangent::new(2.0, 4.0));
+        assert_eq!(second.pre_tangent, ts::Tangent::new(2.0, 2.0));
     }
 
     #[test]
     fn parse_spline_extrapolation_and_loop() {
-        let parser = Parser::new(
+        let spline = spline_of(
             r#"#usda 1.0
 def "p" {
     double x.spline = {
         pre: sloped (2.5),
-        post: clamp,
+        post : loop reset,
         loop: (1.0, 10.0, 0, 3, 0.5),
         5 : 1.0 & 9.0
     }
 }
 "#,
         );
-        let data = parser.parse().unwrap();
-        let d = data
-            .get(&sdf::path("/p.x").unwrap())
-            .unwrap()
-            .get(FieldKey::Spline.as_str())
-            .unwrap()
-            .try_as_dictionary_ref()
-            .unwrap();
+        assert_eq!(spline.pre_extrapolation(), ts::Extrapolation::Sloped(2.5));
+        assert_eq!(spline.post_extrapolation(), ts::Extrapolation::LoopReset);
+        assert_eq!(
+            spline.loop_params(),
+            ts::LoopParams {
+                proto_start: 1.0,
+                proto_end: 10.0,
+                num_pre_loops: 0,
+                num_post_loops: 3,
+                value_offset: 0.5,
+            }
+        );
+        // `5 : 1.0 & 9.0`: the pre-value is 1.0, the value 9.0.
+        let knot = &spline.knots()[0];
+        assert_eq!((knot.pre_value, knot.value), (Some(1.0), 9.0));
+    }
 
-        let pre = d.get("preExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
-        assert_eq!(pre.get("mode"), Some(&vt::Value::Token("sloped".into())));
-        assert_eq!(pre.get("slope"), Some(&vt::Value::Double(2.5)));
+    /// A `timecode` attribute's spline holds doubles that are times, and a
+    /// type with no spline form is refused.
+    #[test]
+    fn parse_spline_value_types() {
+        let timed = spline_of("#usda 1.0\ndef \"p\" { timecode x.spline = { 1: 2 } }\n");
+        assert!(timed.is_time_valued());
+        assert_eq!(timed.value_type(), ts::ValueType::Double);
 
-        let post = d.get("postExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
-        assert_eq!(post.get("mode"), Some(&vt::Value::Token("clamp".into())));
-        assert_eq!(post.get("slope"), Some(&vt::Value::Double(0.0)));
+        let half = spline_of("#usda 1.0\ndef \"p\" { half x.spline = { 1: 0.1 } }\n");
+        assert_eq!(half.knots()[0].value, gf::f16::from_f64(0.1).to_f64());
 
-        let lp = d.get("loopParameters").unwrap().try_as_dictionary_ref().unwrap();
-        assert_eq!(lp.get("protoStart"), Some(&vt::Value::Double(1.0)));
-        assert_eq!(lp.get("numPostLoops"), Some(&vt::Value::Double(3.0)));
-        assert_eq!(lp.get("valueOffset"), Some(&vt::Value::Double(0.5)));
+        let error = Parser::new("#usda 1.0\ndef \"p\" { int x.spline = { 1: 2 } }\n")
+            .parse()
+            .expect_err("no spline of ints");
+        assert!(error.to_string().contains("cannot hold a spline"), "{error}");
+        // Nor a spline of doubles on an attribute declared an int, whichever
+        // statement comes first.
+        for body in [
+            "int x = 2\n    double x.spline = { 1: 2 }",
+            "double x.spline = { 1: 2 }\n    int x = 2",
+            "double x.spline = { 1: 2 }\n    int x",
+        ] {
+            Parser::new(&format!("#usda 1.0\ndef \"p\" {{\n    {body}\n}}\n"))
+                .parse()
+                .expect_err("a spline the declaration does not take");
+        }
 
-        // `5 : 1.0 & 9.0` — preValue is 1.0, value is 9.0.
-        let knot = d.get("knots").unwrap().try_as_value_vec_ref().unwrap()[0]
-            .try_as_dictionary_ref()
-            .unwrap();
-        assert_eq!(knot.get("preValue"), Some(&vt::Value::Double(1.0)));
-        assert_eq!(knot.get("value"), Some(&vt::Value::Double(9.0)));
+        // The colon of an extrapolation may touch the mode it introduces.
+        let compact = spline_of("#usda 1.0\ndef \"p\" { double x.spline = { pre:linear, post:sloped(2), 1: 2 } }\n");
+        assert_eq!(compact.pre_extrapolation(), ts::Extrapolation::Linear);
+        assert_eq!(compact.post_extrapolation(), ts::Extrapolation::Sloped(2.0));
+        let looping = spline_of("#usda 1.0\ndef \"p\" { double x.spline = { post:loop reset, 1: 2 } }\n");
+        assert_eq!(looping.post_extrapolation(), ts::Extrapolation::LoopReset);
+    }
+
+    /// What C++ drops on read is dropped here: the later of two knots at one
+    /// time, a negative tangent width, and a value the type cannot hold.
+    #[test]
+    fn parse_spline_dropped_input() {
+        let spline = spline_of(
+            "#usda 1.0\ndef \"p\" { float x.spline = { 1: 2; pre (-3, 4), 1: 5, 2: 1 & 1e40; post linear } }\n",
+        );
+        let [first, second] = spline.knots() else {
+            panic!("two knots")
+        };
+        assert_eq!(first.value, 2.0);
+        assert_eq!(first.pre_tangent, ts::Tangent::new(0.0, 4.0));
+        assert_eq!((second.pre_value, second.value), (Some(1.0), 0.0));
+
+        // A second tangent number may be spelled `inf`, and is dropped too.
+        let infinite = spline_of("#usda 1.0\ndef \"p\" { double x.spline = { 1: 2; pre (0.5, inf) } }\n");
+        assert_eq!(infinite.knots()[0].pre_tangent, ts::Tangent::new(0.5, 0.0));
+
+        // The first of two knots at one time is kept wherever the second is.
+        let unordered = spline_of("#usda 1.0\ndef \"p\" { double x.spline = { 2: 20, 1: 10, 2: 99 } }\n");
+        let values: Vec<_> = unordered.knots().iter().map(|knot| knot.value).collect();
+        assert_eq!(values, [10.0, 20.0]);
+    }
+
+    /// A layer may say it is version 1.1, the version that added tangent
+    /// algorithms, and no later one.
+    #[test]
+    fn usda_versions() {
+        Parser::new("#usda 1.1\n").parse().expect("version 1.1");
+        Parser::new("#usda 1.2\n").parse().expect_err("version 1.2");
+        Parser::new("#usda 1.10\n").parse().expect_err("version 1.10");
     }
 
     /// A property declared only by a suffixed statement keeps its place among

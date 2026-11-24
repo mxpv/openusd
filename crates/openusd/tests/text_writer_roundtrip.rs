@@ -87,8 +87,9 @@ fn normalize_json(v: &mut serde_json::Value) {
 /// Every spec's fields. A prim's properties and a variant set's variants are
 /// compared as sets: the text writer sorts them by name, as C++ does, so text
 /// does not keep the order they were stored in (`reorder properties` is what
-/// keeps an order). A spline's knots are compared in time order, the order
-/// C++ keeps and writes them in.
+/// keeps an order). A Hermite spline's text holds a tangent's slope alone, as
+/// C++ writes one. The widths that face a segment follow from the knot times;
+/// the two that face none, at the spline's ends, are left out.
 fn snapshot(reader: &sdf::Data) -> serde_json::Value {
     let mut out: BTreeMap<String, BTreeMap<&str, &vt::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
@@ -102,9 +103,15 @@ fn snapshot(reader: &sdf::Data) -> serde_json::Value {
                 names.sort_by_key(|name| name.as_str().unwrap_or_default().to_owned());
             }
         }
-        if let Some(serde_json::Value::Array(knots)) = fields.pointer_mut("/spline/knots") {
-            let time = |knot: &serde_json::Value| knot["time"].as_f64().unwrap_or_default();
-            knots.sort_by(|a, b| time(a).total_cmp(&time(b)));
+        if fields.pointer("/spline/curve_type") == Some(&serde_json::json!("Hermite"))
+            && let Some(serde_json::Value::Array(knots)) = fields.pointer_mut("/spline/knots")
+        {
+            if let Some(first) = knots.first_mut() {
+                first["pre_tangent"]["width"] = serde_json::json!(0);
+            }
+            if let Some(last) = knots.last_mut() {
+                last["post_tangent"]["width"] = serde_json::json!(0);
+            }
         }
     }
     json

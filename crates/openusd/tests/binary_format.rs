@@ -21,6 +21,8 @@ use std::fs;
 use openusd::gf::f16;
 use openusd::sdf::{self, AbstractData, LayerOffset, Payload, Permission, Specifier, Variability};
 use openusd::tf;
+use openusd::ts;
+use openusd::usda;
 use openusd::usdc::CrateData;
 use openusd::vt::Value;
 
@@ -644,4 +646,44 @@ fn fender_reads_every_field() {
         }
     }
     assert!(fields > 100, "{fields} fields");
+}
+
+/// `test_spline_simple`: a Bezier spline of doubles with two knots, no loop
+/// and no custom data, which is also the spline C++ was given as text in
+/// `gen_splines.usda`.
+#[test]
+fn spline_simple() {
+    let binary = value(&scene("splines"), "/MyPrim.myAttr", "spline")
+        .try_as_spline()
+        .expect("a spline");
+
+    let text = usda::read_file(format!("{VENDOR}/gen_splines.usda")).expect("the text source");
+    let authored = text
+        .field(&sdf::path("/MyPrim.myAttr").unwrap(), "spline")
+        .expect("a spline field")
+        .into_owned()
+        .try_as_spline()
+        .expect("a spline");
+    assert_eq!(binary, authored);
+
+    let knots: Vec<_> = binary
+        .knots()
+        .iter()
+        .map(|knot| {
+            let (pre, post) = (knot.pre_tangent, knot.post_tangent);
+            (knot.time, knot.value, (pre.width, pre.slope), (post.width, post.slope))
+        })
+        .collect();
+    assert_eq!(
+        knots,
+        [
+            (1.0, 8.0, (0.0, 0.0), (1.3, 0.125)),
+            (6.0, 20.0, (1.3, -0.2), (2.0, 0.3)),
+        ]
+    );
+    assert_eq!(binary.value_type(), ts::ValueType::Double);
+    assert!(!binary.has_inner_loops());
+    assert!(binary.knots().iter().all(|knot| knot.custom_data.is_empty()));
+    assert_eq!(binary.eval(1.0), Some(8.0));
+    assert_eq!(binary.eval(100.0), Some(20.0));
 }

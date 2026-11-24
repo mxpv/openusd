@@ -805,7 +805,7 @@ impl SchemaRegistry {
         // rather than read as metadata, plus `customData`, which carries the
         // schema generator's own bookkeeping, and `kind`, whose fallback prim
         // composition deliberately ignores.
-        const RESOLVED: [sdf::FieldKey; 10] = [
+        const RESOLVED: [sdf::FieldKey; 11] = [
             sdf::FieldKey::Active,
             sdf::FieldKey::ConnectionPaths,
             sdf::FieldKey::CustomData,
@@ -814,6 +814,7 @@ impl SchemaRegistry {
             sdf::FieldKey::Specifier,
             sdf::FieldKey::TargetPaths,
             sdf::FieldKey::TimeSamples,
+            sdf::FieldKey::Spline,
             sdf::FieldKey::Clips,
             sdf::FieldKey::ClipSets,
         ];

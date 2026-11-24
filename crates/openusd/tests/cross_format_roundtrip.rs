@@ -21,7 +21,23 @@ fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
         }
         out.insert(path.to_string(), fields);
     }
-    serde_json::to_value(&out).expect("serialize")
+    let mut json = serde_json::to_value(&out).expect("serialize");
+    // A crate file holds no tangent widths for a Hermite spline. Those that
+    // face a segment follow from the knot times; the two that face none, at
+    // the spline's ends, are not kept.
+    for fields in json.as_object_mut().expect("a map of specs").values_mut() {
+        if fields.pointer("/spline/curve_type") == Some(&serde_json::json!("Hermite"))
+            && let Some(serde_json::Value::Array(knots)) = fields.pointer_mut("/spline/knots")
+        {
+            if let Some(first) = knots.first_mut() {
+                first["pre_tangent"]["width"] = serde_json::json!(0);
+            }
+            if let Some(last) = knots.last_mut() {
+                last["post_tangent"]["width"] = serde_json::json!(0);
+            }
+        }
+    }
+    json
 }
 
 fn is_default_layer_offset(v: &serde_json::Value) -> bool {
@@ -122,6 +138,7 @@ cross_tests! {
     cross_variants,
     cross_geometryattributes,
     cross_dictionaries,
+    cross_splines,
 }
 
 // Typed time samples of every shape (scalar, token, array, tuple, timecode)
@@ -131,8 +148,13 @@ fn cross_typed_timesamples() {
     assert_cross("typed_timesamples", Path::new("fixtures/typed_timesamples.usda"));
 }
 
+// Splines of every value type, with loops, dual-valued knots, tangent
+// algorithms' absence and knot custom data, survive both formats.
+#[test]
+fn cross_cpp_splines() {
+    assert_cross("220_splines", Path::new("fixtures/sdf_parsing/220_splines.usda"));
+}
+
 // Skipped fixtures:
 //   - `attributes.usda`: authors bare scalars as `vector3f` time samples, which
 //     the parser rejects (see `attributes_malformed` in `text_format`).
-//   - `splines.usda`: splines materialise as `Value::ValueVec`, which the USDC
-//     writer rejects (no native heterogeneous-array type).

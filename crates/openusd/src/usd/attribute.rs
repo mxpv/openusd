@@ -19,6 +19,7 @@ use crate::pcp;
 use crate::pcp::AttributeValueSource;
 use crate::sdf;
 use crate::tf;
+use crate::ts;
 use crate::vt;
 
 /// An attribute to author, and everything it is authored with.
@@ -381,6 +382,40 @@ impl Attribute {
         Ok(self)
     }
 
+    /// Set the attribute's spline at the edit target (C++
+    /// `UsdAttribute::SetSpline`), which the attribute then reads at every
+    /// numeric time its target authors no sample for.
+    ///
+    /// The spline must be one the composed declaration takes
+    /// ([`sdf::ValueTypeName::validate_spline`]): of the attribute's own
+    /// floating-point type, or time-valued and of doubles for a `timecode`
+    /// attribute. It is in stage time, and is retimed into the target's as a
+    /// sample's time is ([`set_at`](Self::set_at)). The spec is prepared like
+    /// a value write.
+    pub fn set_spline(self, mut spline: ts::Spline) -> Result<Self, StageAuthoringError> {
+        let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
+        let ensure = authoring::plan_property_spec(&self.stage, &self.path, sdf::SpecType::Attribute, None, &schema)?;
+        let declared = self.composed_type(&ensure, &schema)?;
+        declared.validate_spline(&spline)?;
+        let plan = AttributeAuthoringPlan {
+            effective: Some(declared),
+            ensure,
+            values: Vec::new(),
+            clear: false,
+        };
+        // A spline the target's offset cannot retime is refused, where a
+        // value mapped in passing would be left in stage time.
+        let offset = self.stage.spec_time_offset();
+        if !offset.is_identity() {
+            spline.retime(offset.offset, offset.scale)?;
+        }
+        let spline = vt::Value::Spline(spline);
+        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
+            plan.set_spline(layer.data_mut(), &spec_path, spline)
+        })?;
+        Ok(self)
+    }
+
     /// Block opinions from weaker layers: every local value opinion is
     /// removed and `default` becomes a value block, so nothing weaker resolves
     /// through (C++ `UsdAttribute::Block`, which is `Clear` followed by a
@@ -395,14 +430,16 @@ impl Attribute {
         Ok(self)
     }
 
-    /// Remove every local value opinion — `default` and the whole
-    /// `timeSamples` field — from the edit target (C++ `UsdAttribute::Clear`),
-    /// so weaker layers' opinions resolve again. A target holding no spec is
-    /// left alone, and the sample field is erased without decoding it.
+    /// Remove every local value opinion — `default`, the whole `timeSamples`
+    /// field and the spline — from the edit target (C++
+    /// `UsdAttribute::Clear`), so weaker layers' opinions resolve again. A
+    /// target holding no spec is left alone, and the sample field is erased
+    /// without decoding it.
     pub fn clear(self) -> Result<Self, StageAuthoringError> {
         self.edit_existing(|spec| {
             spec.clear_default();
             spec.erase(sdf::FieldKey::TimeSamples.as_str());
+            spec.clear_spline();
             Ok(())
         })
     }
@@ -1031,6 +1068,39 @@ impl Attribute {
         self.build_resolve_info(pcp::ResolveMode::Proximal)
     }
 
+    /// Whether a spline is the attribute's strongest value source (C++
+    /// `UsdAttribute::HasSpline`): no stronger site authors time samples, and
+    /// no stronger clip set sources the attribute.
+    pub fn has_spline(&self) -> Result<bool> {
+        Ok(self.resolve_info()?.source() == ResolveInfoSource::Spline)
+    }
+
+    /// The spline the attribute reads from, in stage time, where a spline is
+    /// its strongest value source (C++ `UsdAttribute::GetSpline`).
+    pub fn spline(&self) -> Result<Option<ts::Spline>> {
+        let info = self.resolve_info()?;
+        let Some(site) = info.spec_site().filter(|_| info.source() == ResolveInfoSource::Spline) else {
+            return Ok(None);
+        };
+        // TODO(perf): the resolve walk read this spline to name it the
+        // source, and a crate layer decodes it again here. The walk's
+        // resolution could carry the spline it found.
+        let layer = site.layer.try_borrow()?;
+        let Some(field) = layer.data().try_field(&site.path, sdf::FieldKey::Spline.as_str())? else {
+            return Ok(None);
+        };
+        let Some(mut spline) = field.into_owned().try_as_spline() else {
+            return Ok(None);
+        };
+        // Authored in its layer's time and read in the stage's. An offset
+        // that cannot retime the spline is an error here, where a field read
+        // would hand the spline back as its layer holds it.
+        if !site.offset.is_identity() {
+            spline.retime(site.offset.offset, site.offset.scale)?;
+        }
+        Ok(Some(spline))
+    }
+
     /// Where the value at `time` comes from, without producing it.
     ///
     /// `time` is `None` for the default time — matching
@@ -1408,6 +1478,7 @@ impl AttributeAuthoringPlan {
         if self.clear {
             spec.clear_default();
             spec.erase(sdf::FieldKey::TimeSamples.as_str());
+            spec.clear_spline();
         }
         let mut samples = Vec::new();
         for (value, time) in self.values {
@@ -1424,11 +1495,25 @@ impl AttributeAuthoringPlan {
 
     /// The block, once [`prepare`](Self::prepare) has the spec: the
     /// `timeSamples` field erased whole, without decoding the samples it
-    /// discards, and `default` made a value block.
+    /// discards, the spline erased, and `default` made a value block.
     pub(super) fn block(self, data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<(), StageAuthoringError> {
         let mut spec = self.prepare(data, path)?;
         spec.erase(sdf::FieldKey::TimeSamples.as_str());
+        spec.clear_spline();
         spec.set_default_raw(vt::Value::ValueBlock);
+        Ok(())
+    }
+
+    /// The spline, already checked and mapped for the edit target, set once
+    /// [`prepare`](Self::prepare) has the spec.
+    fn set_spline(
+        self,
+        data: &mut dyn sdf::AbstractData,
+        path: &sdf::Path,
+        spline: vt::Value,
+    ) -> Result<(), StageAuthoringError> {
+        let mut spec = self.prepare(data, path)?;
+        spec.set(sdf::FieldKey::Spline.as_str(), spline);
         Ok(())
     }
 }
@@ -1711,6 +1796,12 @@ impl AttributeQuery {
                 })?;
                 Ok(pcp::TimedValue::Value(resolved))
             }
+            // A spline answers at every time, so one with no value at this
+            // time withholds it.
+            AttributeValueSource::Spline { spline, offset } => Ok(match pcp::spline_value_at(spline, *offset, time) {
+                Some(value) => pcp::TimedValue::Value(value),
+                None => pcp::TimedValue::NoValue,
+            }),
             AttributeValueSource::PerTime => stage.resolve_at(self.attr.path(), Some(time), pcp::ValueRead::default()),
         }
     }
@@ -1725,6 +1816,7 @@ fn source_of(kind: pcp::ResolveSourceKind) -> ResolveInfoSource {
     match kind {
         pcp::ResolveSourceKind::Default => ResolveInfoSource::Default,
         pcp::ResolveSourceKind::TimeSamples => ResolveInfoSource::TimeSamples,
+        pcp::ResolveSourceKind::Spline => ResolveInfoSource::Spline,
         pcp::ResolveSourceKind::ValueClips => ResolveInfoSource::ValueClips,
         pcp::ResolveSourceKind::None => ResolveInfoSource::None,
     }

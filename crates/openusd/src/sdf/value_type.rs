@@ -24,6 +24,7 @@ use strum::{Display, IntoStaticStr};
 
 use crate::gf::{self, f16};
 use crate::tf;
+use crate::ts;
 
 use super::unit::Unit;
 use super::{AssetPath, PathExpression, TimeCode};
@@ -133,6 +134,22 @@ pub enum ValueTypeError {
     /// A coercion applies but a component or element does not fit.
     #[error(transparent)]
     Cast(CastError),
+
+    /// The declared type takes no spline, or not one of this value type or
+    /// with values of this meaning: a `float` attribute takes a spline of
+    /// floats, and a `timecode` attribute a time-valued spline of doubles.
+    #[error(
+        "value type {type_name} cannot hold a spline of {}{value_type} values",
+        if *time_valued { "time-valued " } else { "" }
+    )]
+    Spline {
+        /// The declared type's spelling.
+        type_name: tf::Token,
+        /// The offered spline's value type.
+        value_type: ts::ValueType,
+        /// Whether the offered spline's values are times.
+        time_valued: bool,
+    },
 }
 
 // `ValueTypeError` rides inside `sdf::AuthoringError`, whose size the root
@@ -140,6 +157,36 @@ pub enum ValueTypeError {
 const _: () = assert!(mem::size_of::<ValueTypeError>() <= 48);
 
 impl ValueTypeName {
+    /// The value type of the spline an attribute of this type holds, and
+    /// whether the spline's values are times, or `None` where the type takes
+    /// no spline (C++ `TsSpline::IsSupportedValueType`). A `timecode`
+    /// attribute holds a time-valued spline of doubles.
+    pub fn spline_type(&self) -> Option<(ts::ValueType, bool)> {
+        let kind = self.kind()?;
+        Some((ts::ValueType::of(kind)?, kind == ValueKind::TimeCode))
+    }
+
+    /// Checks that an attribute of this type can hold `spline` (C++
+    /// `UsdAttribute::SetSpline`): the type is `double`, `float` or `half`
+    /// and the spline of the same value type, or it is `timecode` and the
+    /// spline a time-valued one of doubles.
+    pub fn validate_spline(&self, spline: &ts::Spline) -> Result<(), ValueTypeError> {
+        if self.kind().is_none() {
+            return Err(ValueTypeError::Unregistered {
+                type_name: self.as_token(),
+            });
+        }
+        let fits = self.spline_type() == Some((spline.value_type(), spline.is_time_valued()));
+        match fits {
+            true => Ok(()),
+            false => Err(ValueTypeError::Spline {
+                type_name: self.as_token(),
+                value_type: spline.value_type(),
+                time_valued: spline.is_time_valued(),
+            }),
+        }
+    }
+
     const fn registered(name: &'static str, kind: ValueKind, role: Option<Role>, unit: Unit) -> Self {
         Self(Repr::Registered(Registered { name, kind, role, unit }))
     }

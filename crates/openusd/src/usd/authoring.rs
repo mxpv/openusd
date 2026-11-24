@@ -1370,13 +1370,13 @@ pub(super) fn edit_existing_spec<'a, S>(
 // required-field knowledge `usda::parser::KNOWN_PROPS` keeps. Until then a
 // prim's `typeName`, `active`, `hidden`, `kind` and `instanceable` have
 // dedicated setters but stay reachable here, since gating them needs the
-// matching clear operations first; `spline` joins the attribute list once
-// splines are authored.
+// matching clear operations first.
 pub(super) fn check_reserved(kind: sdf::SpecType, key: &'static str) -> Result<(), StageAuthoringError> {
     let reserved: &[sdf::FieldKey] = match kind {
         sdf::SpecType::Attribute => &[
             sdf::FieldKey::Default,
             sdf::FieldKey::TimeSamples,
+            sdf::FieldKey::Spline,
             sdf::FieldKey::TypeName,
             sdf::FieldKey::ConnectionPaths,
             sdf::FieldKey::Variability,

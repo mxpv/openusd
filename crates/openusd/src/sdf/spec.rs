@@ -42,7 +42,7 @@ use std::ops::{Deref, DerefMut};
 use strum::{Display, EnumCount, FromRepr};
 
 use crate::tf;
-use crate::{sdf, vt};
+use crate::{sdf, ts, vt};
 
 /// An enum that specifies the type of an object.
 /// Objects are entities that have fields and are addressable by path.
@@ -1109,6 +1109,17 @@ where
         self.get(sdf::FieldKey::TimeSamples)
     }
 
+    /// The spline, if authored (C++ `SdfAttributeSpec::GetSpline`), in the
+    /// layer's own time.
+    pub fn spline(&self) -> Option<ts::Spline> {
+        self.get(sdf::FieldKey::Spline)
+    }
+
+    /// Whether a spline is authored (C++ `SdfAttributeSpec::HasSpline`).
+    pub fn has_spline(&self) -> bool {
+        self.has_field(sdf::FieldKey::Spline.as_str())
+    }
+
     /// The unit this attribute's values are expressed in (C++
     /// `SdfAttributeSpec::GetDisplayUnit`): the authored `displayUnit`, and
     /// otherwise the unit its declared type measures in.
@@ -1200,9 +1211,26 @@ where
         Ok(())
     }
 
+    /// Set the spline (C++ `SdfAttributeSpec::SetSpline`), which must be one
+    /// the declared type takes
+    /// ([`ValueTypeName::validate_spline`](sdf::ValueTypeName::validate_spline)).
+    /// A spec's time samples answer before its spline does.
+    pub fn set_spline(&mut self, spline: ts::Spline) -> Result<(), sdf::AuthoringError> {
+        self.declared_type()?
+            .ok_or(sdf::ValueTypeError::Empty)?
+            .validate_spline(&spline)?;
+        self.set(sdf::FieldKey::Spline.as_str(), vt::Value::Spline(spline));
+        Ok(())
+    }
+
+    /// Clear any authored spline (C++ `SdfAttributeSpec::ClearSpline`).
+    pub fn clear_spline(&mut self) {
+        self.erase(sdf::FieldKey::Spline.as_str());
+    }
+
     /// Redeclare the value type (C++ `SdfAttributeSpec::SetTypeName`). An
-    /// empty spelling is rejected, and the spec's `default` and every time
-    /// sample must pass the new type's
+    /// empty spelling is rejected, the spec's spline must be one the new type
+    /// takes, and its `default` and every time sample must pass the new type's
     /// [`validate`](sdf::ValueTypeName::validate) — a block passes, an opaque
     /// value never does — so the spec stays self-consistent with the values it
     /// holds. C++ writes the token as plain metadata; the validation is this
@@ -1221,6 +1249,17 @@ where
         if let TimeSamplesField::Samples(samples) = self.time_samples_field()? {
             for (_, sample) in &samples {
                 type_name.validate(sample)?;
+            }
+        }
+        match self.field(sdf::FieldKey::Spline.as_str())? {
+            None => {}
+            Some(vt::Value::Spline(spline)) => type_name.validate_spline(&spline)?,
+            Some(_) => {
+                return Err(SpecError::FieldType {
+                    field: sdf::FieldKey::Spline.as_str(),
+                    expected: "Spline",
+                }
+                .into());
             }
         }
         self.set(sdf::FieldKey::TypeName.as_str(), vt::Value::Token(type_name.as_token()));

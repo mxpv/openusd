@@ -52,7 +52,7 @@ use std::thread;
 use bitflags::bitflags;
 
 use crate::tf::Token;
-use crate::{Error, Result, ar, pcp, sdf, vt};
+use crate::{Error, Result, ar, pcp, sdf, ts, vt};
 
 use super::composition::{self, PendingEdit, StageComposition};
 
@@ -439,7 +439,8 @@ impl EditTarget {
     ///
     /// A `timecode` is a time coordinate in the same frame as the key a sample
     /// is authored at, so it runs through the same inverse offset and likewise
-    /// reads back unchanged once composition re-applies the arc's offset. A
+    /// reads back unchanged once composition re-applies the arc's offset, and
+    /// so do a spline's knots. A
     /// `pathExpression`, wherever it sits — the value itself, an element, a
     /// dictionary entry, a time sample — is made absolute against the owning
     /// prim, then each pattern prefix and reference path is mapped
@@ -466,7 +467,7 @@ impl EditTarget {
                 .map_paths(|path| self.mapping.map_target_to_source(path))
         };
         value.try_transform(&mut |value| match value {
-            vt::Value::TimeCode(_) | vt::Value::TimeCodeVec(_) => offset.apply_to_value(value),
+            vt::Value::TimeCode(_) | vt::Value::TimeCodeVec(_) | vt::Value::Spline(_) => offset.apply_to_value(value),
             vt::Value::TimeSamples(samples) if !offset.is_identity() => {
                 let mut samples = samples.clone();
                 offset.retime_samples(&mut samples, |sample| self.to_spec(anchor, object_path, sample));
@@ -637,6 +638,10 @@ pub enum StageAuthoringError {
     /// there is one variant to match.
     #[error(transparent)]
     ValueType(#[from] sdf::ValueTypeError),
+
+    /// A spline cannot be retimed into the edit target's layer time.
+    #[error(transparent)]
+    Spline(#[from] ts::Error),
 
     /// The edit-target layer declares the attribute as a type that does not
     /// agree with the composed one, so writing the composed-type value would
@@ -1596,6 +1601,12 @@ impl Stage {
             Some(type_name) => type_name.coerce(value)?,
             None => value,
         })
+    }
+
+    /// The offset that maps a stage time into the time of the layer the
+    /// current edit target authors into.
+    pub(super) fn spec_time_offset(&self) -> sdf::LayerOffset {
+        self.edit_target.borrow().spec_time_offset()
     }
 
     /// Maps a stage value authored on the object at `object_path` to the one

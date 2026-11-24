@@ -454,7 +454,7 @@ pub fn is_vector_field(field: &str) -> bool {
 /// untouched (C++ `UsdStage::_IsPrivateFieldKey` shields the same fields from
 /// its generic metadata path).
 pub fn folds_list_ops(field: &str) -> bool {
-    const DEDICATED: [FieldKey; 10] = [
+    const DEDICATED: [FieldKey; 11] = [
         FieldKey::References,
         FieldKey::Payload,
         FieldKey::InheritPaths,
@@ -465,6 +465,7 @@ pub fn folds_list_ops(field: &str) -> bool {
         FieldKey::ClipSets,
         FieldKey::Default,
         FieldKey::TimeSamples,
+        FieldKey::Spline,
     ];
     !DEDICATED.iter().any(|key| key.as_str() == field)
 }

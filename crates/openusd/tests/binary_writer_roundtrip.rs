@@ -330,6 +330,7 @@ vendor_tests! {
     vendor_gen_quath,
     vendor_gen_pathexpression,
     vendor_gen_relocates,
+    vendor_gen_splines,
     vendor_gen_timecodes,
     vendor_gen_timesamples,
     vendor_gen_variants,
@@ -457,12 +458,6 @@ fn quat_write_read_preserves_wxyz_convention() {
         ])
     );
 }
-
-// Skipped fixture — this fails during the *read* step, not during writing, and
-// is therefore a pre-existing reader-side limitation:
-//
-// - `gen_splines.usdc`: the crate spline type (59, crate 0.12.0) has no
-//   `Type` enum entry, so the `spline` field fails to decode.
 
 /// A crate file may store its samples in any order and repeat a time; the
 /// reader orders them as every `sdf::TimeSampleMap` is ordered, keeping the

@@ -15,7 +15,7 @@ use std::borrow::Cow;
 
 use strum::EnumTryAs;
 
-use crate::{sdf, vt};
+use crate::{sdf, ts, vt};
 
 use super::QueryError;
 use super::asset_resolve::{AssetMode, AssetSite};
@@ -105,7 +105,8 @@ pub(crate) enum Withheld {
     /// A `default` opinion authored `ValueBlock`. Withholds the value itself, so
     /// resolution reverts to whatever comes after the authored tiers.
     DefaultBlock,
-    /// The whole `timeSamples` field is blocked. Withholds samples only: this
+    /// The whole `timeSamples` field is blocked. Withholds this site's
+    /// animation and every weaker site's, samples and splines both: this
     /// site's `default`, and every weaker one, can still answer.
     TimeSamplesFieldBlock,
 }
@@ -247,7 +248,32 @@ pub(crate) enum ResolveSourceKind {
     None,
     Default,
     TimeSamples,
+    Spline,
     ValueClips,
+}
+
+impl ResolveSourceKind {
+    /// Whether a source of this kind answers over time: a sample map, a
+    /// spline or a clip set.
+    pub(crate) fn varies(self) -> bool {
+        matches!(self, Self::TimeSamples | Self::Spline | Self::ValueClips)
+    }
+}
+
+/// The value a spline authored at a site reached through `offset` has at
+/// stage `time`, or `None` where it has none there: it holds no knots, or the
+/// time falls in a value block (C++
+/// `UsdStage_ResolveInfoAccess::_GetSplineValue`).
+///
+/// The spline is evaluated at the time mapped into its layer's, and answers
+/// at its own precision. A time-valued one answers a time code, mapped back
+/// out to the stage's time.
+pub(crate) fn spline_value_at(spline: &ts::Spline, offset: sdf::LayerOffset, time: f64) -> Option<vt::Value> {
+    let value = spline.eval(offset.inverse().apply(time))?;
+    Some(match spline.is_time_valued() {
+        true => vt::Value::TimeCode(sdf::TimeCode(offset.apply(value))),
+        false => spline.value_type().value(value),
+    })
 }
 
 /// Whether a `timeSamples` opinion supplies a value at any time at all.
@@ -541,6 +567,13 @@ pub(crate) trait OpinionResolver {
         Step::Continue
     }
 
+    /// The spline at this site, in the contributing layer's own time frame.
+    /// A site that holds a sample map answers from that, and its spline is
+    /// not offered. Never called in [`ResolveMode::Default`].
+    fn on_spline(&mut self, _spline: &ts::Spline, _site: &OpinionSite<'_>) -> Step {
+        Step::Continue
+    }
+
     /// A `default` opinion at this site, in the layer's own time frame. Owned
     /// where the backend decoded it for this read, so a resolver that keeps
     /// the value takes it rather than copying it.
@@ -548,16 +581,17 @@ pub(crate) trait OpinionResolver {
         Step::Continue
     }
 
-    /// A `timeSamples` opinion the walk will not resolve from, because
-    /// [`ResolveMode::Default`] answers from `default` alone. It is still an
-    /// authored opinion, which is all a resolver can learn about it here.
+    /// A `timeSamples` or `spline` opinion the walk will not resolve from,
+    /// because [`ResolveMode::Default`] answers from `default` alone. It is
+    /// still an authored opinion, which is all a resolver can learn about it
+    /// here.
     ///
     /// Only a resolver that says so through
     /// [`wants_unresolved_samples`](Self::wants_unresolved_samples) is told.
     fn on_unresolved_samples(&mut self, _site: &OpinionSite<'_>) {}
 
-    /// Whether a default-time walk still reads the `timeSamples` it will not
-    /// resolve from, to report them through
+    /// Whether a default-time walk still reads the `timeSamples` and the
+    /// `spline` it will not resolve from, to report them through
     /// [`on_unresolved_samples`](Self::on_unresolved_samples).
     ///
     /// Reading a field costs what the backend charges to decode it — a whole

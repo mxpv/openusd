@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use openusd::ts;
 use openusd::usda;
 use openusd::vt;
 
@@ -26,16 +27,23 @@ fn assert_text_format(name: &str) {
     let reader = usda::read_file(&usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
 
     // Build actual output as a sorted map of path → fields.
-    let mut actual: BTreeMap<String, BTreeMap<&str, &vt::Value>> = BTreeMap::new();
+    let mut actual: BTreeMap<String, BTreeMap<&str, serde_json::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
-        let fields: BTreeMap<&str, &vt::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
-        actual.insert(path.to_string(), fields);
+        let fields = spec.fields.iter().map(|(name, value)| {
+            let json = match value {
+                vt::Value::Spline(spline) => reference_spline(spline),
+                value => serde_json::to_value(value).expect("failed to serialize a field"),
+            };
+            (name.as_str(), json)
+        });
+        actual.insert(path.to_string(), fields.collect());
     }
 
     let mut actual_json = serde_json::to_value(&actual).expect("failed to serialize actual data");
     let mut expected_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&baseline).expect("failed to read baseline"))
             .expect("failed to parse baseline JSON");
+    read_splines_as_cpp(&mut expected_json);
     normalize_json(&mut actual_json);
     normalize_json(&mut expected_json);
     drop_relationship_variability(&mut actual_json);
@@ -115,6 +123,105 @@ fn expand_baseline_escapes(v: &mut serde_json::Value) {
         serde_json::Value::Object(fields) => fields.values_mut().for_each(expand_baseline_escapes),
         serde_json::Value::Array(items) => items.iter_mut().for_each(expand_baseline_escapes),
         _ => {}
+    }
+}
+
+/// A spline as the Python baseline records one: a dictionary of its
+/// parameters, its knots, and the knots' custom data keyed by knot time.
+///
+/// The baseline names the two numbers of a tangent in the order it reads
+/// them, `Slope` then `Width`, where the text holds a width then a slope (C++
+/// `SplineTangent`); a tangent written as one number is a slope in both. An
+/// extrapolation or loop left at its default is `null`, and a knot with no
+/// pre-value records zero.
+fn reference_spline(spline: &ts::Spline) -> serde_json::Value {
+    use serde_json::json;
+
+    let extrapolation = |extrapolation: ts::Extrapolation| {
+        let (mode, slope) = match extrapolation {
+            ts::Extrapolation::Held => return serde_json::Value::Null,
+            ts::Extrapolation::ValueBlock => ("none", 0.0),
+            ts::Extrapolation::Linear => ("linear", 0.0),
+            ts::Extrapolation::Sloped(slope) => ("sloped", slope),
+            ts::Extrapolation::LoopRepeat => ("looprepeat", 0.0),
+            ts::Extrapolation::LoopReset => ("loopreset", 0.0),
+            ts::Extrapolation::LoopOscillate => ("looposcillate", 0.0),
+        };
+        json!({ "mode": mode, "slope": slope })
+    };
+    let params = spline.loop_params();
+    let loop_parameters = match params == ts::LoopParams::default() {
+        true => serde_json::Value::Null,
+        false => json!({
+            "protoStart": params.proto_start,
+            "protoEnd": params.proto_end,
+            "numPreLoops": params.num_pre_loops,
+            "numPostLoops": params.num_post_loops,
+            "valueOffset": params.value_offset,
+        }),
+    };
+    let knots: Vec<_> = spline
+        .knots()
+        .iter()
+        .map(|knot| {
+            json!({
+                "time": knot.time,
+                "value": knot.value,
+                "preValue": knot.pre_value.unwrap_or(0.0),
+                "preTangentSlope": knot.pre_tangent.width,
+                "preTangentWidth": knot.pre_tangent.slope,
+                "postTangentSlope": knot.post_tangent.width,
+                "postTangentWidth": knot.post_tangent.slope,
+                "nextInterpolationMode": knot.next_interp.to_string(),
+            })
+        })
+        .collect();
+    let custom_data: serde_json::Map<_, _> = spline
+        .knots()
+        .iter()
+        .filter(|knot| !knot.custom_data.is_empty())
+        .map(|knot| {
+            let data = serde_json::to_value(&knot.custom_data).expect("failed to serialize custom data");
+            (knot.time.to_string(), data)
+        })
+        .collect();
+    json!({
+        "curveType": spline.curve_type().to_string(),
+        "preExtrapolation": extrapolation(spline.pre_extrapolation()),
+        "postExtrapolation": extrapolation(spline.post_extrapolation()),
+        "loopParameters": loop_parameters,
+        "knots": knots,
+        "knotCustomData": custom_data,
+    })
+}
+
+/// The two references disagree on what a spline keeps of its text. The
+/// Python baseline records every knot as written. C++ keeps a spline's knots
+/// in time order, and its knot setters refuse a negative tangent width
+/// (`TsKnot::SetPreTanWidth`) and a value that is not finite at the
+/// attribute's precision (`TsKnot::SetValue`), leaving the knot's default.
+/// We follow C++, and read the baseline's splines the same way.
+fn read_splines_as_cpp(expected: &mut serde_json::Value) {
+    let Some(specs) = expected.as_object_mut() else { return };
+    for spec in specs.values_mut() {
+        let float = spec.get("typeName") == Some(&serde_json::json!("float"));
+        let Some(serde_json::Value::Array(knots)) = spec.pointer_mut("/spline/knots") else {
+            continue;
+        };
+        let time = |knot: &serde_json::Value| knot["time"].as_f64().unwrap_or_default();
+        knots.sort_by(|a, b| time(a).total_cmp(&time(b)));
+        for knot in knots {
+            let value = knot["value"].as_f64().unwrap_or_default();
+            if float && !(value as f32).is_finite() {
+                knot["value"] = serde_json::json!(0);
+            }
+            // The baseline's `Slope` is the tangent's width.
+            for width in ["preTangentSlope", "postTangentSlope"] {
+                if knot[width].as_f64().is_some_and(|width| width < 0.0) {
+                    knot[width] = serde_json::json!(0);
+                }
+            }
+        }
     }
 }
 

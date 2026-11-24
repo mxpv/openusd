@@ -202,11 +202,11 @@ pub(super) fn value_expr(value: &vt::Value) -> Result<TokenStream, vt::ValueKind
         // Named rather than caught by a wildcard: each is a shape no schema
         // can give a property, so a declaration holding one is a mistake to
         // report rather than a value to write. Composition arcs and the
-        // list-ops behind them never reach a schematics; `TimeSamples` is a
-        // value over time, which a fallback is not; `Specifier`, `Permission`
-        // and `Variability` are a spec's own declaration, which the
-        // declaration already carries; and the rest are internal to value
-        // resolution.
+        // list-ops behind them never reach a schematics; `TimeSamples` and
+        // `Spline` are values over time, which a fallback is not;
+        // `Specifier`, `Permission` and `Variability` are a spec's own
+        // declaration, which the declaration already carries; and the rest
+        // are internal to value resolution.
         vt::Value::None
         | vt::Value::Value
         | vt::Value::ValueVec(_)
@@ -228,6 +228,7 @@ pub(super) fn value_expr(value: &vt::Value) -> Result<TokenStream, vt::ValueKind
         | vt::Value::Relocates(_)
         | vt::Value::VariantSelectionMap(_)
         | vt::Value::TimeSamples(_)
+        | vt::Value::Spline(_)
         | vt::Value::LayerOffsetVec(_)
         | vt::Value::UnregisteredValue(_)
         | vt::Value::UnregisteredValueListOp(_)

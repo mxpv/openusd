@@ -583,6 +583,7 @@ mod tests {
     use crate::Result;
     use crate::gf;
     use crate::sdf::{AbstractData, FileFormat};
+    use crate::ts;
 
     /// A crate's samples read one by one agree with its field read whole, at
     /// every kind of time, and an edit made after load is read as authored.
@@ -827,6 +828,7 @@ mod tests {
             vt::Value::ValueBlock,
             vt::Value::TimeCode(1.0.into()),
             vt::Value::TimeCodeVec(many()),
+            vt::Value::Spline(Default::default()),
             vt::Value::PathExpression(sdf::PathExpression::parse("/a")),
             vt::Value::PathExpressionVec(vec![sdf::PathExpression::parse("/a")]),
             vt::Value::Relocates(vec![(sdf::Path::new("/a")?, sdf::Path::new("/b")?)]),
@@ -912,6 +914,25 @@ mod tests {
         );
         assert_eq!(written(vec![relocates()?])?, version(0, 11, 0));
         assert_eq!(written(vec![relocates()?, time_code()])?, version(0, 11, 0));
+
+        // A spline, and one whose knot has a tangent algorithm.
+        let mut spline = ts::Spline::new(ts::ValueType::Double);
+        assert_eq!(written(vec![vt::Value::Spline(spline.clone())])?, version(0, 12, 0));
+        let auto_ease = ts::Tangent {
+            algorithm: ts::TangentAlgorithm::AutoEase,
+            ..ts::Tangent::default()
+        };
+        let knot = ts::Knot {
+            post_tangent: auto_ease,
+            custom_data: vt::Dictionary::from([("note".to_owned(), vt::Value::Int(1))]),
+            ..ts::Knot::new(1.0, 2.0)
+        };
+        spline.set_knot(knot).expect("a valid knot");
+        assert_eq!(written(vec![vt::Value::Spline(spline.clone())])?, version(0, 13, 0));
+        assert_eq!(
+            written(vec![relocates()?, vt::Value::Spline(spline)])?,
+            version(0, 13, 0)
+        );
         assert_eq!(
             written(vec![
                 vt::Value::TimeCodeVec(vec![]),

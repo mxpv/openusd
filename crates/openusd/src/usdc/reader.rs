@@ -8,7 +8,7 @@ use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::usdc::coding;
 use crate::vt::{self, Value};
-use crate::{ar, gf, sdf, tf};
+use crate::{ar, gf, sdf, tf, ts};
 
 use super::layout::*;
 use super::{MAX_NESTING, MIN_COMPRESSED_ARRAY_SIZE, ReadError, ReadResultExt};
@@ -41,10 +41,10 @@ const MAX_DECOMPRESSED_BYTES: usize = if usize::BITS > 32 { 4 << 30 } else { usi
 /// moved either way, would say where it belongs.
 const MIN_ADVISED_BYTES: usize = 1 << 20;
 
-// Maximum supported USDC crate version: 0.12.0 added splines. The versions
-// that introduced the value types before it are named in `layout`, after USD
-// Core Specification v1.0.1 §16.3.8.2.
-const SW_VERSION: Version = version(0, 12, 0);
+// Maximum supported USDC crate version: 0.13.0 added tangent algorithms to
+// spline knots. The versions that introduced the value types before it are
+// named in `layout`, after USD Core Specification v1.0.1 §16.3.8.2.
+const SW_VERSION: Version = version(0, 13, 0);
 
 /// A crate file: its structural sections, read once by [`open`](Self::open),
 /// over the bytes it decodes values from on demand. The bytes live as long
@@ -1014,6 +1014,24 @@ impl<'a> Decoder<'a> {
         self.stream.skip(delta)
     }
 
+    /// Reads a spline: the bytes of its binary encoding, then its knots'
+    /// custom data, a dictionary to each knot time that has any (C++
+    /// `CrateFile::_Reader::Read<TsSpline>`).
+    fn read_spline(&mut self) -> Result<ts::Spline, ReadError> {
+        let bytes = self.read_pod_vec::<u8>()?;
+        let mut spline =
+            ts::Spline::from_binary(&bytes).map_err(|error| ReadError::corrupt(format!("Invalid spline: {error}")))?;
+
+        let count = self.stream.read_count()?;
+        for _ in 0..count {
+            let time = self.stream.read_pod::<f64>()?;
+            let custom_data = self.read_custom_data()?;
+            // Data for a time with no knot belongs to no knot, and is dropped.
+            spline.set_custom_data(time, custom_data.into());
+        }
+        Ok(spline)
+    }
+
     /// Reads a crate dictionary value (`customData`, `assetInfo`, and nested
     /// dictionaries).
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>, ReadError> {
@@ -1625,6 +1643,12 @@ impl<'a> Decoder<'a> {
                 vt::Value::Relocates(pairs)
             }
 
+            Type::Spline => {
+                corrupt!(!value.is_inlined());
+                self.stream.seek(value.payload())?;
+                vt::Value::Spline(self.read_spline()?)
+            }
+
             Type::Invalid => return Err(ReadError::unsupported(format!("Unsupported value type: {ty}"))),
         };
 
@@ -1701,6 +1725,7 @@ fn kind_of(ty: Type, array: bool) -> Option<vt::ValueKind> {
         Type::UnregisteredValueListOp => vt::ValueKind::UnregisteredValueListOp,
         Type::PayloadListOp => vt::ValueKind::PayloadListOp,
         Type::Relocates => vt::ValueKind::Relocates,
+        Type::Spline => vt::ValueKind::Spline,
         Type::UnregisteredValue | Type::Invalid => return None,
     };
     Some(match scalar.array_kind() {

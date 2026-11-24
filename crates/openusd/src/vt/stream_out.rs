@@ -154,6 +154,7 @@ fn stream(s: &mut String, value: &Value) {
                 s.push('\n');
             }
         }
+        Value::Spline(spline) => display(s, spline),
         Value::ValueBlock => s.push_str("None"),
         Value::ValueVec(v) => separated(s, ARRAY, v, stream),
         Value::TimeCode(v) => time_code(s, v),

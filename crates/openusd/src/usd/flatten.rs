@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::usd::{Attribute, Prim, PrimPredicate, PrimStatus, SpecSite, Stage};
-use crate::{Result, pcp, sdf, tf, vt};
+use crate::{Result, pcp, sdf, tf, ts, vt};
 
 /// Fields flattening does not copy.
 ///
@@ -43,6 +43,7 @@ const NOT_COPIED: &[sdf::FieldKey] = &[
     sdf::FieldKey::ApiSchemas,
     sdf::FieldKey::Default,
     sdf::FieldKey::TimeSamples,
+    sdf::FieldKey::Spline,
     sdf::FieldKey::TargetPaths,
     sdf::FieldKey::ConnectionPaths,
     sdf::FieldKey::Variability,
@@ -345,6 +346,21 @@ fn write_property(
                     vt::Value::TimeSamples(samples),
                 );
             }
+            if let Some(spline) = held.spline {
+                // A spline the composed type does not take is one the stage
+                // reads and no layer can declare: a stronger site redeclared
+                // the attribute.
+                // TODO: an asset path in a knot's custom data is written as
+                // its layer holds it, as C++ writes it. Anchoring it takes
+                // the flatten asset policy applied to each knot's dictionary
+                // with the site the spline was read from.
+                attribute
+                    .type_name()?
+                    .unwrap_or(sdf::ValueTypeName::TOKEN)
+                    .validate_spline(&spline)
+                    .map_err(sdf::AuthoringError::from)?;
+                data.set_field(&path, sdf::FieldKey::Spline.as_str(), vt::Value::Spline(spline));
+            }
             // Connections are composed paths on the stage. Only those into a
             // prototype need translating, and an explicit list is how one
             // layer states them.
@@ -458,13 +474,17 @@ fn composed<'a>(
 struct Held {
     default: Option<vt::Value>,
     samples: Option<sdf::TimeSampleMap>,
+    /// The spline that answers at a numeric time, in stage time (C++
+    /// `UsdStage::Flatten` writes the spline a resolve info names).
+    spline: Option<ts::Spline>,
 }
 
 /// What an attribute holds, from the sites that answer for it.
 ///
 /// The two opinions resolve by different walks, so they are asked for
-/// separately. A numeric time takes the strongest site holding either, and
-/// reads its samples — so a stronger `default` hides weaker samples entirely.
+/// separately. A numeric time takes the strongest site holding samples, a
+/// spline or a `default`, and reads its samples — so a stronger `default` or
+/// spline hides weaker samples entirely.
 /// The default time skips samples altogether, so the strongest `default` is
 /// the answer wherever it sits, even under a site whose samples won above.
 /// Writing both is what lets one layer answer the way the stage did.
@@ -488,18 +508,22 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], clips: bool, a
     // TODO(perf): the raw samples and default are copied for every attribute
     // and used only when composition reports none; noting which site holds
     // them and reading the raw value only then would spare the copies.
-    let (raw_samples, raw_default) = {
-        // The strongest site holding either field answers for the samples, and
+    let (raw_samples, raw_default, any_spline) = {
+        // The strongest site holding samples, a spline or a `default` answers
+        // for the samples, and
         // the strongest holding a `default` for the default. Presence is read
         // without copying a field, as a sample map is expensive to clone.
         let (mut samples, mut default) = (None, None);
         let (mut numeric_found, mut default_found) = (false, false);
+        let mut any_spline = false;
         for site in sites {
             let layer = site.layer.try_borrow()?;
             let data = layer.data();
             let has_samples = data.has_field(&site.path, sdf::FieldKey::TimeSamples.as_str());
             let has_default = data.has_field(&site.path, sdf::FieldKey::Default.as_str());
-            if !numeric_found && (has_samples || has_default) {
+            let has_spline = data.has_field(&site.path, sdf::FieldKey::Spline.as_str());
+            any_spline |= has_spline;
+            if !numeric_found && (has_samples || has_spline || has_default) {
                 numeric_found = true;
                 samples = authored(&layer, site, sdf::FieldKey::TimeSamples)
                     .and_then(|value| value.try_as_time_samples())
@@ -513,7 +537,7 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], clips: bool, a
                 break;
             }
         }
-        (samples, default)
+        (samples, default, any_spline)
     };
 
     let samples = match raw_samples {
@@ -534,7 +558,19 @@ fn held(stage: &Stage, attribute: &Attribute, sites: &[SpecSite], clips: bool, a
         None => None,
     };
 
-    Ok(Held { default, samples })
+    // Whether a spline answers is the resolve walk's to say: a site's empty
+    // sample map does not hide its spline. The walk is asked only where a
+    // site holds a spline at all.
+    let spline = match any_spline && !clips_own {
+        true => attribute.spline()?,
+        false => None,
+    };
+
+    Ok(Held {
+        default,
+        samples,
+        spline,
+    })
 }
 
 /// The samples a value-clip set supplies for `attribute`, baked into one map

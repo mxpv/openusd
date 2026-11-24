@@ -6,6 +6,7 @@ use strum::{Display, EnumDiscriminants, EnumIs, EnumIter, EnumTryAs, IntoStaticS
 
 use crate::gf;
 use crate::tf;
+use crate::ts;
 
 use crate::sdf::{
     AssetPath, Int64ListOp, IntListOp, LayerOffset, Path, PathExpression, PathListOp, Payload, PayloadListOp,
@@ -155,6 +156,8 @@ pub enum Value {
     /// A sample map, ordered as a
     /// [`TimeSampleMap`](TimeSampleMap) is.
     TimeSamples(TimeSampleMap),
+    /// A spline: what an attribute's `spline` field holds.
+    Spline(ts::Spline),
 
     LayerOffsetVec(Vec<LayerOffset>),
 
@@ -163,7 +166,8 @@ pub enum Value {
     #[from(skip)]
     Value,
 
-    /// Heterogeneous array (e.g. spline knots). Each element is a `Value`.
+    /// Heterogeneous array (C++ `std::vector<VtValue>`). Each element is a
+    /// `Value`.
     ValueVec(Vec<Value>),
 
     #[from(skip)]
@@ -315,6 +319,8 @@ impl serde::Serialize for Value {
             Value::UnregisteredValue(v) => v.serialize(serializer),
             Value::UnregisteredValueListOp(v) => v.serialize(serializer),
             Value::UnregisteredDictionary(v) => v.serialize(serializer),
+
+            Value::Spline(v) => v.serialize(serializer),
 
             // Time samples serialize as a map with string keys.
             Value::TimeSamples(v) => {
@@ -478,6 +484,7 @@ impl_try_from_value!(f64, Double, "Double");
 impl_try_from_value!(u8, Uchar, "Uchar");
 impl_try_from_value!(f16, Half, "Half");
 impl_try_from_value!(TimeCode, TimeCode, "TimeCode");
+impl_try_from_value!(ts::Spline, Spline, "ts::Spline");
 impl_try_from_value!(Path, Path, "Path");
 impl_try_from_value!(PathExpression, PathExpression, "PathExpression");
 impl_try_from_value!(Specifier, Specifier, "Specifier");

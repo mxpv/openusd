@@ -237,12 +237,14 @@ impl LayerOffset {
     /// a sample map is keyed by: an attribute authoring `timecode t = 5` in a
     /// layer sublayered with `(offset = 10; scale = 2)` resolves to `20` on the
     /// stage. The timecodes a value holds at the reach of
-    /// [`try_transform`](Value::try_transform) are retimed, and a sample map's
-    /// times with them.
+    /// [`try_transform`](Value::try_transform) are retimed, a sample map's
+    /// times with them, and a spline's knots.
     ///
     /// `None` where nothing is retimed: a value that holds no time, and any
-    /// value at all under the identity offset. A sample map holds times
-    /// whatever its samples hold, so any other offset retimes one.
+    /// value at all under the identity offset. A sample map and a spline hold
+    /// times whatever their values are, so any other offset retimes one. A
+    /// spline cannot run backwards, and an offset whose scale is not positive
+    /// leaves it as it is.
     pub fn apply_to_value(&self, value: &Value) -> Option<Value> {
         if self.is_identity() {
             return None;
@@ -258,6 +260,11 @@ impl LayerOffset {
                 let mut samples = samples.clone();
                 self.apply_to_samples(&mut samples);
                 Some(Value::TimeSamples(samples))
+            }
+            Value::Spline(spline) => {
+                let mut spline = spline.clone();
+                spline.retime(self.offset, self.scale).ok()?;
+                Some(Value::Spline(spline))
             }
             _ => None,
         })

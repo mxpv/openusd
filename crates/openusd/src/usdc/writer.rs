@@ -19,14 +19,14 @@ use num_traits::{AsPrimitive, PrimInt};
 use crate::{
     ar, gf, sdf,
     sdf::{AbstractData, FormatError, LayerOffset, ListOp, Path, PathElement, Payload, Reference},
-    tf,
+    tf, ts,
     vt::Value,
 };
 
 use super::coding;
 use super::layout::{
-    Bootstrap, Field, ListOpHeader, PATH_EXPRESSION_VERSION, RELOCATES_VERSION, Section, Spec as FileSpec,
-    TIME_CODE_VERSION, Type, ValueRep, Version, version,
+    Bootstrap, Field, ListOpHeader, PATH_EXPRESSION_VERSION, RELOCATES_VERSION, SPLINE_VERSION, Section,
+    Spec as FileSpec, TANGENT_ALGORITHM_VERSION, TIME_CODE_VERSION, Type, ValueRep, Version, version,
 };
 use super::reader::CrateFile;
 
@@ -753,8 +753,17 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 reason: "no value type holds a single path; a layer holds a path vector".into(),
             }),
 
-            // Heterogeneous arrays are produced only by the USDA spline parser;
-            // the USDC binary format has no native representation for them.
+            Value::Spline(spline) => {
+                let needed = match spline.has_tangent_algorithms() {
+                    true => TANGENT_ALGORITHM_VERSION,
+                    false => SPLINE_VERSION,
+                };
+                self.require_version(needed, 1);
+                self.write_spline(spline)
+            }
+
+            // The USDC binary format has no representation for a
+            // heterogeneous array.
             Value::ValueVec(_) => Err(FormatError::Encode {
                 reason:
                     "Value::ValueVec cannot be serialized to USDC (the binary format lacks a heterogeneous-array type)"
@@ -1056,6 +1065,24 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             self.write_pod(&tidx)?;
         }
         Ok(rep_heap(Type::Relocates, off, false))
+    }
+
+    /// Serialize a spline: the bytes of its binary encoding, counted, then
+    /// the custom data of each knot that has any, keyed by the knot's time
+    /// (C++ `CrateFile::_Writer::Write(const TsSpline &)`).
+    fn write_spline(&mut self, spline: &ts::Spline) -> Result<ValueRep, FormatError> {
+        let off = self.pos()?;
+        let bytes = spline.to_binary();
+        self.write_count(bytes.len() as u64)?;
+        self.write_bytes(&bytes)?;
+
+        let with_data = || spline.knots().iter().filter(|knot| !knot.custom_data.is_empty());
+        self.write_count(with_data().count() as u64)?;
+        for knot in with_data() {
+            self.write_pod(&knot.time)?;
+            self.write_dictionary_entries(&knot.custom_data)?;
+        }
+        Ok(rep_heap(Type::Spline, off, false))
     }
 
     fn write_payload(&mut self, p: &Payload) -> Result<ValueRep, FormatError> {
