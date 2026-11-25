@@ -504,8 +504,9 @@ pub(crate) struct ApplyOutcome {
     /// indices a `subLayers`/offset/`timeCodesPerSecond` change or an
     /// `expressionVariables` delta dropped (C++ `DidChangeSignificantly` from
     /// `_DidChangeLayerStackExpressionVariables`). Each drops its index and every
-    /// namespace descendant, so an entry stands for its whole subtree; a lone
-    /// [`Path::abs_root`] entry means the whole stage resynced. Sorted and
+    /// namespace descendant, so an entry stands for its whole subtree;
+    /// [`Path::abs_root`], with the prototype roots retired beside it, means
+    /// the whole stage resynced ([`root_stack_resync`]). Sorted and
     /// deduplicated.
     ///
     /// An entry is a subtree a consumer must re-resolve, which is not always one
@@ -1143,7 +1144,7 @@ impl Changes {
         let mut resynced = if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             let evicted = cache.invalidate_layers(graph, &affected);
             match affected.iter().any(|&layer| graph.in_root_stack(layer)) {
-                true => vec![Path::abs_root()],
+                true => root_stack_resync(evicted),
                 false => evicted,
             }
         } else {
@@ -1235,6 +1236,8 @@ impl Changes {
         // and the others that recorded the same failures compose again too.
         drop(view);
         resynced.extend(cache.retry_dropped_failures(graph));
+        resynced.sort();
+        resynced.dedup();
         ApplyOutcome {
             resynced,
             resynced_prims,
@@ -1359,6 +1362,17 @@ fn apply_default_prim_edits(
     reported.into_iter().collect()
 }
 
+/// The resyncs of a change to the root layer stack, whose users are the
+/// whole cache: `/` stands for every stage path `evicted` names, and the
+/// prototype roots retired with them stand beside it, each a namespace of
+/// its own. The rest is trimmed, as the list names every index of the
+/// stage.
+fn root_stack_resync(mut evicted: Vec<Path>) -> Vec<Path> {
+    evicted.retain(super::is_prototype_namespace);
+    evicted.push(Path::abs_root());
+    evicted
+}
+
 /// Consumes an `expressionVariables` rebuild's per-stack deltas, dropping their
 /// recorded dependents and returning them, with the prototype roots retired
 /// alongside and their instances, as the resynced paths — the C++
@@ -1388,10 +1402,9 @@ fn apply_vars_deltas(cache: &mut IndexCache, graph: &LayerGraph, deltas: &[Stack
         // Step 2 (the variable source changed, so every arc out of the stack
         // keys its target differently) or step 3: resync every prim using the
         // stack. The root stack's users are the whole cache, subsuming every
-        // victim any delta could add — prototype roots included, so the roots
-        // retired here need no separate mention — so drop it once and stop.
+        // victim any delta could add, so drop it once and stop.
         if delta.stack == LayerStackId::ROOT {
-            return cache.drop_index_victims(vec![Path::abs_root()]);
+            return root_stack_resync(cache.drop_index_victims(vec![Path::abs_root()]));
         }
         victims.extend(cache.store().dependencies().prims_for_stack(delta.stack));
     }

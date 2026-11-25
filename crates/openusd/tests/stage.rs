@@ -1669,6 +1669,35 @@ class "Lib"
     Ok(())
 }
 
+/// A root-layer `subLayers` edit resyncs `/`, and the prototypes stand
+/// beside it: the one the walk of the stage then composes, and the one the
+/// edit retired, as C++ `UsdStage::_RecomposePrims` names every prototype
+/// whose source lies under a recomposed path. A prototype root is a
+/// namespace of its own, which `/` does not stand for.
+#[test]
+fn root_resync_names_prototypes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("empty.usda"), "#usda 1.0\n")?;
+    let edit = |stage: &Stage| {
+        stage.root_layer().edit(|e| {
+            e.pseudo_root_mut()?.set_sublayers(["empty.usda"]);
+            Ok(())
+        })
+    };
+    let stage = two_referrers(&dir, true)?;
+    let notices = capture_notices(&stage);
+    edit(&stage)?;
+    let prototype = first_prototype(&stage)?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/")?, prototype]);
+
+    let stage = two_referrers(&dir, true)?;
+    let prototype = first_prototype(&stage)?;
+    let notices = capture_notices(&stage);
+    edit(&stage)?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/")?, prototype]);
+    Ok(())
+}
+
 /// An instance moving onto a prototype whose own source goes in the same edit
 /// keeps that prototype's work: the moved instance takes the root back, and
 /// the work the retired prototype held there settles, so its composition
