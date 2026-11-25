@@ -42,7 +42,7 @@ use std::thread;
 
 use crate::{Result, ar, pcp, sdf, tf};
 
-use super::sink::{Payload, Provenance, ReplayId, ResyncPaths};
+use super::sink::{Covering, Payload, Provenance, ReplayId, ResyncPaths};
 
 /// One transaction outcome awaiting reconciliation, in commit order.
 pub(super) enum Pending {
@@ -885,7 +885,7 @@ impl StageComposition {
             let since = self.prototype_mark();
             let mut found = Vec::new();
             let mut found_since = self.take_discovered(&mut found, since);
-            let mut covered = sdf::Covering::default();
+            let mut covered = Covering::composed();
             let mut retries_sublayers = false;
             while let Some(group) = next_group(&mut drained) {
                 match group {
@@ -1398,7 +1398,7 @@ impl StageComposition {
         &self,
         group: &mut [PendingEdit],
         since: usize,
-        covered: &mut sdf::Covering,
+        covered: &mut Covering,
         hooks: &dyn CompositionHooks,
     ) -> bool {
         let generation = group[0].generation;

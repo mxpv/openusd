@@ -250,7 +250,10 @@ pub struct CommittedChange<'a> {
     /// than it was, so a handle to it must be re-resolved rather than re-read.
     /// The prims the transaction's own layer loads dropped are here too;
     /// what settling the drain's work finds reaches
-    /// [`StageSink::recomposed`].
+    /// [`StageSink::recomposed`]. The `/__Prototype_N` roots the change
+    /// composed are here as well, as C++ names each prototype
+    /// `Usd_InstanceCache` adds: a prototype root is a namespace of its
+    /// own, so one stands beside a resynced `/`.
     ///
     /// Minimal in ancestors: an entry stands for its whole subtree, so a
     /// resynced `/foo` appears without `/foo/bar`. A
@@ -486,7 +489,9 @@ impl<F: Fn(&Stage, &CommittedChange<'_>)> StageSink for F {
 /// [`prims`](Self::prims) alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resynced<'a> {
-    /// Subtree resyncs, minimal in ancestors.
+    /// Subtree resyncs, minimal in ancestors. A `/__Prototype_N` root the
+    /// change composed is a namespace of its own, so it stands beside a
+    /// resynced `/`.
     pub subtrees: &'a [sdf::Path],
     /// Prims recomposed in place, none of them at or under a subtree resync.
     pub prims: &'a [sdf::Path],
@@ -504,7 +509,7 @@ pub(super) struct ResyncPaths {
 impl ResyncPaths {
     /// The subtree resyncs `paths` name, normalized.
     pub(super) fn from_subtrees(mut paths: Vec<sdf::Path>) -> Self {
-        let _ = keep_ancestors(&mut paths);
+        let _ = keep_ancestors(&mut paths, true);
         Self {
             subtrees: paths,
             prims: Vec::new(),
@@ -514,7 +519,7 @@ impl ResyncPaths {
     /// Keeps [`subtrees`](Self::subtrees) minimal in ancestors and drops a
     /// prim a subtree covers.
     pub(super) fn normalize(&mut self) {
-        let covering = keep_ancestors(&mut self.subtrees);
+        let covering = keep_ancestors(&mut self.subtrees, true);
         self.prims.sort();
         self.prims.dedup();
         self.prims.retain(|prim| !covering.covers(prim));
@@ -574,6 +579,7 @@ pub(super) struct Payload {
 
 /// A resync set and the covering projection over it, both named in one
 /// namespace — the only pairing a prefix comparison means anything across.
+/// The default is a layer's own namespace.
 #[derive(Default)]
 struct NamespacedPaths {
     /// The prim paths whose composition was resynced.
@@ -588,9 +594,10 @@ struct NamespacedPaths {
     /// attribute authored at `/A/B.x`. Not reported — it is a projection of
     /// `resynced`.
     subtree: Vec<sdf::Path>,
-    /// [`subtree`](Self::subtree) as an [`sdf::Covering`], which
-    /// [`normalize`](Self::normalize) builds; empty until it runs.
-    covering: sdf::Covering,
+    /// [`subtree`](Self::subtree) as a [`Covering`], which
+    /// [`normalize`](Self::normalize) builds; of the paths' namespace from
+    /// construction, and empty until it runs.
+    covering: Covering,
 }
 
 impl NamespacedPaths {
@@ -599,7 +606,7 @@ impl NamespacedPaths {
     fn normalize(&mut self) {
         self.resynced.sort();
         self.resynced.dedup();
-        self.covering = keep_ancestors(&mut self.subtree);
+        self.covering = keep_ancestors(&mut self.subtree, self.covering.composed);
         self.resynced.retain(|p| !self.covering.covers_below(p));
     }
 
@@ -621,6 +628,57 @@ impl NamespacedPaths {
         self.resynced.append(&mut other.resynced);
         self.resynced.sort();
         self.resynced.dedup();
+    }
+}
+
+/// The subtrees a set of resyncs stands for, answering whether a path lies
+/// in one. In composed stage namespace the pseudo-root stands for the stage
+/// namespace alone: a `/__Prototype_N` root is a namespace of its own,
+/// which no stage path holds, so it is named beside a resynced `/`, as C++
+/// `UsdStage::_RecomposePrims` keeps each prototype it names beside the
+/// pseudo-root. A layer's own namespace has no such namespaces, and `/`
+/// holds every path in it, which is the default.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Covering {
+    /// Whether the pseudo-root is among the subtrees.
+    root: bool,
+    /// Whether the paths are composed stage paths, whose pseudo-root stops
+    /// at the prototype namespaces.
+    composed: bool,
+    /// The subtrees below the pseudo-root, prototype namespaces included.
+    below: sdf::Covering,
+}
+
+impl Covering {
+    /// An empty covering of composed stage paths.
+    pub(super) fn composed() -> Self {
+        Self {
+            composed: true,
+            ..Self::default()
+        }
+    }
+
+    /// Adds `path`, which stands for its subtree.
+    pub(super) fn insert(&mut self, path: sdf::Path) {
+        match path.is_abs_root() {
+            true => self.root = true,
+            false => self.below.insert(path),
+        }
+    }
+
+    /// Whether the pseudo-root, when among the subtrees, holds `path`.
+    fn under_root(&self, path: &sdf::Path) -> bool {
+        self.root && !(self.composed && pcp::is_prototype_namespace(path))
+    }
+
+    /// Whether `path` lies at or beneath one of the subtrees.
+    pub(super) fn covers(&self, path: &sdf::Path) -> bool {
+        self.under_root(path) || self.below.covers(path)
+    }
+
+    /// Whether `path` lies strictly beneath one of the subtrees.
+    fn covers_below(&self, path: &sdf::Path) -> bool {
+        (self.under_root(path) && !path.is_abs_root()) || self.below.covers_below(path)
     }
 }
 
@@ -691,9 +749,9 @@ impl Payload {
         // The cache's stage half needs no translation: it is what a dependency
         // lookup answered, already in the composed namespace.
         let mut stage = NamespacedPaths {
+            covering: Covering::composed(),
             resynced: changes.cache.stage_resynced_paths().cloned().collect(),
             subtree: changes.cache.stage_subtree_paths().cloned().collect(),
-            ..NamespacedPaths::default()
         };
         let mut authored = NamespacedPaths::default();
         for path in changes.cache.authored_resynced_paths() {
@@ -783,7 +841,7 @@ impl Payload {
             .retain(|p| !self.stage.reports(p) && self.recomposed.binary_search(p).is_err());
         self.authored_info.retain(|p| !self.authored.reports(p));
 
-        let _ = keep_ancestors(&mut asset_paths_resynced);
+        let _ = keep_ancestors(&mut asset_paths_resynced, true);
         asset_paths_resynced.retain(|p| !self.stage.covering.covers(p));
         self.asset_paths_resynced = asset_paths_resynced;
 
@@ -820,8 +878,9 @@ impl Payload {
     }
 
     /// Adds `prototypes`, the `/__Prototype_N` roots the change composed, to
-    /// the finished payload's resyncs. A prototype root stands in its own
-    /// namespace, so no other reported path covers one or lies beneath it.
+    /// the finished payload's resyncs. A prototype root is a namespace of
+    /// its own, which no reported stage path holds, so the set stays
+    /// minimal in ancestors.
     pub(super) fn add_resynced(&mut self, prototypes: Vec<sdf::Path>) {
         self.stage.resynced.extend(prototypes);
         self.stage.resynced.sort();
@@ -856,12 +915,16 @@ impl Payload {
 /// Orders a path set and reduces it to its ancestors, dropping every entry a
 /// shallower entry already stands for (C++ `_RemoveDescendentEntries`).
 /// Duplicates fall out with them, since a path covers its own copy. The
-/// result is sorted, and returned as an [`sdf::Covering`] too.
-fn keep_ancestors(paths: &mut Vec<sdf::Path>) -> sdf::Covering {
+/// result is sorted, and returned as a [`Covering`] too, of composed stage
+/// paths when `composed`, else of a layer's own.
+fn keep_ancestors(paths: &mut Vec<sdf::Path>, composed: bool) -> Covering {
+    let mut kept = Covering {
+        composed,
+        ..Covering::default()
+    };
     // A path sorts before every path it prefixes, so each ancestor is kept
     // before any of its descendants is tested.
     paths.sort();
-    let mut kept = sdf::Covering::default();
     paths.retain(|path| {
         let covered = kept.covers(path);
         if !covered {
@@ -940,6 +1003,30 @@ mod tests {
         );
         assert_eq!(payload.stage.resynced, paths(&["/A"]));
         assert_eq!(payload.changed_info_only, paths(&["/B.y"]));
+    }
+
+    /// A prototype root is a namespace of its own: a resynced `/` stands for
+    /// the stage namespace and leaves `/__Prototype_N` beside it, while the
+    /// prototype's own subtree folds into its root as any other.
+    #[test]
+    fn prototype_root_beside_root() {
+        let resync = ResyncPaths::from_subtrees(paths(&["/__Prototype_1/A", "/A", "/", "/__Prototype_1"]));
+        assert_eq!(resync.subtrees, paths(&["/", "/__Prototype_1"]));
+
+        let outcome = pcp::ApplyOutcome {
+            resynced_prims: Vec::new(),
+            resynced: paths(&["/", "/__Prototype_1"]),
+            asset_paths_resynced: Vec::new(),
+            retries_sublayers: false,
+        };
+        let payload = shaped(Provenance::LocalStack, &[], &[], &[], outcome);
+        assert_eq!(payload.stage.resynced, paths(&["/", "/__Prototype_1"]));
+
+        // A layer's own namespace has no prototype namespaces: `/` holds a
+        // prim of that name like any other.
+        let mut subtrees = paths(&["/", "/__Prototype_1"]);
+        let _ = keep_ancestors(&mut subtrees, false);
+        assert_eq!(subtrees, paths(&["/"]));
     }
 
     /// The asset-path channel is minimized the same way and then yields to the
