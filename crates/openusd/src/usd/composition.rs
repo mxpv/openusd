@@ -196,6 +196,16 @@ struct Mark {
     since: usize,
 }
 
+/// What operations outside a drain found that no notice carries
+/// ([`StageComposition::discover`]), with the earliest prototype mark of the
+/// operations that found it: the notice that reports the paths names the
+/// prototypes minted since.
+#[derive(Default)]
+struct Discovered {
+    paths: Vec<sdf::Path>,
+    since: Option<usize>,
+}
+
 /// One notice the outbox holds.
 enum Notice {
     /// A transaction that landed.
@@ -338,7 +348,7 @@ pub(super) struct StageComposition {
     /// What reads and other operations outside a drain found that no notice
     /// carries ([`discover`](Self::discover)): the next drain's snapshot
     /// reports it with its own findings.
-    discovered: RefCell<Vec<sdf::Path>>,
+    discovered: RefCell<Discovered>,
     /// The stack sweeps and layer reclaims skipped away from a boundary
     /// ([`at_boundary`](Self::at_boundary)).
     deferred: Cell<Deferred>,
@@ -526,13 +536,14 @@ impl StageComposition {
     fn update_pair<T>(&self, f: impl FnOnce(&mut pcp::LayerGraph, &mut pcp::IndexCache) -> T) -> T {
         let mut layers = self.layers.borrow_mut();
         let mut cache = self.cache.borrow_mut();
+        let since = cache.prototype_mark();
         let out = f(&mut layers, &mut cache);
         // A prim composed again tries the targets its dropped index failed
         // to load, as C++ opens a layer afresh at every index rebuild; the
         // other prims that recorded those failures, which compose again too,
         // reach the stage's sinks with the next drain.
         let others = cache.retry_dropped_failures(&mut layers);
-        self.discovered.borrow_mut().extend(others);
+        self.note_discovered(others, since);
         out
     }
 
@@ -868,13 +879,14 @@ impl StageComposition {
             // What operations found since the last drain is reported with
             // what this snapshot finds, after its transactions, less what
             // their notices cover.
-            let mut found = self.discovered.take();
+            // Every notice of the snapshot counts the prototypes minted from
+            // here on, before any of its transactions applies, as its own;
+            // what operations found before it counts from their own mark.
+            let since = self.prototype_mark();
+            let mut found = Vec::new();
+            let mut found_since = self.take_discovered(&mut found, since);
             let mut covered = sdf::Covering::default();
             let mut retries_sublayers = false;
-            // Every notice of the snapshot counts the prototypes minted from
-            // here on, before any of its transactions applies, as its own.
-            let since = self.cache.borrow().prototype_mark();
-            let back = Mark { at: None, since };
             while let Some(group) = next_group(&mut drained) {
                 match group {
                     Group::Aborted(generation) => {
@@ -928,8 +940,12 @@ impl StageComposition {
             }
             // What settling the snapshot's work found follows its notices,
             // with what its own composition found, less what they reported.
-            found.extend(self.discovered.take());
+            found_since = self.take_discovered(&mut found, found_since);
             found.retain(|path| !covered.covers(path));
+            let back = Mark {
+                at: None,
+                since: found_since,
+            };
             self.report(back, StageNotice::Recomposed, found, hooks);
         }
         Ok(())
@@ -979,11 +995,12 @@ impl StageComposition {
     /// change dropped prims (a walk under rules it swapped), reporting what
     /// the settling's loads find.
     pub(super) fn settle_now(&self, hooks: &dyn CompositionHooks) {
+        let since = self.prototype_mark();
         let mut found = Vec::new();
         self.guarded(Poisoned::Compose, || {
             self.settle_work(Settled::Required, hooks, &mut found);
         });
-        self.discover(found, hooks);
+        self.discover(found, since, hooks);
     }
 
     /// Delivers what operations outside a drain found
@@ -1010,8 +1027,7 @@ impl StageComposition {
         {
             return Err(sdf::LayerError::Busy.into());
         }
-        let found = self.discovered.take();
-        self.report(self.back(), StageNotice::Recomposed, found, hooks);
+        self.report_discovered(hooks);
         self.process_pending(hooks);
         Ok(())
     }
@@ -1022,12 +1038,46 @@ impl StageComposition {
     }
 
     /// Records `found`, what an operation outside a drain (a read, a
-    /// mutation's own loads) dropped that no notice carries, for the next
-    /// drain to report. Nothing is kept with no sink to tell.
-    fn discover(&self, found: Vec<sdf::Path>, hooks: &dyn CompositionHooks) {
+    /// mutation's own loads) that began at the prototype mark `since`
+    /// dropped that no notice carries, for the next drain to report. Nothing
+    /// is kept with no sink to tell.
+    fn discover(&self, found: Vec<sdf::Path>, since: usize, hooks: &dyn CompositionHooks) {
         if hooks.delivers() {
-            self.discovered.borrow_mut().extend(found);
+            self.note_discovered(found, since);
         }
+    }
+
+    /// Records `found`, found by an operation that began at the prototype
+    /// mark `since`, keeping the earliest mark of the operations recorded.
+    fn note_discovered(&self, found: Vec<sdf::Path>, since: usize) {
+        if found.is_empty() {
+            return;
+        }
+        let mut discovered = self.discovered.borrow_mut();
+        discovered.paths.extend(found);
+        discovered.since = Some(discovered.since.map_or(since, |earliest| earliest.min(since)));
+    }
+
+    /// Moves what operations found ([`discover`](Self::discover)) onto
+    /// `found`, returning the earlier of `since` and the mark they began at:
+    /// the mark of a notice that reports both.
+    fn take_discovered(&self, found: &mut Vec<sdf::Path>, since: usize) -> usize {
+        let discovered = self.discovered.take();
+        found.extend(discovered.paths);
+        discovered.since.map_or(since, |earliest| earliest.min(since))
+    }
+
+    /// Queues what operations found ([`discover`](Self::discover)) as a
+    /// [`StageNotice::Recomposed`] behind every notice queued.
+    fn report_discovered(&self, hooks: &dyn CompositionHooks) {
+        let mut found = Vec::new();
+        let since = self.take_discovered(&mut found, self.prototype_mark());
+        self.report(Mark { at: None, since }, StageNotice::Recomposed, found, hooks);
+    }
+
+    /// The cache's prototype mark ([`pcp::IndexCache::prototype_mark`]).
+    fn prototype_mark(&self) -> usize {
+        self.cache.borrow().prototype_mark()
     }
 
     /// Queues `notice` naming `found`, the subtrees an operation resynced, at
@@ -1052,25 +1102,15 @@ impl StageComposition {
         self.outbox.borrow_mut().push_back(Queued { notice, since });
     }
 
-    /// A [`Mark`] behind every notice queued, for a change beginning now.
-    fn back(&self) -> Mark {
-        Mark {
-            at: None,
-            since: self.cache.borrow().prototype_mark(),
-        }
-    }
-
     /// Opens a mutation's notice: queues what operations found before it
     /// ([`discover`](Self::discover)) as a [`StageNotice::Recomposed`], and
     /// returns the mark its own notice goes at ([`queue_at`](Self::queue_at)):
     /// the outbox's length and the prototype mark now.
     fn mark(&self, hooks: &dyn CompositionHooks) -> Mark {
-        let found = self.discovered.take();
-        let back = self.back();
-        self.report(back, StageNotice::Recomposed, found, hooks);
+        self.report_discovered(hooks);
         Mark {
             at: Some(self.outbox.borrow().len()),
-            ..back
+            since: self.prototype_mark(),
         }
     }
 
@@ -1084,9 +1124,10 @@ impl StageComposition {
         committed: sdf::Committed,
         hooks: &dyn CompositionHooks,
     ) {
+        let since = self.prototype_mark();
         let mut found = Vec::new();
         self.intern_layer(joined, hooks, &mut found);
-        self.discover(found, hooks);
+        self.discover(found, since, hooks);
         self.deliver(committed, hooks);
     }
 
@@ -1137,8 +1178,8 @@ impl StageComposition {
         self.settle_work(settled, hooks, &mut again);
         // The stacks the settled prims released are swept too.
         self.reclaim_stale_stacks();
-        again.extend(self.discovered.take());
-        self.report(mark, StageNotice::LoadsRetried, again, hooks);
+        let since = self.take_discovered(&mut again, mark.since);
+        self.report(Mark { since, ..mark }, StageNotice::LoadsRetried, again, hooks);
     }
 
     /// How many times the failed loads were retried
@@ -1189,15 +1230,17 @@ impl StageComposition {
     /// first ([`register_instances`](Self::register_instances)), and goes on
     /// into each new prototype for the instances nested in it.
     ///
-    /// The walk composes, and may load, the resynced subtrees, as C++ does.
-    /// One that fails stops, and the notice names the prototypes it reached.
+    /// The walk composes, and may load, the resynced subtrees, as C++ does,
+    /// and is repeated until the population it reads is stable. One that
+    /// fails stops, and the notice names the prototypes its last pass
+    /// reached.
     //
     // TODO(perf): a resynced subtree is walked whole whether or not the change
     // could have made anything in it instanceable; the change set could
     // narrow the walk to the subtrees whose instancing it touched.
     fn add_composed_prototypes(&self, notice: &mut Notice, since: usize, hooks: &dyn CompositionHooks) {
         let roots = match notice {
-            Notice::Committed(notice) => notice.payload.resynced_prims(),
+            Notice::Committed(notice) => notice.payload.resynced_prims().to_vec(),
             Notice::Stage(
                 StageNotice::LoadRules(paths)
                 | StageNotice::LoadsRetried(paths)
@@ -1211,7 +1254,7 @@ impl StageComposition {
         }
         let mut reached = Vec::new();
         let is_new = |cache: &pcp::IndexCache, root: &sdf::Path| cache.minted_since(root, since);
-        let _ = self.register_instances(roots, is_new, &mut reached, hooks);
+        let _ = self.register_instances(&roots, is_new, &mut reached, hooks);
         {
             let cache = self.cache.borrow();
             reached.retain(|root| is_new(&cache, root));
@@ -1234,20 +1277,31 @@ impl StageComposition {
         }
     }
 
-    /// Registers every instance at or below each of `roots`, and pushes the
-    /// prototype roots they resolve to onto `reached`, each once. The walk
-    /// then goes on through the namespace of each reached root `descend`
-    /// admits, for the instances nested in it.
+    /// Registers every instance at or below each of `roots`, and fills
+    /// `reached` with the prototype roots they resolve to, each once. The
+    /// walk then goes on through the namespace of each reached root `descend`
+    /// admits, for the instances nested in it. Returns the population epoch
+    /// the answer holds at.
     ///
     /// The walk takes the steps stage traversal takes, so mask, activeness,
     /// and the stop at instances cannot drift from it: it descends only into
     /// populated prims, so nothing below an inactive one is composed or
     /// loaded, and stops at each instance, whose subtree belongs to its
     /// prototype. Every subtree of `roots` is walked before any prototype
-    /// namespace, so prototypes mint in stage order. Each prim is one settled
-    /// read, against the cache, so a prim's own loads settle before its
-    /// children are read. An error stops the walk, leaving in `reached` what
-    /// it had found.
+    /// namespace, so prototypes mint in stage order. An error stops the walk,
+    /// leaving in `reached` what its last pass had found.
+    ///
+    /// Each prim is one settled read, against the cache, so a prim's own
+    /// loads settle before its children are read, but the walk as a whole
+    /// does not: a demand raised late can install a layer whose invalidation
+    /// drops prototypes and child names the walk already consumed (a demanded
+    /// layer that introduces relocates, or one whose own `${VAR}` sublayer
+    /// resolves afterwards, both reach `IndexCache::invalidate_layers`). The
+    /// walk restarts whenever the population epoch moved, so its answer is
+    /// one coherent population. That terminates for the same reason the
+    /// loader's own fixpoints do: a restart means a demanded layer was
+    /// installed, and each pass settles at least one previously unsettled
+    /// target, of which there are finitely many.
     //
     // TODO(rayon): sibling subtrees, and distinct prototype namespaces, are
     // independent once their parent has composed, so their walks could run
@@ -1255,30 +1309,36 @@ impl StageComposition {
     // `IndexCache::materialize_prototype`).
     pub(super) fn register_instances(
         &self,
-        roots: Vec<sdf::Path>,
+        roots: &[sdf::Path],
         mut descend: impl FnMut(&pcp::IndexCache, &sdf::Path) -> bool,
         reached: &mut Vec<sdf::Path>,
         hooks: &dyn CompositionHooks,
-    ) -> Result<(), pcp::QueryError> {
-        let mut seen = sdf::PathSet::default();
-        let mut namespaces = Vec::new();
-        let mut found = Vec::new();
-        let mut roots = roots.into_iter();
-        // A prototype's namespace can hold further instances, each minting a
-        // prototype to walk in turn; `seen` bounds the fixpoint however the
-        // composition nests.
-        while let Some(root) = roots.next().or_else(|| namespaces.pop()) {
-            self.walk_instances(root, &mut found, hooks)?;
-            for prototype in found.drain(..) {
-                if seen.insert(prototype.clone()) {
-                    if descend(&self.cache.borrow(), &prototype) {
-                        namespaces.push(prototype.clone());
+    ) -> Result<u64, pcp::QueryError> {
+        loop {
+            let epoch = self.cache.borrow().population_epoch();
+            reached.clear();
+            let mut seen = sdf::PathSet::default();
+            let mut namespaces = Vec::new();
+            let mut found = Vec::new();
+            let mut pass = roots.iter().cloned();
+            // A prototype's namespace can hold further instances, each minting
+            // a prototype to walk in turn; `seen` bounds the fixpoint however
+            // the composition nests.
+            while let Some(root) = pass.next().or_else(|| namespaces.pop()) {
+                self.walk_instances(root, &mut found, hooks)?;
+                for prototype in found.drain(..) {
+                    if seen.insert(prototype.clone()) {
+                        if descend(&self.cache.borrow(), &prototype) {
+                            namespaces.push(prototype.clone());
+                        }
+                        reached.push(prototype);
                     }
-                    reached.push(prototype);
                 }
             }
+            if self.cache.borrow().population_epoch() == epoch {
+                return Ok(epoch);
+            }
         }
-        Ok(())
     }
 
     /// Registers every instance in the subtree at `root`, pushing the
@@ -2116,6 +2176,7 @@ impl StageComposition {
         // The passes build indices through the resolver, and the loads
         // between them run it too.
         let mut query = query;
+        let since = self.prototype_mark();
         let mut found = Vec::new();
         let result = self.guarded(Poisoned::Compose, || {
             loop {
@@ -2143,7 +2204,7 @@ impl StageComposition {
         });
         // What the read's loads found reaches the stage's sinks at the next
         // delivery: a read delivers nothing.
-        self.discover(found, hooks);
+        self.discover(found, since, hooks);
         result
     }
 
@@ -2311,14 +2372,14 @@ impl StageComposition {
         // them costs no notice; `LayerGraph::recompose_for_mute` carries the
         // argument.
         self.reclaim(hooks, pcp::Reclaim::Muted);
-        found.extend(self.discovered.take());
+        let since = self.take_discovered(&mut found, mark.since);
         if hooks.delivers() {
             let notice = StageNotice::Muting {
                 layer: changed,
                 muted,
                 resynced: ResyncPaths::from_subtrees(found),
             };
-            self.queue_at(mark, notice, hooks);
+            self.queue_at(Mark { since, ..mark }, notice, hooks);
         }
     }
 
@@ -2366,6 +2427,7 @@ impl StageComposition {
         authoring: Option<Box<pcp::StackIdentity>>,
         hooks: &dyn CompositionHooks,
     ) -> Result<StackPin<'_>, String> {
+        let since = self.prototype_mark();
         if let Some(identity) = authoring {
             let mut found = Vec::new();
             let resolved = self.guarded(Poisoned::Compose, || {
@@ -2380,7 +2442,7 @@ impl StageComposition {
                     }
                 }
             });
-            self.discover(found, hooks);
+            self.discover(found, since, hooks);
             return resolved.map(|id| self.pin_stack(id));
         }
         // A target without a captured authoring stack (a local or variant
@@ -2407,7 +2469,7 @@ impl StageComposition {
         self.guarded(Poisoned::Compose, || {
             self.resolve_sublayer_demands(demands, hooks, &mut found)
         });
-        self.discover(found, hooks);
+        self.discover(found, since, hooks);
         Ok(pin)
     }
 
@@ -2548,9 +2610,9 @@ impl StageComposition {
             self.settle_work(Settled::Required, hooks, &mut found);
         });
         self.reclaim(hooks, pcp::Reclaim::Unused);
-        found.extend(self.discovered.take());
+        let since = self.take_discovered(&mut found, mark.since);
         if victims.subtrees.is_empty() && victims.prims.is_empty() {
-            self.discover(found, hooks);
+            self.discover(found, since, hooks);
         } else if hooks.delivers() {
             let mut paths = ResyncPaths {
                 subtrees: found,
@@ -2558,7 +2620,7 @@ impl StageComposition {
             };
             paths.subtrees.extend(victims.subtrees);
             paths.normalize();
-            self.queue_at(mark, StageNotice::LoadRules(paths), hooks);
+            self.queue_at(Mark { since, ..mark }, StageNotice::LoadRules(paths), hooks);
         }
     }
 

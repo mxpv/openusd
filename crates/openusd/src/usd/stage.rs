@@ -4115,19 +4115,8 @@ impl Stage {
     ///
     /// The walk is the composition's
     /// ([`register_instances`](super::composition::StageComposition::register_instances))
-    /// from the pseudo-root, into every prototype namespace it reaches.
-    ///
-    /// The pass must be *epoch-stable*. It runs through many separate settled
-    /// reads; each settles its own layer loading, but the traversal as a
-    /// whole does not, so a demand raised late can install a layer whose
-    /// invalidation drops prototypes and child names the walk already
-    /// consumed — a demanded layer that introduces relocates, or one
-    /// whose own `${VAR}` sublayer resolves afterwards, both reach
-    /// `IndexCache::invalidate_layers`. Restarting whenever the epoch moved is
-    /// what keeps the stamped result a snapshot of one coherent population.
-    /// That terminates for the same reason the loader's own fixpoints do: a
-    /// restart means a demanded layer was installed, and each pass settles at
-    /// least one previously unsettled target, of which there are finitely many.
+    /// from the pseudo-root, into every prototype namespace it reaches. It
+    /// answers for one coherent population, whose epoch is stamped.
     //
     // TODO(perf): the walk composes — and, under `InitialLoadSet::LoadAll`,
     // loads — the whole populated namespace, so one cheap read of a
@@ -4137,16 +4126,12 @@ impl Stage {
     // keyed on the change set, registering only the subtrees an edit could have
     // made instanceable.
     fn discover_prototypes(&self) -> Result<(), pcp::QueryError> {
-        loop {
-            let epoch = self.population_epoch();
-            let mut reached = Vec::new();
-            self.composition
-                .register_instances(vec![sdf::Path::abs_root()], |_, _| true, &mut reached, self)?;
-            if self.population_epoch() == epoch {
-                self.prototypes_discovered.set(Some(epoch));
-                return Ok(());
-            }
-        }
+        let mut reached = Vec::new();
+        let epoch = self
+            .composition
+            .register_instances(&[sdf::Path::abs_root()], |_, _| true, &mut reached, self)?;
+        self.prototypes_discovered.set(Some(epoch));
+        Ok(())
     }
 
     /// Returns a handle to a prim's composition index (C++

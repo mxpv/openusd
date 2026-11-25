@@ -549,6 +549,10 @@ pub(super) struct Payload {
     /// The prims recomposed in place, in composed stage namespace, which
     /// yield to [`stage`](Self::stage)'s resyncs.
     recomposed: Vec<sdf::Path>,
+    /// The prims [`stage`](Self::stage) resyncs before
+    /// [`finish`](Self::finish) merges [`authored`](Self::authored) in: the
+    /// resynced prims named in composed stage namespace.
+    stage_prims: Vec<sdf::Path>,
     /// The changed-info paths in composed stage namespace, which yield to
     /// [`stage`](Self::stage)'s resyncs. Emptied into
     /// [`changed_info_only`](Self::changed_info_only) by
@@ -716,6 +720,7 @@ impl Payload {
             stage,
             authored,
             recomposed: changes.cache.stage_recomposed_paths().cloned().collect(),
+            stage_prims: Vec::new(),
             stage_info,
             authored_info,
             changed_info_only: Vec::new(),
@@ -782,6 +787,13 @@ impl Payload {
         asset_paths_resynced.retain(|p| !self.stage.covering.covers(p));
         self.asset_paths_resynced = asset_paths_resynced;
 
+        self.stage_prims = self
+            .stage
+            .resynced
+            .iter()
+            .filter(|path| path.is_abs_root() || path.is_prim())
+            .cloned()
+            .collect();
         // Every comparison is done, so the two namespaces can share one reported
         // set — the provenance says which namespace a direct edit's entries are
         // in, and nothing distinguishes them from here on. The authored bundles
@@ -800,15 +812,11 @@ impl Payload {
         &self.stage.subtree
     }
 
-    /// The prims the finished payload resyncs: its reported resyncs less the
-    /// properties.
-    pub(super) fn resynced_prims(&self) -> Vec<sdf::Path> {
-        self.stage
-            .resynced
-            .iter()
-            .filter(|path| path.is_abs() && (path.is_abs_root() || path.is_prim()))
-            .cloned()
-            .collect()
+    /// The prims the finished payload resyncs in composed stage namespace.
+    /// A direct edit's resyncs named in the edited layer's own namespace are
+    /// not among them, though they are reported.
+    pub(super) fn resynced_prims(&self) -> &[sdf::Path] {
+        &self.stage_prims
     }
 
     /// Adds `prototypes`, the `/__Prototype_N` roots the change composed, to

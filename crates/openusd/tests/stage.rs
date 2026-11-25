@@ -1583,6 +1583,92 @@ def "rock"
     Ok(())
 }
 
+/// A read whose loads drop prims reports them at the next delivery, naming
+/// the prototype the read composed while a sink listened: reading `/F/I`
+/// joins `t.usda`, which forgets the failure `/F` recorded for `m.usda`, now
+/// written, and drops `/F`.
+#[test]
+fn read_prototype_notified() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\"\n{\n    def \"C\" {}\n}\n",
+    )?;
+    let m = dir.path().join("m.usda");
+    let stage = open_text(
+        &dir,
+        &format!(
+            r#"#usda 1.0
+def "F" (
+    references = @{}@
+)
+{{
+    def "I" (
+        instanceable = true
+        references = @t.usda@
+    ) {{}}
+}}
+"#,
+            m.display()
+        ),
+    )?;
+    assert!(stage.prim("/F")?.is_valid()?);
+    fs::write(&m, "#usda 1.0\n(\n    defaultPrim = \"M\"\n)\ndef \"M\" {}\n")?;
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    stage.add_sink(RecordingSink {
+        recomposed: Some(Box::new(move |_: &Stage, resynced: Resynced<'_>| {
+            sink.borrow_mut().extend(resynced.subtrees.iter().cloned());
+        })),
+        ..Default::default()
+    })?;
+    let prototype = stage.prim("/F/I")?.prototype()?.expect("/F/I is an instance");
+    stage.flush()?;
+    let heard = heard.borrow();
+    assert!(heard.contains(&sdf::path("/F")?), "{heard:?}");
+    assert!(heard.contains(&prototype), "{heard:?}");
+    Ok(())
+}
+
+/// A direct edit of a referenced layer walks only the stage prims it
+/// resyncs: a prim the edit defines in that layer's own namespace is not the
+/// stage's instance of the same path, whose prototype stays unregistered.
+#[test]
+fn layer_paths_not_walked() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("x.usda"), "#usda 1.0\ndef \"Source\" {}\n")?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+def "R" (
+    references = @x.usda@</Source>
+) {}
+def "Other" (
+    instanceable = true
+    references = </Lib>
+) {}
+class "Lib"
+{
+    def "c" {}
+}
+"#,
+    )?;
+    assert!(stage.prim("/R")?.is_valid()?);
+    let notices = capture_notices(&stage);
+    let x = identifier_by_leaf(&stage, "x.usda");
+    stage.layer(&x)?.expect("x.usda is loaded").edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/Other", sdf::Specifier::Def, "")?;
+        Ok(())
+    })?;
+    assert!(stage.prim("/R")?.is_valid()?);
+    let resynced = notices.borrow().resynced.clone();
+    assert!(
+        !resynced.iter().any(|path| path.as_str().starts_with("/__Prototype_")),
+        "{resynced:?}"
+    );
+    Ok(())
+}
+
 /// An instance moving onto a prototype whose own source goes in the same edit
 /// keeps that prototype's work: the moved instance takes the root back, and
 /// the work the retired prototype held there settles, so its composition
