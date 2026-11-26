@@ -28,7 +28,7 @@ use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::diagnostics::Diagnostics;
 use super::index_store::{IndexStore, Owner, PrimRevision, ScopedInvalidation, SpecRescan, ValueScope};
-use super::instancing::{Answer, PrimRecord, PrototypeRegistry, RetiredPrototype};
+use super::instancing::{Answer, PrimRecord, PrototypeRegistry, RetiredPrototype, is_prototype_namespace};
 use super::layer_graph::{LayerGraph, LayerStackIdentifier, LayerView, MuteChange, sublayer_introducer};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::load_rules::LoadRules;
@@ -2725,8 +2725,8 @@ impl IndexCache {
     ///
     /// An added or removed spec can change whether a prim exists, so the caller
     /// must already have advanced the population epoch for these sites.
-    /// `Changes::apply` has: the same `did_change_specs` paths reach
-    /// [`Self::invalidate_prototypes`] in its change set, which owns the seam.
+    /// `Changes::apply` has: a pass with spec-tier sites touches the
+    /// population ([`Self::invalidate_population`]).
     ///
     /// A node an arc introduced that gains or loses its specs enters or leaves
     /// its prim's instance key (C++ `Pcp_ChildNodeInstanceableChanged`). The
@@ -2768,6 +2768,29 @@ impl IndexCache {
         } else {
             self.invalidate_prototypes(&rekeyed)
         };
+        // A prim beneath an instance has no index of its own, being an
+        // instance proxy: where the rescan reached the prototype prim it
+        // stands for, that prim's index answers for it.
+        let mut uncached = uncached;
+        if uncached
+            .iter()
+            .any(|prim| self.prototypes.instance_above(prim).is_some())
+        {
+            let reached: sdf::PathSet = rebuild
+                .iter()
+                .chain(&refreshed)
+                .chain(&appeared)
+                .chain(&uncached)
+                .filter(|prim| is_prototype_namespace(prim))
+                .cloned()
+                .collect();
+            uncached.retain(|prim| {
+                self.prototypes.instance_above(prim).is_none()
+                    || self
+                        .notice_path(prim)
+                        .is_none_or(|prototype| !reached.contains(&prototype))
+            });
+        }
         Rescanned {
             resynced: rebuild
                 .into_iter()

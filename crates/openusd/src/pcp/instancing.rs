@@ -344,11 +344,10 @@ impl PrototypeRegistry {
     /// back ([`retired`](Self::retired)); any other mints a fresh identity.
     ///
     /// Each changed path resolves to the prototypes it could affect through
-    /// bounded lookups: the [`by_root`](Self::by_root) entries nested with it
-    /// (an enclosing root above, or `/__Prototype_N` roots below) and, via the
-    /// [`by_instance`](Self::by_instance) reverse index, the prototypes whose
-    /// instances it is nested with. The cost scales with the change set and the
-    /// touched subtrees, not the total prototype count.
+    /// bounded lookups: the [`by_root`](Self::by_root) entries at or below it
+    /// and, via the [`by_instance`](Self::by_instance) reverse index, the
+    /// prototypes whose instances lie at or below it. The cost scales with the
+    /// change set and the touched subtrees, not the total prototype count.
     ///
     /// A nested instance is registered inside its enclosing prototype's
     /// namespace, so an affected root is itself a path to sweep: each newly
@@ -405,14 +404,18 @@ impl PrototypeRegistry {
         self.by_instance.ancestors(path).map(|(instance, _)| instance)
     }
 
-    /// The path `path` stands for in its nearest registered instance's
-    /// prototype, when it lies strictly beneath one.
-    fn in_prototype(&self, path: &Path) -> Option<Path> {
-        let (instance, root) = self
-            .by_instance
-            .ancestors(path)
-            .find(|(instance, _)| *instance != path)?;
-        path.replace_prefix(instance, root)
+    /// The nearest registered instance strictly above the prim `path` names
+    /// or lies on, with its prototype root. A property of the instance itself
+    /// is the instance's own, and none is returned for it (C++
+    /// `UsdStage::_IsObjectDescendantOfInstance`).
+    pub(super) fn instance_above(&self, path: &Path) -> Option<(&Path, &Path)> {
+        if self.by_instance.is_empty() {
+            return None;
+        }
+        let prim = path.prim_path();
+        self.by_instance
+            .ancestors(&prim)
+            .find(|(instance, _)| **instance != prim)
     }
 
     /// Forgets the retired roots, so a key that comes back later mints a
@@ -544,9 +547,9 @@ fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules, m
 
 impl IndexCache {
     /// Evicts only the prototypes a prim-level change touches (spec 11.3.3):
-    /// every prototype whose instance subtree or prototype namespace lies on the
-    /// ancestor chain of one of the `changed` prim paths is removed from the
-    /// registry and has its materialized `/__Prototype_N` index dropped.
+    /// every prototype one of whose instances, or whose root, is one of the
+    /// `changed` prim paths or lies beneath one is removed from the registry
+    /// and has its materialized `/__Prototype_N` index dropped.
     /// Unaffected prototypes keep their mapping and index, so a localized edit
     /// does not recompute every key.
     ///
@@ -595,16 +598,24 @@ impl IndexCache {
     }
 
     /// The path a composed-change notice names for `path` (C++ `UsdStage`
-    /// remapping its changes to prototypes): a path strictly beneath a
-    /// registered instance stands for the prim of the prototype it shares,
-    /// so it is named in that prototype's namespace, through each nested
-    /// instance in turn. Every other path is named as it is.
-    pub(crate) fn notice_path(&self, path: &Path) -> Path {
+    /// remapping its changes to prototypes), `None` for one no notice names.
+    /// A path beneath the instance a prototype was composed from stands for
+    /// that prototype's prim, so it is named in the prototype's namespace,
+    /// through each nested instance in turn. A path beneath another instance
+    /// of it is no prototype's, and is dropped (C++
+    /// `Usd_InstanceCache::GetPrimsInPrototypesUsingPrimIndexPath`). Every
+    /// other path, a property of an instance itself among them, is named as
+    /// it is.
+    pub(crate) fn notice_path(&self, path: &Path) -> Option<Path> {
         let mut path = path.clone();
-        while let Some(mapped) = self.prototypes.in_prototype(&path) {
-            path = mapped;
+        while let Some((instance, root)) = self.prototypes.instance_above(&path) {
+            let canonical = self.prototypes.by_root.get(root).and_then(|p| p.instances.first());
+            if canonical != Some(instance) {
+                return None;
+            }
+            path = path.replace_prefix(instance, root)?;
         }
-        path
+        Some(path)
     }
 
     /// Whether the stage's population admits `path` — the mask exposes it, it

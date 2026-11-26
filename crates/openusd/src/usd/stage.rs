@@ -974,6 +974,8 @@ pub struct StageInner {
     /// callback: that would borrow the set mutably while the fan-out holds it
     /// shared, and panic.
     sinks: RefCell<sdf::sink::Set<dyn StageSink>>,
+    /// The id of the last group [`Stage::grouped`] opened.
+    groups: Cell<u64>,
     /// The installed sinks that asked for every prototype a resync covers
     /// ([`StageSink::complete_prototypes`]), asked once, when installed.
     complete_sinks: RefCell<Vec<StageSinkId>>,
@@ -1331,6 +1333,9 @@ struct Attribution {
     /// The undo revert the transaction replays, when it is one of its
     /// replays.
     replay: Option<ReplayId>,
+    /// The group of one stage edit the transaction commits for
+    /// ([`Stage::grouped`]).
+    group: Option<u64>,
 }
 
 /// The [`Attribution`] a transaction published, withdrawn as the commit
@@ -1418,7 +1423,11 @@ impl sdf::Subscriber for StageRecorder {
             .flatten();
         // A stage edit's provenance travels with its recording from here.
         let generation = commit.txn.id.get();
-        let Attribution { provenance, replay } = own
+        let Attribution {
+            provenance,
+            replay,
+            group,
+        } = own
             .then(|| {
                 stage
                     .edit_attribution
@@ -1439,7 +1448,7 @@ impl sdf::Subscriber for StageRecorder {
             landed: false,
         });
         let mapping = recording.provenance.as_deref().and_then(Provenance::mapping);
-        stage.forward_before_commit(change, self.layer_id, own, replay, mapping);
+        stage.forward_before_commit(change, self.layer_id, own, replay, group, mapping);
         Some(recording)
     }
 }
@@ -1648,8 +1657,19 @@ impl Stage {
     /// to have been set up to author the site it names, as C++ trusts it.
     /// `identifier` names the target's layer.
     fn validate_edit_prim(&self, scene_path: &sdf::Path, identifier: &str) -> Result<(), StageAuthoringError> {
+        let maps_to_self = maps_prim_to_self(&self.edit_target.borrow().mapping, scene_path);
+        self.validate_edit_prim_as(scene_path, identifier, maps_to_self)
+    }
+
+    /// [`validate_edit_prim`](Self::validate_edit_prim) for a target that
+    /// maps the prim to itself when `maps_to_self`.
+    fn validate_edit_prim_as(
+        &self,
+        scene_path: &sdf::Path,
+        identifier: &str,
+        maps_to_self: bool,
+    ) -> Result<(), StageAuthoringError> {
         let prim = scene_path.prim_path();
-        let maps_to_self = self.edit_target.borrow().map_to_spec_path(&prim).as_ref() == Some(&prim);
         if !maps_to_self || !self.is_local_layer(identifier) {
             return Ok(());
         }
@@ -2446,6 +2466,82 @@ impl Stage {
         self.edit_target_layer(identifier, spec_path, f)
     }
 
+    /// The edit target's layer and the spec path `scene_path` maps to on
+    /// it, checked as [`with_target_layer_at`](Self::with_target_layer_at)
+    /// checks them: what an authoring call that commits several
+    /// transactions holds for all of them, so a sink that retargets the
+    /// stage between two of them does not move the later ones
+    /// ([`with_pinned_layer`](Self::with_pinned_layer)).
+    pub(super) fn pin_target(&self, scene_path: &sdf::Path) -> Result<Pin, StageAuthoringError> {
+        let (identifier, spec_path) = self.target_spec_path(scene_path)?;
+        let target = self.edit_target.borrow();
+        let maps_to_self = maps_prim_to_self(&target.mapping, scene_path);
+        let mapping = target.mapping.clone();
+        Ok(Pin {
+            scene_path: scene_path.clone(),
+            identifier,
+            spec_path,
+            maps_to_self,
+            mapping,
+        })
+    }
+
+    /// Runs `edit`, the transactions it commits recorded as one edit
+    /// ([`TxnObserver::open_group`]): one undo step, though each is
+    /// delivered on its own.
+    pub(super) fn grouped<T>(&self, edit: impl FnOnce(u64) -> T) -> T {
+        let group = self.groups.get() + 1;
+        self.groups.set(group);
+        let observers = self.observers.borrow().snapshot();
+        for observer in &observers {
+            observer.open_group(group);
+        }
+        let _close = CloseGroup(observers, group);
+        edit(group)
+    }
+
+    /// Takes back what a stamp on `pin` for `group` created, the edit it
+    /// began having failed: `undo` removes it in a transaction of the
+    /// group's own and says whether it took all of it back. Only then is the
+    /// group forgotten ([`TxnObserver::discard_group`]), so the failed edit
+    /// leaves neither the layer nor the undo history changed. What it could
+    /// not take back, a later edit having built on it, stays recorded with
+    /// the group as one step.
+    pub(super) fn unstamp<F>(&self, pin: &Pin, group: u64, undo: F)
+    where
+        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<bool, StageAuthoringError>,
+    {
+        let mapping = Some(&pin.mapping).filter(|_| composition::CompositionHooks::wants_notice(self));
+        let mut whole = false;
+        let removed = self.edit_layer_mapped(&pin.identifier, mapping, Some(group), (), |layer, ()| {
+            whole = undo(layer)?;
+            Ok(())
+        });
+        if removed.is_ok() && whole {
+            for observer in self.observers.borrow().snapshot() {
+                observer.discard_group(group);
+            }
+        }
+    }
+
+    /// [`with_target_layer_at`](Self::with_target_layer_at) on the target
+    /// [`pin_target`](Self::pin_target) pinned: its layer, spec path and
+    /// mapping. The scene path is checked again against the stage as it now
+    /// stands, which a sink of an earlier transaction may have changed.
+    pub(super) fn with_pinned_layer<F>(&self, pin: &Pin, group: u64, f: F) -> Result<bool, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), StageAuthoringError>,
+    {
+        self.validate_edit_prim_as(&pin.scene_path, &pin.identifier, pin.maps_to_self)?;
+        self.edit_layer_mapped(
+            &pin.identifier,
+            Some(&pin.mapping).filter(|_| composition::CompositionHooks::wants_notice(self)),
+            Some(group),
+            pin.spec_path.clone(),
+            f,
+        )
+    }
+
     /// [`with_target_layer_at`](Self::with_target_layer_at) for several paths
     /// at once: map each through the current edit target, borrow the target's
     /// layer, and hand it and the mapped spec paths — in the order the scene
@@ -2499,12 +2595,32 @@ impl Stage {
         // allocation-free.
         let notify = composition::CompositionHooks::wants_notice(self);
         let mapping = notify.then(|| self.edit_target.borrow().mapping.clone());
+        self.edit_layer_mapped(&identifier, mapping.as_ref(), None, authored, f)
+    }
+
+    /// [`edit_target_layer`](Self::edit_target_layer) under `mapping`, the
+    /// edit target's mapping the notice translates the edit's paths by
+    /// (`None` with no one to tell), the transaction committed for `group`
+    /// when one is given ([`grouped`](Self::grouped)).
+    fn edit_layer_mapped<P, F>(
+        &self,
+        identifier: &str,
+        mapping: Option<&pcp::MapFunction>,
+        group: Option<u64>,
+        authored: P,
+        f: F,
+    ) -> Result<bool, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::LayerEdit<'_>, P) -> Result<(), StageAuthoringError>,
+    {
         let edited = {
             let layers = self.composition.authoring_graph();
             let layer_id = layers
-                .id_of(&identifier)
-                .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
-            self.commit_layer(&layers, layer_id, mapping.as_ref(), |layer| f(layer, authored))
+                .id_of(identifier)
+                .ok_or_else(|| StageAuthoringError::LayerNotFound {
+                    layer: identifier.to_owned(),
+                })?;
+            self.commit_layer(&layers, layer_id, mapping, group, |layer| f(layer, authored))
         };
         let edited = edited.map(|committed| self.composition.deliver(committed, self));
         self.composition.end_edit(self);
@@ -2624,7 +2740,7 @@ impl Stage {
         // id with no live layer, so the closure keys on these rather than the
         // requested `layer_ids` to stay paired with each `LayerEdit`.
         let (ids, handles): (Vec<pcp::LayerId>, Vec<&sdf::LayerHandle>) = graph.handles(layer_ids).into_iter().unzip();
-        self.commit_attributed(graph.store(), &handles, mapping, replay, |edits| f(&ids, edits))
+        self.commit_attributed(graph.store(), &handles, mapping, replay, None, |edits| f(&ids, edits))
     }
 
     /// The delivery half of [`author_layers_txn`](Self::author_layers_txn):
@@ -2709,6 +2825,7 @@ impl Stage {
         layers: &pcp::LayerGraph,
         layer: pcp::LayerId,
         mapping: Option<&pcp::MapFunction>,
+        group: Option<u64>,
         f: F,
     ) -> Result<sdf::Committed, StageAuthoringError>
     where
@@ -2716,7 +2833,7 @@ impl Stage {
     {
         // The stage's own closure error rides through the layer transaction, so
         // a stage-only failure inside it rolls the layer back like a layer one.
-        self.commit_attributed(layers.store(), &[layers.handle(layer)], mapping, None, |edits| {
+        self.commit_attributed(layers.store(), &[layers.handle(layer)], mapping, None, group, |edits| {
             f(&mut edits[0])
         })
     }
@@ -2743,6 +2860,7 @@ impl Stage {
         handles: &[&sdf::LayerHandle],
         mapping: Option<&pcp::MapFunction>,
         replay: Option<ReplayId>,
+        group: Option<u64>,
         f: impl FnOnce(&mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<sdf::Committed, E> {
         let txn = sdf::TxnContext::new(Some(self.editor));
@@ -2754,9 +2872,15 @@ impl Stage {
         let provenance = mapping
             .filter(|m| !m.is_identity())
             .map(|mapping| Rc::new(Provenance::EditTarget(mapping.clone())));
-        if provenance.is_some() || replay.is_some() {
-            self.edit_attribution
-                .insert(generation, Attribution { provenance, replay });
+        if provenance.is_some() || replay.is_some() || group.is_some() {
+            self.edit_attribution.insert(
+                generation,
+                Attribution {
+                    provenance,
+                    replay,
+                    group,
+                },
+            );
         }
         store.commit(handles, txn, f)
     }
@@ -2784,6 +2908,7 @@ impl Stage {
         layer: pcp::LayerId,
         own: bool,
         replay: Option<ReplayId>,
+        group: Option<u64>,
         mapping: Option<&pcp::MapFunction>,
     ) {
         let observers = self.observers.borrow().snapshot();
@@ -2799,6 +2924,7 @@ impl Stage {
             generation: change.generation,
             own,
             replay,
+            group,
         };
         // Observers capture first, so no sink's order or panic reaches them.
         for observer in observers {
@@ -3246,26 +3372,28 @@ impl Stage {
     ) -> Result<(), sdf::PathParseError> {
         // Convert (and fail) before any rule is edited, so a bad path in
         // either set leaves the stage untouched.
-        let to_unload: Vec<sdf::Path> = to_unload
+        let to_unload: Vec<Option<sdf::Path>> = to_unload
             .into_iter()
             .map(|path| Ok(Self::normalize_load_target(&sdf::try_into_path(path)?)))
-            .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
-        let to_load: Vec<(sdf::Path, LoadPolicy)> = to_load
+        let to_load: Vec<Option<(sdf::Path, LoadPolicy)>> = to_load
             .into_iter()
             .map(
                 |(path, policy)| Ok(Self::normalize_load_target(&sdf::try_into_path(path)?).map(|path| (path, policy))),
             )
-            .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
-        // C++ checks for a no-op only when one of the two sets is empty.
+        // C++ checks for a no-op only when one of the two sets it was given
+        // is empty, before it sets aside the paths it cannot load or unload.
+        let unconditional = !to_load.is_empty() && !to_unload.is_empty();
+        let to_unload: Vec<sdf::Path> = to_unload.into_iter().flatten().collect();
+        let to_load: Vec<(sdf::Path, LoadPolicy)> = to_load.into_iter().flatten().collect();
         let requested = pcp::Requested {
             paths: to_unload
                 .iter()
                 .chain(to_load.iter().map(|(path, _)| path))
                 .cloned()
                 .collect(),
-            unconditional: !to_load.is_empty() && !to_unload.is_empty(),
+            unconditional,
         };
         self.composition.install_load_rules(
             |rules| {
@@ -4473,7 +4601,7 @@ impl Stage {
                     return Err(refused.error.into());
                 }
             };
-            self.commit_layer(&layers, parent_id, None, |l| {
+            self.commit_layer(&layers, parent_id, None, None, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
                     .map_err(StageAuthoringError::from)
@@ -4526,7 +4654,7 @@ impl Stage {
                 })
             };
             authored.map(|entry| {
-                self.commit_layer(&layers, parent_id, None, move |l| {
+                self.commit_layer(&layers, parent_id, None, None, move |l| {
                     l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
                         .map(|_| ())
@@ -4672,6 +4800,42 @@ impl Stage {
 
         Ok(())
     }
+}
+
+/// Whether `mapping` maps the prim `scene_path` names or lies on to itself.
+fn maps_prim_to_self(mapping: &pcp::MapFunction, scene_path: &sdf::Path) -> bool {
+    let prim = scene_path.prim_path();
+    mapping.map_target_to_source(&prim).as_ref() == Some(&prim)
+}
+
+/// Closes the group [`Stage::grouped`] opened when dropped, an early return
+/// or a panic included.
+struct CloseGroup(Vec<Rc<dyn TxnObserver>>, u64);
+
+impl Drop for CloseGroup {
+    fn drop(&mut self) {
+        // The observers that opened the group: one installed meanwhile, by
+        // a sink, never did.
+        for observer in &self.0 {
+            observer.close_group(self.1);
+        }
+    }
+}
+
+/// An edit target pinned for an authoring call that commits several
+/// transactions ([`Stage::pin_target`]): each authors where the first did,
+/// and is reported through the same mapping.
+pub(super) struct Pin {
+    /// The scene path authored at.
+    scene_path: sdf::Path,
+    /// The identifier of the target's layer.
+    identifier: String,
+    /// The spec path the scene path maps to on that layer.
+    spec_path: sdf::Path,
+    /// Whether the target maps the prim authored on to itself.
+    maps_to_self: bool,
+    /// The target's mapping, which the notices translate by.
+    mapping: pcp::MapFunction,
 }
 
 /// Restores a stage's load rules on drop — the RAII half of
@@ -5146,6 +5310,7 @@ impl StageBuilder {
             saved_edit_targets: RefCell::default(),
             layer_stack_id,
             sinks: RefCell::default(),
+            groups: Cell::new(0),
             complete_sinks: RefCell::default(),
             observers: RefCell::default(),
             edit_attribution: TxnTable::default(),

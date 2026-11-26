@@ -16332,6 +16332,191 @@ fn set_stamps_then_writes() -> Result<()> {
     Ok(())
 }
 
+/// An inert `over` beneath the source of instanced content is changed info
+/// for the prototype prim it reaches, not a resync of it: the prototype's own
+/// index refreshes in place (C++ `PcpChanges::DidChangeSpecs`).
+#[test]
+fn over_under_instance_info() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("asset.usda"),
+        "#usda 1.0\ndef \"Asset\"\n{\n    def \"Geo\" {}\n}\n",
+    )?;
+    let session = dir.path().join("session.usda");
+    fs::write(&session, "#usda 1.0\n")?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@asset.usda@]\n)\ndef \"World\"\n{\n    def \"I0\" (\n        instanceable = true\n        references = </Asset>\n    ) {}\n    def \"I1\" (\n        instanceable = true\n        references = </Asset>\n    ) {}\n}\n",
+    )?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    let prototype = stage.prim("/World/I0")?.prototype()?.expect("an instance");
+    assert!(stage.prim(&prototype.append_child("Geo")?)?.is_valid()?);
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    stage.set_edit_target(EditTarget::for_layer(session_id))?;
+    let notices = capture_notices(&stage);
+    stage.create_attribute("/Asset/Geo.x", sdf::ValueTypeName::DOUBLE)?;
+    let geo = prototype.append_child("Geo")?;
+    let resynced = notices.borrow().resynced.clone();
+    assert!(!resynced.contains(&geo), "{resynced:?}");
+    let info = notices.borrow().changed_info_only.clone();
+    assert!(info.contains(&geo), "{info:?}");
+    assert_eq!(stage.prim("/World/I0")?.prototype()?, Some(prototype));
+    Ok(())
+}
+
+/// A first property override on one instance, which adds an inert `over` at
+/// the instance, leaves its key and its prototype alone: the notice names the
+/// property, and neither the other instances nor the prototype (C++
+/// `PcpChanges::DidChangeSpecs` retires only a key the spec moved).
+#[test]
+fn instance_override_keeps_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let session = dir.path().join("session.usda");
+    fs::write(&session, "#usda 1.0\n")?;
+    let root = dir.path().join("root.usda");
+    let mut text = String::from("#usda 1.0\ndef \"Asset\"\n{\n    double size = 1\n    def \"Geo\" {}\n}\n");
+    for i in 0..4 {
+        text.push_str(&format!(
+            "def \"I{i}\" (\n    instanceable = true\n    references = </Asset>\n) {{}}\n"
+        ));
+    }
+    fs::write(&root, text)?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    let prototype = stage.prim("/I0")?.prototype()?.expect("an instance");
+    for i in 1..4 {
+        assert_eq!(stage.prim(format!("/I{i}"))?.prototype()?.as_ref(), Some(&prototype));
+    }
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    stage.set_edit_target(EditTarget::for_layer(session_id))?;
+    let notices = capture_notices(&stage);
+    stage.attribute("/I0.size")?.set(2.0)?;
+    assert_eq!(notices.borrow().resynced, paths(&["/I0.size"]));
+    assert_eq!(stage.prim("/I0")?.prototype()?, Some(prototype));
+    Ok(())
+}
+
+/// A sink that makes an ancestor an instance as the spec appears turns the
+/// value write into an edit of an instance proxy, which is refused: the
+/// write checks the stage again as it stands.
+#[test]
+fn set_rechecks_proxy() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/Lib/A")?;
+    stage.create_attribute("/Lib/A.x", sdf::ValueTypeName::DOUBLE)?;
+    stage.define_prim("/World")?.references().add(sdf::Reference {
+        prim_path: sdf::path("/Lib")?,
+        ..Default::default()
+    })?;
+    let once = Rc::new(Cell::new(false));
+    let fired = once.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if !fired.replace(true) {
+                let world = stage.prim("/World").expect("a prim path");
+                world.set_instanceable(true).expect("the stage is free");
+            }
+        })),
+        ..Default::default()
+    })?;
+    let written = stage.attribute("/World/A.x")?.set(1.0);
+    assert!(once.get(), "the sink ran");
+    assert!(written.is_err(), "{written:?}");
+    Ok(())
+}
+
+/// A sink that retargets the stage when the spec appears does not move the
+/// value: both of an attribute write's transactions author on the target as
+/// the write began.
+#[test]
+fn set_keeps_its_target() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let session = dir.path().join("session.usda");
+    fs::write(
+        &session,
+        "#usda 1.0
+",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0
+def \"World\" {}
+",
+    )?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    let root_id = stage.root_layer().identifier().to_string();
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    // The attribute is declared on the session layer, so a write on the
+    // root layer stamps a spec there first.
+    stage.set_edit_target(EditTarget::for_layer(session_id.clone()))?;
+    stage.create_attribute("/World.x", sdf::ValueTypeName::DOUBLE)?;
+    stage.set_edit_target(EditTarget::for_layer(root_id))?;
+    let retargeted = Rc::new(Cell::new(false));
+    let once = retargeted.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if !once.replace(true) {
+                stage
+                    .set_edit_target(EditTarget::for_layer(session_id.clone()))
+                    .expect("the session layer is on the stage");
+            }
+        })),
+        ..Default::default()
+    })?;
+    stage.attribute("/World.x")?.set(1.0)?;
+    assert!(retargeted.get(), "the sink retargeted the stage");
+    let x = sdf::path("/World.x")?;
+    let root_layer = stage.root_layer();
+    assert!(root_layer.try_borrow()?.data().has_field(&x, "default"));
+    let session_layer = stage.session_layer().expect("session layer");
+    assert!(!session_layer.try_borrow()?.data().has_field(&x, "default"));
+    Ok(())
+}
+
+/// A property of an instance itself is the instance's own, and a notice
+/// names it as it is (C++ `UsdStage::_IsObjectDescendantOfInstance`): a
+/// property the instances' source gains is named on each instance. A prim
+/// beneath an instance the prototype was not composed from is no
+/// prototype's (C++ `GetPrimsInPrototypesUsingPrimIndexPath`).
+#[test]
+fn instance_paths_named() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/Asset/Geo")?;
+    for instance in ["/World/I0", "/World/I1"] {
+        let prim = stage.define_prim(instance)?;
+        prim.references().add(sdf::Reference {
+            prim_path: sdf::path("/Asset")?,
+            ..Default::default()
+        })?;
+        prim.set_instanceable(true)?;
+    }
+    let prototype = stage.prim("/World/I0")?.prototype()?.expect("an instance");
+    let notices = capture_notices(&stage);
+    stage.create_attribute("/Asset.size", sdf::ValueTypeName::DOUBLE)?;
+    let resynced = notices.borrow().resynced.clone();
+    for instance in ["/World/I0.size", "/World/I1.size"] {
+        assert!(resynced.contains(&sdf::path(instance)?), "{resynced:?}");
+    }
+
+    notices.borrow_mut().resynced.clear();
+    stage.root_layer().edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/World/I1/Local", sdf::Specifier::Over, "")?;
+        Ok(())
+    })?;
+    stage.flush()?;
+    let local = prototype.append_child("Local")?;
+    let resynced = notices.borrow().resynced.clone();
+    assert!(!resynced.contains(&local), "{resynced:?}");
+    Ok(())
+}
+
 /// A prim defined under a prototype's source leaves the prototype and its
 /// instances standing: the new child resyncs in the prototype's namespace,
 /// and a path beneath an instance is named there too (C++ `UsdStage`
