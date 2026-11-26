@@ -93,6 +93,7 @@ use crate::sdf::{ChangeEntry, ChangeList, Path};
 use crate::tf;
 
 use super::clip;
+use super::index_cache::Rescanned;
 use super::index_store::{ScopedInvalidation, ValueScope};
 use super::layer_graph::{LayerGraph, LayerView};
 use super::layer_stack::StackVarsDelta;
@@ -370,29 +371,34 @@ impl CacheChanges {
     }
 
     /// The resynced paths expressed in the edited layer's namespace — the
-    /// [`authored_subtree_paths`](Self::authored_subtree_paths), the spec tier,
-    /// which is authored by construction (its sites are literal `(layer, path)`
-    /// pairs), and the property specs the round added or removed.
-    ///
-    /// The spec tier is reported so an inert spec add/remove (e.g. an `over`) is
-    /// surfaced, not silently dropped, even though it refreshes `has_specs` in
-    /// place rather than rebuilding the index.
+    /// [`authored_subtree_paths`](Self::authored_subtree_paths) and the
+    /// property specs the round added or removed.
     ///
     /// Each path comes with the layers that authored it.
     pub(crate) fn authored_resynced_paths(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
         let reported = &self.reported;
-        self.authored_subtree_paths()
-            .chain(
-                self.did_change_specs
-                    .iter()
-                    .map(|(layer, path)| (path, slice::from_ref(layer))),
-            )
-            .chain(
-                reported
-                    .authored_resync
-                    .iter()
-                    .map(|path| (path, reported.authors(Authored::Resync, path))),
-            )
+        self.authored_subtree_paths().chain(
+            reported
+                .authored_resync
+                .iter()
+                .map(|path| (path, reported.authors(Authored::Resync, path))),
+        )
+    }
+
+    /// The spec tier's sites, expressed in the edited layer's namespace by
+    /// construction (each is a literal `(layer, path)` pair), each with the
+    /// layer that authored it.
+    ///
+    /// An inert spec add or remove (an `over`) changes only whether its site
+    /// contributes an opinion. The report decides each site once the rescan
+    /// has run: changed info for a prim it refreshed in place
+    /// ([`ApplyOutcome::refreshed_prims`]), a resync otherwise (C++
+    /// `PcpChanges::DidChangeSpecs`, which marks a prim with no index cached
+    /// significant).
+    pub(crate) fn spec_sites(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
+        self.did_change_specs
+            .iter()
+            .map(|(layer, path)| (path, slice::from_ref(layer)))
     }
 
     /// The subset of [`stage_resynced_paths`](Self::stage_resynced_paths) that
@@ -515,11 +521,17 @@ pub(crate) struct ApplyOutcome {
     /// named here may still hold a valid cached index.
     pub(crate) resynced: Vec<Path>,
     /// Composed prims this apply resynced without touching what lies beneath
-    /// them: the spec tier's dependents, whose site gained or lost an opinion.
-    /// Reported like [`resynced`](Self::resynced) but standing for themselves
-    /// alone, so they subsume nothing — an `over` added at `/A` on the way to
-    /// authoring `/A/B.x` says nothing about `/A/B.x`.
+    /// them: the spec tier's dependents that a site gaining or losing an
+    /// opinion recomposes ([`Rescanned::resynced`]). Reported like
+    /// [`resynced`](Self::resynced) but standing for themselves alone, so they
+    /// subsume nothing — an `over` added at `/A` on the way to authoring
+    /// `/A/B.x` says nothing about `/A/B.x`.
     pub(crate) resynced_prims: Vec<Path>,
+    /// Composed prims whose site gained or lost an opinion and which compose
+    /// as they did otherwise ([`Rescanned::refreshed`]): a change to their
+    /// info, not a resync (C++ `didChangeSpecs`, which `UsdStage` reports as
+    /// changed info).
+    pub(crate) refreshed_prims: Vec<Path>,
     /// The subtrees whose `asset` values may now resolve elsewhere, from
     /// [`asset_path_victims`] — the channel that covers what no dependency
     /// record can. Costs a dependency lookup per stack whose composed variables
@@ -1192,13 +1204,9 @@ impl Changes {
             .into_iter()
             .filter(|(_, path)| !self.cache.authored_significant.iter().any(|p| path.has_prefix(p)))
             .collect();
-        let mut resynced_prims = Vec::new();
+        let mut rescanned = Rescanned::default();
         if !sites.is_empty() {
-            // Each dependent the rescan reached had a site gain or lose an
-            // opinion, so whether that prim composes at all may have moved — a
-            // resync of that prim, not a report that its info changed. It stands
-            // for itself alone: the refresh touches one site, not a subtree.
-            resynced_prims = cache.rescan_specs(&view, &sites);
+            rescanned = cache.rescan_specs(&view, &sites);
         }
 
         // Value tier: the composition graph is intact, so nothing is dropped —
@@ -1240,7 +1248,8 @@ impl Changes {
         resynced.dedup();
         ApplyOutcome {
             resynced,
-            resynced_prims,
+            resynced_prims: rescanned.resynced,
+            refreshed_prims: rescanned.refreshed,
             asset_paths_resynced,
             retries_sublayers: self.retries_sublayers,
         }

@@ -2337,9 +2337,10 @@ fn root_resync_names_prototypes() -> Result<()> {
     Ok(())
 }
 
-/// A prim resynced in place, a spec of it appearing on the way to an
-/// attribute, is asked for its own prototype alone: the instance beneath it
-/// stays uncomposed, and the notice names no prototype.
+/// A spec of a composed prim appearing on the way to an attribute is changed
+/// info, not a resync (C++ `PcpChanges::DidChangeSpecs`): nothing walks the
+/// prim's subtree, the instance beneath it stays uncomposed, and the notice
+/// names no prototype.
 #[test]
 fn spec_resync_leaves_subtree() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -2376,8 +2377,9 @@ def "W"
     stage.set_edit_target(EditTarget::for_layer(session_id))?;
     let notices = capture_complete(&stage);
     stage.create_attribute("/W.x", sdf::ValueTypeName::DOUBLE)?;
-    assert_eq!(notices.borrow().resynced, paths(&["/W", "/W.x"]));
-    assert_eq!(stage.index_revision(&a), None, "the walk stops at the prim");
+    assert_eq!(notices.borrow().resynced, paths(&["/W.x"]));
+    assert!(notices.borrow().changed_info_only.contains(&sdf::path("/W")?));
+    assert_eq!(stage.index_revision(&a), None, "nothing walks the subtree");
     Ok(())
 }
 
@@ -16231,14 +16233,14 @@ fn remove_rejects_wrong_path_kind() -> Result<()> {
     Ok(())
 }
 
-/// A resync only subsumes the paths beneath it when it actually dropped the
-/// subtree. Creating an attribute over a sublayer-defined prim adds inert
-/// `over` specs on the way down, which land on the spec tier — a `has_specs`
-/// refresh, not a subtree drop — so the attribute's own entry survives beside
-/// them. The property spec appearing is itself a resync of that property, not a
-/// value change on it (C++ `otherResyncChanges`).
+/// Creating an attribute over a sublayer-defined prim adds inert `over` specs
+/// on the way down, which land on the spec tier: a `has_specs` refresh of
+/// prims that compose as they did, reported as changed info, as C++
+/// `UsdStage` reports a `didChangeSpecs` path. The property spec appearing is
+/// a resync of that property, not a value change on it (C++
+/// `otherResyncChanges`).
 #[test]
-fn spec_tier_resync_keeps_info() -> Result<()> {
+fn spec_tier_reports_info() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     fs::write(
@@ -16268,16 +16270,48 @@ def "A" {
     assert!(stage.prim("/A")?.is_valid()?);
 
     let notices = notices.borrow();
-    assert!(
-        notices.resynced.contains(&sdf::path("/A/B.x")?),
-        "the authored attribute must still be reported, got {:?}",
-        notices.resynced
-    );
-    assert_eq!(
-        notices.resynced,
-        paths(&["/A", "/A/B", "/A/B.x"]),
-        "the spec tier reports both sites; neither stands for the other's subtree"
-    );
+    assert_eq!(notices.resynced, paths(&["/A/B.x"]));
+    assert_eq!(notices.changed_info_only, paths(&["/A", "/A/B"]));
+    Ok(())
+}
+
+/// Authoring through a reference adds an `over` for a prim the reference
+/// already composes: an opinion appears at a site the prim's index holds, so
+/// the prim is changed info, not a resync (C++ `PcpChanges::DidChangeSpecs`
+/// finding the node providing the spec).
+#[test]
+fn over_through_reference_info() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/Asset/Geo")?;
+    stage.define_prim("/World/Inst")?.references().add(sdf::Reference {
+        prim_path: sdf::path("/Asset")?,
+        ..Default::default()
+    })?;
+    assert!(stage.prim("/World/Inst/Geo")?.is_valid()?);
+
+    let notices = capture_notices(&stage);
+    stage.create_attribute("/World/Inst/Geo.x", "double")?;
+
+    let notices = notices.borrow();
+    assert_eq!(notices.resynced, paths(&["/World/Inst/Geo.x"]));
+    assert_eq!(notices.changed_info_only, paths(&["/World/Inst/Geo"]));
+    Ok(())
+}
+
+/// An `over` whose prim nothing composed before is a resync of that prim: it
+/// appeared, though the authoring query left an empty index cached for it.
+#[test]
+fn over_new_prim_resyncs() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/World")?;
+    assert!(stage.prim("/World")?.is_valid()?);
+
+    let notices = capture_notices(&stage);
+    stage.override_prim("/World/New")?;
+
+    let notices = notices.borrow();
+    assert_eq!(notices.resynced, paths(&["/World/New"]));
+    assert!(notices.changed_info_only.is_empty());
     Ok(())
 }
 

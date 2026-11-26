@@ -222,6 +222,29 @@ pub(crate) struct ScopedInvalidation {
     pub clips: bool,
 }
 
+/// What one change round's spec-tier refresh found across its sites
+/// ([`IndexStore::refresh_specs`]), each prim in one partition.
+#[derive(Default)]
+pub(super) struct SpecRescan {
+    /// The indices refreshed in place, each with the fresh node runs
+    /// [`IndexStore::splice_spec_stacks`] splices into its spec stack.
+    pub(super) refreshed: sdf::PathMap<NodeRuns>,
+    /// The indices an in-place refresh cannot make current, to drop.
+    pub(super) rebuild: sdf::PathSet,
+    /// The indices in which a node an arc introduced gained or lost its specs
+    /// ([`SpecRefresh::arc_specs_changed`]), whichever partition they landed
+    /// in.
+    pub(super) rekeyed: sdf::PathSet,
+    /// The prims an added spec reaches through an ancestor's dependency that
+    /// have no index cached (C++ `DidChangeSpecs` finding no prim index, which
+    /// it marks significant).
+    pub(super) uncached: sdf::PathSet,
+    /// The indices whose first opinion the round added or whose last it
+    /// removed ([`PrimIndex::is_empty`](super::PrimIndex::is_empty) flipped),
+    /// whichever partition they landed in: the prim appeared or vanished.
+    pub(super) appeared: sdf::PathSet,
+}
+
 /// How far a value-tier invalidation reaches from the prim it is recorded at.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ValueScope {
@@ -600,8 +623,10 @@ impl IndexStore {
     /// Spec-tier refresh (C++ `Pcp_RescanForSpecs`): for every cached index that
     /// reads `(layer, path)` — the local prim and each dependent, found through
     /// the reverse dependency map — recompute its `has_specs` flags in place from
-    /// live layer data, then partition it into `refreshed` (the flags were flipped
-    /// in place) or `rebuild` (the in-place refresh cannot make it current).
+    /// live layer data, then partition it into
+    /// [`refreshed`](SpecRescan::refreshed) (the flags were flipped in place) or
+    /// [`rebuild`](SpecRescan::rebuild) (the in-place refresh cannot make it
+    /// current), recording what else it finds in `rescan`.
     ///
     /// An index needs a rebuild when the local prim holds no contributing node at
     /// the site (a prior "no spec here" result), or a dependent had *culled* the
@@ -609,27 +634,21 @@ impl IndexStore {
     /// and graft the target's subtree.
     ///
     /// The memoized spec stack is left stale: the refresh keeps each touched
-    /// node's fresh run in `refreshed`, and the caller splices them in once per
+    /// node's fresh run in `rescan`, and the caller splices them in once per
     /// index via [`splice_spec_stacks`](Self::splice_spec_stacks). An index
     /// reached by several of one round's sites therefore scans each of its nodes
     /// once, and rewrites its stack once.
-    ///
-    /// `rekeyed` collects every index in which a node an arc introduced gained
-    /// or lost its specs ([`SpecRefresh::arc_specs_changed`]), whichever
-    /// partition it landed in.
     pub(super) fn refresh_specs(
         &mut self,
         graph: &LayerView<'_>,
         layer: LayerId,
         path: &Path,
-        refreshed: &mut sdf::PathMap<NodeRuns>,
-        rebuild: &mut sdf::PathSet,
-        rekeyed: &mut sdf::PathSet,
+        rescan: &mut SpecRescan,
     ) {
         for prim in self.deps.exact_lookup(graph, layer, path) {
             // An index this round already condemned recomposes from scratch,
             // flags included, so the rescan leaves it alone.
-            if rebuild.contains(&prim) {
+            if rescan.rebuild.contains(&prim) {
                 continue;
             }
             let Some(index) = self.entries.get_mut(&prim).map(|entry| &mut entry.index) else {
@@ -638,19 +657,25 @@ impl IndexStore {
             // Taken out so the refresh sees what earlier sites in this round
             // already scanned, and put back under the owned path. It goes back
             // even when no node was touched, since the entry is also what earns
-            // the index its revision stamp and its resync report.
-            let mut runs = refreshed.remove(&prim).unwrap_or_default();
+            // the index its revision stamp and its report.
+            let mut runs = rescan.refreshed.remove(&prim).unwrap_or_default();
+            let was_empty = index.is_empty();
             let refresh = index.refresh_has_specs_at(layer, path, graph, &mut runs);
+            // Several sites of one round may each flip it, so the set keeps
+            // the parity: whether the round as a whole moved it.
+            if index.is_empty() != was_empty && !rescan.appeared.remove(&prim) {
+                rescan.appeared.insert(prim.clone());
+            }
             if refresh.arc_specs_changed {
-                rekeyed.insert(prim.clone());
+                rescan.rekeyed.insert(prim.clone());
             }
             // The local prim is one of its own dependents (it reads its own
             // site). Rebuild it when it carries no contributing node there; rebuild
             // any index whose culled site the spec just filled in.
             if refresh.needs_rebuild || (prim == *path && !refresh.contributing) {
-                rebuild.insert(prim);
+                rescan.rebuild.insert(prim);
             } else {
-                refreshed.insert(prim, runs);
+                rescan.refreshed.insert(prim, runs);
             }
         }
         // A prim reached only through an ancestor of the site holds no node for
@@ -663,15 +688,16 @@ impl IndexStore {
             return;
         }
         for prim in self.translated_ancestor_dependents(graph, layer, path) {
-            if rebuild.contains(&prim) {
+            if rescan.rebuild.contains(&prim) {
                 continue;
             }
             let Some(entry) = self.entries.get(&prim) else {
+                rescan.uncached.insert(prim);
                 continue;
             };
             if entry.index.node_providing_spec(graph, layer, path).is_none() {
-                refreshed.remove(&prim);
-                rebuild.insert(prim);
+                rescan.refreshed.remove(&prim);
+                rescan.rebuild.insert(prim);
             }
         }
     }
