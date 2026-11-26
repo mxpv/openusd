@@ -27,7 +27,7 @@ use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::diagnostics::Diagnostics;
-use super::index_store::{IndexStore, Owner, PrimRevision, ScopedInvalidation, ValueScope};
+use super::index_store::{IndexStore, Owner, PrimRevision, ScopedInvalidation, SpecRescan, ValueScope};
 use super::instancing::{Answer, PrimRecord, PrototypeRegistry, RetiredPrototype};
 use super::layer_graph::{LayerGraph, LayerStackIdentifier, LayerView, MuteChange, sublayer_introducer};
 use super::layer_stack::{LayerStackId, StackMarks};
@@ -35,8 +35,7 @@ use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
 use super::prim_graph::{ArcType, Node, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_index::{
-    CompositionContext, Demand, NodeRuns, PrimEntry, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo,
-    TargetMemoKey,
+    CompositionContext, Demand, PrimEntry, PrimIndex, PropertyTargetKind, SiteScope, TargetMemo, TargetMemoKey,
 };
 use super::prim_indexer::ExprVarDeps;
 use super::prim_resolve::{
@@ -183,6 +182,22 @@ pub struct IndexCache {
     /// ([`take_minted`](Self::take_minted)): a fresh mint, a retired root an
     /// instance took back, or a private root real work reached.
     pub(super) minted: Vec<(Path, Owner)>,
+}
+
+/// The composed prims a spec-tier rescan reached
+/// ([`IndexCache::rescan_specs`]), apart by what a consumer must do (C++
+/// `PcpChanges::DidChangeSpecs`).
+#[derive(Debug, Default)]
+pub(crate) struct Rescanned {
+    /// The prims to re-resolve, each standing for itself alone: an index the
+    /// refresh could not make current and dropped, a prim reached through an
+    /// ancestor with no index cached, a prim that gained its first opinion or
+    /// lost its last, and the instances and prototype roots whose instance key
+    /// the spec moved, with the prototypes retired.
+    pub(crate) resynced: Vec<Path>,
+    /// The prims refreshed in place: a site of theirs gained or lost an
+    /// opinion, and they compose as they did otherwise.
+    pub(crate) refreshed: Vec<Path>,
 }
 
 /// A prim's own contribution to its inherited status: the inputs C++
@@ -2712,32 +2727,36 @@ impl IndexCache {
     /// must already have advanced the population epoch for these sites.
     /// `Changes::apply` has: the same `did_change_specs` paths reach
     /// [`Self::invalidate_prototypes`] in its change set, which owns the seam.
-    /// Returns every composed prim the rescan reached, refreshed or dropped. A
-    /// spec appearing or disappearing at a site one of them reads is a change in
-    /// whether that prim contributes an opinion at all — a referenced site the
-    /// arc had culled as empty now composes — so the caller reports them as
-    /// resynced. Which of the two partitions a prim landed in says how the cache
-    /// caught up, not whether a consumer must.
     ///
     /// A node an arc introduced that gains or loses its specs enters or leaves
     /// its prim's instance key (C++ `Pcp_ChildNodeInstanceableChanged`). The
     /// key an instance registered under then differs from the one its index
     /// gives, and a prototype seeded from that instance carries a node its
     /// other instances do not share. The rescan retires the prototype of every
-    /// registered instance and prototype root it reached that way, and the
-    /// retired roots join the returned paths.
-    pub(super) fn rescan_specs(&mut self, graph: &LayerView<'_>, sites: &[(LayerId, Path)]) -> Vec<Path> {
-        let mut refreshed = sdf::PathMap::<NodeRuns>::default();
-        let mut rebuild = sdf::PathSet::default();
-        let mut rekeyed = sdf::PathSet::default();
+    /// registered instance and prototype root it reached that way.
+    ///
+    /// Returns the composed prims the rescan reached, apart by what a
+    /// consumer must do ([`Rescanned`]).
+    pub(super) fn rescan_specs(&mut self, graph: &LayerView<'_>, sites: &[(LayerId, Path)]) -> Rescanned {
+        let mut rescan = SpecRescan::default();
         for (layer, path) in sites {
-            self.store
-                .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild, &mut rekeyed);
+            self.store.refresh_specs(graph, *layer, path, &mut rescan);
         }
+        let SpecRescan {
+            refreshed,
+            rebuild,
+            rekeyed,
+            uncached,
+            appeared,
+        } = rescan;
         self.store.remove_all(&rebuild);
         // An index condemned after an earlier site had already refreshed it kept
         // its runs out of the map, so the two sets are disjoint by construction.
-        let touched = self.store.splice_spec_stacks(graph, refreshed);
+        let (appeared, refreshed): (Vec<Path>, Vec<Path>) = self
+            .store
+            .splice_spec_stacks(graph, refreshed)
+            .into_iter()
+            .partition(|prim| appeared.contains(prim));
         // Only a registered instance or a prototype root has a key to go stale;
         // any other prim's flip is caught up by the refresh alone.
         let rekeyed: Vec<Path> = rekeyed
@@ -2749,7 +2768,15 @@ impl IndexCache {
         } else {
             self.invalidate_prototypes(&rekeyed)
         };
-        rebuild.into_iter().chain(touched).chain(retired).collect()
+        Rescanned {
+            resynced: rebuild
+                .into_iter()
+                .chain(uncached)
+                .chain(appeared)
+                .chain(retired)
+                .collect(),
+            refreshed,
+        }
     }
 
     /// Drop the cached index of each of `prefixes` and of every namespace

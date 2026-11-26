@@ -18,6 +18,7 @@
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
 use std::collections::HashSet;
+use std::mem;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -583,6 +584,11 @@ pub(super) struct Payload {
     /// The prims recomposed in place, in composed stage namespace, which
     /// yield to [`stage`](Self::stage)'s resyncs.
     recomposed: Vec<sdf::Path>,
+    /// The spec tier's sites in composed stage namespace, each a prim whose
+    /// opinion appeared or vanished. Emptied by [`finish`](Self::finish):
+    /// changed info for a prim the rescan refreshed in place, a resync of the
+    /// prim alone otherwise.
+    stage_specs: Vec<sdf::Path>,
     /// The changed-info paths in composed stage namespace, which yield to
     /// [`stage`](Self::stage)'s resyncs.
     stage_info: Vec<sdf::Path>,
@@ -708,11 +714,12 @@ impl Payload {
     /// reach composed stage namespace — its [`mapping`](Provenance::mapping)
     /// translates them, or leaves them untranslated for a local or direct edit.
     ///
-    /// [`resynced`](CommittedChange::resynced) is the union of the significant,
-    /// rebuild and spec-tier composed paths, [`recomposed`](CommittedChange::recomposed)
-    /// the prim tier's; [`changed_info_only`](CommittedChange::changed_info_only)
-    /// is every other edited path that authored a field value or edited
-    /// relationship/connection targets. `scratch` is the merged change list;
+    /// [`resynced`](CommittedChange::resynced) is the union of the significant
+    /// and rebuild composed paths and the spec-tier prims that recomposed,
+    /// [`recomposed`](CommittedChange::recomposed) the prim tier's;
+    /// [`changed_info_only`](CommittedChange::changed_info_only) is every other
+    /// edited path that authored a field value or edited relationship/connection
+    /// targets, and the spec-tier prims refreshed in place. `scratch` is the merged change list;
     /// `layer_changes` is the per-layer split retained for
     /// [`layer_changes`](CommittedChange::layer_changes).
     ///
@@ -790,12 +797,20 @@ impl Payload {
         for path in changes.cache.reported.authored_info() {
             place(path, &mut stage_info, &mut authored_info);
         }
+        // A spec site in stage namespace waits for the rescan to say whether
+        // it recomposed; one in a non-local layer's namespace names no
+        // composed prim, and its dependents are reported by the rescan.
+        let mut stage_specs = Vec::new();
+        for path in changes.cache.spec_sites() {
+            place(path, &mut stage_specs, &mut authored_info);
+        }
         stage_info.sort();
         stage_info.dedup();
         Self {
             stage,
             authored,
             recomposed: changes.cache.stage_recomposed_paths().cloned().collect(),
+            stage_specs,
             stage_info,
             authored_info,
             resynced: Vec::new(),
@@ -832,12 +847,25 @@ impl Payload {
         let pcp::ApplyOutcome {
             resynced: mut stage_resynced,
             resynced_prims,
+            refreshed_prims,
             mut asset_paths_resynced,
             ..
         } = outcome;
 
         // What the demand resolution found counts as the outcome's own.
         stage_resynced.extend(found);
+        // A prim the spec tier refreshed in place composes as it did, so its
+        // new or lost opinion is changed info; a site the rescan did not
+        // refresh recomposes.
+        let refreshed: HashSet<&sdf::Path> = refreshed_prims.iter().collect();
+        let (info, resynced): (Vec<sdf::Path>, Vec<sdf::Path>) = mem::take(&mut self.stage_specs)
+            .into_iter()
+            .partition(|site| refreshed.contains(site));
+        self.stage.resynced.extend(resynced);
+        self.stage_info.extend(info);
+        self.stage_info.extend(refreshed_prims);
+        self.stage_info.sort();
+        self.stage_info.dedup();
         // The outcome's victims are subtree drops in stage namespace, so they
         // join both the reported set and the covering projection. Its single-prim
         // resyncs join only the reported set: they cover nothing below them.
@@ -1064,6 +1092,7 @@ mod tests {
 
         let outcome = pcp::ApplyOutcome {
             resynced_prims: Vec::new(),
+            refreshed_prims: Vec::new(),
             resynced: paths(&["/", "/__Prototype_1"]),
             asset_paths_resynced: Vec::new(),
             retries_sublayers: false,
@@ -1103,6 +1132,7 @@ mod tests {
     fn asset_paths_yield_resync() {
         let outcome = pcp::ApplyOutcome {
             resynced_prims: Vec::new(),
+            refreshed_prims: Vec::new(),
             resynced: Vec::new(),
             asset_paths_resynced: paths(&["/A/B", "/B", "/B/C"]),
             retries_sublayers: false,
@@ -1112,6 +1142,7 @@ mod tests {
 
         let outcome = pcp::ApplyOutcome {
             resynced_prims: Vec::new(),
+            refreshed_prims: Vec::new(),
             resynced: paths(&["/"]),
             asset_paths_resynced: paths(&["/A", "/B"]),
             retries_sublayers: false,
@@ -1152,6 +1183,7 @@ mod tests {
     fn direct_edit_keeps_namespaces() {
         let outcome = pcp::ApplyOutcome {
             resynced_prims: Vec::new(),
+            refreshed_prims: Vec::new(),
             resynced: paths(&["/A"]),
             asset_paths_resynced: paths(&["/A/B", "/C"]),
             retries_sublayers: false,
