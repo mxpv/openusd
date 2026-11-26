@@ -257,6 +257,11 @@ impl Provenance {
 /// [`asset_paths_resynced`](Self::asset_paths_resynced) is stage namespace
 /// either way, being derived from composition dependencies rather
 /// than from the authored change record.
+///
+/// A stage path beneath an instance whose prototype the stage holds is named
+/// in that prototype's `/__Prototype_N` namespace, where the prim it stands
+/// for composes (C++ `UsdStage` remaps its changes to prototypes the same
+/// way).
 pub struct CommittedChange<'a> {
     /// Paths a consumer must re-resolve outright (C++ `ResyncedPaths`).
     /// Composed/stage namespace.
@@ -843,14 +848,35 @@ impl Payload {
     ///
     /// `found` is what resolving the sublayers the recompose demanded
     /// discovered: it joins the subtree resyncs.
-    pub(super) fn finish(&mut self, outcome: pcp::ApplyOutcome, found: Vec<sdf::Path>) {
+    ///
+    /// `remap` names each stage path as the notice reports it
+    /// ([`pcp::IndexCache::notice_path`]): a path beneath an instance in its
+    /// prototype's namespace. It runs over the stage half alone, before any
+    /// comparison, since an authored path is in a layer's own namespace.
+    pub(super) fn finish(
+        &mut self,
+        outcome: pcp::ApplyOutcome,
+        found: Vec<sdf::Path>,
+        remap: impl Fn(&sdf::Path) -> sdf::Path,
+    ) {
         let pcp::ApplyOutcome {
-            resynced: mut stage_resynced,
+            resynced: stage_resynced,
             resynced_prims,
             refreshed_prims,
-            mut asset_paths_resynced,
+            asset_paths_resynced,
             ..
         } = outcome;
+        let remap_all = |paths: Vec<sdf::Path>| -> Vec<sdf::Path> { paths.iter().map(&remap).collect() };
+        let mut stage_resynced = remap_all(stage_resynced);
+        let resynced_prims = remap_all(resynced_prims);
+        let refreshed_prims = remap_all(refreshed_prims);
+        let mut asset_paths_resynced = remap_all(asset_paths_resynced);
+        let found = remap_all(found);
+        self.stage.resynced = remap_all(mem::take(&mut self.stage.resynced));
+        self.stage.subtree = remap_all(mem::take(&mut self.stage.subtree));
+        self.stage_specs = remap_all(mem::take(&mut self.stage_specs));
+        self.stage_info = remap_all(mem::take(&mut self.stage_info));
+        self.recomposed = remap_all(mem::take(&mut self.recomposed));
 
         // What the demand resolution found counts as the outcome's own.
         stage_resynced.extend(found);
@@ -1056,7 +1082,7 @@ mod tests {
         }
         let is_local = |layer| layer == local;
         let mut payload = Payload::new(&changes, &sdf::ChangeList::new(), Vec::new(), &provenance, &is_local);
-        payload.finish(outcome, Vec::new());
+        payload.finish(outcome, Vec::new(), sdf::Path::clone);
         payload
     }
 

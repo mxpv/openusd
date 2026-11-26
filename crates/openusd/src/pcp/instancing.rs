@@ -329,12 +329,15 @@ impl PrototypeRegistry {
 
     /// Removes every prototype the change set could have invalidated, returning
     /// the dropped `/__Prototype_N` roots so the cache can evict their indices.
-    /// A prototype is affected when a changed prim path lies on the ancestor
-    /// chain of one of its instances (the instance's `instanceable` opinion,
-    /// arcs, or shared content may have changed) or of its prototype root.
-    /// Unaffected prototypes keep their instance-to-prototype mapping and
-    /// materialized index, so a localized edit no longer forces every key to be
-    /// recomputed (spec 11.3.3).
+    /// A prototype is affected when a changed prim path is one of its
+    /// instances, its root, or an ancestor of either: the instance's
+    /// `instanceable` opinion or arcs, and with them its key, may have changed.
+    /// A change strictly beneath an instance or a root leaves the key alone
+    /// (C++ `Usd_InstanceCache` re-keys only the instance prim indices a
+    /// change names): it reaches the prototype's own namespace, whose indices
+    /// it drops like any other. Unaffected prototypes keep their
+    /// instance-to-prototype mapping and materialized index, so a localized
+    /// edit does not recompute every key (spec 11.3.3).
     ///
     /// `count` stays monotonic (see its doc). An instance registering again
     /// under the key of a prototype retired here takes that prototype's root
@@ -359,9 +362,9 @@ impl PrototypeRegistry {
         let mut affected = sdf::PathSet::default();
         let mut worklist: Vec<&Path> = changed.iter().collect();
         while let Some(p) = worklist.pop() {
-            let roots = self.by_root.ancestors(p).chain(self.by_root.subtree(p));
-            let instances = self.by_instance.ancestors(p).chain(self.by_instance.subtree(p));
-            let touched = roots.map(|(root, _)| root).chain(instances.map(|(_, root)| root));
+            let roots = self.by_root.subtree(p).map(|(root, _)| root);
+            let instances = self.by_instance.subtree(p).map(|(_, root)| root);
+            let touched = roots.chain(instances);
             for root in touched {
                 if !affected.contains(root) {
                     affected.insert(root.clone());
@@ -395,6 +398,21 @@ impl PrototypeRegistry {
         // hash set's iteration happens to be.
         retired.sort_by(|a, b| a.root.cmp(&b.root));
         retired
+    }
+
+    /// The registered instances at or above `path`, by composed path.
+    fn instances_at_or_above<'a>(&'a self, path: &Path) -> impl Iterator<Item = &'a Path> + use<'a> {
+        self.by_instance.ancestors(path).map(|(instance, _)| instance)
+    }
+
+    /// The path `path` stands for in its nearest registered instance's
+    /// prototype, when it lies strictly beneath one.
+    fn in_prototype(&self, path: &Path) -> Option<Path> {
+        let (instance, root) = self
+            .by_instance
+            .ancestors(path)
+            .find(|(instance, _)| *instance != path)?;
+        path.replace_prefix(instance, root)
     }
 
     /// Forgets the retired roots, so a key that comes back later mints a
@@ -563,6 +581,30 @@ impl IndexCache {
         let invalidated: Vec<Path> = roots.chain(instances).filter(|path| !private(path)).cloned().collect();
         self.drop_prototypes(retired);
         invalidated
+    }
+
+    /// The registered instances at or above each of `paths`, by composed path:
+    /// the instances whose key a load rule at one of `paths` is part of
+    /// ([`instance_key`]).
+    pub(crate) fn instances_at_or_above(&self, paths: &[Path]) -> Vec<Path> {
+        paths
+            .iter()
+            .flat_map(|path| self.prototypes.instances_at_or_above(path))
+            .cloned()
+            .collect()
+    }
+
+    /// The path a composed-change notice names for `path` (C++ `UsdStage`
+    /// remapping its changes to prototypes): a path strictly beneath a
+    /// registered instance stands for the prim of the prototype it shares,
+    /// so it is named in that prototype's namespace, through each nested
+    /// instance in turn. Every other path is named as it is.
+    pub(crate) fn notice_path(&self, path: &Path) -> Path {
+        let mut path = path.clone();
+        while let Some(mapped) = self.prototypes.in_prototype(&path) {
+            path = mapped;
+        }
+        path
     }
 
     /// Whether the stage's population admits `path` — the mask exposes it, it
@@ -1322,7 +1364,8 @@ mod tests {
     }
 
     /// `remove_affected` drops only the prototypes whose instances or root the
-    /// change set touches, leaving the rest mapped. Re-registering the key
+    /// change set touches, leaving the rest mapped, and none for a change
+    /// beneath an instance, which leaves its key alone. Re-registering the key
     /// takes the dropped root back until the retired roots are forgotten, and
     /// mints a fresh identity after.
     #[test]
@@ -1335,8 +1378,11 @@ mod tests {
         assert!(minted0 && minted1);
         assert_ne!(p0, p1);
 
-        // A change under /C touches only its prototype.
-        let dropped = reg.remove_affected(&[path("/C/Child")]);
+        assert!(reg.remove_affected(&[path("/C/Child")]).is_empty());
+        assert!(reg.remove_affected(&[p1.append_child("Child").unwrap()]).is_empty());
+
+        // A change at /C touches only its prototype.
+        let dropped = reg.remove_affected(&[path("/C")]);
         assert_eq!(roots(&dropped), vec![p1.clone()]);
         assert_eq!(dropped[0].instances, [path("/C")]);
         assert_eq!(reg.canonical_of(&p0), Some(path("/A")));
