@@ -432,23 +432,34 @@ fn common_ops(ops: Vec<XformOp>) -> Option<CommonXformOps> {
 }
 
 /// The vectors the ops of a fitting stack hold at `time`, with the identity
-/// for an op the stack does not list or that has no value.
+/// for an op the stack does not list or that has no value of the type it is
+/// read as.
+///
+/// Each op is read as C++ `GetXformVectors` reads it: the translate as a
+/// `double3`, the rotate and the scale as a `float3`, and the pivot as a
+/// `double3`, narrowed, else a `float3`. A value of any other type reads as
+/// the identity.
 fn common_vectors(ops: &CommonXformOps, time: Option<usd::TimeCode>) -> Result<XformVectors> {
-    let read = |op: &Option<XformOp>| -> Result<Option<vt::Value>> {
+    fn read<T>(op: &Option<XformOp>, time: Option<usd::TimeCode>) -> Result<Option<T>>
+    where
+        T: vt::FromValue,
+        T::Error: Into<openusd::Error>,
+    {
         match op {
-            Some(op) => op.attribute().get_at::<vt::Value>(time),
+            Some(op) => op.attribute().get_at::<T>(time),
             None => Ok(None),
         }
+    }
+    let pivot = match read::<gf::Vec3d>(&ops.pivot, time)? {
+        Some(pivot) => Some(pivot.to_f32()),
+        None => read::<gf::Vec3f>(&ops.pivot, time)?,
     };
-    let float3 = |value: Option<vt::Value>| value.and_then(|value| value.cast::<gf::Vec3f>().ok());
     let identity = XformVectors::default();
     Ok(XformVectors {
-        translation: read(&ops.translate)?
-            .and_then(|value| value.cast::<[f64; 3]>().ok())
-            .map_or(identity.translation, gf::Vec3d::from),
-        rotation: float3(read(&ops.rotate)?).unwrap_or(identity.rotation),
-        scale: float3(read(&ops.scale)?).unwrap_or(identity.scale),
-        pivot: float3(read(&ops.pivot)?).unwrap_or(identity.pivot),
+        translation: read(&ops.translate, time)?.unwrap_or(identity.translation),
+        rotation: read(&ops.rotate, time)?.unwrap_or(identity.rotation),
+        scale: read(&ops.scale, time)?.unwrap_or(identity.scale),
+        pivot: pivot.unwrap_or(identity.pivot),
         rotation_order: ops.rotation_order().unwrap_or_default(),
     })
 }
@@ -1023,6 +1034,51 @@ mod tests {
             by_accumulation,
             vectors([2.0, 4.0, 6.0], [0.0; 3], [2.0; 3], [0.0; 3], RotationOrder::XYZ),
         );
+        Ok(())
+    }
+
+    /// An op authored with another type than the one it is read as reads as
+    /// the identity, as in C++, except a `double3` pivot, which is narrowed.
+    #[test]
+    fn mismatched_types_identity() -> Result {
+        let (_dir, stage) = crate::tests::from_usda(
+            r#"#usda 1.0
+
+def Xform "Mismatched"
+{
+    float3 xformOp:translate = (1, 2, 3)
+    double3 xformOp:translate:pivot = (4, 5, 6)
+    double3 xformOp:rotateXYZ.timeSamples = { 1: (10, 20, 30) }
+    double3 xformOp:scale = (2, 2, 2)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "xformOp:rotateXYZ", "xformOp:scale", "!invert!xformOp:translate:pivot"]
+}
+
+def Xform "FloatPivot"
+{
+    double3 xformOp:translate = (1, 2, 3)
+    float3 xformOp:translate:pivot = (4, 5, 6)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "!invert!xformOp:translate:pivot"]
+}
+"#,
+        )?;
+        let api = |path: &str| -> Result<XformCommonAPI> {
+            let xform = Xform::get(&stage, path)?.expect("an Xform");
+            Ok(XformCommonAPI::from_prim_unchecked(xform.prim().clone()))
+        };
+
+        let mismatched = api("/Mismatched")?;
+        assert!(mismatched.is_compatible()?);
+        let pivot_only = XformVectors {
+            pivot: gf::vec3f(4.0, 5.0, 6.0),
+            ..XformVectors::default()
+        };
+        assert_eq!(mismatched.xform_vectors(None)?, pivot_only);
+        assert_eq!(mismatched.xform_vectors(usd::TimeCode::new(1.0))?, pivot_only);
+        assert_eq!(mismatched.xform_vectors_by_accumulation(None)?, pivot_only);
+
+        let float_pivot = api("/FloatPivot")?.xform_vectors(None)?;
+        assert_eq!(float_pivot.translation, gf::vec3d(1.0, 2.0, 3.0));
+        assert_eq!(float_pivot.pivot, gf::vec3f(4.0, 5.0, 6.0));
         Ok(())
     }
 
