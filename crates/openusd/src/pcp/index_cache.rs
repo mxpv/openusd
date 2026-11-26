@@ -4948,7 +4948,7 @@ mod tests {
 
     use crate::Result;
 
-    use super::super::{Changes, ExpressionContext, LayerChanges};
+    use super::super::{Changes, ExpressionContext, LayerChanges, Requested};
     use super::*;
     use crate::pcp::prim_graph::RelocateKind;
 
@@ -9158,7 +9158,7 @@ def "P" (
         compose(&graph, &mut cache, &["/P", "/P/Inner"])?;
         let mut rules = LoadRules::all();
         rules.unload(sdf::path("/P")?);
-        cache.set_load_rules(rules);
+        cache.set_load_rules(rules, Requested::default());
         let recorded = evicted(&cache);
         assert!(recorded.contains(&"/P".to_owned()), "{recorded:?}");
         assert!(recorded.contains(&"/P/Inner".to_owned()), "{recorded:?}");
@@ -9763,13 +9763,13 @@ def \"World\" {
 }
 ",
         );
-        cache.set_load_rules(LoadRules::none());
+        cache.set_load_rules(LoadRules::none(), Requested::default());
         compose(&graph, &mut cache, &["/World/A", "/World/B", "/Group/C"])?;
 
         let mut rules = cache.load_rules().clone();
         rules.load_with_descendants(sdf::path("/World/A")?);
         rules.load_with_descendants(sdf::path("/Group/C")?);
-        let victims = cache.set_load_rules(rules);
+        let victims = cache.set_load_rules(rules, Requested::default());
         assert_eq!(victims.prims, [sdf::path("/World")?]);
         assert!(
             victims.subtrees.contains(&sdf::path("/Group")?),

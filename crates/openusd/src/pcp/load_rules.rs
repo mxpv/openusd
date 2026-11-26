@@ -478,9 +478,20 @@ impl IndexCache {
     /// ([`PrimIndex::reads_load_rule`](super::PrimIndex::reads_load_rule)),
     /// or has no index cached to tell, is dropped as a subtree; the rest
     /// are reported as prims. One whose inclusion holds composes as it did.
-    pub(crate) fn set_load_rules(&mut self, rules: LoadRules) -> RuleVictims {
+    ///
+    /// The paths `requested` names join the touched ones, each resynced as a
+    /// subtree whether or not its own entry changed, unless the change is a
+    /// no-op its [`unconditional`](Requested::unconditional) flag does not
+    /// override.
+    pub(crate) fn set_load_rules(&mut self, rules: LoadRules, requested: Requested) -> RuleVictims {
         let before = mem::replace(&mut self.load_rules, canonical(rules));
-        let touched = diff_entries(&before, &self.load_rules);
+        let mut touched = diff_entries(&before, &self.load_rules);
+        if touched.is_empty() && !requested.unconditional {
+            return RuleVictims::default();
+        }
+        touched.extend(requested.paths);
+        touched.sort();
+        touched.dedup();
         if touched.is_empty() {
             return RuleVictims::default();
         }
@@ -547,6 +558,19 @@ pub(crate) struct RuleVictims {
     /// The ancestors whose inclusion flipped with no payload to read it:
     /// they compose as they did, and only their loaded state changed.
     pub(crate) prims: Vec<Path>,
+}
+
+/// The paths a load or unload request names (C++ `UsdStage::LoadAndUnload`'s
+/// load and unload sets), which [`IndexCache::set_load_rules`] resyncs beside
+/// the entries its table diff touches. C++ resyncs each requested path, an
+/// already loaded one among them, once the request is not a no-op.
+#[derive(Debug, Default)]
+pub(crate) struct Requested {
+    /// The paths asked to load or unload, in real namespace.
+    pub(crate) paths: Vec<Path>,
+    /// Whether the paths resync even when the table resolves as it did: C++
+    /// checks for a no-op only when the load or the unload set is empty.
+    pub(crate) unconditional: bool,
 }
 
 #[cfg(test)]
@@ -891,7 +915,7 @@ mod tests {
             subtrees: vec![p("/A")],
             prims: Vec::new(),
         };
-        assert_eq!(cache.set_load_rules(rules), victims);
+        assert_eq!(cache.set_load_rules(rules, Requested::default()), victims);
     }
 
     #[test]
@@ -903,7 +927,10 @@ mod tests {
             Diagnostics::default(),
         );
         let rules = cache.load_rules().clone();
-        assert_eq!(cache.set_load_rules(rules), RuleVictims::default());
+        assert_eq!(
+            cache.set_load_rules(rules, Requested::default()),
+            RuleVictims::default()
+        );
     }
 
     /// A caller-supplied table that is textually different but semantically
@@ -921,7 +948,10 @@ mod tests {
         );
         let mut explicit_all = LoadRules::all();
         explicit_all.add_rule(p("/"), Rule::All);
-        assert_eq!(cache.set_load_rules(explicit_all), RuleVictims::default());
+        assert_eq!(
+            cache.set_load_rules(explicit_all, Requested::default()),
+            RuleVictims::default()
+        );
         assert!(cache.load_rules().is_empty(), "the stored table stays canonical");
     }
 
@@ -935,9 +965,9 @@ mod tests {
         );
         let mut rules = cache.load_rules().clone();
         rules.load_with_descendants(p("/World"));
-        cache.set_load_rules(rules.clone());
+        cache.set_load_rules(rules.clone(), Requested::default());
         rules.unload(p("/World/Deep/Nested"));
-        let victims = cache.set_load_rules(rules);
+        let victims = cache.set_load_rules(rules, Requested::default());
         assert_eq!(
             victims.subtrees,
             vec![p("/World/Deep/Nested")],
@@ -961,9 +991,9 @@ mod tests {
         );
         let mut rules = cache.load_rules().clone();
         rules.load_without_descendants(p("/World"));
-        cache.set_load_rules(rules.clone());
+        cache.set_load_rules(rules.clone(), Requested::default());
         rules.load_with_descendants(p("/World/A/Deep"));
-        let victims = cache.set_load_rules(rules);
+        let victims = cache.set_load_rules(rules, Requested::default());
         assert_eq!(
             victims.subtrees,
             vec![p("/World/A/Deep"), p("/World/A")],
@@ -986,7 +1016,7 @@ mod tests {
         );
         let mut rules = cache.load_rules().clone();
         rules.load_with_descendants(p("/World/A"));
-        let first = cache.set_load_rules(rules.clone());
+        let first = cache.set_load_rules(rules.clone(), Requested::default());
         assert_eq!(
             first.subtrees,
             vec![p("/World/A"), p("/World")],
@@ -994,7 +1024,7 @@ mod tests {
         );
 
         rules.load_with_descendants(p("/World/B"));
-        let second = cache.set_load_rules(rules);
+        let second = cache.set_load_rules(rules, Requested::default());
         assert_eq!(second.subtrees, vec![p("/World/B")]);
         assert!(second.prims.is_empty(), "already loaded");
     }
