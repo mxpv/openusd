@@ -16298,6 +16298,40 @@ fn over_through_reference_info() -> Result<()> {
     Ok(())
 }
 
+/// A value set on an attribute the edit target holds no spec for is two
+/// notices, as C++ `UsdStage::_CreatePropertySpecForEditing` commits the new
+/// spec before the value: the attribute resynced, then its value changed.
+#[test]
+fn set_stamps_then_writes() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/Asset")?;
+    stage.create_attribute("/Asset.x", "double")?;
+    stage.define_prim("/World")?.references().add(sdf::Reference {
+        prim_path: sdf::path("/Asset")?,
+        ..Default::default()
+    })?;
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let heard = heard.clone();
+        stage.add_sink(RecordingSink {
+            after: Some(Box::new(move |_stage, change| {
+                heard
+                    .borrow_mut()
+                    .push((change.resynced.to_vec(), change.changed_info_only.to_vec()));
+            })),
+            ..Default::default()
+        })?
+    };
+
+    stage.attribute("/World.x")?.set(1.0)?;
+
+    assert_eq!(
+        *heard.borrow(),
+        [(paths(&["/World.x"]), Vec::new()), (Vec::new(), paths(&["/World.x"]))]
+    );
+    Ok(())
+}
+
 /// An `over` whose prim nothing composed before is a resync of that prim: it
 /// appeared, though the authoring query left an empty index cached for it.
 #[test]
