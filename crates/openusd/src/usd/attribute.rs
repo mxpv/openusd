@@ -353,9 +353,10 @@ impl Attribute {
     /// `point3f` or `double`), so a layer never holds a value of a kind it
     /// does not declare. The value is then written as validated, never
     /// recast against the local declaration. A spec the target lacks is
-    /// stamped first from the declaration composition finds — the schema's,
-    /// else the strongest authored spec's (C++
-    /// `UsdStage::_CreatePropertySpecForEditing`).
+    /// stamped first, in a transaction of its own, from the declaration
+    /// composition finds — the schema's, else the strongest authored spec's
+    /// (C++ `UsdStage::_CreatePropertySpecForEditing`) — so an observer hears
+    /// the attribute appear, then its value change.
     ///
     /// `time` is `None` to author the default value, or `Some(tc)` (a
     /// [`usd::TimeCode`](super::TimeCode), which a bare `TimeCode` coerces
@@ -377,6 +378,7 @@ impl Attribute {
     ) -> Result<Self, StageAuthoringError> {
         let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
         let plan = self.plan_authoring(vec![(value.into(), time.into())], false, None, &schema)?;
+        plan.stamp(&self.stage, &self.path)?;
         self.stage
             .with_target_layer_at(&self.path, |layer, spec_path| plan.write(layer.data_mut(), &spec_path))?;
         Ok(self)
@@ -410,6 +412,7 @@ impl Attribute {
             spline.retime(offset.offset, offset.scale)?;
         }
         let spline = vt::Value::Spline(spline);
+        plan.stamp(&self.stage, &self.path)?;
         self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
             plan.set_spline(layer.data_mut(), &spec_path, spline)
         })?;
@@ -425,6 +428,7 @@ impl Attribute {
     pub fn block(self) -> Result<Self, StageAuthoringError> {
         let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
         let plan = self.plan_authoring(Vec::new(), false, None, &schema)?;
+        plan.stamp(&self.stage, &self.path)?;
         self.stage
             .with_target_layer_at(&self.path, |layer, spec_path| plan.block(layer.data_mut(), &spec_path))?;
         Ok(self)
@@ -1443,6 +1447,27 @@ pub(super) struct AttributeAuthoringPlan {
 }
 
 impl AttributeAuthoringPlan {
+    /// Stamps the spec the plan declares at `path` on the edit target in a
+    /// transaction of its own, ahead of the value write, and does nothing
+    /// where the target already holds the spec (C++
+    /// `UsdStage::_CreatePropertySpecForEditing`, which commits the new spec
+    /// before the value is set). An observer hears the attribute appear, then
+    /// its value change.
+    ///
+    /// The write's own transaction applies the plan again and finds the spec
+    /// in place. The values were validated before either transaction, so
+    /// once the spec is stamped the write does not fail.
+    fn stamp(&self, stage: &Stage, path: &sdf::Path) -> Result<(), StageAuthoringError> {
+        if self.ensure == authoring::EnsurePlan::Existing {
+            return Ok(());
+        }
+        stage
+            .with_target_layer_at(path, |layer, spec_path| {
+                authoring::apply_plan(layer.data_mut(), &spec_path, sdf::SpecType::Attribute, &self.ensure)
+            })
+            .map(|_| ())
+    }
+
     /// The write phase, inside the transaction: apply the spec plan, read the
     /// edit-target spec's own declaration fallibly (a missing `typeName` is
     /// rejected, never repaired), and unless the value is a block require it
