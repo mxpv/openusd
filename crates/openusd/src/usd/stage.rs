@@ -3182,11 +3182,16 @@ impl Stage {
         let Some(path) = Self::normalize_load_target(path) else {
             return;
         };
+        let requested = pcp::Requested {
+            paths: vec![path.clone()],
+            unconditional: false,
+        };
         self.composition.install_load_rules(
             move |rules| match policy {
                 LoadPolicy::WithDescendants => rules.load_with_descendants(path),
                 LoadPolicy::WithoutDescendants => rules.load_without_descendants(path),
             },
+            requested,
             self,
         );
     }
@@ -3216,8 +3221,12 @@ impl Stage {
         let Some(path) = Self::normalize_load_target(path) else {
             return;
         };
+        let requested = pcp::Requested {
+            paths: vec![path.clone()],
+            unconditional: false,
+        };
         self.composition
-            .install_load_rules(move |rules| rules.unload(path), self);
+            .install_load_rules(move |rules| rules.unload(path), requested, self);
     }
 
     /// Loads every path in `to_load` (with `policy`) and unloads every path
@@ -3249,6 +3258,15 @@ impl Stage {
             )
             .filter_map(Result::transpose)
             .collect::<Result<_, sdf::PathParseError>>()?;
+        // C++ checks for a no-op only when one of the two sets is empty.
+        let requested = pcp::Requested {
+            paths: to_unload
+                .iter()
+                .chain(to_load.iter().map(|(path, _)| path))
+                .cloned()
+                .collect(),
+            unconditional: !to_load.is_empty() && !to_unload.is_empty(),
+        };
         self.composition.install_load_rules(
             |rules| {
                 for path in to_unload {
@@ -3261,6 +3279,7 @@ impl Stage {
                     }
                 }
             },
+            requested,
             self,
         );
         Ok(())
@@ -3278,7 +3297,8 @@ impl Stage {
     /// use, not a blunt whole-stage drop, since the affected set is already
     /// provably sufficient (see [`pcp::LoadRules`]'s module documentation).
     pub fn set_load_rules(&self, rules: pcp::LoadRules) {
-        self.composition.install_load_rules(|current| *current = rules, self);
+        self.composition
+            .install_load_rules(|current| *current = rules, pcp::Requested::default(), self);
     }
 
     /// Every prim below `root` (inclusive) that carries a payload arc, loaded
@@ -3329,7 +3349,8 @@ impl Stage {
                 stage: self,
                 original: self.load_rules(),
             };
-            self.composition.swap_load_rules(pcp::LoadRules::all(), self);
+            self.composition
+                .swap_load_rules(pcp::LoadRules::all(), pcp::Requested::default(), self);
             let mut found = Vec::new();
             self.walk_loadable(&root, &mut found).map(|()| found)
         };
@@ -4666,7 +4687,7 @@ impl Drop for LoadRulesGuard<'_> {
     fn drop(&mut self) {
         self.stage
             .composition
-            .swap_load_rules(mem::take(&mut self.original), self.stage);
+            .swap_load_rules(mem::take(&mut self.original), pcp::Requested::default(), self.stage);
     }
 }
 

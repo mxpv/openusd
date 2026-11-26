@@ -3006,7 +3006,14 @@ impl StageComposition {
     /// next drain. An unload can leave payload-target stacks unreferenced
     /// for a long stretch, so this reclaims while the seam is quiet,
     /// whenever accumulated registry churn has ripened the trigger.
-    pub(super) fn install_load_rules(&self, edit: impl FnOnce(&mut pcp::LoadRules), hooks: &dyn CompositionHooks) {
+    /// `requested` names the paths a load or unload asked for, which the
+    /// change resyncs ([`pcp::Requested`]).
+    pub(super) fn install_load_rules(
+        &self,
+        edit: impl FnOnce(&mut pcp::LoadRules),
+        requested: pcp::Requested,
+        hooks: &dyn CompositionHooks,
+    ) {
         // Drain before reading: a queued edit's notification may itself install
         // load rules, and `edit` is applied to whatever this read returns, so a
         // pre-drain snapshot would overwrite that change on the way back out.
@@ -3026,7 +3033,7 @@ impl StageComposition {
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
         self.compose_flipped(&rules, hooks);
-        let victims = self.swap_load_rules(rules, hooks);
+        let victims = self.swap_load_rules(rules, requested, hooks);
         // What the change reports is walked for the instances it registers,
         // the ancestors it refreshes in place included.
         self.cache.borrow_mut().queue_resyncs(&victims.subtrees, &victims.prims);
@@ -3076,19 +3083,25 @@ impl StageComposition {
         );
     }
 
-    /// Installs `rules` in place of the current table, returning what it
-    /// dropped ([`pcp::RuleVictims`]).
+    /// Installs `rules` in place of the current table, with the paths
+    /// `requested` names resynced beside its diff, returning what it dropped
+    /// ([`pcp::RuleVictims`]).
     ///
     /// Drains first so the mutation recomposes against a current graph and
     /// cache, matching [`apply_mute`](Self::apply_mute). Reclaims nothing: this
     /// is also the transient swap behind the loadability walk, which must leave
     /// the payload-target stacks it composes untouched.
-    pub(super) fn swap_load_rules(&self, rules: pcp::LoadRules, hooks: &dyn CompositionHooks) -> pcp::RuleVictims {
+    pub(super) fn swap_load_rules(
+        &self,
+        rules: pcp::LoadRules,
+        requested: pcp::Requested,
+        hooks: &dyn CompositionHooks,
+    ) -> pcp::RuleVictims {
         self.process_pending(hooks);
         if !self.sound() {
             return pcp::RuleVictims::default();
         }
-        self.settled_cache_mut().set_load_rules(rules)
+        self.settled_cache_mut().set_load_rules(rules, requested)
     }
 
     /// Backstop for the settled operations: the queue being empty is necessary
@@ -3398,7 +3411,7 @@ mod tests {
         let composition = composition();
         composition.record_pending(edit());
 
-        composition.swap_load_rules(pcp::LoadRules::none(), &StubHooks);
+        composition.swap_load_rules(pcp::LoadRules::none(), pcp::Requested::default(), &StubHooks);
 
         assert!(
             composition.pending_is_empty(),
@@ -3429,7 +3442,8 @@ mod tests {
             fn notify(&self, _notice: CompositionNotice) {
                 // Standing in for a sink installing load rules from `after_commit`.
                 if !self.1.replace(true) {
-                    self.0.install_load_rules(|rules| *rules = pcp::LoadRules::none(), self);
+                    self.0
+                        .install_load_rules(|rules| *rules = pcp::LoadRules::none(), pcp::Requested::default(), self);
                 }
             }
         }
@@ -3439,7 +3453,7 @@ mod tests {
         let hooks = RuleSetter(&composition, Cell::new(false));
 
         // A no-op batch: everything it installs comes from the table it read.
-        composition.install_load_rules(|_| {}, &hooks);
+        composition.install_load_rules(|_| {}, pcp::Requested::default(), &hooks);
 
         assert_eq!(
             composition

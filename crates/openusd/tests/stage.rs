@@ -5991,6 +5991,47 @@ fn load_and_unload_nested_ancestor_descendant() -> Result<()> {
     Ok(())
 }
 
+/// A `load_and_unload` naming both sets resyncs every path it names, one
+/// already loaded among them: C++ `UsdStage::LoadAndUnload` checks for a no-op
+/// only when one of the two sets is empty. A `load` of one of those paths
+/// alone is still a no-op.
+#[test]
+fn load_and_unload_resyncs_both() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("p.usda"),
+        "#usda 1.0\ndef \"X\" {\n    def \"C\" {}\n}\n",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"A\" (payload = @p.usda@</X>) {}\n    def \"B\" (payload = @p.usda@</X>) {}\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let notices = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let notices = notices.clone();
+        stage.add_sink(RecordingSink {
+            load_rules: Some(Box::new(move |_stage, resynced| {
+                notices.borrow_mut().push(resynced.subtrees.to_vec());
+            })),
+            ..Default::default()
+        })?
+    };
+
+    stage.load("/World/A", LoadPolicy::WithDescendants).unwrap();
+    assert!(notices.borrow().is_empty(), "/World/A is already loaded");
+
+    stage
+        .load_and_unload([("/World/A", LoadPolicy::WithDescendants)], ["/World/B"])
+        .unwrap();
+    assert_eq!(
+        *notices.borrow(),
+        vec![vec![sdf::path("/World/A")?, sdf::path("/World/B")?]]
+    );
+    Ok(())
+}
+
 /// `Prim::load` / `Prim::unload` act on the prim's own path, so a handle is
 /// enough to change the stage's load state (C++ `UsdPrim::Load` / `Unload`),
 /// and each `LoadPolicy` reaches a different depth.
