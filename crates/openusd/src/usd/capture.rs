@@ -79,6 +79,7 @@ impl UndoStage {
             stack: VecDeque::new(),
             in_flight: Vec::new(),
             frames: Vec::new(),
+            edit_groups: Vec::new(),
             capacity: capacity.max(1),
         };
         let capture = CaptureStage::new(stage, journal, |journal| UndoRecorder { journal });
@@ -317,6 +318,9 @@ struct Inverse {
 /// ([`PendingChange::generation`]).
 struct InFlight {
     generation: u64,
+    /// The stage edit's group the transaction commits for, if any
+    /// ([`PendingChange::group`]).
+    group: Option<u64>,
     transaction: Transaction,
 }
 
@@ -334,6 +338,10 @@ struct Journal {
     /// order: a group's transactions; a revert's transactions still to
     /// replay, its replay in progress, then the steps recorded inside it.
     frames: Vec<Frame>,
+    /// The open groups of one stage edit ([`TxnObserver::open_group`]), each
+    /// by its id with the transactions it sealed, oldest first. They seal as
+    /// one into the innermost frame when they close.
+    edit_groups: Vec<(u64, Vec<Transaction>)>,
     /// The maximum number of steps on [`stack`](Self::stack).
     capacity: usize,
 }
@@ -415,6 +423,10 @@ impl Journal {
                 }
             }
         }
+        self.edit_groups
+            .iter()
+            .flat_map(|(_, transactions)| transactions)
+            .for_each(&mut add);
         self.in_flight
             .iter()
             .map(|flight| &flight.transaction)
@@ -428,6 +440,9 @@ impl Journal {
     fn discard(&mut self) {
         self.in_flight.clear();
         self.stack.clear();
+        for (_, transactions) in &mut self.edit_groups {
+            transactions.clear();
+        }
         for frame in &mut self.frames {
             match frame {
                 Frame::Group(transactions) => transactions.clear(),
@@ -469,6 +484,16 @@ impl Journal {
         }
     }
 
+    /// Close the stage edit's group `group`: what it sealed joins the
+    /// innermost frame as one, as a closing group's does.
+    fn close_edit_group(&mut self, group: u64) {
+        let Some(at) = self.edit_groups.iter().position(|(held, _)| *held == group) else {
+            return;
+        };
+        let (_, own) = self.edit_groups.remove(at);
+        self.join_innermost(own);
+    }
+
     /// Close the innermost frame, an open group: what it committed joins
     /// the enclosing group, is recorded as one step of the enclosing
     /// revert, or is the newest step.
@@ -476,6 +501,14 @@ impl Journal {
         let Some(Frame::Group(own)) = self.frames.pop() else {
             unreachable!("a group closes as the innermost frame");
         };
+        self.join_innermost(own);
+    }
+
+    /// Seal `own`, the transactions a closing group committed, as one into
+    /// the innermost frame: the enclosing group, a step of the enclosing
+    /// revert, or the newest step. A group that committed nothing adds
+    /// nothing.
+    fn join_innermost(&mut self, own: Vec<Transaction>) {
         if own.is_empty() {
             return;
         }
@@ -547,6 +580,20 @@ impl Journal {
     /// frames, which closes into one step, loses its stale transaction and
     /// the older ones.
     fn drop_stale(&mut self, stale: impl Fn(&Transaction) -> bool) {
+        // The open stage-edit groups hold the newest history.
+        for at in (0..self.edit_groups.len()).rev() {
+            if let Some(newest) = self.edit_groups[at].1.iter().rposition(&stale) {
+                self.edit_groups[at].1.drain(..=newest);
+                for (_, older) in &mut self.edit_groups[..at] {
+                    older.clear();
+                }
+                for unit in self.frame_units() {
+                    self.drop_unit(unit, None);
+                }
+                self.stack.clear();
+                return;
+            }
+        }
         let units = self.frame_units();
         for (at, &unit) in units.iter().enumerate() {
             if let Some(newest) = self.unit(unit).into_iter().rposition(&stale) {
@@ -579,6 +626,10 @@ impl Journal {
     fn depart(&mut self, layers: &HashSet<pcp::LayerId>) {
         let touches =
             |transaction: &Transaction| transaction.layers.iter().any(|inverse| layers.contains(&inverse.layer));
+        // A stage edit's group still open drops what names a departed layer.
+        for (_, transactions) in &mut self.edit_groups {
+            transactions.retain(|transaction| !touches(transaction));
+        }
         let mut units = self.frame_units();
         units.extend((0..self.stack.len()).rev().map(Unit::Step));
         // The footprints the dropped units leave on the other layers.
@@ -814,6 +865,18 @@ impl TxnObserver for UndoRecorder {
         self.journal.borrow().hold(layers);
     }
 
+    fn open_group(&self, group: u64) {
+        self.journal.borrow_mut().edit_groups.push((group, Vec::new()));
+    }
+
+    fn close_group(&self, group: u64) {
+        self.journal.borrow_mut().close_edit_group(group);
+    }
+
+    fn discard_group(&self, group: u64) {
+        self.journal.borrow_mut().edit_groups.retain(|(held, _)| *held != group);
+    }
+
     fn capture(&self, _stage: &Stage, change: &PendingChange<'_>, layer: pcp::LayerId) {
         // Only the stage's own edits are undoable: another editor's edit to a
         // layer the stage holds, or one made through a layer handle, is not
@@ -847,6 +910,7 @@ impl TxnObserver for UndoRecorder {
             Some(bucket) if bucket.generation == change.generation => bucket.transaction.layers.push(inverse),
             _ => journal.in_flight.push(InFlight {
                 generation: change.generation,
+                group: change.group,
                 transaction: Transaction {
                     mapping: change.mapping.cloned(),
                     layers: vec![inverse],
@@ -901,7 +965,21 @@ impl TxnObserver for UndoRecorder {
             let footprint = footprint_of(footprints, inverse.layer).expect("an observed commit carries its footprint");
             inverse.footprint = Rc::clone(footprint);
         }
-        journal.seal(transaction);
+        // An edit a sink makes while a stage edit's group is open joins the
+        // group when it overlaps what the group holds, so undo reverts the
+        // two in the reverse of the order they landed.
+        let group = bucket.group.or_else(|| {
+            journal
+                .edit_groups
+                .iter()
+                .rev()
+                .find(|(_, held)| held.iter().any(|held| held.overlaps(footprints)))
+                .map(|(group, _)| *group)
+        });
+        match journal.edit_groups.iter_mut().find(|(held, _)| Some(*held) == group) {
+            Some((_, transactions)) => transactions.push(transaction),
+            None => journal.seal(transaction),
+        }
     }
 }
 
@@ -1062,12 +1140,26 @@ mod tests {
     use super::*;
     use crate::usd::diff::tests::create;
     use crate::usd::stage::tests::recorder_counts;
-    use crate::usd::{ApplyMode, Diff, Edit, EditTarget, ListPosition, NamespaceEditor, StageSink};
+    use crate::usd::{ApplyMode, CommittedChange, Diff, Edit, EditTarget, ListPosition, NamespaceEditor, StageSink};
     use crate::{Error, Result};
     use crate::{sdf, tf, vt};
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// An undo stage where `/World` references `/Asset`, which declares the
+    /// attribute `x`: a write of `/World.x` on the root layer stamps a spec
+    /// there first.
+    fn referenced_attribute() -> Result<UndoStage> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        stage.define_prim("/Asset")?;
+        stage.create_attribute("/Asset.x", "double")?;
+        stage.define_prim("/World")?.references().add(sdf::Reference {
+            prim_path: sdf::path("/Asset")?,
+            ..Default::default()
+        })?;
+        Ok(stage)
     }
 
     /// Author a `def` Xform prim spec directly on a layer, for the direct-edit
@@ -1111,6 +1203,202 @@ mod tests {
 
         assert!(stage.undo()?);
         assert_eq!(stage.attribute("/World.size")?.get::<f64>()?, Some(1.0));
+        Ok(())
+    }
+
+    /// A value set where the edit target has no spec stamps the spec and
+    /// sets the value in two transactions, which make one undo step: one
+    /// undo leaves no spec behind.
+    #[test]
+    fn undo_stamped_set() -> Result<()> {
+        let stage = referenced_attribute()?;
+        let depth = stage.undo_depth();
+        stage.attribute("/World.x")?.set(1.0_f64)?;
+        assert_eq!(stage.undo_depth(), depth + 1);
+        assert!(stage.undo()?);
+        let x = sdf::path("/World.x")?;
+        assert!(!stage.root_layer().try_borrow()?.data().has_spec(&x));
+        Ok(())
+    }
+
+    /// A rejected write takes back only what its stamp created: a prim a
+    /// sink defined beneath the stamped `over` meanwhile stays, and so does
+    /// the `over` holding it.
+    #[test]
+    fn rejected_write_keeps_sink_edit() -> Result<()> {
+        struct RejectNth(Cell<u32>, u32);
+        impl sdf::LayerSink for RejectNth {
+            fn before_commit(&self, _: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+                self.0.set(self.0.get() + 1);
+                match self.0.get() == self.1 {
+                    true => Err(sdf::sink::Error::new("the value is refused")),
+                    false => Ok(()),
+                }
+            }
+        }
+        let stage = UndoStage::from(in_memory_stage()?);
+        stage.define_prim("/Asset/Geo")?;
+        stage.create_attribute("/Asset/Geo.x", "double")?;
+        stage.define_prim("/World")?.references().add(sdf::Reference {
+            prim_path: sdf::path("/Asset")?,
+            ..Default::default()
+        })?;
+        let fired = Rc::new(Cell::new(false));
+        let once = Rc::clone(&fired);
+        stage.add_sink(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if !once.replace(true) {
+                stage.define_prim("/World/Geo/Marker").expect("the stage is free");
+            }
+        })?;
+        // The stamp, the sink's define, then the write, which is refused.
+        stage.root_layer().add_sink(RejectNth(Cell::new(0), 3))?;
+        let written = stage.attribute("/World/Geo.x")?.set(2.0_f64);
+        assert!(fired.get());
+        assert!(written.is_err(), "{written:?}");
+        let layer = stage.root_layer();
+        let data = layer.try_borrow()?;
+        assert!(data.data().has_spec(&sdf::path("/World/Geo/Marker")?));
+        assert!(!data.data().has_spec(&sdf::path("/World/Geo.x")?));
+        Ok(())
+    }
+
+    /// An edit a sink makes on the stamped spec as it lands joins the write's
+    /// step: one undo reverts the three, newest first, and leaves no spec
+    /// the layer never had.
+    #[test]
+    fn overlapping_sink_edit_joins() -> Result<()> {
+        let stage = referenced_attribute()?;
+        let depth = stage.undo_depth();
+        let fired = Rc::new(Cell::new(false));
+        let once = Rc::clone(&fired);
+        stage.add_sink(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if !once.replace(true) {
+                let x = stage.attribute("/World.x").expect("a property path");
+                x.set(5.0_f64).expect("the stage is free");
+            }
+        })?;
+        stage.attribute("/World.x")?.set(1.0_f64)?;
+        assert!(fired.get());
+        assert_eq!(stage.undo_depth(), depth + 1, "the sink's edit is the write's step");
+        assert!(stage.undo()?);
+        let x = sdf::path("/World.x")?;
+        assert!(!stage.root_layer().try_borrow()?.data().has_spec(&x));
+        Ok(())
+    }
+
+    /// An edit made elsewhere, as the stamp lands, over what the stamp
+    /// touched leaves the stamp stale: it goes with every older step, and
+    /// only the write stays undoable.
+    #[test]
+    fn foreign_edit_drops_stamp() -> Result<()> {
+        let stage = referenced_attribute()?;
+        assert!(stage.undo_depth() > 0);
+        let fired = Rc::new(Cell::new(false));
+        let once = Rc::clone(&fired);
+        let layer = stage.root_layer();
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| {
+            if !once.replace(true) {
+                layer
+                    .edit(|e| {
+                        let x = sdf::path("/World.x")?;
+                        e.data_mut()
+                            .set_field(&x, "documentation", vt::Value::String("note".into()));
+                        Ok(())
+                    })
+                    .expect("the layer is free");
+            }
+        })?;
+        stage.attribute("/World.x")?.set(1.0_f64)?;
+        assert!(fired.get());
+        assert_eq!(stage.undo_depth(), 1);
+        Ok(())
+    }
+
+    /// A stamped write a layer sink rejects leaves the layer and the undo
+    /// history as they were: the stamp that committed first is taken back,
+    /// and the group is forgotten.
+    #[test]
+    fn rejected_write_unstamps() -> Result<()> {
+        struct RejectSecond(Cell<u32>);
+        impl sdf::LayerSink for RejectSecond {
+            fn before_commit(&self, _: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+                self.0.set(self.0.get() + 1);
+                match self.0.get() {
+                    2 => Err(sdf::sink::Error::new("the value is refused")),
+                    _ => Ok(()),
+                }
+            }
+        }
+        let stage = referenced_attribute()?;
+        let depth = stage.undo_depth();
+        stage.root_layer().add_sink(RejectSecond(Cell::new(0)))?;
+        let written = stage.attribute("/World.x")?.set(2.0_f64);
+        assert!(written.is_err(), "{written:?}");
+        let x = sdf::path("/World.x")?;
+        assert!(!stage.root_layer().try_borrow()?.data().has_spec(&x));
+        assert_eq!(stage.undo_depth(), depth);
+        Ok(())
+    }
+
+    /// An edit a sink makes as the stamp lands is not the write's: one undo
+    /// reverts the stamped write, and the sink's edit stays a step of its
+    /// own.
+    #[test]
+    fn sink_edit_outside_write() -> Result<()> {
+        let stage = referenced_attribute()?;
+        let fired = Rc::new(Cell::new(false));
+        let once = Rc::clone(&fired);
+        stage.add_sink(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if !once.replace(true) {
+                stage.define_prim("/Other").expect("the stage is free");
+            }
+        })?;
+        let depth = stage.undo_depth();
+        stage.attribute("/World.x")?.set(1.0_f64)?;
+        assert!(fired.get());
+        assert_eq!(stage.undo_depth(), depth + 2);
+        assert!(stage.undo()?);
+        let x = sdf::path("/World.x")?;
+        assert!(!stage.root_layer().try_borrow()?.data().has_spec(&x));
+        assert!(stage.prim("/Other")?.is_valid()?);
+        Ok(())
+    }
+
+    /// A write the target already holds the spec for is one transaction, and
+    /// opens no group: an edit a sink makes as it lands is its own step.
+    #[test]
+    fn unstamped_set_ungrouped() -> Result<()> {
+        let stage = UndoStage::from(in_memory_stage()?);
+        stage.define_prim("/World")?;
+        stage.create_attribute("/World.x", "double")?;
+        let fired = Rc::new(Cell::new(false));
+        let once = Rc::clone(&fired);
+        stage.add_sink(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if !once.replace(true) {
+                stage.define_prim("/Other").expect("the stage is free");
+            }
+        })?;
+        let depth = stage.undo_depth();
+        stage.attribute("/World.x")?.set(1.0_f64)?;
+        assert!(fired.get());
+        assert_eq!(stage.undo_depth(), depth + 2);
+        Ok(())
+    }
+
+    /// A recorder a sink installs while a stamped write runs never opened its
+    /// group, and is not asked to close it.
+    #[test]
+    fn recorder_joins_mid_write() -> Result<()> {
+        let stage = referenced_attribute()?;
+        let joined: Rc<RefCell<Option<UndoStage>>> = Rc::default();
+        let slot = Rc::clone(&joined);
+        stage.add_sink(move |stage: &Stage, _: &CommittedChange<'_>| {
+            if slot.borrow().is_none() {
+                slot.replace(Some(UndoStage::from(stage.clone())));
+            }
+        })?;
+        stage.attribute("/World.x")?.set(1.0_f64)?;
+        assert!(joined.borrow().is_some());
         Ok(())
     }
 

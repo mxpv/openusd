@@ -414,10 +414,8 @@ impl CacheChanges {
     }
 
     /// The covering subset of
-    /// [`authored_resynced_paths`](Self::authored_resynced_paths). The spec tier
-    /// is excluded: refreshing `has_specs`
-    /// at `/A` says nothing about `/A/B`, so an inert `over` added on the way to
-    /// authoring `/A/B.x` must not swallow the attribute's own report.
+    /// [`authored_resynced_paths`](Self::authored_resynced_paths): each stands
+    /// for the subtree beneath it, and comes with the layers that authored it.
     pub(crate) fn authored_subtree_paths(&self) -> impl Iterator<Item = (&Path, &[LayerId])> {
         let reported = &self.reported;
         self.authored_significant
@@ -1174,13 +1172,14 @@ impl Changes {
         // how they compose, so affected entries in the shared-prototype registry
         // (spec 11.3.3) are dropped rather than left stale and lazily recomposed
         // on the next instancing query. The layer-stack path evicted its
-        // prototypes through `invalidate_layers` above.
+        // prototypes through `invalidate_layers` above. The spec-tier rescan
+        // below retires the prototypes whose instance key a spec moves (C++
+        // `PcpChanges::DidChangeSpecs`).
         let changed: Vec<Path> = self
             .cache
             .all_significant()
             .chain(self.cache.did_change_prims.iter())
             .map(Path::prim_path)
-            .chain(self.cache.did_change_specs.iter().map(|(_, path)| path.prim_path()))
             .collect();
         if !changed.is_empty() {
             // The tiers that named `changed` were snapshotted before this pass

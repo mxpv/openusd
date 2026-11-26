@@ -439,6 +439,10 @@ pub struct PendingChange<'a> {
     /// replays: the revert's own undo stage skips it, and every other
     /// observer sees an own edit like any other.
     pub(crate) replay: Option<ReplayId>,
+    /// The group of one stage edit the transaction commits for
+    /// ([`TxnObserver::open_group`]): never one a sink's edit, made as a
+    /// notice of the group's is delivered, commits for.
+    pub(crate) group: Option<u64>,
 }
 
 impl PendingChange<'_> {
@@ -484,6 +488,27 @@ pub(crate) trait TxnObserver {
     /// The transaction `change` reports landed, which touched each layer in
     /// `footprints` with its footprint.
     fn committed(&self, stage: &Stage, change: &CommittedChange<'_>, footprints: &[(pcp::LayerId, Rc<sdf::Footprint>)]);
+
+    /// Opens the group `group`: the transactions the stage commits for it
+    /// ([`PendingChange::group`]), until the matching
+    /// [`close_group`](Self::close_group), make one edit its caller asked
+    /// for, though each is delivered on its own. What a sink commits
+    /// meanwhile is not the group's.
+    fn open_group(&self, group: u64) {
+        let _ = group;
+    }
+
+    /// Ends the group `group` [`open_group`](Self::open_group) began.
+    fn close_group(&self, group: u64) {
+        let _ = group;
+    }
+
+    /// Forgets the group `group` and what it committed: the edit it was
+    /// failed, and the stage put back what its transactions changed, with a
+    /// transaction of the group's own.
+    fn discard_group(&self, group: u64) {
+        let _ = group;
+    }
 
     /// The transaction `generation` began committing and did not land.
     fn aborted(&self, generation: u64) {
@@ -724,8 +749,8 @@ impl Payload {
     /// [`recomposed`](CommittedChange::recomposed) the prim tier's;
     /// [`changed_info_only`](CommittedChange::changed_info_only) is every other
     /// edited path that authored a field value or edited relationship/connection
-    /// targets, and the spec-tier prims refreshed in place. `scratch` is the merged change list;
-    /// `layer_changes` is the per-layer split retained for
+    /// targets, and the spec-tier prims refreshed in place. `scratch` is the
+    /// merged change list; `layer_changes` is the per-layer split retained for
     /// [`layer_changes`](CommittedChange::layer_changes).
     ///
     /// This covers only what the classification phase knows, and the sets it
@@ -849,7 +874,7 @@ impl Payload {
     /// `found` is what resolving the sublayers the recompose demanded
     /// discovered: it joins the subtree resyncs.
     ///
-    /// `remap` names each stage path as the notice reports it
+    /// `remap` names each stage path as the notice reports it, or drops it
     /// ([`pcp::IndexCache::notice_path`]): a path beneath an instance in its
     /// prototype's namespace. It runs over the stage half alone, before any
     /// comparison, since an authored path is in a layer's own namespace.
@@ -857,7 +882,7 @@ impl Payload {
         &mut self,
         outcome: pcp::ApplyOutcome,
         found: Vec<sdf::Path>,
-        remap: impl Fn(&sdf::Path) -> sdf::Path,
+        remap: impl Fn(&sdf::Path) -> Option<sdf::Path>,
     ) {
         let pcp::ApplyOutcome {
             resynced: stage_resynced,
@@ -866,7 +891,7 @@ impl Payload {
             asset_paths_resynced,
             ..
         } = outcome;
-        let remap_all = |paths: Vec<sdf::Path>| -> Vec<sdf::Path> { paths.iter().map(&remap).collect() };
+        let remap_all = |paths: Vec<sdf::Path>| -> Vec<sdf::Path> { paths.iter().filter_map(&remap).collect() };
         let mut stage_resynced = remap_all(stage_resynced);
         let resynced_prims = remap_all(resynced_prims);
         let refreshed_prims = remap_all(refreshed_prims);
@@ -1082,7 +1107,7 @@ mod tests {
         }
         let is_local = |layer| layer == local;
         let mut payload = Payload::new(&changes, &sdf::ChangeList::new(), Vec::new(), &provenance, &is_local);
-        payload.finish(outcome, Vec::new(), sdf::Path::clone);
+        payload.finish(outcome, Vec::new(), |path| Some(path.clone()));
         payload
     }
 

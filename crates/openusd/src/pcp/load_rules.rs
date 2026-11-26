@@ -501,9 +501,9 @@ impl IndexCache {
         self.invalidate_population();
         // An ancestor composes as it did unless its inclusion flipped and a
         // payload it composes reads it (C++ recomposes only the prims whose
-        // payload inclusion changes). The population memo was cleared above,
-        // and an instance among the ancestors keys its prototype on the rules
-        // below it, which the touched paths retire.
+        // payload inclusion changes). The population memo was cleared above.
+        // An instance among the ancestors keys its prototype on the rules
+        // below it, and joins the resynced subtrees below.
         let (dropped, prims): (Vec<Path>, Vec<Path>) = rule_ancestors(&before, &self.load_rules, &touched)
             .into_iter()
             .filter_map(|(ancestor, flipped)| flipped.then_some(ancestor))

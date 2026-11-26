@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use super::stage::Pin;
 use super::{
     ListPosition, Object, Prim, PrimTypeInfo, ResolveInfo, ResolveInfoSource, SpecSite, Stage, StageAuthoringError,
     StageEdit, TimeCode, TypeConflict, authoring, interp, list_edit,
@@ -378,9 +379,9 @@ impl Attribute {
     ) -> Result<Self, StageAuthoringError> {
         let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
         let plan = self.plan_authoring(vec![(value.into(), time.into())], false, None, &schema)?;
-        plan.stamp(&self.stage, &self.path)?;
-        self.stage
-            .with_target_layer_at(&self.path, |layer, spec_path| plan.write(layer.data_mut(), &spec_path))?;
+        plan.author(&self.stage, &self.path, |plan, layer, spec_path| {
+            plan.write(layer.data_mut(), &spec_path)
+        })?;
         Ok(self)
     }
 
@@ -412,8 +413,7 @@ impl Attribute {
             spline.retime(offset.offset, offset.scale)?;
         }
         let spline = vt::Value::Spline(spline);
-        plan.stamp(&self.stage, &self.path)?;
-        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
+        plan.author(&self.stage, &self.path, |plan, layer, spec_path| {
             plan.set_spline(layer.data_mut(), &spec_path, spline)
         })?;
         Ok(self)
@@ -428,9 +428,9 @@ impl Attribute {
     pub fn block(self) -> Result<Self, StageAuthoringError> {
         let schema = self.stage.prim_type_info_composed(self.path.prim_path())?;
         let plan = self.plan_authoring(Vec::new(), false, None, &schema)?;
-        plan.stamp(&self.stage, &self.path)?;
-        self.stage
-            .with_target_layer_at(&self.path, |layer, spec_path| plan.block(layer.data_mut(), &spec_path))?;
+        plan.author(&self.stage, &self.path, |plan, layer, spec_path| {
+            plan.block(layer.data_mut(), &spec_path)
+        })?;
         Ok(self)
     }
 
@@ -1447,25 +1447,61 @@ pub(super) struct AttributeAuthoringPlan {
 }
 
 impl AttributeAuthoringPlan {
-    /// Stamps the spec the plan declares at `path` on the edit target in a
-    /// transaction of its own, ahead of the value write, and does nothing
-    /// where the target already holds the spec (C++
+    /// Authors the plan at `path` on the edit target: `write` sets the value
+    /// on the spec path it is handed. A spec the target lacks is stamped
+    /// first in a transaction of its own (C++
     /// `UsdStage::_CreatePropertySpecForEditing`, which commits the new spec
-    /// before the value is set). An observer hears the attribute appear, then
-    /// its value change.
-    ///
-    /// The write's own transaction applies the plan again and finds the spec
-    /// in place. The values were validated before either transaction, so
-    /// once the spec is stamped the write does not fail.
-    fn stamp(&self, stage: &Stage, path: &sdf::Path) -> Result<(), StageAuthoringError> {
+    /// before the value is set), so an observer hears the attribute appear,
+    /// then its value change. The two transactions are one undo step
+    /// ([`Stage::grouped`]), and both author on the target as the call
+    /// began ([`Stage::pin_target`]).
+    fn author<F>(self, stage: &Stage, path: &sdf::Path, write: F) -> Result<(), StageAuthoringError>
+    where
+        F: FnOnce(Self, &mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), StageAuthoringError>,
+    {
         if self.ensure == authoring::EnsurePlan::Existing {
-            return Ok(());
+            return stage
+                .with_target_layer_at(path, |layer, spec_path| write(self, layer, spec_path))
+                .map(|_| ());
         }
-        stage
-            .with_target_layer_at(path, |layer, spec_path| {
-                authoring::apply_plan(layer.data_mut(), &spec_path, sdf::SpecType::Attribute, &self.ensure)
-            })
-            .map(|_| ())
+        let pin = stage.pin_target(path)?;
+        stage.grouped(|group| {
+            let stamped = self.stamp(stage, &pin, group)?;
+            let written = stage.with_pinned_layer(&pin, group, |layer, spec_path| write(self, layer, spec_path));
+            // A write that fails takes the stamp back with it.
+            if written.is_err() {
+                stage.unstamp(&pin, group, |layer| stamped.take_back(layer));
+            }
+            written.map(|_| ())
+        })
+    }
+
+    /// Stamps the spec the plan declares on `pin`, ahead of the value write
+    /// ([`author`](Self::author)), and returns what it created
+    /// ([`Stamped`]). The write's own transaction applies the plan again and
+    /// finds the spec in place. It checks the stage again first, and can be
+    /// refused once the stamp has landed ([`Stage::unstamp`] then takes the
+    /// stamp back).
+    fn stamp(&self, stage: &Stage, pin: &Pin, group: u64) -> Result<Stamped, StageAuthoringError> {
+        let mut stamped = None;
+        stage.with_pinned_layer(pin, group, |layer, spec_path| {
+            let missing = missing_prims(layer.data(), &spec_path);
+            authoring::apply_plan(layer.data_mut(), &spec_path, sdf::SpecType::Attribute, &self.ensure)?;
+            let data = layer.data();
+            let prims = missing
+                .into_iter()
+                .map(|prim| {
+                    let fields = own_fields(data, &prim);
+                    (prim, fields)
+                })
+                .collect();
+            stamped = Some(Stamped {
+                property: spec_path,
+                prims,
+            });
+            Ok(())
+        })?;
+        Ok(stamped.expect("a stamp that committed ran its closure"))
     }
 
     /// The write phase, inside the transaction: apply the spec plan, read the
@@ -1598,6 +1634,69 @@ impl CachedSource {
     fn is_current(&self, stage: &Stage) -> bool {
         let (revision, population) = stage.value_stamp(&self.prim);
         revision == Some(self.revision) && self.redirect_epoch.is_none_or(|epoch| epoch == population)
+    }
+}
+
+/// What a stamp ([`AttributeAuthoringPlan::stamp`]) created on its layer:
+/// the property spec, and the prim specs on its chain the layer lacked,
+/// innermost first, each with the fields it held once stamped.
+struct Stamped {
+    property: sdf::Path,
+    prims: Vec<(sdf::Path, Vec<String>)>,
+}
+
+impl Stamped {
+    /// Removes what the stamp created from `layer`: the property spec, then
+    /// each prim spec it created, innermost first, while one holds nothing
+    /// a later edit gave it, no child and no field it lacked once stamped.
+    /// Returns whether it took the stamp back whole.
+    fn take_back(&self, layer: &mut sdf::LayerEdit<'_>) -> Result<bool, StageAuthoringError> {
+        layer.remove_spec(&self.property)?;
+        for (prim, fields) in &self.prims {
+            let data = layer.data();
+            let children = [sdf::ChildrenKey::PrimChildren, sdf::ChildrenKey::PropertyChildren];
+            let parent = children.iter().any(|key| has_children(data, prim, key.as_str()));
+            if parent || own_fields(data, prim) != *fields {
+                return Ok(false);
+            }
+            layer.remove_spec(prim)?;
+        }
+        Ok(true)
+    }
+}
+
+/// The prim specs on the chain of the property `path` that `data` lacks,
+/// innermost first: the ones stamping the property creates
+/// (`sdf::AttributeSpec::new` making sure of the whole chain).
+fn missing_prims(data: &dyn sdf::AbstractData, path: &sdf::Path) -> Vec<sdf::Path> {
+    let mut missing = Vec::new();
+    let mut parent = path.parent();
+    while let Some(prim) = parent.filter(|prim| !prim.is_abs_root() && !data.has_spec(prim)) {
+        parent = prim.parent();
+        missing.push(prim);
+    }
+    missing
+}
+
+/// The fields of the spec at `path` other than its child lists, sorted.
+fn own_fields(data: &dyn sdf::AbstractData, path: &sdf::Path) -> Vec<String> {
+    let children = [sdf::ChildrenKey::PrimChildren, sdf::ChildrenKey::PropertyChildren];
+    let mut fields: Vec<String> = data
+        .list_fields(path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|field| children.iter().all(|key| field != key.as_str()))
+        .collect();
+    fields.sort();
+    fields
+}
+
+/// Whether the spec at `path` lists any child under the child-list field
+/// `key`.
+fn has_children(data: &dyn sdf::AbstractData, path: &sdf::Path, key: &str) -> bool {
+    match data.try_field(path, key) {
+        Ok(Some(value)) => !matches!(&*value, crate::vt::Value::TokenVec(names) if names.is_empty()),
+        _ => false,
     }
 }
 
