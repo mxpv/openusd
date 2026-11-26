@@ -510,6 +510,12 @@ impl IndexCache {
             .partition(|ancestor| self.reads_rule(ancestor));
         let mut subtrees = touched;
         subtrees.extend(dropped);
+        // A load rule is part of the key of each instance at or above it, so
+        // the instance composes under another prototype (C++
+        // `UsdStage::LoadAndUnload` resyncs the most ancestral instance above
+        // each path it names).
+        let instances = self.instances_at_or_above(&subtrees);
+        subtrees.extend(instances);
         // An instance whose prototype retired composes under another, so it
         // is a subtree resync even beneath an ancestor recomposed in place.
         let retired = self.drop_retiring(&subtrees);

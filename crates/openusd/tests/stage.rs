@@ -16332,6 +16332,39 @@ fn set_stamps_then_writes() -> Result<()> {
     Ok(())
 }
 
+/// A prim defined under a prototype's source leaves the prototype and its
+/// instances standing: the new child resyncs in the prototype's namespace,
+/// and a path beneath an instance is named there too (C++ `UsdStage`
+/// remapping its changes to prototypes).
+#[test]
+fn prototype_source_child() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/Asset/Geo")?;
+    for instance in ["/World/I0", "/World/I1"] {
+        let prim = stage.define_prim(instance)?;
+        prim.references().add(sdf::Reference {
+            prim_path: sdf::path("/Asset")?,
+            ..Default::default()
+        })?;
+        prim.set_instanceable(true)?;
+    }
+    let prototype = stage.prim("/World/I0")?.prototype()?.expect("an instance");
+    assert_eq!(stage.prim("/World/I1")?.prototype()?.as_ref(), Some(&prototype));
+
+    let notices = capture_notices(&stage);
+    stage.define_prim("/Asset/Extra")?;
+
+    let extra = prototype.append_child("Extra")?;
+    assert_eq!(
+        notices.borrow().resynced,
+        vec![sdf::path("/Asset/Extra")?, extra.clone()]
+    );
+    assert_eq!(stage.prim("/World/I0")?.prototype()?.as_ref(), Some(&prototype));
+    assert!(stage.prim(&extra)?.is_valid()?);
+    assert!(stage.prim("/World/I1/Extra")?.is_valid()?);
+    Ok(())
+}
+
 /// An `over` whose prim nothing composed before is a resync of that prim: it
 /// appeared, though the authoring query left an empty index cached for it.
 #[test]

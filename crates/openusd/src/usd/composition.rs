@@ -1827,8 +1827,8 @@ impl StageComposition {
         // than at the snapshot above.
         let retries_sublayers = outcome.retries_sublayers;
         if let Some(payload) = payload.as_mut() {
-            payload.finish(outcome, found);
             let mut cache = self.cache.borrow_mut();
+            payload.finish(outcome, found, |path| cache.notice_path(path));
             if cache.has_private() {
                 payload.hide(|path| cache.is_private(path));
             }
