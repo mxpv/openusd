@@ -2048,6 +2048,7 @@ impl LayerGraph {
                     asset_path: identifier.clone(),
                     context,
                     recheck: false,
+                    owner: None,
                 });
             };
             context = id;
@@ -4829,6 +4830,7 @@ mod tests {
             asset_path: "target.usda".to_string(),
             context: src_stack,
             recheck: false,
+            owner: None,
         };
         assert!(graph.intern_demanded(&[demand]), "the re-mint reports progress");
         let (reminted, fresh) = graph.intern_external(target_id, src_stack);

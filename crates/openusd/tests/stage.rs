@@ -34,9 +34,14 @@ struct RecordingSink {
     load_rules: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
     loads_retried: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
     recomposed: Option<Box<dyn Fn(&Stage, Resynced<'_>)>>,
+    /// Whether the sink asks for every prototype a resync covers.
+    complete: bool,
 }
 
 impl StageSink for RecordingSink {
+    fn complete_prototypes(&self) -> bool {
+        self.complete
+    }
     fn after_commit(&self, stage: &Stage, change: &CommittedChange<'_>) {
         if let Some(f) = &self.after {
             f(stage, change);
@@ -182,15 +187,35 @@ struct Notices {
     load_rules: Vec<sdf::Path>,
     /// What a load-rules edit recomposed in place.
     load_rules_prims: Vec<sdf::Path>,
+    /// What settling or a delivery's walks found, as subtrees.
+    recomposed: Vec<sdf::Path>,
 }
 
 /// Installs a sink recording every channel, for tests asserting exactly what an
 /// edit or toggle publishes.
 fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
+    capture(stage, false)
+}
+
+/// Installs a sink recording every channel that asks for every prototype a
+/// resync covers ([`StageSink::complete_prototypes`]).
+fn capture_complete(stage: &Stage) -> Rc<RefCell<Notices>> {
+    capture(stage, true)
+}
+
+/// Installs a sink recording every channel, asking for complete prototype
+/// notices when `complete`.
+fn capture(stage: &Stage, complete: bool) -> Rc<RefCell<Notices>> {
     let notices = Rc::new(RefCell::new(Notices::default()));
-    let (commit, muting, load_rules) = (notices.clone(), notices.clone(), notices.clone());
+    let (commit, muting, load_rules, recomposed) = (notices.clone(), notices.clone(), notices.clone(), notices.clone());
     stage
         .add_sink(RecordingSink {
+            recomposed: Some(Box::new(move |_stage: &Stage, resynced: Resynced<'_>| {
+                recomposed
+                    .borrow_mut()
+                    .recomposed
+                    .extend(resynced.subtrees.iter().cloned());
+            })),
             after: Some(Box::new(move |_stage: &Stage, change: &CommittedChange<'_>| {
                 let mut n = commit.borrow_mut();
                 n.resynced.extend(change.resynced.iter().cloned());
@@ -208,6 +233,7 @@ fn capture_notices(stage: &Stage) -> Rc<RefCell<Notices>> {
                 notices.load_rules.extend(resynced.subtrees.iter().cloned());
                 notices.load_rules_prims.extend(resynced.prims.iter().cloned());
             })),
+            complete,
             ..Default::default()
         })
         .unwrap();
@@ -223,6 +249,12 @@ fn first_prototype(stage: &Stage) -> Result<sdf::Path> {
         .first()
         .cloned()
         .expect("the scene instances no prim"))
+}
+
+/// Whether `path` lies in a `/__Prototype_N` namespace.
+fn is_prototype(path: &sdf::Path) -> bool {
+    path.root_prim_name()
+        .is_some_and(|name| name.starts_with("__Prototype_"))
 }
 
 /// Parses each of `paths`, for comparing a captured channel against literals.
@@ -1463,6 +1495,27 @@ def "Source" {
     Ok(())
 }
 
+/// An instance of `t.usda`, for the scenes that read one.
+const INSTANCE_OF_T: &str = "    def \"I\" (\n        instanceable = true\n        references = @t.usda@\n    ) {}\n";
+
+/// A stage whose `/F` recorded the failure of `m.usda`, written once the
+/// stage has read `/F`, with `body` following `/F`'s header in the root
+/// layer: a read that joins `t.usda` forgets the failure and drops `/F`.
+fn forgotten_failure(dir: &tempfile::TempDir, body: &str) -> Result<Stage> {
+    fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\"\n{\n    def \"C\" {}\n}\n",
+    )?;
+    let m = dir.path().join("m.usda");
+    let stage = open_text(
+        dir,
+        &format!("#usda 1.0\ndef \"F\" (\n    references = @{}@\n)\n{body}", m.display()),
+    )?;
+    assert!(stage.prim("/F")?.is_valid()?);
+    fs::write(&m, "#usda 1.0\n(\n    defaultPrim = \"M\"\n)\ndef \"M\" {}\n")?;
+    Ok(stage)
+}
+
 /// Two prims referencing one class, `B` instanceable when `b_instanceable`,
 /// for the edits that make `A` an instance too.
 fn two_referrers(dir: &tempfile::TempDir, b_instanceable: bool) -> Result<Stage> {
@@ -1493,9 +1546,25 @@ over "W"
     )
 }
 
+/// A prototype a read composes while a sink listens reaches the sink with
+/// what the read found, at the next delivery: an edit whose instance joins
+/// it resyncs the instance alone.
+#[test]
+fn read_mint_recomposed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = two_referrers(&dir, true)?;
+    let notices = capture_notices(&stage);
+    let prototype = stage.prim("/W/B")?.prototype()?.expect("/W/B is an instance");
+    stage.prim("/W/A")?.set_instanceable(true)?;
+    assert_eq!(notices.borrow().resynced, paths(&["/W/A"]));
+    assert_eq!(notices.borrow().recomposed, [prototype]);
+    Ok(())
+}
+
 /// An edit that gives a prototype its first instance resyncs the prototype
 /// it composes, as C++ `UsdStage` names every prototype its
-/// `Usd_InstanceCache` adds.
+/// `Usd_InstanceCache` adds; a second instance joining it then resyncs the
+/// instance alone.
 #[test]
 fn new_prototype_notified() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1504,12 +1573,515 @@ fn new_prototype_notified() -> Result<()> {
     let notices = capture_notices(&stage);
     stage.prim("/W/A")?.set_instanceable(true)?;
     let prototype = first_prototype(&stage)?;
-    assert_eq!(notices.borrow().resynced, [sdf::path("/W/A")?, prototype]);
+    assert_eq!(notices.borrow().resynced, [sdf::path("/W/A")?, prototype.clone()]);
+    notices.borrow_mut().resynced.clear();
+    stage.prim("/W/B")?.set_instanceable(true)?;
+    assert_eq!(stage.prim("/W/B")?.prototype()?, Some(prototype));
+    assert_eq!(notices.borrow().resynced, paths(&["/W/B"]));
     Ok(())
 }
 
-/// An instance joining a prototype that already exists resyncs only the
-/// instance.
+/// A prototype a read composed that a `/` resync names, as the edit retired
+/// and took it back, is named once: an instance joining it afterwards
+/// resyncs the instance alone.
+#[test]
+fn root_resync_names_once() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("empty.usda"), "#usda 1.0\n")?;
+    let stage = two_referrers(&dir, true)?;
+    let notices = capture_notices(&stage);
+    let prototype = stage.prim("/W/B")?.prototype()?.expect("/W/B is an instance");
+    stage.root_layer().edit(|e| {
+        e.pseudo_root_mut()?.set_sublayers(["empty.usda"]);
+        Ok(())
+    })?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/")?, prototype.clone()]);
+    notices.borrow_mut().resynced.clear();
+    stage.prim("/W/A")?.set_instanceable(true)?;
+    assert_eq!(stage.prim("/W/A")?.prototype()?, Some(prototype));
+    assert_eq!(notices.borrow().resynced, paths(&["/W/A"]));
+    Ok(())
+}
+
+/// An edit that resyncs the subtree a read found covers the find, though not
+/// the prototype the read composed under it, which goes out with the find.
+/// The edit drops the prototype's instance, and its settling gives the
+/// prototype its source again, which its notice names, as C++ names each
+/// prototype that changes its source.
+#[test]
+fn edit_covers_read_find() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = forgotten_failure(&dir, &format!("{{\n{INSTANCE_OF_T}}}\n"))?;
+    let notices = capture_notices(&stage);
+    let prototype = stage.prim("/F/I")?.prototype()?.expect("/F/I is an instance");
+    stage.prim("/F")?.set_active(true)?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/F")?, prototype.clone()]);
+    assert_eq!(notices.borrow().recomposed, [prototype]);
+    Ok(())
+}
+
+/// Edits a sink makes while it hears a notice reconcile one at a time, each
+/// naming what its own settling composed, as C++ processes each change as it
+/// lands: activating `/W` composes no prototype, and the instance made next
+/// names its own.
+#[test]
+fn sink_edits_attributed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = two_referrers(&dir, false)?;
+    let commits: Rc<RefCell<Vec<Vec<sdf::Path>>>> = Rc::default();
+    let fired = Rc::new(Cell::new(false));
+    let (log, once) = (commits.clone(), fired.clone());
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |stage: &Stage, change: &CommittedChange<'_>| {
+            log.borrow_mut().push(change.resynced.to_vec());
+            if !once.replace(true) {
+                stage.prim("/W").unwrap().set_active(true).unwrap();
+                stage.prim("/W/A").unwrap().set_instanceable(true).unwrap();
+            }
+        })),
+        complete: true,
+        ..Default::default()
+    })?;
+    stage.define_prim("/Trigger")?;
+    let prototype = first_prototype(&stage)?;
+    assert_eq!(
+        *commits.borrow(),
+        [
+            paths(&["/Trigger"]),
+            paths(&["/W"]),
+            vec![sdf::path("/W/A")?, prototype]
+        ]
+    );
+    Ok(())
+}
+
+/// A prim whose composition cannot be read stops only its own walk: the
+/// instance beside it registers, with the prototype nested in its own, in
+/// the commit that resynced them, and an instance joining the outer
+/// prototype later resyncs the instance alone.
+#[test]
+fn nested_spared_by_failure() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Inner" (
+            instanceable = true
+            references = </Geo>
+        ) {}
+    }
+}
+def "Geo"
+{
+    def "m" {}
+}
+def "W"
+{
+    def "A" (
+        instanceable = true
+        references = </Lib/P>
+    ) {}
+    def "Z" {}
+}
+def "B" (
+    instanceable = false
+    references = </Lib/P>
+) {}
+"#,
+    )?;
+    let z = sdf::path("/W/Z")?;
+    stage.root_layer().edit(|e| {
+        e.data_mut()
+            .set_field(&z, "active", vt::Value::String("nope".to_string()));
+        Ok(())
+    })?;
+    let notices = capture_complete(&stage);
+    stage.prim("/W")?.set_active(true)?;
+    let outer = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+    let inner = stage
+        .prim("/W/A/Inner")?
+        .prototype()?
+        .expect("/W/A/Inner is an instance");
+    let resynced = notices.borrow().resynced.clone();
+    assert_eq!(resynced.len(), 3, "{resynced:?}");
+    assert!(resynced.contains(&outer) && resynced.contains(&inner), "{resynced:?}");
+    notices.borrow_mut().resynced.clear();
+    stage.prim("/B")?.set_instanceable(true)?;
+    stage.flush()?;
+    assert_eq!(notices.borrow().resynced, paths(&["/B"]));
+    assert!(
+        notices.borrow().recomposed.is_empty(),
+        "{:?}",
+        notices.borrow().recomposed
+    );
+    Ok(())
+}
+
+/// What a read found is composed with what it found, after the edit's own
+/// walk: the prototype nested in one a read composed goes out with the
+/// read's, and the edit's commit names neither.
+#[test]
+fn read_nested_stays_recomposed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Inner" (
+            instanceable = true
+            references = </Geo>
+        ) {}
+    }
+}
+def "Geo"
+{
+    def "m" {}
+}
+def "A" (
+    instanceable = true
+    references = </Lib/P>
+) {}
+"#,
+    )?;
+    let notices = capture_complete(&stage);
+    let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    stage.define_prim("/Z")?;
+    assert_eq!(notices.borrow().resynced, paths(&["/Z"]));
+    let prototypes = stage.prototypes()?;
+    assert_eq!(prototypes.len(), 2, "{prototypes:?}");
+    let recomposed = notices.borrow().recomposed.clone();
+    for prototype in &prototypes {
+        assert!(recomposed.contains(prototype), "{recomposed:?}");
+    }
+    assert!(recomposed.contains(&outer));
+    Ok(())
+}
+
+/// A prim whose composition cannot be read waits for its own repair, and
+/// spares its siblings: the instance beside it registers in the commit
+/// that resynced it, and once the prim reads again, its own prototype is
+/// named exactly once.
+#[test]
+fn failed_prim_spares_siblings() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Body" {}
+    }
+    def "Q"
+    {
+        def "Leg" {}
+    }
+}
+def "W"
+{
+    def "A" (
+        instanceable = true
+        references = </Lib/Q>
+    ) {}
+    def "B" (
+        instanceable = true
+        references = </Lib/P>
+    ) {}
+}
+"#,
+    )?;
+    let a = sdf::path("/W/A")?;
+    let set_active = |value: vt::Value| {
+        stage.root_layer().edit(|e| {
+            e.data_mut().set_field(&a, "active", value);
+            Ok(())
+        })
+    };
+    set_active(vt::Value::String("nope".to_string()))?;
+    let notices = capture_complete(&stage);
+    stage.prim("/W")?.set_active(true)?;
+    let sibling = stage.prim("/W/B")?.prototype()?.expect("/W/B is an instance");
+    assert_eq!(notices.borrow().resynced, [sdf::path("/W")?, sibling]);
+    set_active(vt::Value::Bool(true))?;
+    stage.flush()?;
+    let repaired = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+    let heard = notices.borrow();
+    let named = heard
+        .resynced
+        .iter()
+        .chain(&heard.recomposed)
+        .filter(|path| **path == repaired)
+        .count();
+    assert_eq!(named, 1, "{heard:?}");
+    Ok(())
+}
+
+/// A library class whose `Q` holds a nested instance, and the instance `/A`
+/// of its `P`, for the edits that retarget `/A`.
+const RETARGET: &str = r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Body" {}
+    }
+    def "Q"
+    {
+        def "Inner" (
+            instanceable = true
+            references = </Geo>
+        ) {}
+    }
+}
+def "Geo"
+{
+    def "m" {}
+}
+def "A" (
+    instanceable = true
+    references = </Lib/P>
+) {}
+"#;
+
+/// Retargeting an instance names its new prototype and the one nested in
+/// it, in the commit that retargeted it.
+#[test]
+fn retarget_names_nested() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, RETARGET)?;
+    let retired = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    let notices = capture_complete(&stage);
+    stage.prim("/A")?.references().set([sdf::Reference {
+        prim_path: sdf::path("/Lib/Q")?,
+        ..Default::default()
+    }])?;
+    let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    let inner = stage.prim("/A/Inner")?.prototype()?.expect("/A/Inner is an instance");
+    let resynced = notices.borrow().resynced.clone();
+    for path in [sdf::path("/A")?, retired, outer, inner] {
+        assert!(resynced.contains(&path), "{path} in {resynced:?}");
+    }
+    Ok(())
+}
+
+/// A read that composes an instance names its prototype, and the one nested
+/// in it, with what the read found, at the first flush, and no flush after
+/// names them again.
+#[test]
+fn flush_names_read_nested() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, &RETARGET.replace("</Lib/P>", "</Lib/Q>"))?;
+    let notices = capture_notices(&stage);
+    let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    stage.flush()?;
+    stage.flush()?;
+    let inner = stage.prim("/A/Inner")?.prototype()?.expect("/A/Inner is an instance");
+    stage.flush()?;
+    let recomposed = notices.borrow().recomposed.clone();
+    for prototype in [&outer, &inner] {
+        let named = recomposed.iter().filter(|path| *path == prototype).count();
+        assert_eq!(named, 1, "{prototype} in {recomposed:?}");
+    }
+    Ok(())
+}
+
+/// A prim a walk's load drops composes in the same settlement, and the
+/// instance it then holds is named once: walking `/G` joins `t.usda`, which
+/// forgets the failure `/F` recorded for `m.usda`, now holding the instance
+/// `New`.
+#[test]
+fn load_resync_names_new() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("t.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\"\n{\n    def \"C\" {}\n}\n",
+    )?;
+    let m = dir.path().join("m.usda");
+    let stage = open_text(
+        &dir,
+        &format!(
+            "#usda 1.0\ndef \"F\" (\n    references = @{}@\n) {{}}\ndef \"G\"\n{{\n{INSTANCE_OF_T}}}\n",
+            m.display()
+        ),
+    )?;
+    assert!(stage.prim("/F")?.is_valid()?);
+    assert!(stage.prim("/G")?.is_valid()?);
+    fs::write(
+        &m,
+        "#usda 1.0\n(\n    defaultPrim = \"M\"\n)\ndef \"M\"\n{\n    def \"New\" (\n        instanceable = true\n        references = @t.usda@</P/C>\n    ) {}\n}\n",
+    )?;
+    let notices = capture_complete(&stage);
+    stage.prim("/G")?.set_instanceable(false)?;
+    stage.flush()?;
+    let new = stage.prim("/F/New")?.prototype()?.expect("/F/New is an instance");
+    let heard = notices.borrow();
+    let named = heard
+        .resynced
+        .iter()
+        .chain(&heard.recomposed)
+        .filter(|path| **path == new)
+        .count();
+    assert_eq!(named, 1, "{heard:?}");
+    Ok(())
+}
+
+/// A library class and an inactive `/W` holding an instance of it.
+const COLD: &str = r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Body" {}
+    }
+}
+def "W" (
+    active = false
+)
+{
+    def "A" (
+        instanceable = true
+        references = </Lib/P>
+    ) {}
+}
+"#;
+
+/// A resync of a subtree nothing has read names no prototype beneath it by
+/// default: the stage composes nothing there, and the read that first
+/// reaches the instance names its prototype, once.
+#[test]
+fn cold_resync_lazy() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, COLD)?;
+    let notices = capture_notices(&stage);
+    stage.prim("/W")?.set_active(true)?;
+    assert_eq!(notices.borrow().resynced, paths(&["/W"]));
+    let prototype = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+    stage.flush()?;
+    assert_eq!(notices.borrow().resynced, paths(&["/W"]));
+    assert_eq!(notices.borrow().recomposed, [prototype]);
+    Ok(())
+}
+
+/// A sink asking for complete prototype notices hears the prototype beneath
+/// a cold resync in the edit's own commit.
+#[test]
+fn cold_resync_complete() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(&dir, COLD)?;
+    let notices = capture_complete(&stage);
+    stage.prim("/W")?.set_active(true)?;
+    let prototype = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+    stage.flush()?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/W")?, prototype]);
+    assert!(notices.borrow().recomposed.is_empty());
+    Ok(())
+}
+
+/// `find_loadable` restores the population its temporary rules left: a
+/// prototype registered before it is the same root after it, a failure
+/// recorded under it is unchanged, and no notice names a prototype root.
+#[test]
+fn find_loadable_keeps_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("w.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"R\"\n)\ndef \"R\"\n{\n    def \"I\" (\n        instanceable = true\n        references = @lib.usda@</Q>\n    ) {}\n}\n",
+    )?;
+    fs::write(
+        dir.path().join("lib.usda"),
+        "#usda 1.0\ndef \"P\"\n{\n    def \"Broken\" (references = @missing.usda@) {}\n}\ndef \"Q\"\n{\n    def \"Leg\" {}\n}\n",
+    )?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\" (\n    instanceable = true\n    references = @lib.usda@</P>\n) {}\ndef \"B\" (references = @lib.usda@</P>) {}\ndef \"W\" (payload = @w.usda@) {}\n",
+    )?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+    let registered = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+    assert!(stage.prim("/A/Broken")?.is_valid()?);
+    let errors = stage.composition_errors().len();
+    assert!(errors > 0, "the missing reference is recorded");
+    let notices = capture_notices(&stage);
+    let loadable = stage.find_loadable("/")?;
+    assert!(loadable.contains(&sdf::path("/W")?), "{loadable:?}");
+    stage.flush()?;
+    assert_eq!(stage.prim("/A")?.prototype()?, Some(registered));
+    assert_eq!(stage.composition_errors().len(), errors);
+    let heard = notices.borrow();
+    let named: Vec<_> = heard
+        .resynced
+        .iter()
+        .chain(&heard.recomposed)
+        .chain(&heard.load_rules)
+        .filter(|path| is_prototype(path) && path.parent().is_some_and(|parent| parent.is_abs_root()))
+        .collect();
+    assert!(named.is_empty(), "{heard:?}");
+    drop(heard);
+    // The prototype stays the stage's own, so an instance joining it later
+    // resyncs the instance alone.
+    notices.borrow_mut().resynced.clear();
+    stage.prim("/B")?.set_instanceable(true)?;
+    let resynced = notices.borrow().resynced.clone();
+    assert!(resynced.contains(&sdf::path("/B")?), "{resynced:?}");
+    let roots = resynced
+        .iter()
+        .filter(|path| is_prototype(path) && path.parent().is_some_and(|parent| parent.is_abs_root()));
+    assert_eq!(roots.count(), 0, "{resynced:?}");
+    Ok(())
+}
+
+/// A walk that fails on a prim whose composition cannot be read names the
+/// prototypes it reached before: the `active` of `/W/Z` holds a string.
+#[test]
+fn partial_walk_names_reached() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Body" {}
+    }
+}
+def "W"
+{
+    def "A" (
+        instanceable = true
+        references = </Lib/P>
+    ) {}
+    def "Z" {}
+}
+"#,
+    )?;
+    let z = sdf::path("/W/Z")?;
+    stage.root_layer().edit(|e| {
+        e.data_mut()
+            .set_field(&z, "active", vt::Value::String("nope".to_string()));
+        Ok(())
+    })?;
+    let notices = capture_complete(&stage);
+    stage.prim("/W")?.set_active(true)?;
+    let resynced = notices.borrow().resynced.clone();
+    assert_eq!(resynced.len(), 2, "{resynced:?}");
+    assert_eq!(resynced[0], sdf::path("/W")?);
+    assert!(is_prototype(&resynced[1]), "{resynced:?}");
+    Ok(())
+}
+
+/// An instance joining a prototype that existed before any sink listened
+/// resyncs only the instance.
 #[test]
 fn joined_prototype_quiet() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1566,7 +2138,7 @@ def "rock"
             .open(root.to_str().unwrap())?;
         let before = stage.prototypes()?;
         assert_eq!(before.len(), usize::from(existing));
-        let notices = capture_notices(&stage);
+        let notices = capture_complete(&stage);
         stage.load("/world/a", LoadPolicy::WithDescendants)?;
         let added: Vec<sdf::Path> = stage
             .prototypes()?
@@ -1590,43 +2162,113 @@ def "rock"
 #[test]
 fn read_prototype_notified() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    fs::write(
-        dir.path().join("t.usda"),
-        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\"\n{\n    def \"C\" {}\n}\n",
-    )?;
-    let m = dir.path().join("m.usda");
-    let stage = open_text(
-        &dir,
-        &format!(
-            r#"#usda 1.0
-def "F" (
-    references = @{}@
-)
-{{
-    def "I" (
-        instanceable = true
-        references = @t.usda@
-    ) {{}}
-}}
-"#,
-            m.display()
-        ),
-    )?;
-    assert!(stage.prim("/F")?.is_valid()?);
-    fs::write(&m, "#usda 1.0\n(\n    defaultPrim = \"M\"\n)\ndef \"M\" {}\n")?;
-    let heard = Rc::new(RefCell::new(Vec::new()));
-    let sink = heard.clone();
-    stage.add_sink(RecordingSink {
-        recomposed: Some(Box::new(move |_: &Stage, resynced: Resynced<'_>| {
-            sink.borrow_mut().extend(resynced.subtrees.iter().cloned());
-        })),
-        ..Default::default()
-    })?;
+    let stage = forgotten_failure(&dir, &format!("{{\n{INSTANCE_OF_T}}}\n"))?;
+    let notices = capture_notices(&stage);
     let prototype = stage.prim("/F/I")?.prototype()?.expect("/F/I is an instance");
     stage.flush()?;
-    let heard = heard.borrow();
+    let heard = notices.borrow().recomposed.clone();
     assert!(heard.contains(&sdf::path("/F")?), "{heard:?}");
     assert!(heard.contains(&prototype), "{heard:?}");
+    Ok(())
+}
+
+/// What a read found, and the prototype it composed, go out in the
+/// recomposed notice after an edit's own notice, which names neither: the
+/// prototype is named once, there.
+#[test]
+fn read_prototype_before_edit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = forgotten_failure(&dir, &format!("{{\n{INSTANCE_OF_T}}}\n"))?;
+    let notices = capture_notices(&stage);
+    let prototype = stage.prim("/F/I")?.prototype()?.expect("/F/I is an instance");
+    stage.define_prim("/Z")?;
+    assert_eq!(notices.borrow().resynced, paths(&["/Z"]));
+    assert_eq!(notices.borrow().recomposed, [sdf::path("/F")?, prototype]);
+    Ok(())
+}
+
+/// An edit whose instance joins a prototype a read composed resyncs the
+/// instance alone: the prototype goes out with what the read found.
+#[test]
+fn edit_joins_read_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = forgotten_failure(
+        &dir,
+        &format!("{{\n{INSTANCE_OF_T}}}\ndef \"Z\" (\n    instanceable = false\n    references = @t.usda@\n) {{}}\n"),
+    )?;
+    let notices = capture_notices(&stage);
+    let prototype = stage.prim("/F/I")?.prototype()?.expect("/F/I is an instance");
+    stage.prim("/Z")?.set_instanceable(true)?;
+    assert_eq!(stage.prim("/Z")?.prototype()?, Some(prototype.clone()));
+    assert_eq!(notices.borrow().resynced, paths(&["/Z"]));
+    assert_eq!(notices.borrow().recomposed, [sdf::path("/F")?, prototype]);
+    Ok(())
+}
+
+/// A spec authored under an instance, at a name its prototype has no prim
+/// for, composes nothing itself: the notice still names the prototype the
+/// walk registered on the way to it.
+#[test]
+fn missing_proxy_names_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = two_referrers(&dir, true)?;
+    let notices = capture_complete(&stage);
+    stage.root_layer().edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/W/B/Missing", sdf::Specifier::Over, "")?;
+        Ok(())
+    })?;
+    let prototype = first_prototype(&stage)?;
+    let resynced = notices.borrow().resynced.clone();
+    assert!(resynced.contains(&prototype), "{resynced:?}");
+    assert!(!stage.prim("/W/B/Missing")?.is_valid()?);
+    Ok(())
+}
+
+/// A resync at a path under an instance, a spec appearing there in a local
+/// layer, composes in that instance's prototype: the notice names the
+/// prototype, and the one the composed path mints for the instance nested
+/// in it.
+#[test]
+fn proxy_resync_names_prototypes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = open_text(
+        &dir,
+        r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Body" (
+            instanceable = true
+            references = </Geo>
+        ) {}
+    }
+}
+def "Geo"
+{
+    def "m" {}
+}
+over "W"
+{
+    def "A" (
+        instanceable = true
+        references = </Lib/P>
+    ) {}
+}
+"#,
+    )?;
+    let notices = capture_complete(&stage);
+    stage.root_layer().edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/W/A/Body", sdf::Specifier::Over, "")?;
+        Ok(())
+    })?;
+    let resynced = notices.borrow().resynced.clone();
+    assert!(resynced.contains(&sdf::path("/W/A/Body")?), "{resynced:?}");
+    let prototypes = stage.prototypes()?;
+    assert_eq!(prototypes.len(), 2, "{prototypes:?}");
+    for prototype in prototypes {
+        assert!(resynced.contains(&prototype), "{resynced:?}");
+    }
     Ok(())
 }
 
@@ -1662,10 +2304,7 @@ class "Lib"
     })?;
     assert!(stage.prim("/R")?.is_valid()?);
     let resynced = notices.borrow().resynced.clone();
-    assert!(
-        !resynced.iter().any(|path| path.as_str().starts_with("/__Prototype_")),
-        "{resynced:?}"
-    );
+    assert!(!resynced.iter().any(is_prototype), "{resynced:?}");
     Ok(())
 }
 
@@ -1685,16 +2324,77 @@ fn root_resync_names_prototypes() -> Result<()> {
         })
     };
     let stage = two_referrers(&dir, true)?;
-    let notices = capture_notices(&stage);
+    let notices = capture_complete(&stage);
     edit(&stage)?;
     let prototype = first_prototype(&stage)?;
     assert_eq!(notices.borrow().resynced, [sdf::path("/")?, prototype]);
 
     let stage = two_referrers(&dir, true)?;
     let prototype = first_prototype(&stage)?;
-    let notices = capture_notices(&stage);
+    let notices = capture_complete(&stage);
     edit(&stage)?;
     assert_eq!(notices.borrow().resynced, [sdf::path("/")?, prototype]);
+    Ok(())
+}
+
+/// A prim resynced in place, a spec of it appearing on the way to an
+/// attribute, is asked for its own prototype alone: the instance beneath it
+/// stays uncomposed, and the notice names no prototype.
+#[test]
+fn spec_resync_leaves_subtree() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let session = dir.path().join("session.usda");
+    fs::write(&session, "#usda 1.0\n")?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+class "Lib"
+{
+    def "P"
+    {
+        def "Body" {}
+    }
+}
+def "W"
+{
+    def "A" (
+        instanceable = true
+        references = </Lib/P>
+    ) {}
+    def "Z" {}
+}
+"#,
+    )?;
+    let stage = Stage::builder()
+        .session_layer(session.to_str().unwrap())
+        .open(root.to_str().unwrap())?;
+    assert!(stage.prim("/W/Z")?.is_valid()?);
+    let a = sdf::path("/W/A")?;
+    assert_eq!(stage.index_revision(&a), None, "nothing composed the instance");
+    let session_id = stage.session_layer().expect("session layer").identifier().to_string();
+    stage.set_edit_target(EditTarget::for_layer(session_id))?;
+    let notices = capture_complete(&stage);
+    stage.create_attribute("/W.x", sdf::ValueTypeName::DOUBLE)?;
+    assert_eq!(notices.borrow().resynced, paths(&["/W", "/W.x"]));
+    assert_eq!(stage.index_revision(&a), None, "the walk stops at the prim");
+    Ok(())
+}
+
+/// The prims an edit's delivery walk drops are reported before the delivery
+/// ends: the walk of `/G` reaches its instance and joins `t.usda`, which
+/// forgets the failure `/F` recorded for `m.usda`, written after the open,
+/// and drops `/F`.
+#[test]
+fn walk_drops_reported() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = forgotten_failure(&dir, &format!("{{}}\ndef \"G\"\n{{\n{INSTANCE_OF_T}}}\n"))?;
+    assert!(stage.prim("/G")?.is_valid()?);
+    let notices = capture_complete(&stage);
+    stage.prim("/G")?.set_instanceable(false)?;
+    let prototype = first_prototype(&stage)?;
+    assert_eq!(notices.borrow().resynced, [sdf::path("/G")?, prototype]);
+    assert_eq!(notices.borrow().recomposed, paths(&["/F"]));
     Ok(())
 }
 

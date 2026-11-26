@@ -17,6 +17,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::mem;
 
 use crate::sdf;
 use crate::sdf::Path;
@@ -24,6 +25,7 @@ use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
 use super::index_cache::{IndexCache, OwnStatus};
+use super::index_store::Owner;
 use super::layer_graph::{LayerGraph, LayerView};
 use super::load_rules::LoadRules;
 use super::population_mask::PopulationMask;
@@ -385,6 +387,7 @@ impl PrototypeRegistry {
                     root: root.clone(),
                     instances: prototype.instances,
                     failed_in: None,
+                    owner: None,
                 });
             }
         }
@@ -415,6 +418,9 @@ pub(super) struct RetiredPrototype {
     pub(super) instances: Vec<Path>,
     /// The settlement round deciding its instances' groups last failed in.
     pub(super) failed_in: Option<u64>,
+    /// Who the transfer of its work, and what that registers, is reported
+    /// for ([`IndexStore::retire_prototypes`](super::index_store::IndexStore::retire_prototypes)).
+    pub(super) owner: Option<Owner>,
 }
 
 /// The reserved name every synthetic prototype root starts with. The mint
@@ -531,7 +537,8 @@ impl IndexCache {
     /// edit instead drops the affected prototypes through
     /// [`Self::invalidate_layers`].
     ///
-    /// Returns the roots it retired, sorted, then the instances that shared
+    /// Returns the roots it retired, sorted, less the private ones
+    /// ([`set_private`](Self::set_private)), then the instances that shared
     /// them. A caller reporting what an edit invalidated must name the roots
     /// in their own right: the retirement cascades through a worklist, so a
     /// nested root goes without any `changed` path covering it, and a
@@ -547,9 +554,13 @@ impl IndexCache {
         // own, so those memos go with them.
         self.clear_population_memos();
         let retired = self.prototypes.remove_affected(changed);
-        let mut invalidated: Vec<Path> = retired.iter().map(|prototype| prototype.root.clone()).collect();
-        let instances = retired.iter().flat_map(|prototype| prototype.instances.iter().cloned());
-        invalidated.extend(instances);
+        // A private root was announced to no one, so neither its retirement
+        // nor an instance in its namespace is reported. It stays private: a
+        // registration that takes it back announces it then.
+        let private = |path: &Path| self.is_private(path);
+        let roots = retired.iter().map(|prototype| &prototype.root);
+        let instances = retired.iter().flat_map(|prototype| &prototype.instances);
+        let invalidated: Vec<Path> = roots.chain(instances).filter(|path| !private(path)).cloned().collect();
         self.drop_prototypes(retired);
         invalidated
     }
@@ -790,7 +801,55 @@ impl IndexCache {
         if minted {
             self.materialize_prototype(graph, &composed, &prototype);
         }
+        self.credit(instance, &composed, &prototype, minted);
         Ok(prototype)
+    }
+
+    /// Records `prototype`, which registering the instance at `instance`
+    /// (composing at `composed`) materialized when `minted`, for the owner
+    /// it is credited to, while someone is told of registrations
+    /// ([`IndexStore::set_owner`](super::index_store::IndexStore::set_owner)),
+    /// and queues its namespace to walk for that owner: the instances
+    /// nested in it register too (C++ `_ComposeSubtreesInParallel` over each
+    /// prototype `Usd_InstanceCache` adds).
+    ///
+    /// The owner is, in order: the owner of the outstanding work covering
+    /// the instance ([`IndexStore::claim`](super::index_store::IndexStore::claim)),
+    /// the owner of the unit settlement is settling, then the current owner.
+    /// While temporary load rules are installed
+    /// ([`set_private`](Self::set_private)), nothing is credited, and a
+    /// root they mint stays private. Real work that reaches a private root
+    /// later is credited as if it had minted it.
+    fn credit(&mut self, instance: &Path, composed: &Path, prototype: &Path, minted: bool) {
+        let Some(current) = self.store.owner() else {
+            return;
+        };
+        // A registration that joins a root already announced, or one still
+        // private, reports nothing.
+        if !minted && !self.private_roots.contains(prototype) {
+            return;
+        }
+        let claim = self.store.claim(&[instance, composed]);
+        if let Some(temporary) = self.private
+            && claim.or(self.active).is_none_or(|owner| owner == temporary)
+        {
+            // Under temporary rules a mint is private, and walks nothing: no
+            // one is told of what it composes. A root live before the rules
+            // were installed, retired by them and taken back, is no mint.
+            // Work another owner left, settling meanwhile, is reported.
+            if minted && !self.live_roots.contains(prototype) {
+                self.private_roots.insert(prototype.clone());
+            }
+            return;
+        }
+        // A mint announces its root, and the first real registration that
+        // reaches a private one announces it too.
+        if !self.private_roots.remove(prototype) && !minted {
+            return;
+        }
+        let owner = claim.or(self.active).unwrap_or(current);
+        self.minted.push((prototype.clone(), owner));
+        self.store.queue_namespace(prototype.clone(), owner);
     }
 
     /// Builds and caches the composed index for a freshly minted prototype root
@@ -850,20 +909,126 @@ impl IndexCache {
         self.prototypes.roots()
     }
 
-    /// A mark of how many prototypes have been minted so far, for
-    /// [`minted_since`](Self::minted_since) to compare a root against.
-    pub(crate) fn prototype_mark(&self) -> usize {
-        self.prototypes.count
+    /// Sets the owner the work invalidations and retirements queue from
+    /// here on is recorded for, and registrations are credited to when
+    /// nothing else decides ([`credit`](Self::credit)), and returns the
+    /// previous one.
+    pub(crate) fn set_owner(&mut self, owner: Option<Owner>) -> Option<Owner> {
+        self.store.set_owner(owner)
     }
 
-    /// Whether `root` is a registered `/__Prototype_N` root minted after
-    /// `mark` ([`prototype_mark`](Self::prototype_mark)). A root an instance
-    /// took back after its prototype was retired keeps its first mint, so it
-    /// counts only if that came after `mark`.
-    pub(crate) fn minted_since(&self, root: &Path, mark: usize) -> bool {
-        self.prototypes
-            .get(root)
-            .is_some_and(|prototype| prototype.index > mark)
+    /// Sets whether a removal queues its paths to walk for the instances
+    /// they register, and returns whether it did: a change applied names
+    /// paths in its layers' own namespaces, which are no stage prims.
+    pub(crate) fn set_walking(&mut self, walking: bool) -> bool {
+        self.store.set_walking(walking)
+    }
+
+    /// Sets whether settlement walks what a change resyncs, and the
+    /// namespace of each prototype root it mints, for the instances they
+    /// hold (C++ `UsdStage::_RecomposePrims`, which composes the whole
+    /// resynced subtree): on while someone is told every prototype a
+    /// resync covers. Off, only what an operation composes registers.
+    pub(crate) fn set_complete(&mut self, complete: bool) {
+        self.store.set_complete(complete);
+    }
+
+    /// Ends the claims of the prototype namespaces registered while the
+    /// outermost operation ran, kept while settlement walks nothing
+    /// ([`set_complete`](Self::set_complete)).
+    pub(crate) fn end_claims(&mut self) {
+        self.store.end_claims();
+    }
+
+    /// Stops recording who work is reported for: no one is told of
+    /// registrations any more, so the walk work and the credits queued are
+    /// dropped.
+    pub(crate) fn forget_owners(&mut self) {
+        self.store.set_owner(None);
+        self.store.forget_owners();
+        self.minted.clear();
+        self.private_roots.clear();
+        for demand in &mut self.pending_loads {
+            demand.owner = None;
+        }
+    }
+
+    /// Queues the prims a change resynced to walk for the instances they
+    /// register, for the current owner: each of `subtrees` with everything
+    /// beneath it, each of `prims` alone.
+    // TODO(perf): a resynced subtree is walked whole whether or not the change
+    // could have made anything in it instanceable; the change set could
+    // narrow the walk to the subtrees whose instancing it touched.
+    pub(crate) fn queue_resyncs(&mut self, subtrees: &[Path], prims: &[Path]) {
+        let Some(owner) = self.store.owner() else {
+            return;
+        };
+        for subtree in subtrees {
+            self.store.queue_walk(subtree.clone(), true, true, owner);
+        }
+        for prim in prims {
+            self.store.queue_walk(prim.clone(), false, true, owner);
+        }
+    }
+
+    /// Keeps every registration private while temporary load rules are
+    /// installed, `temporary` being their scope's owner: what they mint is
+    /// credited to no one and walks nothing, and the removals the rules make
+    /// queue no walks. `None` ends that.
+    pub(crate) fn set_private(&mut self, temporary: Option<Owner>) {
+        self.private = temporary;
+        self.store.set_walking(temporary.is_none());
+        if temporary.is_some() {
+            self.live_roots = self.prototypes.roots().into_iter().collect();
+        } else {
+            self.live_roots.clear();
+        }
+    }
+
+    /// Takes the roots materialized since they were last taken, each with
+    /// the owner it is credited to ([`credit`](Self::credit)).
+    pub(crate) fn take_minted(&mut self) -> Vec<(Path, Owner)> {
+        mem::take(&mut self.minted)
+    }
+
+    /// Whether any work the work set holds settles for `owner`.
+    pub(crate) fn has_work_of(&self, owner: Owner) -> bool {
+        self.store.has_work_of(owner) || self.pending_loads.iter().any(|demand| demand.owner == Some(owner))
+    }
+
+    /// Hands every unit of work `from` owns to `to`, the demands parked for
+    /// a later load included.
+    pub(crate) fn reown(&mut self, from: Owner, to: Owner) {
+        self.store.reown(from, to);
+        for demand in &mut self.pending_loads {
+            if demand.owner == Some(from) {
+                demand.owner = Some(to);
+            }
+        }
+    }
+
+    /// Drops the notification work `owner` holds: its walks, and the roots
+    /// credited to it. Its structural work stays, to settle the population.
+    pub(crate) fn discard_notifications(&mut self, owner: Owner) {
+        self.store.discard_walks(owner);
+        self.minted.retain(|(_, credited)| *credited != owner);
+    }
+
+    /// Whether any prototype root is private ([`set_private`](Self::set_private)).
+    pub(crate) fn has_private(&self) -> bool {
+        !self.private_roots.is_empty()
+    }
+
+    /// Whether settlement walks what a change resyncs
+    /// ([`set_complete`](Self::set_complete)).
+    pub(crate) fn is_complete(&self) -> bool {
+        self.store.is_complete()
+    }
+
+    /// Whether `path` lies in the namespace of a private prototype root
+    /// ([`set_private`](Self::set_private)), which no one has been told of.
+    pub(crate) fn is_private(&self, path: &Path) -> bool {
+        is_prototype_namespace(path) && path.root_prim().is_some_and(|root| self.private_roots.contains(&root))
     }
 
     /// Returns `true` if `path` is a `/__Prototype_N` root.

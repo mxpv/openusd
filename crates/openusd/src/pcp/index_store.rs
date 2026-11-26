@@ -15,6 +15,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::iter;
 use std::mem;
 use std::slice;
 
@@ -82,6 +83,70 @@ pub(super) struct IndexStore {
     /// The failed assets the entries removals dropped had recorded
     /// ([`take_dropped_failures`](Self::take_dropped_failures)).
     dropped_failures: Vec<String>,
+    /// Who the work that removals and retirements queue is recorded for
+    /// ([`set_owner`](Self::set_owner)): `None` while no one is told of it.
+    owner: Option<Owner>,
+    /// The walk work: each path whose instances settlement registers, for
+    /// the owner the prototypes it composes are reported for
+    /// ([`queue_walk`](Self::queue_walk)).
+    walks: sdf::PathTable<WalkItem>,
+    /// Whether a removal queues its paths to walk
+    /// ([`set_walking`](Self::set_walking)): off while a change is applied,
+    /// whose removals can name a layer's own paths.
+    quiet_removals: bool,
+    /// Whether walk work is queued at all ([`set_complete`](Self::set_complete)):
+    /// on while someone is told every prototype a resynced subtree holds.
+    complete: bool,
+}
+
+/// Who a unit of settlement work, and what settling it registers, is
+/// reported for. The id is the stage's to hand out and to map to a notice:
+/// `pcp` compares ids, which grow with the order they were handed out in,
+/// and never interprets them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Owner(pub(crate) u64);
+
+/// A path whose instances settlement registers
+/// ([`IndexStore::queue_walk`]).
+#[derive(Debug, Clone)]
+pub(super) struct WalkItem {
+    /// The walk of the prim itself.
+    pub(super) here: Walk,
+    /// The walk of the prim's descendants, when the item covers its subtree.
+    pub(super) below: Option<Walk>,
+    /// The round the walk last failed in.
+    pub(super) failed_in: Option<u64>,
+}
+
+impl WalkItem {
+    /// The owners the item's parts are walked for.
+    fn owners(&self) -> impl Iterator<Item = Owner> {
+        iter::once(self.here.owner).chain(self.below.map(|walk| walk.owner))
+    }
+}
+
+/// Who one part of a [`WalkItem`] is walked for.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Walk {
+    /// Whether an invalidation or a resync queued the walk, and not a walk
+    /// of a parent's children or of a materialized namespace.
+    pub(super) change: bool,
+    /// Who the prototypes the walk registers are reported for.
+    pub(super) owner: Owner,
+}
+
+impl Walk {
+    /// The walk that keeps a path queued by both: a change's outranks a
+    /// walk's that only reaches the path, and between two of a kind, the
+    /// newer owner's.
+    fn merge(self, other: Walk) -> Walk {
+        match (self.change, other.change) {
+            (true, false) => self,
+            (false, true) => other,
+            _ if other.owner > self.owner => other,
+            _ => self,
+        }
+    }
 }
 
 /// A cached prim a removal dropped, waiting in the work set.
@@ -95,6 +160,8 @@ pub(super) struct Unsettled {
     /// Whether the prim was rebuilt once already and dropped again to try
     /// the targets its rebuild failed to load ([`retry_failed`](IndexStore::retry_failed)).
     retried: bool,
+    /// Who the prim's settlement is reported for.
+    owner: Option<Owner>,
 }
 
 /// Validity token for a cached answer about one composed prim.
@@ -403,12 +470,25 @@ impl IndexStore {
 
     /// Drops the entry at each of `paths`, retracting their dependency
     /// registrations together and recording each in the work set.
+    ///
+    /// Each prim dropped is walked alone for the instances it registers, for
+    /// the current owner ([`set_owner`](Self::set_owner)).
     pub(super) fn remove_all<'p>(&mut self, paths: impl IntoIterator<Item = &'p Path>) {
         let mut victims = Vec::new();
         for path in paths {
             if let Some(entry) = self.entries.remove(path) {
                 self.evict(path, &entry);
                 victims.push(path.clone());
+            } else if let Some(owner) = self.owner
+                && let Some(unsettled) = self.evicted.get_mut(path)
+            {
+                // Dropped again while it waits: the latest change owns it.
+                unsettled.owner = Some(owner);
+            }
+        }
+        if let Some(owner) = self.owner.filter(|_| !self.quiet_removals) {
+            for victim in &victims {
+                self.queue_walk(victim.clone(), false, true, owner);
             }
         }
         self.deps.remove_all(&victims);
@@ -417,6 +497,9 @@ impl IndexStore {
     /// Drops each of `prefixes` and every namespace descendant, retracting the
     /// removed entries' dependencies together and recording each in the work
     /// set.
+    ///
+    /// Each prefix's subtree is walked for the instances it registers, for
+    /// the current owner ([`set_owner`](Self::set_owner)).
     pub(super) fn remove_subtrees<'p>(&mut self, prefixes: impl IntoIterator<Item = &'p Path>) {
         let mut victims = Vec::new();
         for prefix in prefixes {
@@ -429,9 +512,22 @@ impl IndexStore {
                 !prefix.is_empty(),
                 "remove_subtrees called with empty prefix — use Path::abs_root() to drop everything",
             );
+            // What waits in the work set beneath the prefix is the latest
+            // change's too.
+            if let Some(owner) = self.owner {
+                let waiting: Vec<Path> = self.evicted.subtree(prefix).map(|(path, _)| path.clone()).collect();
+                for path in waiting {
+                    if let Some(unsettled) = self.evicted.get_mut(&path) {
+                        unsettled.owner = Some(owner);
+                    }
+                }
+            }
             for (victim, entry) in self.entries.remove_subtree(prefix) {
                 self.evict(&victim, &entry);
                 victims.push(victim);
+            }
+            if let Some(owner) = self.owner.filter(|_| !self.quiet_removals) {
+                self.queue_walk(prefix.clone(), true, true, owner);
             }
         }
         self.deps.remove_all(&victims);
@@ -447,6 +543,7 @@ impl IndexStore {
             stacks: owned_stacks(&entry.index).into_iter().collect(),
             failure: None,
             retried: false,
+            owner: self.owner,
         };
         self.dropped_failures.extend(failed_assets(entry).map(str::to_owned));
         let held = self.evicted.insert(path.clone(), unsettled);
@@ -470,6 +567,9 @@ impl IndexStore {
     /// Whether the work set holds a prim to settle, or a retired prototype
     /// whose descendants' work to transfer.
     pub(super) fn has_work(&self) -> bool {
+        if !self.walks.is_empty() {
+            return true;
+        }
         !self.evicted.is_empty() || !self.retired.is_empty()
     }
 
@@ -867,8 +967,12 @@ impl IndexStore {
     /// A record whose root the work set holds a record for already joins it,
     /// its instances added: an instance can take a retired root back, and
     /// the prototype be retired again before settlement places the first.
+    ///
+    /// A record without an owner takes the current one
+    /// ([`set_owner`](Self::set_owner)), and a merged record the newer.
     pub(super) fn retire_prototypes(&mut self, records: impl IntoIterator<Item = RetiredPrototype>) {
-        for record in records {
+        for mut record in records {
+            record.owner = record.owner.or(self.owner);
             if let Some(&at) = self.retired_at.get(&record.root) {
                 let merged = &mut self.retired[at];
                 let mut known: sdf::PathSet = merged.instances.iter().cloned().collect();
@@ -881,6 +985,7 @@ impl IndexStore {
                 // Instances no round has tried yet make the merged record
                 // worth trying again.
                 merged.failed_in = merged.failed_in.min(record.failed_in);
+                merged.owner = merged.owner.max(record.owner);
                 continue;
             }
             self.retired_at.insert(record.root.clone(), self.retired.len());
@@ -929,6 +1034,7 @@ impl IndexStore {
                     if held.failure.is_none() {
                         held.failure.clone_from(&unsettled.failure);
                     }
+                    held.owner = held.owner.max(unsettled.owner);
                 } else {
                     let stacks = added.into_boxed_slice();
                     let failure = unsettled.failure.clone();
@@ -939,6 +1045,7 @@ impl IndexStore {
                             stacks,
                             failure,
                             retried,
+                            owner: unsettled.owner,
                         },
                     );
                 }
@@ -955,6 +1062,243 @@ impl IndexStore {
             left.clear();
         }
         left
+    }
+}
+
+/// Who settlement work is reported for, and the walk work: the ownership
+/// side of the work set.
+impl IndexStore {
+    /// Sets the owner the work queued from here on is recorded for, `None`
+    /// while no one is told of it, and returns the previous one.
+    pub(super) fn set_owner(&mut self, owner: Option<Owner>) -> Option<Owner> {
+        mem::replace(&mut self.owner, owner)
+    }
+
+    /// Sets whether a removal queues its paths to walk, and returns whether
+    /// it did.
+    pub(super) fn set_walking(&mut self, walking: bool) -> bool {
+        !mem::replace(&mut self.quiet_removals, !walking)
+    }
+
+    /// The owner work is recorded for now ([`set_owner`](Self::set_owner)).
+    pub(super) fn owner(&self) -> Option<Owner> {
+        self.owner
+    }
+
+    /// The owner the work-set prim at `path` settles for.
+    pub(super) fn owner_at(&self, path: &Path) -> Option<Owner> {
+        self.evicted.get(path).and_then(|unsettled| unsettled.owner)
+    }
+
+    /// Sets whether walk work is queued, dropping what is queued when not.
+    pub(super) fn set_complete(&mut self, complete: bool) {
+        self.complete = complete;
+        if !complete {
+            self.walks.clear();
+        }
+    }
+
+    /// Queues `path` to walk for the instances it registers, for `owner`:
+    /// its subtree when `below`, the prim alone otherwise; `change` when an
+    /// invalidation or a resync queued it. A path queued already merges
+    /// each part, the prim's and its descendants', on its own
+    /// ([`Walk::merge`]), and is tried again whatever round it failed in.
+    /// Nothing is queued unless [`set_complete`](Self::set_complete) is on.
+    pub(super) fn queue_walk(&mut self, path: Path, below: bool, change: bool, owner: Owner) {
+        if !self.complete {
+            return;
+        }
+        let walk = Walk { change, owner };
+        let item = WalkItem {
+            here: walk,
+            below: below.then_some(walk),
+            failed_in: None,
+        };
+        self.put_walk(path, item);
+    }
+
+    /// Queues the namespace of `root`, a prototype root just registered,
+    /// for `owner`, complete or not: walked for the instances it holds
+    /// while [`set_complete`](Self::set_complete) is on, and otherwise kept
+    /// unwalked, as the claim that credits what settles in it to `owner`
+    /// ([`claim`](Self::claim)) until the operation ends
+    /// ([`end_claims`](Self::end_claims)).
+    pub(super) fn queue_namespace(&mut self, root: Path, owner: Owner) {
+        let walk = Walk { change: false, owner };
+        let item = WalkItem {
+            here: walk,
+            below: Some(walk),
+            failed_in: None,
+        };
+        self.put_walk(root, item);
+    }
+
+    /// Whether the walk work is walked ([`set_complete`](Self::set_complete)).
+    pub(super) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Drops the namespaces kept unwalked ([`queue_namespace`](Self::queue_namespace)):
+    /// the outermost operation ended, and what settles in them later is
+    /// credited as it settles.
+    pub(super) fn end_claims(&mut self) {
+        if !self.complete {
+            self.walks.clear();
+        }
+    }
+
+    /// Merges `item` into the walk work at `path`, whose round of failure
+    /// becomes `item`'s.
+    fn put_walk(&mut self, path: Path, item: WalkItem) {
+        match self.walks.get_mut(&path) {
+            Some(held) => {
+                held.here = held.here.merge(item.here);
+                held.below = match (held.below, item.below) {
+                    (Some(held), Some(walk)) => Some(held.merge(walk)),
+                    (held, walk) => held.or(walk),
+                };
+                held.failed_in = item.failed_in;
+            }
+            None => {
+                self.walks.insert(path, item);
+            }
+        }
+    }
+
+    /// The walk work's paths, parents before children, less those whose
+    /// walk failed in the current round.
+    pub(super) fn walk_work(&self) -> Vec<Path> {
+        self.walks
+            .subtree(&Path::abs_root())
+            .filter(|(_, item)| item.failed_in != Some(self.round))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    /// Takes the walk queued at `path` out, for settlement to take its step.
+    pub(super) fn take_walk(&mut self, path: &Path) -> Option<WalkItem> {
+        self.walks.remove(path)
+    }
+
+    /// Puts `item` back at `path`, a walk settlement could not finish:
+    /// failed in the current round when `failed`.
+    pub(super) fn return_walk(&mut self, path: Path, mut item: WalkItem, failed: bool) {
+        if failed {
+            item.failed_in = Some(self.round);
+        }
+        self.put_walk(path, item);
+    }
+
+    /// The owner of the outstanding work that covers the instance at each
+    /// of `paths`, when some does, for the instance's registration to be
+    /// credited to. The change that touched the prim outranks a walk that
+    /// only reaches it, then the deepest covering path, then the newest
+    /// owner: a retired record listing the instance, a dropped prim at or
+    /// above it, and a walk an invalidation queued are changes; a walk of a
+    /// parent's children or of a namespace is not. A walk of a prim alone
+    /// covers its own path only.
+    pub(super) fn claim(&self, paths: &[&Path]) -> Option<Owner> {
+        let mut best: Option<(bool, usize, Owner)> = None;
+        let mut offer = |change: bool, depth: usize, owner: Owner| {
+            let key = (change, depth, owner);
+            if best.is_none_or(|held| key > held) {
+                best = Some(key);
+            }
+        };
+        for &path in paths {
+            for record in &self.retired {
+                if let Some(owner) = record.owner
+                    && record.instances.contains(path)
+                {
+                    offer(true, path.prim_element_count(), owner);
+                }
+            }
+            for (at, unsettled) in self.evicted.ancestors(path) {
+                if let Some(owner) = unsettled.owner {
+                    offer(true, at.prim_element_count(), owner);
+                }
+            }
+            for (at, item) in self.walks.ancestors(path) {
+                let walk = if at == path { Some(item.here) } else { item.below };
+                if let Some(walk) = walk {
+                    offer(walk.change, at.prim_element_count(), walk.owner);
+                }
+            }
+        }
+        best.map(|(_, _, owner)| owner)
+    }
+
+    /// Whether any work the work set holds settles for `owner`.
+    // TODO(perf): this and `reown` scan the whole work set, once for each
+    // scope that closes, every outer read's included, so N reads that each
+    // leave a root's walk queued cost O(N^2) before the walks run. A count of the units each owner
+    // holds would answer this at once, and an index by owner would let
+    // `reown` visit only that owner's units.
+    pub(super) fn has_work_of(&self, owner: Owner) -> bool {
+        self.evicted.iter().any(|(_, unsettled)| unsettled.owner == Some(owner))
+            || self.retired.iter().any(|record| record.owner == Some(owner))
+            || self
+                .walks
+                .iter()
+                .any(|(_, item)| item.owners().any(|held| held == owner))
+    }
+
+    /// Hands every unit of work `from` owns to `to`.
+    pub(super) fn reown(&mut self, from: Owner, to: Owner) {
+        for (_, unsettled) in self.evicted.iter_mut() {
+            if unsettled.owner == Some(from) {
+                unsettled.owner = Some(to);
+            }
+        }
+        for record in &mut self.retired {
+            if record.owner == Some(from) {
+                record.owner = Some(to);
+            }
+        }
+        for (_, item) in self.walks.iter_mut() {
+            for walk in iter::once(&mut item.here).chain(item.below.as_mut()) {
+                if walk.owner == from {
+                    walk.owner = to;
+                }
+            }
+        }
+    }
+
+    /// Drops the walks `owner` queued: notification work, which composes
+    /// nothing the population depends on.
+    pub(super) fn discard_walks(&mut self, owner: Owner) {
+        let owned: Vec<Path> = self
+            .walks
+            .iter()
+            .filter(|(_, item)| item.owners().any(|held| held == owner))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in owned {
+            let Some(mut item) = self.walks.remove(&path) else {
+                continue;
+            };
+            item.below = item.below.filter(|walk| walk.owner != owner);
+            if item.here.owner == owner {
+                // The descendants' walk takes the prim's step too.
+                let Some(below) = item.below else {
+                    continue;
+                };
+                item.here = below;
+            }
+            self.walks.insert(path, item);
+        }
+    }
+
+    /// Forgets who every unit of work settles for, and drops every walk:
+    /// no one is told of what they register.
+    pub(super) fn forget_owners(&mut self) {
+        self.walks.clear();
+        for (_, unsettled) in self.evicted.iter_mut() {
+            unsettled.owner = None;
+        }
+        for record in &mut self.retired {
+            record.owner = None;
+        }
     }
 }
 
@@ -1304,6 +1648,7 @@ pub(crate) mod tests {
             root: p("/__Prototype_1"),
             instances: instances.iter().map(|instance| p(instance)).collect(),
             failed_in,
+            owner: None,
         };
         let mut store = IndexStore::default();
         store.retire_prototypes([record(&["/A", "/B"], None), record(&["/B", "/C"], Some(2))]);
@@ -1311,5 +1656,27 @@ pub(crate) mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].instances, [p("/A"), p("/B"), p("/C")]);
         assert_eq!(records[0].failed_in, None, "the new instances are tried again");
+    }
+
+    /// A walk of a prim alone, queued where a walk of its subtree waits,
+    /// takes the prim and leaves the descendants to the subtree's owner.
+    #[test]
+    fn prim_walk_keeps_descent() {
+        let mut store = IndexStore::default();
+        store.set_complete(true);
+        let (subtree, prim) = (Owner(3), Owner(4));
+        store.queue_walk(p("/A"), true, true, subtree);
+        store.queue_walk(p("/A"), false, true, prim);
+        assert_eq!(store.claim(&[&p("/A")]), Some(prim));
+        assert_eq!(store.claim(&[&p("/A/B")]), Some(subtree));
+        assert!(store.has_work_of(subtree) && store.has_work_of(prim));
+    }
+
+    /// No walk is queued unless complete notices are asked for.
+    #[test]
+    fn walks_need_complete() {
+        let mut store = IndexStore::default();
+        store.queue_walk(p("/A"), true, true, Owner(3));
+        assert!(store.walk_work().is_empty());
     }
 }

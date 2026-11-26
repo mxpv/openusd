@@ -34,7 +34,7 @@
 //! make.
 
 use std::cell::{Cell, LazyCell, RefCell};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -145,7 +145,10 @@ pub(super) trait CompositionHooks {
 
     /// Tells the stage's internal observers that `notice`'s transaction was
     /// reconciled. Called by the drain with its borrows released, before the
-    /// next transaction reconciles; it runs no user code.
+    /// next transaction reconciles; it runs no user code. The payload is the
+    /// transaction's own: the prototypes its snapshot's settling composes
+    /// ([`close_snapshot`](StageComposition::close_snapshot)) are not yet in
+    /// it.
     fn observe(&self, notice: &CompositionNotice) {
         let _ = notice;
     }
@@ -176,34 +179,6 @@ pub(super) trait CompositionHooks {
     fn held_layers(&self) -> HashSet<pcp::LayerId> {
         HashSet::new()
     }
-}
-
-/// One notice waiting in the outbox for delivery, with the prototype mark
-/// ([`pcp::IndexCache::prototype_mark`]) taken when the change it reports
-/// began: a prototype minted after it is one the change composed.
-struct Queued {
-    notice: Notice,
-    since: usize,
-}
-
-/// Where a notice goes in the outbox: at the outbox's length when the
-/// operation it reports began ([`StageComposition::mark`]), ahead of the
-/// notices of edits the operation itself reconciled, or behind every notice
-/// queued with none; and the prototype mark of that beginning.
-#[derive(Debug, Clone, Copy)]
-struct Mark {
-    at: Option<usize>,
-    since: usize,
-}
-
-/// What operations outside a drain found that no notice carries
-/// ([`StageComposition::discover`]), with the earliest prototype mark of the
-/// operations that found it: the notice that reports the paths names the
-/// prototypes minted since.
-#[derive(Default)]
-struct Discovered {
-    paths: Vec<sdf::Path>,
-    since: Option<usize>,
 }
 
 /// One notice the outbox holds.
@@ -259,6 +234,44 @@ pub(super) enum Interrupted {
     /// is poisoned.
     Failed(pcp::QueryError),
 }
+
+/// What an owner's registrations ([`pcp::Owner`]) are reported in.
+enum Target {
+    /// A drain snapshot's: the commit's notice when it settled one
+    /// transaction, its [`StageNotice::Recomposed`] otherwise.
+    Snapshot,
+    /// A mutation's own notice.
+    Mutation,
+    /// What operations found ([`StageComposition::discover`]): a read's, or
+    /// the work that survived the operation that queued it
+    /// ([`CARRY`]), reported at the next boundary.
+    Found,
+    /// Nothing: registrations under temporary load rules, and work that
+    /// only restores the population they left ([`SILENT`]).
+    Discard,
+    /// A [`StageNotice::Recomposed`] behind its anchor, once its work
+    /// settles or the operation it ran inside returns: what a snapshot left
+    /// unsettled while an enclosing operation ran on, or what loads several
+    /// owners demanded together caused.
+    FollowUp(Anchor),
+}
+
+/// Where a follow-up's notice goes ([`Target::FollowUp`]).
+#[derive(Debug, Clone, Copy)]
+enum Anchor {
+    /// Behind the commit of this generation.
+    Commit(u64),
+    /// Behind every notice queued.
+    Back,
+}
+
+/// The owner of work that survived the operation that queued it: what
+/// settling it registers is reported with what operations found.
+const CARRY: pcp::Owner = pcp::Owner(1);
+
+/// The owner of work that only restores the population temporary load
+/// rules left: what settling it registers is not reported.
+const SILENT: pcp::Owner = pcp::Owner(2);
 
 /// What a panic interrupted when it poisoned the stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,11 +357,29 @@ pub(super) struct StageComposition {
     /// [`deliver_notices`](Self::deliver_notices). A drain made from inside a
     /// delivery only reconciles: what it adds waits behind the notices already
     /// here.
-    outbox: RefCell<VecDeque<Queued>>,
+    outbox: RefCell<VecDeque<Notice>>,
     /// What reads and other operations outside a drain found that no notice
     /// carries ([`discover`](Self::discover)): the next drain's snapshot
     /// reports it with its own findings.
-    discovered: RefCell<Discovered>,
+    discovered: RefCell<Vec<sdf::Path>>,
+    /// Whether a sink is told of the prototypes composition registers
+    /// ([`listen`](Self::listen)): owners are handed out and work is
+    /// recorded for them only then.
+    listening: Cell<bool>,
+    /// The registration scopes open, innermost last
+    /// ([`open_scope`](Self::open_scope)): each the owner of the work an
+    /// operation queues, and of what settling it registers.
+    scopes: RefCell<Vec<pcp::Owner>>,
+    /// What each owner's registrations are reported in.
+    targets: RefCell<HashMap<pcp::Owner, Target>>,
+    /// The registrations taken from the cache that no notice names yet,
+    /// each with the owner it is credited to.
+    credited: RefCell<Vec<(sdf::Path, pcp::Owner)>>,
+    /// The owners whose notice waits for their work to settle
+    /// ([`settle_follow_ups`](Self::settle_follow_ups)).
+    follow_ups: RefCell<Vec<pcp::Owner>>,
+    /// The last owner id handed out, past [`CARRY`] and [`SILENT`].
+    owners: Cell<u64>,
     /// The stack sweeps and layer reclaims skipped away from a boundary
     /// ([`at_boundary`](Self::at_boundary)).
     deferred: Cell<Deferred>,
@@ -397,6 +428,12 @@ impl StageComposition {
             pending: RefCell::new(Vec::new()),
             outbox: RefCell::default(),
             discovered: RefCell::default(),
+            listening: Cell::new(false),
+            scopes: RefCell::default(),
+            targets: RefCell::default(),
+            credited: RefCell::default(),
+            follow_ups: RefCell::default(),
+            owners: Cell::new(SILENT.0),
             deferred: Cell::default(),
             poisoned: Cell::new(None),
             snapshots: Cell::new(0),
@@ -536,14 +573,13 @@ impl StageComposition {
     fn update_pair<T>(&self, f: impl FnOnce(&mut pcp::LayerGraph, &mut pcp::IndexCache) -> T) -> T {
         let mut layers = self.layers.borrow_mut();
         let mut cache = self.cache.borrow_mut();
-        let since = cache.prototype_mark();
         let out = f(&mut layers, &mut cache);
         // A prim composed again tries the targets its dropped index failed
         // to load, as C++ opens a layer afresh at every index rebuild; the
         // other prims that recorded those failures, which compose again too,
         // reach the stage's sinks with the next drain.
         let others = cache.retry_dropped_failures(&mut layers);
-        self.note_discovered(others, since);
+        self.discovered.borrow_mut().extend(others);
         out
     }
 
@@ -614,6 +650,12 @@ impl StageComposition {
     /// [`pcp::QueryError::Poisoned`] on a poisoned stage.
     pub(super) fn settle(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
         self.process_pending(hooks);
+        self.check_settled()
+    }
+
+    /// Fails with what makes the stage unreadable now: its poisoning, or
+    /// the store or composition being held ([`is_settled`](Self::is_settled)).
+    fn check_settled(&self) -> Result<(), pcp::QueryError> {
         if let Some(poisoned) = self.poisoned.get() {
             return Err(poisoned.error());
         }
@@ -879,28 +921,28 @@ impl StageComposition {
             // What operations found since the last drain is reported with
             // what this snapshot finds, after its transactions, less what
             // their notices cover.
-            // Every notice of the snapshot counts the prototypes minted from
-            // here on, before any of its transactions applies, as its own;
-            // what operations found before it counts from their own mark.
-            let since = self.prototype_mark();
-            let mut found = Vec::new();
-            let mut found_since = self.take_discovered(&mut found, since);
+            let mut found = self.discovered.take();
             let mut covered = Covering::composed();
             let mut retries_sublayers = false;
+            // The snapshot owns the work its transactions queue, and the
+            // transactions it settles together are these.
+            let snapshot = self.open_scope(Target::Snapshot);
+            let mut edits = Vec::new();
             while let Some(group) = next_group(&mut drained) {
                 match group {
                     Group::Aborted(generation) => {
                         hooks.observe_abort(generation);
                         if hooks.delivers() {
-                            self.enqueue(Notice::Aborted(generation), since);
+                            self.enqueue(Notice::Aborted(generation));
                         }
                     }
-                    Group::Stage(notice) => self.enqueue(Notice::Stage(notice), since),
+                    Group::Stage(notice) => self.enqueue(Notice::Stage(notice)),
                     // A panic applying a transaction poisons the stage,
                     // naming it.
                     Group::Edit(mut group) => {
                         let generation = group[0].generation;
-                        let apply = || self.apply_change_sets(&mut group, since, &mut covered, hooks);
+                        edits.push(generation);
+                        let apply = || self.apply_change_sets(&mut group, &mut covered, hooks);
                         retries_sublayers |= self.guarded(Poisoned::Apply(generation), apply);
                     }
                 }
@@ -938,17 +980,274 @@ impl StageComposition {
                     }
                 }
             }
+            // A drain a read's loads need settles nothing, and leaves its
+            // work to the settlement the read runs on with.
+            if let Some(owner) = snapshot.close() {
+                self.close_snapshot(owner, &edits, &mut covered, &mut found);
+            }
             // What settling the snapshot's work found follows its notices,
             // with what its own composition found, less what they reported.
-            found_since = self.take_discovered(&mut found, found_since);
-            found.retain(|path| !covered.covers(path));
-            let back = Mark {
-                at: None,
-                since: found_since,
-            };
-            self.report(back, StageNotice::Recomposed, found, hooks);
+            // A prototype root is kept: what a read registered stays with
+            // what the read found, a later edit covering it or not.
+            found.extend(self.discovered.take());
+            found.retain(|path| is_prototype_root(path) || !covered.covers(path));
+            self.report(None, StageNotice::Recomposed, found, hooks);
+            self.settle_follow_ups(hooks);
         }
         Ok(())
+    }
+
+    /// Opens a registration scope whose registrations are reported in
+    /// `target`, while a sink listens ([`listen`](Self::listen)), and
+    /// records the work queued from here on for its owner. `None` while no
+    /// sink listens, or while the cache is borrowed, when the operation
+    /// fails as busy before it composes anything.
+    fn open_scope(&self, target: Target) -> Scope<'_> {
+        let owner = (self.listening.get() && !self.cache.is_borrowed()).then(|| {
+            let owner = self.new_owner(target);
+            self.scopes.borrow_mut().push(owner);
+            self.cache.borrow_mut().set_owner(Some(owner));
+            owner
+        });
+        Scope {
+            composition: self,
+            owner,
+        }
+    }
+
+    /// Abandons `owner`'s scope, which an early return or a panic left
+    /// unclosed: its work, and the roots credited to it, go to the scope it
+    /// was opened in, or to [`CARRY`] once none is open, which report them.
+    /// A temporary scope's rules end, and what it registered stays private
+    /// ([`end_temporary`](Self::end_temporary)). Each borrow is only tried:
+    /// a panic may have left one held, and this runs as it unwinds.
+    fn abandon(&self, owner: pcp::Owner) {
+        if !self.listening.get() {
+            return;
+        }
+        let Ok(mut scopes) = self.scopes.try_borrow_mut() else {
+            return;
+        };
+        scopes.retain(|open| *open != owner);
+        let current = scopes.last().copied().unwrap_or(CARRY);
+        drop(scopes);
+        let target = self
+            .targets
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut targets| targets.remove(&owner));
+        let temporary = matches!(target, Some(Target::Discard));
+        let heir = if temporary { SILENT } else { current };
+        if self.cache.is_borrowed() {
+            return;
+        }
+        let mut cache = self.cache.borrow_mut();
+        if current == CARRY {
+            cache.end_claims();
+        }
+        if temporary {
+            cache.discard_notifications(owner);
+            cache.set_private(None);
+        }
+        cache.set_owner(Some(current));
+        cache.reown(owner, heir);
+        if let Ok(mut credited) = self.credited.try_borrow_mut() {
+            credited.extend(cache.take_minted());
+            credited.retain(|(_, credit)| !(temporary && *credit == owner));
+            for (_, credit) in credited.iter_mut() {
+                if *credit == owner {
+                    *credit = heir;
+                }
+            }
+        }
+    }
+
+    /// Hands out an owner whose registrations are reported in `target`.
+    fn new_owner(&self, target: Target) -> pcp::Owner {
+        let id = self.owners.get() + 1;
+        self.owners.set(id);
+        let owner = pcp::Owner(id);
+        self.targets.borrow_mut().insert(owner, target);
+        owner
+    }
+
+    /// Closes `owner`'s scope ([`open_scope`](Self::open_scope)), recording
+    /// work for the scope it was opened in, or for [`CARRY`] once none is
+    /// open. Returns the roots credited to it, and whether work it owns is
+    /// left unsettled ([`leave`](Self::leave)).
+    fn close_scope(&self, owner: pcp::Owner) -> (Vec<sdf::Path>, bool) {
+        // The last sink left while the scope was open, and the scopes went
+        // with it ([`forget_discovered`](Self::forget_discovered)).
+        if !self.listening.get() {
+            return (Vec::new(), false);
+        }
+        let (current, outermost) = {
+            let mut scopes = self.scopes.borrow_mut();
+            // The sinks were all removed and others installed while it was
+            // open: the scope went with the first set.
+            if !scopes.contains(&owner) {
+                return (Vec::new(), false);
+            }
+            debug_assert_eq!(scopes.last(), Some(&owner), "a scope closes innermost first");
+            scopes.retain(|open| *open != owner);
+            (scopes.last().copied().unwrap_or(CARRY), scopes.is_empty())
+        };
+        let remaining = {
+            let mut cache = self.cache.borrow_mut();
+            cache.set_owner(Some(current));
+            if outermost {
+                cache.end_claims();
+            }
+            cache.has_work_of(owner)
+        };
+        let roots = self.take_credits(owner);
+        self.targets.borrow_mut().remove(&owner);
+        (roots, remaining)
+    }
+
+    /// Closes a drain snapshot's scope: the roots credited to it go to the
+    /// commit's notice when the snapshot settled one transaction, `edits`
+    /// holding its generation alone, and to `found`, which its
+    /// [`StageNotice::Recomposed`] reports, when it settled several together
+    /// against the layers as the last of them left them. What work that
+    /// outlived its own operation registered goes to `found` too.
+    fn close_snapshot(&self, owner: pcp::Owner, edits: &[u64], covered: &mut Covering, found: &mut Vec<sdf::Path>) {
+        let (roots, remaining) = self.close_scope(owner);
+        let single = match edits {
+            [generation] => Some(*generation),
+            _ => None,
+        };
+        let mut outbox = self.outbox.borrow_mut();
+        let committed = single.filter(|_| !roots.is_empty()).and_then(|generation| {
+            outbox.iter_mut().find_map(|notice| match notice {
+                Notice::Committed(notice) if notice.generation == generation => Some(notice),
+                _ => None,
+            })
+        });
+        match committed {
+            Some(notice) => {
+                // What the commit names covers what settling found beneath.
+                for root in &roots {
+                    covered.insert(root.clone());
+                }
+                notice.payload.add_resynced(roots);
+            }
+            None => found.extend(roots),
+        }
+        drop(outbox);
+        found.extend(self.take_credits(CARRY));
+        if remaining {
+            self.leave(owner, single.map_or(Anchor::Back, Anchor::Commit));
+        }
+    }
+
+    /// Takes the roots the cache credited to `owner` since they were last
+    /// taken.
+    fn take_credits(&self, owner: pcp::Owner) -> Vec<sdf::Path> {
+        let mut credited = self.credited.take();
+        credited.extend(self.cache.borrow_mut().take_minted());
+        let (taken, kept): (Vec<_>, Vec<_>) = credited.into_iter().partition(|(_, credit)| *credit == owner);
+        self.credited.replace(kept);
+        taken.into_iter().map(|(root, _)| root).collect()
+    }
+
+    /// Hands the work `owner` left unsettled on: to a follow-up behind its
+    /// notice at `anchor` while an enclosing operation runs on, which may
+    /// settle it, and to [`CARRY`] once no scope is open.
+    fn leave(&self, owner: pcp::Owner, anchor: Anchor) {
+        if self.scopes.borrow().is_empty() {
+            self.cache.borrow_mut().reown(owner, CARRY);
+            return;
+        }
+        let follow = self.new_owner(Target::FollowUp(anchor));
+        self.cache.borrow_mut().reown(owner, follow);
+        self.follow_ups.borrow_mut().push(follow);
+    }
+
+    /// Queues the notice of each follow-up whose work settled, and, once no
+    /// scope is open, of every follow-up, what is left of its work going to
+    /// [`CARRY`]. What [`CARRY`] registered joins what operations found, and
+    /// what [`SILENT`] registered is dropped.
+    fn settle_follow_ups(&self, hooks: &dyn CompositionHooks) {
+        if !self.listening.get() {
+            return;
+        }
+        let returned = self.scopes.borrow().is_empty();
+        let follow_ups = self.follow_ups.take();
+        let mut waiting = Vec::new();
+        for follow in follow_ups {
+            let remaining = self.cache.borrow().has_work_of(follow);
+            if remaining && !returned {
+                waiting.push(follow);
+                continue;
+            }
+            if remaining {
+                self.cache.borrow_mut().reown(follow, CARRY);
+            }
+            let roots = self.take_credits(follow);
+            let anchor = match self.targets.borrow_mut().remove(&follow) {
+                Some(Target::FollowUp(anchor)) => anchor,
+                _ => Anchor::Back,
+            };
+            if !roots.is_empty() && hooks.delivers() {
+                self.insert_after(anchor, StageNotice::Recomposed(ResyncPaths::from_subtrees(roots)));
+            }
+        }
+        self.follow_ups.borrow_mut().extend(waiting);
+        let carried = self.take_credits(CARRY);
+        self.discovered.borrow_mut().extend(carried);
+        self.take_credits(SILENT);
+    }
+
+    /// Queues `notice` behind `anchor` in the outbox.
+    fn insert_after(&self, anchor: Anchor, mut notice: StageNotice) {
+        if self.poisoned.get().is_some() {
+            return;
+        }
+        self.hide_private(&mut notice);
+        let mut outbox = self.outbox.borrow_mut();
+        let at = match anchor {
+            Anchor::Commit(generation) => outbox
+                .iter()
+                .position(|queued| matches!(queued, Notice::Committed(committed) if committed.generation == generation))
+                .map_or(outbox.len(), |at| at + 1),
+            Anchor::Back => outbox.len(),
+        };
+        outbox.insert(at, Notice::Stage(notice));
+    }
+
+    /// Opens a scope for a walk under temporary load rules
+    /// (`Stage::find_loadable`): every registration it makes is credited to
+    /// it and kept private ([`pcp::IndexCache::set_private`]), and walks
+    /// other owners queued wait until it ends
+    /// ([`end_temporary`](Self::end_temporary)).
+    pub(super) fn begin_temporary(&self) -> Scope<'_> {
+        let scope = self.open_scope(Target::Discard);
+        if let Some(owner) = scope.owner {
+            self.cache.borrow_mut().set_private(Some(owner));
+        }
+        scope
+    }
+
+    /// Ends `owner`'s temporary scope ([`begin_temporary`](Self::begin_temporary)),
+    /// once the original rules are restored and what the swaps dropped has
+    /// settled: its notification work is dropped, and the structural work
+    /// it left goes to [`SILENT`], which restores the population and
+    /// reports nothing.
+    pub(super) fn end_temporary(&self, scope: Scope<'_>, hooks: &dyn CompositionHooks) {
+        let Some(owner) = scope.close() else {
+            return;
+        };
+        {
+            let mut cache = self.cache.borrow_mut();
+            cache.discard_notifications(owner);
+            cache.set_private(None);
+        }
+        let (_, remaining) = self.close_scope(owner);
+        if remaining {
+            self.cache.borrow_mut().reown(owner, SILENT);
+        }
+        self.settle_follow_ups(hooks);
     }
 
     /// Starts a settlement round, at a drain or a mutation the stage's caller
@@ -995,12 +1294,11 @@ impl StageComposition {
     /// change dropped prims (a walk under rules it swapped), reporting what
     /// the settling's loads find.
     pub(super) fn settle_now(&self, hooks: &dyn CompositionHooks) {
-        let since = self.prototype_mark();
         let mut found = Vec::new();
         self.guarded(Poisoned::Compose, || {
             self.settle_work(Settled::Required, hooks, &mut found);
         });
-        self.discover(found, since, hooks);
+        self.discover(found, hooks);
     }
 
     /// Delivers what operations outside a drain found
@@ -1027,65 +1325,97 @@ impl StageComposition {
         {
             return Err(sdf::LayerError::Busy.into());
         }
-        self.report_discovered(hooks);
+        // What operations found predates every edit queued, so its notice
+        // goes ahead of theirs. The edits are reconciled first, so what
+        // survived its operation settles against the layers they leave, in
+        // a round of its own, and is reported with what was found.
+        let at = self.outbox.borrow().len();
+        let mut found = self.discovered.take();
+        found.extend(self.take_credits(CARRY));
+        // The work operations left is the flush's from here on: what
+        // settling it registers goes out in the flush's notice, settled by
+        // the drain or after it.
+        let scope = self.open_scope(Target::Mutation);
+        if let Some(owner) = scope.owner {
+            self.cache.borrow_mut().reown(CARRY, owner);
+        }
+        if !self.pending_is_empty()
+            && let Err(error) = self.reconcile(true, hooks)
+        {
+            // What was found waits for the next delivery.
+            self.discovered.borrow_mut().extend(found);
+            return Err(error);
+        }
+        if self.listening.get() {
+            self.begin_round();
+            self.guarded(Poisoned::Compose, || {
+                self.settle_work(Settled::Required, hooks, &mut found);
+            });
+        }
+        if let Some(owner) = scope.close() {
+            self.close_mutation(owner, &mut found);
+        }
+        self.settle_follow_ups(hooks);
+        found.extend(self.discovered.take());
+        if !found.is_empty() && hooks.delivers() {
+            self.queue_at(at, StageNotice::Recomposed(ResyncPaths::from_subtrees(found)), hooks);
+        }
         self.process_pending(hooks);
         Ok(())
     }
 
-    /// Drops what operations found for no sink to hear: the last sink left.
+    /// Drops what operations found for no sink to hear, and the record of
+    /// who the work is reported for: the last sink left.
     pub(super) fn forget_discovered(&self) {
         self.discovered.take();
+        self.listening.set(false);
+        self.scopes.take();
+        self.targets.take();
+        self.credited.take();
+        self.follow_ups.take();
+        self.cache.borrow_mut().forget_owners();
+    }
+
+    /// Records the work queued from here on for who it is reported for,
+    /// and credits the prototypes settling it registers
+    /// ([`pcp::IndexCache::set_owner`]): a sink was installed.
+    pub(super) fn listen(&self) {
+        if !self.listening.replace(true) {
+            self.cache.borrow_mut().set_owner(Some(CARRY));
+        }
+    }
+
+    /// Sets whether settling a change composes its resynced subtrees for
+    /// the prototypes they hold ([`pcp::IndexCache::set_complete`]): on
+    /// while an installed sink asks for every one
+    /// ([`StageSink::complete_prototypes`]).
+    pub(super) fn set_complete(&self, complete: bool) {
+        self.cache.borrow_mut().set_complete(complete);
     }
 
     /// Records `found`, what an operation outside a drain (a read, a
-    /// mutation's own loads) that began at the prototype mark `since`
-    /// dropped that no notice carries, for the next drain to report. Nothing
-    /// is kept with no sink to tell.
-    fn discover(&self, found: Vec<sdf::Path>, since: usize, hooks: &dyn CompositionHooks) {
+    /// mutation's own loads) dropped that no notice carries, for the next
+    /// drain to report. Nothing is kept with no sink to tell.
+    fn discover(&self, found: Vec<sdf::Path>, hooks: &dyn CompositionHooks) {
         if hooks.delivers() {
-            self.note_discovered(found, since);
+            self.discovered.borrow_mut().extend(found);
         }
-    }
-
-    /// Records `found`, found by an operation that began at the prototype
-    /// mark `since`, keeping the earliest mark of the operations recorded.
-    fn note_discovered(&self, found: Vec<sdf::Path>, since: usize) {
-        if found.is_empty() {
-            return;
-        }
-        let mut discovered = self.discovered.borrow_mut();
-        discovered.paths.extend(found);
-        discovered.since = Some(discovered.since.map_or(since, |earliest| earliest.min(since)));
-    }
-
-    /// Moves what operations found ([`discover`](Self::discover)) onto
-    /// `found`, returning the earlier of `since` and the mark they began at:
-    /// the mark of a notice that reports both.
-    fn take_discovered(&self, found: &mut Vec<sdf::Path>, since: usize) -> usize {
-        let discovered = self.discovered.take();
-        found.extend(discovered.paths);
-        discovered.since.map_or(since, |earliest| earliest.min(since))
     }
 
     /// Queues what operations found ([`discover`](Self::discover)) as a
     /// [`StageNotice::Recomposed`] behind every notice queued.
     fn report_discovered(&self, hooks: &dyn CompositionHooks) {
-        let mut found = Vec::new();
-        let since = self.take_discovered(&mut found, self.prototype_mark());
-        self.report(Mark { at: None, since }, StageNotice::Recomposed, found, hooks);
-    }
-
-    /// The cache's prototype mark ([`pcp::IndexCache::prototype_mark`]).
-    fn prototype_mark(&self) -> usize {
-        self.cache.borrow().prototype_mark()
+        let found = self.discovered.take();
+        self.report(None, StageNotice::Recomposed, found, hooks);
     }
 
     /// Queues `notice` naming `found`, the subtrees an operation resynced, at
-    /// `mark` ([`queue_at`](Self::queue_at)). Nothing is queued when it found
-    /// nothing, or with no sink to tell.
+    /// `mark` ([`queue_at`](Self::queue_at)), or behind every notice queued
+    /// with none. Nothing is queued when it found nothing, or with no sink
+    /// to tell.
     fn report(
         &self,
-        mark: Mark,
+        mark: Option<usize>,
         notice: fn(ResyncPaths) -> StageNotice,
         found: Vec<sdf::Path>,
         hooks: &dyn CompositionHooks,
@@ -1093,25 +1423,49 @@ impl StageComposition {
         if found.is_empty() || !hooks.delivers() {
             return;
         }
-        self.queue_at(mark, notice(ResyncPaths::from_subtrees(found)), hooks);
+        let notice = notice(ResyncPaths::from_subtrees(found));
+        match mark {
+            Some(mark) => self.queue_at(mark, notice, hooks),
+            None => self.enqueue(Notice::Stage(notice)),
+        }
     }
 
-    /// Queues `notice` behind every notice queued, under the prototype mark
-    /// `since` its change began at.
-    fn enqueue(&self, notice: Notice, since: usize) {
-        self.outbox.borrow_mut().push_back(Queued { notice, since });
+    /// Queues `notice` behind every notice queued.
+    fn enqueue(&self, mut notice: Notice) {
+        if let Notice::Stage(notice) = &mut notice {
+            self.hide_private(notice);
+        }
+        self.outbox.borrow_mut().push_back(notice);
+    }
+
+    /// Drops from `notice` the paths in the namespace of a prototype no
+    /// sink has been told of ([`pcp::IndexCache::is_private`]).
+    fn hide_private(&self, notice: &mut StageNotice) {
+        let paths = match notice {
+            StageNotice::EditTarget => return,
+            StageNotice::LoadRules(paths)
+            | StageNotice::LoadsRetried(paths)
+            | StageNotice::Recomposed(paths)
+            | StageNotice::Muting { resynced: paths, .. } => paths,
+        };
+        if self.cache.is_borrowed_mut() {
+            return;
+        }
+        let cache = self.cache.borrow();
+        if !cache.has_private() {
+            return;
+        }
+        paths.subtrees.retain(|path| !cache.is_private(path));
+        paths.prims.retain(|path| !cache.is_private(path));
     }
 
     /// Opens a mutation's notice: queues what operations found before it
     /// ([`discover`](Self::discover)) as a [`StageNotice::Recomposed`], and
-    /// returns the mark its own notice goes at ([`queue_at`](Self::queue_at)):
-    /// the outbox's length and the prototype mark now.
-    fn mark(&self, hooks: &dyn CompositionHooks) -> Mark {
+    /// returns the outbox's length, the mark its own notice goes at
+    /// ([`queue_at`](Self::queue_at)).
+    fn mark(&self, hooks: &dyn CompositionHooks) -> usize {
         self.report_discovered(hooks);
-        Mark {
-            at: Some(self.outbox.borrow().len()),
-            since: self.prototype_mark(),
-        }
+        self.outbox.borrow().len()
     }
 
     /// Joins `joined`, a layer an edit just sublayered, to the stage, then
@@ -1124,10 +1478,9 @@ impl StageComposition {
         committed: sdf::Committed,
         hooks: &dyn CompositionHooks,
     ) {
-        let since = self.prototype_mark();
         let mut found = Vec::new();
         self.intern_layer(joined, hooks, &mut found);
-        self.discover(found, since, hooks);
+        self.discover(found, hooks);
         self.deliver(committed, hooks);
     }
 
@@ -1168,6 +1521,8 @@ impl StageComposition {
         self.layers.borrow_mut().clear_failed_loads();
         self.retries.set(self.retries.get() + 1);
         let mark = self.mark(hooks);
+        // A retry inside a drain is that snapshot's own work.
+        let scope = (settled == Settled::Required).then(|| self.open_scope(Target::Mutation));
         let mut again = self.cache.borrow_mut().drop_load_failed_indices(|_| true);
         // The sweep goes first: it retires a reclaimed stack's failure
         // diagnostics, so the requeue never demands a sublayer for a stack
@@ -1178,8 +1533,12 @@ impl StageComposition {
         self.settle_work(settled, hooks, &mut again);
         // The stacks the settled prims released are swept too.
         self.reclaim_stale_stacks();
-        let since = self.take_discovered(&mut again, mark.since);
-        self.report(Mark { since, ..mark }, StageNotice::LoadsRetried, again, hooks);
+        again.extend(self.discovered.take());
+        if let Some(owner) = scope.and_then(Scope::close) {
+            self.close_mutation(owner, &mut again);
+        }
+        self.report(Some(mark), StageNotice::LoadsRetried, again, hooks);
+        self.settle_follow_ups(hooks);
     }
 
     /// How many times the failed loads were retried
@@ -1209,87 +1568,65 @@ impl StageComposition {
                 self.outbox.take();
                 break;
             }
-            let Some(Queued { mut notice, since }) = self.outbox.borrow_mut().pop_front() else {
-                break;
-            };
-            self.add_composed_prototypes(&mut notice, since, hooks);
-            match notice {
-                Notice::Committed(notice) => hooks.notify(*notice),
-                Notice::Aborted(generation) => hooks.aborted(generation),
-                Notice::Stage(notice) => hooks.notify_stage(&notice),
+            let next = self.outbox.borrow_mut().pop_front();
+            match next {
+                Some(Notice::Committed(notice)) => hooks.notify(*notice),
+                Some(Notice::Aborted(generation)) => hooks.aborted(generation),
+                Some(Notice::Stage(notice)) => hooks.notify_stage(&notice),
+                None => break,
             }
         }
     }
 
-    /// Adds to `notice`'s resyncs the prototypes the change it reports
-    /// composed: each minted since `since` that a walk of its resynced
-    /// subtrees reaches. C++ `UsdStage` composes every resynced subtree as it
-    /// processes a change, and names each prototype `Usd_InstanceCache` adds
-    /// on the way (`_ComposeSubtreesInParallel`). Composition here is
-    /// demand-driven, so the walk registers the instances in those subtrees
-    /// first ([`register_instances`](Self::register_instances)), and goes on
-    /// into each new prototype for the instances nested in it.
-    ///
-    /// The walk composes, and may load, the resynced subtrees, as C++ does,
-    /// and is repeated until the population it reads is stable. One that
-    /// fails stops, and the notice names the prototypes its last pass
-    /// reached.
-    //
-    // TODO(perf): a resynced subtree is walked whole whether or not the change
-    // could have made anything in it instanceable; the change set could
-    // narrow the walk to the subtrees whose instancing it touched.
-    fn add_composed_prototypes(&self, notice: &mut Notice, since: usize, hooks: &dyn CompositionHooks) {
-        let roots = match notice {
-            Notice::Committed(notice) => notice.payload.resynced_prims().to_vec(),
-            Notice::Stage(
-                StageNotice::LoadRules(paths)
-                | StageNotice::LoadsRetried(paths)
-                | StageNotice::Recomposed(paths)
-                | StageNotice::Muting { resynced: paths, .. },
-            ) => paths.subtrees.clone(),
-            Notice::Aborted(_) | Notice::Stage(StageNotice::EditTarget) => return,
-        };
-        if roots.is_empty() {
-            return;
-        }
-        let mut reached = Vec::new();
-        let is_new = |cache: &pcp::IndexCache, root: &sdf::Path| cache.minted_since(root, since);
-        let _ = self.register_instances(&roots, is_new, &mut reached, hooks);
-        {
-            let cache = self.cache.borrow();
-            reached.retain(|root| is_new(&cache, root));
-        }
-        if reached.is_empty() {
-            return;
-        }
-        match notice {
-            Notice::Committed(notice) => notice.payload.add_resynced(reached),
-            Notice::Stage(
-                StageNotice::LoadRules(paths)
-                | StageNotice::LoadsRetried(paths)
-                | StageNotice::Recomposed(paths)
-                | StageNotice::Muting { resynced: paths, .. },
-            ) => {
-                paths.subtrees.extend(reached);
-                paths.normalize();
-            }
-            Notice::Aborted(_) | Notice::Stage(StageNotice::EditTarget) => {}
+    /// Closes a mutation's scope, its roots joining `found`, what its notice
+    /// reports. The work it left survives the mutation ([`CARRY`]).
+    fn close_mutation(&self, owner: pcp::Owner, found: &mut Vec<sdf::Path>) {
+        let (roots, remaining) = self.close_scope(owner);
+        found.extend(roots);
+        if remaining {
+            self.leave(owner, Anchor::Back);
         }
     }
 
-    /// Registers every instance at or below each of `roots`, and fills
-    /// `reached` with the prototype roots they resolve to, each once. The
-    /// walk then goes on through the namespace of each reached root `descend`
-    /// admits, for the instances nested in it. Returns the population epoch
-    /// the answer holds at.
+    /// Registers every prototype the stage's population holds: a walk from
+    /// the pseudo-root into every prototype namespace it reaches
+    /// ([`register_instances`](Self::register_instances)). What its loads
+    /// drop, and the prototypes it mints, reach the stage's sinks at the
+    /// next delivery. Returns the population epoch the answer holds at.
+    pub(super) fn discover_prototypes(&self, hooks: &dyn CompositionHooks) -> Result<u64, pcp::QueryError> {
+        self.scoped_read(hooks, |found| self.register_instances(hooks, found))
+    }
+
+    /// Runs `read`, which leaves what its loads drop in the vector it is
+    /// handed, inside a scope of its own when no operation is open: what it
+    /// registers goes out with what it found, at the next delivery. A read
+    /// inside an operation is the operation's.
+    fn scoped_read<T>(&self, hooks: &dyn CompositionHooks, read: impl FnOnce(&mut Vec<sdf::Path>) -> T) -> T {
+        let outermost = self.scopes.borrow().is_empty();
+        let scope = outermost.then(|| self.open_scope(Target::Found));
+        let mut found = Vec::new();
+        let result = read(&mut found);
+        if let Some(owner) = scope.and_then(Scope::close) {
+            self.close_mutation(owner, &mut found);
+            self.settle_follow_ups(hooks);
+        }
+        // A read delivers nothing.
+        self.discover(found, hooks);
+        result
+    }
+
+    /// Registers every instance the stage's population holds, walking from
+    /// the pseudo-root, then through each prototype namespace it reaches
+    /// for the instances nested in it. What its loads drop joins `found`.
+    /// Returns the population epoch the answer holds at.
     ///
     /// The walk takes the steps stage traversal takes, so mask, activeness,
-    /// and the stop at instances cannot drift from it: it descends only into
+    /// and the stop at instances cannot drift from it: it reads only
     /// populated prims, so nothing below an inactive one is composed or
     /// loaded, and stops at each instance, whose subtree belongs to its
-    /// prototype. Every subtree of `roots` is walked before any prototype
-    /// namespace, so prototypes mint in stage order. An error stops the walk,
-    /// leaving in `reached` what its last pass had found.
+    /// prototype. The stage namespace is walked before any prototype
+    /// namespace, and the namespaces in the order they were reached, so
+    /// prototypes mint in the order the walk reaches their instances.
     ///
     /// Each prim is one settled read, against the cache, so a prim's own
     /// loads settle before its children are read, but the walk as a whole
@@ -1307,31 +1644,24 @@ impl StageComposition {
     // independent once their parent has composed, so their walks could run
     // concurrently once materialization does (see
     // `IndexCache::materialize_prototype`).
-    pub(super) fn register_instances(
+    fn register_instances(
         &self,
-        roots: &[sdf::Path],
-        mut descend: impl FnMut(&pcp::IndexCache, &sdf::Path) -> bool,
-        reached: &mut Vec<sdf::Path>,
         hooks: &dyn CompositionHooks,
+        found: &mut Vec<sdf::Path>,
     ) -> Result<u64, pcp::QueryError> {
         loop {
             let epoch = self.cache.borrow().population_epoch();
-            reached.clear();
             let mut seen = sdf::PathSet::default();
-            let mut namespaces = Vec::new();
-            let mut found = Vec::new();
-            let mut pass = roots.iter().cloned();
+            let mut prototypes = Vec::new();
+            let mut queue = VecDeque::from([sdf::Path::abs_root()]);
             // A prototype's namespace can hold further instances, each minting
             // a prototype to walk in turn; `seen` bounds the fixpoint however
             // the composition nests.
-            while let Some(root) = pass.next().or_else(|| namespaces.pop()) {
-                self.walk_instances(root, &mut found, hooks)?;
-                for prototype in found.drain(..) {
+            while let Some(root) = queue.pop_front() {
+                self.walk_instances(root, &mut prototypes, hooks, found)?;
+                for prototype in prototypes.drain(..) {
                     if seen.insert(prototype.clone()) {
-                        if descend(&self.cache.borrow(), &prototype) {
-                            namespaces.push(prototype.clone());
-                        }
-                        reached.push(prototype);
+                        queue.push_back(prototype);
                     }
                 }
             }
@@ -1341,33 +1671,46 @@ impl StageComposition {
         }
     }
 
+    /// [`settle`](Self::settle) when edits are queued, for a read of the
+    /// walk: one a load of the walk committed reconciles before the next
+    /// prim is read, and a read with nothing queued does not start a
+    /// settlement round. Either way a poisoned or busy stage fails the
+    /// read, as [`settle`](Self::settle) does.
+    fn settle_pending(&self, hooks: &dyn CompositionHooks) -> Result<(), pcp::QueryError> {
+        if !self.pending_is_empty() {
+            self.process_pending(hooks);
+        }
+        self.check_settled()
+    }
+
     /// Registers every instance in the subtree at `root`, pushing the
-    /// prototype root each resolves to onto `found`: one subtree of
+    /// prototype root each resolves to onto `prototypes`: one namespace of
     /// [`register_instances`](Self::register_instances)'s walk.
     fn walk_instances(
         &self,
         root: sdf::Path,
-        found: &mut Vec<sdf::Path>,
+        prototypes: &mut Vec<sdf::Path>,
         hooks: &dyn CompositionHooks,
+        found: &mut Vec<sdf::Path>,
     ) -> Result<(), pcp::QueryError> {
         let mut stack = vec![root];
         while let Some(path) = stack.pop() {
-            // One settled pass per prim, straight against the cache. Going
-            // through the stage's composed handles instead would re-enter
-            // `Stage::resolve_prototype_path` the moment the walk reached a
-            // prototype namespace, so the walk sits below that gate rather
-            // than guarding against itself.
-            self.settle(hooks)?;
-            let step = self.query(
+            // One settled read per prim, straight against the cache, which
+            // reads a prototype-namespace path like any other: the discovery
+            // `Stage::resolve_prototype_path` runs for the stage's composed
+            // handles is this walk.
+            self.settle_pending(hooks)?;
+            let step = self.read(
                 |g, c| match c.prototype_of(g, &path)? {
                     Some(prototype) => Ok(Err(prototype)),
                     None => Ok(Ok(c.populated_children(g, &path)?)),
                 },
                 hooks,
+                found,
             )?;
             match step {
                 // An instance's subtree belongs to its prototype, so stop here.
-                Err(prototype) => found.push(prototype),
+                Err(prototype) => prototypes.push(prototype),
                 // Reversed, as `traverse` does, so the walk visits children in
                 // namespace order. A prim that is not populated has none.
                 Ok(children) => {
@@ -1387,8 +1730,7 @@ impl StageComposition {
     /// a single [`pcp::Changes`] cycle and apply the resulting cache
     /// invalidation, queuing one [`CommittedChange`](super::CommittedChange)
     /// (tagged with the transaction's generation) for the stage's observers
-    /// and sinks, under the prototype mark `since` its snapshot began at. The
-    /// subtrees a sink hears it resync join `covered`.
+    /// and sinks. The subtrees a sink hears it resync join `covered`.
     ///
     /// [`pcp::Changes::did_change`] takes the per-layer split because
     /// classification is layer-relative; the event instead reports the merged
@@ -1397,7 +1739,6 @@ impl StageComposition {
     fn apply_change_sets(
         &self,
         group: &mut [PendingEdit],
-        since: usize,
         covered: &mut Covering,
         hooks: &dyn CompositionHooks,
     ) -> bool {
@@ -1464,7 +1805,15 @@ impl StageComposition {
             Payload::new(&pcp_changes, &merged, layer_changes, &provenance, &is_local)
         });
 
-        let outcome = self.update_pair(|graph, cache| pcp_changes.apply(cache, graph));
+        // The change's removals name paths in its layers' own namespaces as
+        // well as the stage's, so they queue no walk: the payload's resyncs,
+        // in composed stage namespace, are walked below.
+        let outcome = self.update_pair(|graph, cache| {
+            let walking = cache.set_walking(false);
+            let outcome = pcp_changes.apply(cache, graph);
+            cache.set_walking(walking);
+            outcome
+        });
         // The recompose may have demanded sublayers — a `${VAR}` entry the
         // edited variables newly select, or a just-authored literal naming an
         // unloaded layer; open them before observers read the settled stage.
@@ -1479,6 +1828,17 @@ impl StageComposition {
         let retries_sublayers = outcome.retries_sublayers;
         if let Some(payload) = payload.as_mut() {
             payload.finish(outcome, found);
+            let mut cache = self.cache.borrow_mut();
+            if cache.has_private() {
+                payload.hide(|path| cache.is_private(path));
+            }
+            // The prims the change resynced are walked for the instances
+            // they register, those whose specs it touched included.
+            if cache.is_complete() {
+                let walk = payload.walk();
+                cache.queue_resyncs(&walk.subtrees, &walk.prims);
+            }
+            drop(cache);
         }
 
         let Some(payload) = payload else {
@@ -1504,7 +1864,7 @@ impl StageComposition {
         });
         hooks.observe(&notice);
         if hooks.delivers() {
-            self.enqueue(Notice::Committed(notice), since);
+            self.enqueue(Notice::Committed(notice));
         }
         retries_sublayers
     }
@@ -2173,15 +2533,23 @@ impl StageComposition {
         query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
         hooks: &dyn CompositionHooks,
     ) -> Result<T, pcp::QueryError> {
+        self.scoped_read(hooks, |found| self.read(query, hooks, found))
+    }
+
+    /// [`query`](Self::query), leaving what its loads drop in `found`.
+    fn read<T>(
+        &self,
+        query: impl FnMut(&pcp::LayerView<'_>, &mut pcp::IndexCache) -> Result<T, pcp::QueryError>,
+        hooks: &dyn CompositionHooks,
+        found: &mut Vec<sdf::Path>,
+    ) -> Result<T, pcp::QueryError> {
         // The passes build indices through the resolver, and the loads
         // between them run it too.
         let mut query = query;
-        let since = self.prototype_mark();
-        let mut found = Vec::new();
-        let result = self.guarded(Poisoned::Compose, || {
+        self.guarded(Poisoned::Compose, || {
             loop {
                 let evictions = self.cache.borrow().evictions();
-                let result = match self.fixpoint(&mut query, Settled::Required, hooks, &mut found) {
+                let result = match self.fixpoint(&mut query, Settled::Required, hooks, found) {
                     Ok(answer) => Ok(answer),
                     Err(Interrupted::Failed(error)) => Err(error),
                     Err(Interrupted::NewWork) => unreachable!("a settled fixpoint reconciles new work itself"),
@@ -2194,18 +2562,14 @@ impl StageComposition {
                     return result;
                 }
                 let snapshots = self.snapshots.get();
-                self.settle_work(Settled::Required, hooks, &mut found);
+                self.settle_work(Settled::Required, hooks, found);
                 // Settling reconciled edits its loads committed, which can
                 // change the answer: the query runs again.
                 if self.snapshots.get() == snapshots {
                     return result;
                 }
             }
-        });
-        // What the read's loads found reaches the stage's sinks at the next
-        // delivery: a read delivers nothing.
-        self.discover(found, since, hooks);
-        result
+        })
     }
 
     /// Runs `pass` to a fixpoint over on-demand layer loading.
@@ -2275,7 +2639,9 @@ impl StageComposition {
                 return Err(Interrupted::Failed(busy.into()));
             }
             scope.get_or_insert_with(ar::CacheScope::begin);
-            let loaded = self.load_demanded(&pending, hooks, found);
+            // What the loads invalidate is the work of the owners whose
+            // settlement demanded them.
+            let loaded = self.owning_loads(&pending, hooks, found);
             if settled == Settled::Taken && !self.pending_is_empty() {
                 return Err(Interrupted::NewWork);
             }
@@ -2305,6 +2671,59 @@ impl StageComposition {
             pending.clear();
             clips.clear();
         }
+    }
+
+    /// Loads the targets `pending` demands ([`load_demanded`](Self::load_demanded)),
+    /// recording the work each load invalidates for the owners whose
+    /// settlement demanded its target ([`pcp::Demand::owner`]): the one, or,
+    /// for a target several demanded, a follow-up behind every notice,
+    /// whose consequences are joint. A target no owner demanded loads for
+    /// the owner current. Returns whether a load made progress.
+    fn owning_loads(&self, pending: &[pcp::Demand], hooks: &dyn CompositionHooks, found: &mut Vec<sdf::Path>) -> bool {
+        if pending.iter().all(|demand| demand.owner.is_none()) {
+            return self.load_demanded(pending, hooks, found);
+        }
+        // Every owner that demanded each target, then the demands of the
+        // targets the same owners demanded, loaded together.
+        let mut demanders: HashMap<(&str, pcp::LayerStackId), BTreeSet<pcp::Owner>> = HashMap::new();
+        for demand in pending {
+            let key = (demand.asset_path.as_str(), demand.context);
+            demanders.entry(key).or_default().extend(demand.owner);
+        }
+        // Consecutive demands of the same owners load together, in the
+        // order they were raised: the loads run, and the user code they run
+        // commits, in composition order.
+        let sets: Vec<&BTreeSet<pcp::Owner>> = pending
+            .iter()
+            .map(|demand| &demanders[&(demand.asset_path.as_str(), demand.context)])
+            .collect();
+        let mut loaded = false;
+        let mut start = 0;
+        let mut joints: Vec<(&BTreeSet<pcp::Owner>, pcp::Owner)> = Vec::new();
+        for owners in sets.chunk_by(|a, b| a == b) {
+            let demands = &pending[start..start + owners.len()];
+            start += owners.len();
+            let owners = owners[0];
+            let owner = match owners.len() {
+                0 => None,
+                1 => owners.first().copied(),
+                _ => {
+                    let held = joints.iter().find(|(held, _)| *held == owners).map(|(_, joint)| *joint);
+                    if held.is_none() {
+                        let joint = self.new_owner(Target::FollowUp(Anchor::Back));
+                        self.follow_ups.borrow_mut().push(joint);
+                        joints.push((owners, joint));
+                    }
+                    held.or(joints.last().map(|(_, joint)| *joint))
+                }
+            };
+            let previous = owner.map(|owner| self.cache.borrow_mut().set_owner(Some(owner)));
+            loaded |= self.load_demanded(demands, hooks, found);
+            if let Some(previous) = previous {
+                self.cache.borrow_mut().set_owner(previous);
+            }
+        }
+        loaded
     }
 
     /// Applies a muted-set mutation and recomposes when it reports a change,
@@ -2338,6 +2757,7 @@ impl StageComposition {
         self.begin_round();
         // The toggle's notice goes ahead of the edits its settling reconciles.
         let mark = self.mark(hooks);
+        let scope = self.open_scope(Target::Mutation);
         let Some((changed, mut resynced, demands)) = self.guarded(Poisoned::Compose, || {
             self.update_pair(|graph, cache| {
                 let change = mutate(graph)?;
@@ -2352,6 +2772,10 @@ impl StageComposition {
                 Some((change.changed, resynced, graph.take_sublayer_demands()))
             })
         }) else {
+            if let Some(owner) = scope.close() {
+                self.close_mutation(owner, &mut Vec::new());
+            }
+            self.settle_follow_ups(hooks);
             return;
         };
         // An unmuted sublayer that left the graph while muted has no fanout to
@@ -2372,39 +2796,38 @@ impl StageComposition {
         // them costs no notice; `LayerGraph::recompose_for_mute` carries the
         // argument.
         self.reclaim(hooks, pcp::Reclaim::Muted);
-        let since = self.take_discovered(&mut found, mark.since);
+        if let Some(owner) = scope.close() {
+            self.close_mutation(owner, &mut found);
+        }
+        found.extend(self.discovered.take());
         if hooks.delivers() {
             let notice = StageNotice::Muting {
                 layer: changed,
                 muted,
                 resynced: ResyncPaths::from_subtrees(found),
             };
-            self.queue_at(Mark { since, ..mark }, notice, hooks);
+            self.queue_at(mark, notice, hooks);
         }
+        self.settle_follow_ups(hooks);
     }
 
-    /// Queues `notice` for the stage's sinks at `mark`. Nothing is queued
-    /// with no sink to tell.
-    fn queue_at(&self, mark: Mark, notice: StageNotice, hooks: &dyn CompositionHooks) {
+    /// Queues `notice` for the stage's sinks at `mark`, the outbox's length
+    /// when the operation it reports began: ahead of the notices of edits
+    /// the operation itself reconciled. Nothing is queued with no sink to
+    /// tell.
+    fn queue_at(&self, mark: usize, mut notice: StageNotice, hooks: &dyn CompositionHooks) {
         // A poisoned stage dropped its outbox, and delivers nothing more.
         if !hooks.delivers() || self.poisoned.get().is_some() {
             return;
         }
-        let queued = Queued {
-            notice: Notice::Stage(notice),
-            since: mark.since,
-        };
-        let Some(at) = mark.at else {
-            self.outbox.borrow_mut().push_back(queued);
-            return;
-        };
         // Nothing is delivered while the operation runs, a mutation
         // ([`quiet`](Self::quiet)) or a retry inside a drain, which
         // delivers once it has reconciled, so the outbox only grew since.
+        self.hide_private(&mut notice);
         let mut outbox = self.outbox.borrow_mut();
-        debug_assert!(at <= outbox.len(), "the outbox was delivered past the mark");
-        let at = at.min(outbox.len());
-        outbox.insert(at, queued);
+        debug_assert!(mark <= outbox.len(), "the outbox was delivered past the mark");
+        let at = mark.min(outbox.len());
+        outbox.insert(at, Notice::Stage(notice));
     }
 
     /// Resolves the layer stack an edit target authors into, loading whatever
@@ -2427,7 +2850,6 @@ impl StageComposition {
         authoring: Option<Box<pcp::StackIdentity>>,
         hooks: &dyn CompositionHooks,
     ) -> Result<StackPin<'_>, String> {
-        let since = self.prototype_mark();
         if let Some(identity) = authoring {
             let mut found = Vec::new();
             let resolved = self.guarded(Poisoned::Compose, || {
@@ -2442,7 +2864,7 @@ impl StageComposition {
                     }
                 }
             });
-            self.discover(found, since, hooks);
+            self.discover(found, hooks);
             return resolved.map(|id| self.pin_stack(id));
         }
         // A target without a captured authoring stack (a local or variant
@@ -2469,7 +2891,7 @@ impl StageComposition {
         self.guarded(Poisoned::Compose, || {
             self.resolve_sublayer_demands(demands, hooks, &mut found)
         });
-        self.discover(found, since, hooks);
+        self.discover(found, hooks);
         Ok(pin)
     }
 
@@ -2596,12 +3018,18 @@ impl StageComposition {
         // change overwritten by the install.
         let _quiet = self.quiet(hooks);
         self.begin_round();
+        // The change's notice goes ahead of the edits that composing for it
+        // reconciles, from its first composition on, which the change owns
+        // the work of.
+        let mark = self.mark(hooks);
+        let scope = self.open_scope(Target::Mutation);
         let mut rules = self.settled_cache().load_rules().clone();
         edit(&mut rules);
         self.compose_flipped(&rules, hooks);
         let victims = self.swap_load_rules(rules, hooks);
-        // The change's notice goes ahead of the edits its settling reconciles.
-        let mark = self.mark(hooks);
+        // What the change reports is walked for the instances it registers,
+        // the ancestors it refreshes in place included.
+        self.cache.borrow_mut().queue_resyncs(&victims.subtrees, &victims.prims);
         // The prims the change dropped settle before the stacks they held are
         // swept: an unloaded payload's prims are retired, and a loaded one's
         // rebuilt.
@@ -2610,9 +3038,12 @@ impl StageComposition {
             self.settle_work(Settled::Required, hooks, &mut found);
         });
         self.reclaim(hooks, pcp::Reclaim::Unused);
-        let since = self.take_discovered(&mut found, mark.since);
+        if let Some(owner) = scope.close() {
+            self.close_mutation(owner, &mut found);
+        }
+        found.extend(self.discovered.take());
         if victims.subtrees.is_empty() && victims.prims.is_empty() {
-            self.discover(found, since, hooks);
+            self.discover(found, hooks);
         } else if hooks.delivers() {
             let mut paths = ResyncPaths {
                 subtrees: found,
@@ -2620,8 +3051,9 @@ impl StageComposition {
             };
             paths.subtrees.extend(victims.subtrees);
             paths.normalize();
-            self.queue_at(Mark { since, ..mark }, StageNotice::LoadRules(paths), hooks);
+            self.queue_at(mark, StageNotice::LoadRules(paths), hooks);
         }
+        self.settle_follow_ups(hooks);
     }
 
     /// Composes the ancestors whose inclusion installing `rules` would flip,
@@ -2706,6 +3138,32 @@ impl StageComposition {
             !held,
             "the stage is composed by user code its composition runs (a resolver), while it is part-composed"
         );
+    }
+}
+
+/// A registration scope ([`StageComposition::open_scope`]), open while a
+/// sink listens. Its close takes its owner, for the close that reports its
+/// work; one dropped unclosed, by an early return or a panic, is abandoned
+/// ([`StageComposition::abandon`]).
+pub(super) struct Scope<'a> {
+    /// The composition the scope is on.
+    composition: &'a StageComposition,
+    /// The scope's owner, `None` once closed or when no sink listened.
+    owner: Option<pcp::Owner>,
+}
+
+impl Scope<'_> {
+    /// Takes the scope's owner for its close.
+    fn close(mut self) -> Option<pcp::Owner> {
+        self.owner.take()
+    }
+}
+
+impl Drop for Scope<'_> {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            self.composition.abandon(owner);
+        }
     }
 }
 
@@ -2799,6 +3257,12 @@ fn next_group(queue: &mut VecDeque<Pending>) -> Option<Group> {
             Group::Edit(group)
         }
     })
+}
+
+/// Whether `path` is a `/__Prototype_N` root, which a notice names beside
+/// the stage paths it resyncs.
+fn is_prototype_root(path: &sdf::Path) -> bool {
+    pcp::is_prototype_namespace(path) && path.is_root_prim()
 }
 
 /// Poisons the stage when dropped armed: a panic left the step it guards

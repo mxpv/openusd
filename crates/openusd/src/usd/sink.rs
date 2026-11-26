@@ -18,7 +18,6 @@
 //! `add_sink` takes either a full sink type or a quick closure observer.
 
 use std::collections::HashSet;
-use std::mem;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,6 +44,14 @@ pub type StageSinkId = sdf::sink::Id<dyn StageSink>;
 /// mutation runs: what reads find waits for the next drained edit, the
 /// next mutation (ahead of its own notice) or [`Stage::flush`], and an edit
 /// a sink makes is heard after the notices being delivered.
+///
+/// Each notice names the prototypes its operation created
+/// ([`CommittedChange::resynced`]): the ones an edit, a load or a mutation
+/// composed as it settled, and, in [`recomposed`](Self::recomposed), the
+/// ones reads composed. The stage composes on demand, so a resynced
+/// subtree nothing has read since names no prototype under it. A sink
+/// whose [`complete_prototypes`](Self::complete_prototypes) asks for more
+/// is told every prototype a resync creates beneath it.
 pub trait StageSink {
     /// Observe a committed edit in composed (stage) namespace, after composition
     /// has been invalidated and the stage's borrows released — so the callback
@@ -67,6 +74,21 @@ pub trait StageSink {
     /// strongest edited layer; see [`CommittedChange::change_list`].)
     fn after_commit(&self, stage: &Stage, change: &CommittedChange<'_>) {
         let _ = (stage, change);
+    }
+
+    /// Whether the stage composes each subtree a change resyncs whole, to
+    /// tell this sink every prototype it creates there, and not only the
+    /// ones its operations reach. A prototype that existed before, and that
+    /// an instance in the subtree joins, is not named again.
+    ///
+    /// While a sink installed on the stage asks for it, the stage composes
+    /// a change's resynced subtrees, and may load, when the change settles,
+    /// as C++ `UsdStage::_RecomposePrims` recomposes them. A resync of `/`,
+    /// from a root layer stack or muting edit, then composes the whole
+    /// populated stage, which on a large stage costs as much as composing
+    /// it from scratch. The stage asks once, when the sink is installed.
+    fn complete_prototypes(&self) -> bool {
+        false
     }
 
     /// Inspect a staged edit to one of the stage's layers before it commits,
@@ -250,10 +272,15 @@ pub struct CommittedChange<'a> {
     /// than it was, so a handle to it must be re-resolved rather than re-read.
     /// The prims the transaction's own layer loads dropped are here too;
     /// what settling the drain's work finds reaches
-    /// [`StageSink::recomposed`]. The `/__Prototype_N` roots the change
-    /// composed are here as well, as C++ names each prototype
-    /// `Usd_InstanceCache` adds: a prototype root is a namespace of its
-    /// own, so one stands beside a resynced `/`.
+    /// [`StageSink::recomposed`]. The `/__Prototype_N` roots the change's
+    /// settling composed are here as well, as C++ names each prototype
+    /// `Usd_InstanceCache` adds or gives a new source; when several
+    /// transactions settle together, as edits that queue while the stage
+    /// cannot reconcile do, those roots reach [`StageSink::recomposed`]
+    /// instead. Settling composes the whole of each resynced subtree only
+    /// while a sink asks for it ([`StageSink::complete_prototypes`]), and
+    /// otherwise recomposes what reads had composed there. A prototype
+    /// root is a namespace of its own, so one stands beside a resynced `/`.
     ///
     /// Minimal in ancestors: an entry stands for its whole subtree, so a
     /// resynced `/foo` appears without `/foo/bar`. A
@@ -543,25 +570,21 @@ impl ResyncPaths {
 /// [`committed_change`](Self::committed_change). Built only when a sink is
 /// installed, so the no-sink path allocates nothing.
 pub(super) struct Payload {
-    /// The resyncs in composed stage namespace, and the reported set once
-    /// [`finish`](Self::finish) has merged [`authored`](Self::authored) in.
+    /// The resyncs in composed stage namespace.
     stage: NamespacedPaths,
     /// The resyncs named in the edited layer's own namespace, which only a
     /// [`Provenance::DirectLayerEdit`] has: a local layer's paths are stage
-    /// paths already and an edit target maps its own. Emptied by
-    /// [`finish`](Self::finish) into [`stage`](Self::stage).
+    /// paths already and an edit target maps its own.
     authored: NamespacedPaths,
+    /// The reported resyncs: [`stage`](Self::stage)'s and
+    /// [`authored`](Self::authored)'s, merged ([`merge`](Self::merge)) once
+    /// every comparison that needs them apart is done.
+    resynced: Vec<sdf::Path>,
     /// The prims recomposed in place, in composed stage namespace, which
     /// yield to [`stage`](Self::stage)'s resyncs.
     recomposed: Vec<sdf::Path>,
-    /// The prims [`stage`](Self::stage) resyncs before
-    /// [`finish`](Self::finish) merges [`authored`](Self::authored) in: the
-    /// resynced prims named in composed stage namespace.
-    stage_prims: Vec<sdf::Path>,
     /// The changed-info paths in composed stage namespace, which yield to
-    /// [`stage`](Self::stage)'s resyncs. Emptied into
-    /// [`changed_info_only`](Self::changed_info_only) by
-    /// [`finish`](Self::finish).
+    /// [`stage`](Self::stage)'s resyncs.
     stage_info: Vec<sdf::Path>,
     /// The changed-info paths named in the edited layer's own namespace, which
     /// only a [`Provenance::DirectLayerEdit`] has, and which yield to
@@ -569,8 +592,8 @@ pub(super) struct Payload {
     /// [`stage`](Self::stage)'s — a prefix comparison across namespaces means
     /// nothing.
     authored_info: Vec<sdf::Path>,
-    /// The two halves above, merged once every comparison that needed them
-    /// apart is done.
+    /// The two halves above, merged ([`merge`](Self::merge)) once every
+    /// comparison that needs them apart is done.
     changed_info_only: Vec<sdf::Path>,
     asset_paths_resynced: Vec<sdf::Path>,
     change_list: sdf::ChangeList,
@@ -610,24 +633,19 @@ impl NamespacedPaths {
         self.resynced.retain(|p| !self.covering.covers_below(p));
     }
 
+    /// Adds `paths` to the resyncs, restoring the ordering
+    /// [`reports`](Self::reports) reads.
+    fn extend(&mut self, paths: impl IntoIterator<Item = sdf::Path>) {
+        self.resynced.extend(paths);
+        self.resynced.sort();
+        self.resynced.dedup();
+    }
+
     /// Whether these resyncs already report `path` — covering its subtree, or
     /// naming it exactly. Reads the ordering [`normalize`](Self::normalize)
     /// establishes, so it answers only after that has run.
     fn reports(&self, path: &sdf::Path) -> bool {
         self.covering.covers(path) || self.resynced.binary_search(path).is_ok()
-    }
-
-    /// Folds `other`'s resyncs in, restoring the ordering
-    /// [`reports`](Self::reports) reads. The covering projections stay apart:
-    /// they are only meaningful against paths in their own namespace, and this
-    /// runs once every such comparison is done.
-    fn absorb(&mut self, other: &mut Self) {
-        if other.resynced.is_empty() {
-            return;
-        }
-        self.resynced.append(&mut other.resynced);
-        self.resynced.sort();
-        self.resynced.dedup();
     }
 }
 
@@ -778,9 +796,9 @@ impl Payload {
             stage,
             authored,
             recomposed: changes.cache.stage_recomposed_paths().cloned().collect(),
-            stage_prims: Vec::new(),
             stage_info,
             authored_info,
+            resynced: Vec::new(),
             changed_info_only: Vec::new(),
             asset_paths_resynced: Vec::new(),
             change_list: scratch.clone(),
@@ -845,21 +863,23 @@ impl Payload {
         asset_paths_resynced.retain(|p| !self.stage.covering.covers(p));
         self.asset_paths_resynced = asset_paths_resynced;
 
-        self.stage_prims = self
+        self.merge();
+    }
+
+    /// Merges the two namespaces into the reported sets, once every
+    /// comparison is done: the provenance says which namespace a direct
+    /// edit's entries are in, and nothing distinguishes them in the report.
+    fn merge(&mut self) {
+        self.resynced = self
             .stage
             .resynced
             .iter()
-            .filter(|path| path.is_abs_root() || path.is_prim())
+            .chain(&self.authored.resynced)
             .cloned()
             .collect();
-        // Every comparison is done, so the two namespaces can share one reported
-        // set — the provenance says which namespace a direct edit's entries are
-        // in, and nothing distinguishes them from here on. The authored bundles
-        // are spent with them, covering projection included.
-        let mut authored = mem::take(&mut self.authored);
-        self.stage.absorb(&mut authored);
-        self.changed_info_only = mem::take(&mut self.stage_info);
-        self.changed_info_only.append(&mut self.authored_info);
+        self.resynced.sort();
+        self.resynced.dedup();
+        self.changed_info_only = self.stage_info.iter().chain(&self.authored_info).cloned().collect();
         self.changed_info_only.sort();
         self.changed_info_only.dedup();
     }
@@ -870,21 +890,50 @@ impl Payload {
         &self.stage.subtree
     }
 
-    /// The prims the finished payload resyncs in composed stage namespace.
-    /// A direct edit's resyncs named in the edited layer's own namespace are
-    /// not among them, though they are reported.
-    pub(super) fn resynced_prims(&self) -> &[sdf::Path] {
-        &self.stage_prims
+    /// The prims the finished payload resyncs in composed stage namespace,
+    /// apart by what stands for its subtree. A direct edit's resyncs named
+    /// in the edited layer's own namespace are not among them, though they
+    /// are reported.
+    pub(super) fn walk(&self) -> ResyncPaths {
+        // Each subtree whole, and a prim resynced in place alone: a spec of
+        // it appeared or vanished, and nothing beneath it is implied.
+        let is_prim = |path: &&sdf::Path| path.is_abs_root() || path.is_prim();
+        let mut walk = ResyncPaths {
+            subtrees: self.stage.subtree.iter().filter(is_prim).cloned().collect(),
+            prims: self.stage.resynced.iter().filter(is_prim).cloned().collect(),
+        };
+        walk.normalize();
+        walk
     }
 
     /// Adds `prototypes`, the `/__Prototype_N` roots the change composed, to
-    /// the finished payload's resyncs. A prototype root is a namespace of
-    /// its own, which no reported stage path holds, so the set stays
-    /// minimal in ancestors.
+    /// the finished payload's composed resyncs, which subsume what the
+    /// composed channels report beneath them, and merges the namespaces
+    /// again. A path in the edited layer's own namespace is another
+    /// namespace's, which no prototype root holds.
     pub(super) fn add_resynced(&mut self, prototypes: Vec<sdf::Path>) {
-        self.stage.resynced.extend(prototypes);
-        self.stage.resynced.sort();
-        self.stage.resynced.dedup();
+        let mut covering = Covering::composed();
+        for prototype in &prototypes {
+            covering.insert(prototype.clone());
+        }
+        self.stage.resynced.retain(|p| !covering.covers_below(p));
+        self.recomposed.retain(|p| !covering.covers(p));
+        self.stage_info.retain(|p| !covering.covers(p));
+        self.asset_paths_resynced.retain(|p| !covering.covers(p));
+        self.stage.extend(prototypes);
+        self.merge();
+    }
+
+    /// Drops the composed stage paths `hidden` names, those in the
+    /// namespace of a prototype no sink has been told of: a dependency
+    /// reaches them as it reaches any other prim.
+    pub(super) fn hide(&mut self, hidden: impl Fn(&sdf::Path) -> bool) {
+        self.stage.resynced.retain(|path| !hidden(path));
+        self.stage.subtree.retain(|path| !hidden(path));
+        self.recomposed.retain(|path| !hidden(path));
+        self.stage_info.retain(|path| !hidden(path));
+        self.asset_paths_resynced.retain(|path| !hidden(path));
+        self.merge();
     }
 
     /// Borrow this payload as a [`CommittedChange`] for the `after_commit` call.
@@ -897,7 +946,7 @@ impl Payload {
         replay: Option<ReplayId>,
     ) -> CommittedChange<'a> {
         CommittedChange {
-            resynced: &self.stage.resynced,
+            resynced: &self.resynced,
             recomposed: &self.recomposed,
             changed_info_only: &self.changed_info_only,
             asset_paths_resynced: &self.asset_paths_resynced,
@@ -1001,7 +1050,7 @@ mod tests {
             &["/A/B", "/A.x", "/B.y"],
             pcp::ApplyOutcome::default(),
         );
-        assert_eq!(payload.stage.resynced, paths(&["/A"]));
+        assert_eq!(payload.resynced, paths(&["/A"]));
         assert_eq!(payload.changed_info_only, paths(&["/B.y"]));
     }
 
@@ -1020,13 +1069,32 @@ mod tests {
             retries_sublayers: false,
         };
         let payload = shaped(Provenance::LocalStack, &[], &[], &[], outcome);
-        assert_eq!(payload.stage.resynced, paths(&["/", "/__Prototype_1"]));
+        assert_eq!(payload.resynced, paths(&["/", "/__Prototype_1"]));
+        assert_eq!(payload.walk().subtrees, paths(&["/", "/__Prototype_1"]));
 
         // A layer's own namespace has no prototype namespaces: `/` holds a
         // prim of that name like any other.
         let mut subtrees = paths(&["/", "/__Prototype_1"]);
         let _ = keep_ancestors(&mut subtrees, false);
         assert_eq!(subtrees, paths(&["/"]));
+    }
+
+    /// A prototype root added to a direct edit's report subsumes only the
+    /// composed paths beneath it: a path in the edited layer's own namespace
+    /// spelled under the same root is another namespace's, and stays.
+    #[test]
+    fn prototype_root_keeps_authored() {
+        let payload = &mut shaped(
+            Provenance::DirectLayerEdit,
+            &[],
+            &[],
+            &["/__Prototype_1/Local"],
+            pcp::ApplyOutcome::default(),
+        );
+        assert_eq!(payload.changed_info_only, paths(&["/__Prototype_1/Local"]));
+        payload.add_resynced(paths(&["/__Prototype_1"]));
+        assert_eq!(payload.resynced, paths(&["/__Prototype_1"]));
+        assert_eq!(payload.changed_info_only, paths(&["/__Prototype_1/Local"]));
     }
 
     /// The asset-path channel is minimized the same way and then yields to the
@@ -1101,11 +1169,7 @@ mod tests {
             "only the authored resync covers a layer-namespace path"
         );
         assert_eq!(payload.asset_paths_resynced, paths(&["/C"]));
-        assert_eq!(
-            payload.stage.resynced,
-            paths(&["/A", "/S"]),
-            "both namespaces are reported"
-        );
+        assert_eq!(payload.resynced, paths(&["/A", "/S"]), "both namespaces are reported");
     }
 
     /// An edit target carries its authored paths to stage namespace, leaving the
@@ -1122,6 +1186,6 @@ mod tests {
             &[],
             pcp::ApplyOutcome::default(),
         );
-        assert_eq!(payload.stage.resynced, paths(&["/Model/Child", "/Other"]));
+        assert_eq!(payload.resynced, paths(&["/Model/Child", "/Other"]));
     }
 }
