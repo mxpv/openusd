@@ -1019,6 +1019,49 @@ fn model_token_round_trip() {
     assert_eq!(geom::CardGeometry::FromTexture.as_token(), "fromTexture");
     assert_eq!(geom::CardGeometry::from_token("box"), Some(geom::CardGeometry::Box));
     assert_eq!(geom::CardGeometry::from_token("bogus"), None);
+
+    assert_eq!(geom::CardVisibility::default(), geom::CardVisibility::Inherited);
+    assert_eq!(geom::CardVisibility::Simple.as_token(), "simple");
+    assert_eq!(
+        geom::CardVisibility::from_token("full"),
+        Some(geom::CardVisibility::Full)
+    );
+    assert_eq!(geom::CardVisibility::from_token("bogus"), None);
+}
+
+/// `model:cardVisibility` reads its declared fallback until a layer authors
+/// it.
+#[test]
+fn card_visibility_fallback() -> Result<()> {
+    let stage = memory()?;
+    let model = geom::ModelAPI::apply(Xform::define(&stage, "/Model")?.prim())?;
+    assert_eq!(model.model_card_visibility()?, Some(geom::CardVisibility::Inherited));
+
+    model
+        .create_model_card_visibility_attr()?
+        .set(geom::CardVisibility::Simple)?;
+    assert_eq!(model.model_card_visibility()?, Some(geom::CardVisibility::Simple));
+    Ok(())
+}
+
+/// Each back plate applied to a camera reads its properties under its own
+/// instance name, falling back to what the schema declares.
+#[test]
+fn back_plate_fallbacks() -> Result<()> {
+    let stage = memory()?;
+    let camera = Camera::define(&stage, "/Cam")?;
+    let plate = geom::BackPlateAPI::apply(camera.prim(), "main")?;
+    assert_eq!(plate.plate_visibility_attr().name(), "backPlate:main:plateVisibility");
+    assert_eq!(plate.plate_visibility()?, Some(geom::PlateVisibility::Solo));
+    assert_eq!(plate.depth_normalizing_factor()?, Some(1.0));
+    assert_eq!(plate.scale_tweak()?, Some(gf::vec2f(1.0, 1.0)));
+
+    let names: Vec<_> = geom::BackPlateAPI::all(camera.prim())?
+        .iter()
+        .map(|plate| plate.name().clone())
+        .collect();
+    assert_eq!(names, [Token::from("main")]);
+    Ok(())
 }
 
 /// An in-memory stage carrying the schema data, which is what makes a prim its

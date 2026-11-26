@@ -93,7 +93,7 @@ what remains.
 ## Vendored schemas
 
 Every view is generated at build time from the schema definitions under
-`schemas/<library>/schema.usda`, copied from OpenUSD v26.05 — the same files
+`schemas/<library>/schema.usda`, copied from OpenUSD v26.08 — the same files
 upstream's own `usdGenSchema` reads. `build.rs` runs
 [`openusd-build`](https://github.com/mxpv/openusd/tree/main/crates/openusd-build)
 over them to emit a family's views, its tokens, and the schema data the

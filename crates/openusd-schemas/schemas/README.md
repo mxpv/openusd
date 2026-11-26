@@ -1,8 +1,8 @@
 # Vendored OpenUSD schema definitions
 
 Each `<library>/schema.usda` is copied from
-[OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) v26.05 (commit
-`2095fafafd033fa23386d7ec6d58c7cc33974518`), where it lives at
+[OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) v26.08 (commit
+`ee47c679abde5b467a7b6a41f3b2285564a4222e`), where it lives at
 `pxr/usd/<library>/schema.usda`. These are the definitions upstream's own
 `usdGenSchema` reads, and this crate's `build.rs` generates its views from
 them through `openusd-build`.
