@@ -449,8 +449,14 @@ fn render_line(line: &str, symbols: &Symbols<'_>) -> String {
 /// disappearing.
 fn render_command<'a>(command: &Command<'a>, symbols: &Symbols<'_>, out: &mut String) -> &'a str {
     match command.name {
-        // An emphasis command takes the one word that follows it.
-        "em" | "e" => return wrap_next_word(command, '*', out),
+        // An emphasis command takes the one word that follows it. A word
+        // spelled as a path, `a::b`, is a code span instead, since
+        // `clippy::doc_markdown` flags one that is only emphasized.
+        "em" | "e" => {
+            let (_, core, _) = split_word(next_word(command.after).0);
+            let delimiter = if core.contains("::") { '`' } else { '*' };
+            return wrap_next_word(command, delimiter, out);
+        }
         "p" | "a" | "c" => return wrap_next_word(command, '`', out),
         // `\ref target "text"` reads as its text, `\ref target` as the target
         // itself, which is a symbol name.
@@ -884,6 +890,13 @@ mod tests {
     fn em_italic() {
         assert_eq!(to_markdown("the \\em only one"), "the *only* one");
         assert_eq!(to_markdown("the \\e only one"), "the *only* one");
+    }
+
+    /// An emphasized word spelled as a path is a code span.
+    #[test]
+    fn em_code_word() {
+        assert_eq!(to_markdown("for \\em model::mode, a"), "for `model::mode`, a");
+        assert_eq!(to_markdown("the \\em model:drawMode one"), "the *model:drawMode* one");
     }
 
     #[test]
