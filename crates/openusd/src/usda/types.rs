@@ -97,10 +97,8 @@ pub(super) fn parse_value(cursor: &mut Cursor<'_>, ty: &sdf::ValueTypeName) -> R
         vt::ValueKind::Bool => vt::Value::Bool(parse_bool(cursor)?),
         vt::ValueKind::BoolVec => vt::Value::BoolVec(parse_array_with(cursor, parse_bool)?),
 
-        vt::ValueKind::AssetPath => vt::Value::AssetPath(cursor.expect_asset_ref()?.into()),
-        vt::ValueKind::AssetPathVec => {
-            vt::Value::AssetPathVec(parse_array_with(cursor, |c| Ok(c.expect_asset_ref()?.into()))?)
-        }
+        vt::ValueKind::AssetPath => vt::Value::AssetPath(parse_asset_path(cursor)?),
+        vt::ValueKind::AssetPathVec => vt::Value::AssetPathVec(parse_array_with(cursor, parse_asset_path)?),
 
         vt::ValueKind::TimeCode => vt::Value::TimeCode(parse_token::<f64>(cursor)?.into()),
         vt::ValueKind::TimeCodeVec => vt::Value::TimeCodeVec(
@@ -862,6 +860,16 @@ pub(super) fn parse_bool(cursor: &mut Cursor<'_>) -> Result<bool, RawError> {
     }
 }
 
+/// Parse an `asset` literal: an asset reference, or a quoted string, which
+/// C++ `Sdf_ParserHelpers` reads as the same asset path.
+fn parse_asset_path(cursor: &mut Cursor<'_>) -> Result<sdf::AssetPath, RawError> {
+    match cursor.bump()? {
+        Token::AssetRef(asset_path) => Ok(asset_path.into()),
+        Token::String(asset_path) => Ok(asset_path.into_owned().into()),
+        other => bail!("Asset reference expected, got {other:?}"),
+    }
+}
+
 /// Whether `word` is the boolean `true` or `false`, case-insensitively.
 fn parse_bool_word(word: &str) -> Result<bool, RawError> {
     if word.eq_ignore_ascii_case("true") {
@@ -976,6 +984,13 @@ mod tests {
         let mut cursor = Cursor::new("[1, 2, 3]");
         let result = parse_array::<u32>(&mut cursor).unwrap();
         assert_eq!(result, vec![1_u32, 2, 3]);
+    }
+
+    #[test]
+    fn asset_from_string() {
+        let mut cursor = Cursor::new(r#"["", @a.png@, "b.png"]"#);
+        let paths = parse_array_with(&mut cursor, parse_asset_path).unwrap();
+        assert_eq!(paths, vec![sdf::AssetPath::from(""), "a.png".into(), "b.png".into()]);
     }
 
     #[test]
