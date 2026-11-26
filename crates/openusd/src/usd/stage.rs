@@ -974,6 +974,9 @@ pub struct StageInner {
     /// callback: that would borrow the set mutably while the fan-out holds it
     /// shared, and panic.
     sinks: RefCell<sdf::sink::Set<dyn StageSink>>,
+    /// The installed sinks that asked for every prototype a resync covers
+    /// ([`StageSink::complete_prototypes`]), asked once, when installed.
+    complete_sinks: RefCell<Vec<StageSinkId>>,
     /// The internal observers of transaction outcomes (see
     /// [`TxnObserver`]).
     observers: RefCell<sdf::sink::Set<dyn TxnObserver>>,
@@ -2218,8 +2221,17 @@ impl Stage {
         // handle awaiting drain), and what reads found, go to the current set
         // before this sink joins, so a sink only ever observes what happened
         // after it was installed.
+        // Asked first: what the answer's user code finds goes out before the
+        // sink joins.
+        let complete = sink.complete_prototypes();
         self.flush_sinks()?;
-        Ok(self.sinks.borrow_mut().add(Rc::new(sink)))
+        self.composition.listen();
+        let id = self.sinks.borrow_mut().add(Rc::new(sink));
+        if complete {
+            self.complete_sinks.borrow_mut().push(id);
+            self.composition.set_complete(true);
+        }
+        Ok(id)
     }
 
     /// Remove the sink with the given [`StageSinkId`]; the inverse of
@@ -2238,6 +2250,9 @@ impl Stage {
         self.flush_sinks()?;
         let mut sinks = self.sinks.borrow_mut();
         sinks.remove(id);
+        let mut complete = self.complete_sinks.borrow_mut();
+        complete.retain(|held| *held != id);
+        self.composition.set_complete(!complete.is_empty());
         if sinks.is_empty() {
             self.composition.forget_discovered();
         }
@@ -3296,12 +3311,17 @@ impl Stage {
     // into, left uncommitted, would avoid this, and with it the
     // `suspend_settling` flag that keeps the walk's own reads from settling
     // under the swapped rules, but is a larger change than this method
-    // currently needs.
+    // currently needs. It would also retire the private prototype roots the
+    // walk mints in the shared cache, and the filtering every notice does to
+    // keep their namespaces out (`pcp::IndexCache::set_private`).
     pub fn find_loadable(&self, root: impl sdf::IntoPath) -> Result<Vec<sdf::Path>> {
         let root = sdf::try_into_path(root)?.prim_path();
         self.settle()?;
         // A sink delivered to during the walk would see the transient rules.
         let quiet = self.composition.quiet(self);
+        // What the walk registers under the transient rules is reported to
+        // no one, unless real work reaches it once they are restored.
+        let temporary = self.composition.begin_temporary();
         let walked = {
             // Declared first, so it drops after the restore.
             let _suspended = self.composition.suspend_settling();
@@ -3315,6 +3335,7 @@ impl Stage {
         };
         // The prims the swaps dropped settle under the rules restored.
         self.composition.settle_now(self);
+        self.composition.end_temporary(temporary, self);
         // What the walk's loads reconciled reaches the sinks now.
         drop(quiet);
         let mut found = walked?;
@@ -4114,7 +4135,7 @@ impl Stage {
     /// paid on demand instead).
     ///
     /// The walk is the composition's
-    /// ([`register_instances`](super::composition::StageComposition::register_instances))
+    /// ([`discover_prototypes`](super::composition::StageComposition::discover_prototypes))
     /// from the pseudo-root, into every prototype namespace it reaches. It
     /// answers for one coherent population, whose epoch is stamped.
     //
@@ -4126,10 +4147,7 @@ impl Stage {
     // keyed on the change set, registering only the subtrees an edit could have
     // made instanceable.
     fn discover_prototypes(&self) -> Result<(), pcp::QueryError> {
-        let mut reached = Vec::new();
-        let epoch = self
-            .composition
-            .register_instances(&[sdf::Path::abs_root()], |_, _| true, &mut reached, self)?;
+        let epoch = self.composition.discover_prototypes(self)?;
         self.prototypes_discovered.set(Some(epoch));
         Ok(())
     }
@@ -5107,6 +5125,7 @@ impl StageBuilder {
             saved_edit_targets: RefCell::default(),
             layer_stack_id,
             sinks: RefCell::default(),
+            complete_sinks: RefCell::default(),
             observers: RefCell::default(),
             edit_attribution: TxnTable::default(),
             editor: sdf::EditorId::next(),
@@ -10526,6 +10545,738 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert!(stage.prim("/Late")?.is_valid()?);
         stage.process_pending();
         assert_eq!(*resyncs.borrow(), [vec!["/Late".to_owned()]]);
+        Ok(())
+    }
+
+    /// The resyncs of an edit a read's load commits, which the drain the
+    /// read reconciles it in leaves uncomposed, compose at the next
+    /// boundary: the instance the edit made registers, and its prototype
+    /// reaches the sinks with what operations found.
+    #[test]
+    fn load_commit_composed_later() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = format!(
+            "{REFERENCED}class \"Lib\"
+{{
+    def \"Q\" {{
+        def \"m\" {{}}
+    }}
+}}
+def \"I\" (references = </Lib/Q>) {{}}
+"
+        );
+        let (stage, hook) = hooked_stage(dir.path(), &root, &[("a.usda", TARGET)], "a.usda")?;
+        let layer = stage.root_layer();
+        hook.replace(Some(Box::new(move || {
+            layer
+                .edit(|e| {
+                    e.data_mut()
+                        .set_field(&sdf::path("/I")?, "instanceable", vt::Value::Bool(true));
+                    Ok(())
+                })
+                .expect("the layer is free");
+        })));
+        struct Recomposed(Rc<RefCell<Vec<sdf::Path>>>);
+        impl usd::StageSink for Recomposed {
+            fn complete_prototypes(&self) -> bool {
+                true
+            }
+            fn recomposed(&self, _: &Stage, resynced: usd::Resynced<'_>) {
+                self.0.borrow_mut().extend(resynced.subtrees.iter().cloned());
+            }
+        }
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Recomposed(Rc::clone(&heard)))?;
+
+        assert!(stage.prim("/P/Inner")?.is_valid()?);
+        stage.flush()?;
+        let heard = heard.borrow().clone();
+        assert!(heard.iter().any(pcp::is_prototype_namespace), "{heard:?}");
+        assert_eq!(stage.cache().prototypes().len(), 1, "the walk registered /I");
+        Ok(())
+    }
+
+    /// Each notice's kind and the subtrees it resyncs, in delivery order.
+    type Delivered = Rc<RefCell<Vec<(&'static str, Vec<sdf::Path>)>>>;
+
+    /// A sink recording every notice it hears ([`Delivered`]), asking for
+    /// complete prototype notices when its flag is set.
+    struct Events(Delivered, bool);
+
+    impl usd::StageSink for Events {
+        fn complete_prototypes(&self) -> bool {
+            self.1
+        }
+        fn after_commit(&self, _: &Stage, change: &usd::CommittedChange<'_>) {
+            self.0.borrow_mut().push(("commit", change.resynced.to_vec()));
+        }
+        fn load_rules_changed(&self, _: &Stage, resynced: usd::Resynced<'_>) {
+            self.0.borrow_mut().push(("load", resynced.subtrees.to_vec()));
+        }
+        fn recomposed(&self, _: &Stage, resynced: usd::Resynced<'_>) {
+            self.0.borrow_mut().push(("recomposed", resynced.subtrees.to_vec()));
+        }
+    }
+
+    /// A payload `w.usda` holding the instance `A` and `C`, whose reference
+    /// to `c.usda` runs a resolver hook, and a library both reference.
+    const PAYLOAD_FILES: [(&str, &str); 3] = [
+        (
+            "w.usda",
+            "#usda 1.0\n(\n    defaultPrim = \"R\"\n)\ndef \"R\"\n{\n    def \"A\" (\n        instanceable = true\n        references = @lib.usda@</P>\n    ) {}\n    def \"C\" (references = @c.usda@) {}\n}\n",
+        ),
+        (
+            "lib.usda",
+            "#usda 1.0\ndef \"P\"\n{\n    def \"Body\" {}\n}\ndef \"Q\"\n{\n    def \"Leg\" {}\n}\n",
+        ),
+        ("c.usda", "#usda 1.0\n(\n    defaultPrim = \"C\"\n)\ndef \"C\" {}\n"),
+    ];
+
+    /// A stage on `root` and [`PAYLOAD_FILES`] that loads nothing, whose
+    /// resolver runs the hook when `c.usda` opens.
+    fn payload_stage(dir: &FsPath, root: &str) -> Result<(Stage, Hook)> {
+        fs::write(dir.join("root.usda"), root)?;
+        for (file, content) in PAYLOAD_FILES {
+            fs::write(dir.join(file), content)?;
+        }
+        let hook: Hook = Rc::default();
+        let run = Rc::clone(&hook);
+        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
+            if resolved.file_name().and_then(|file| file.to_str()) == Some("c.usda")
+                && let Some(hook) = run.take()
+            {
+                hook();
+            }
+        });
+        let stage = Stage::builder()
+            .resolver(resolver)
+            .load(InitialLoadSet::LoadNone)
+            .open(&dir.join("root.usda").to_string_lossy())?;
+        Ok((stage, hook))
+    }
+
+    /// Makes `path` an instance in `layer` through its handle, as user code a
+    /// resolver runs would.
+    fn instance_raw(layer: &sdf::LayerHandle, path: &str) {
+        layer
+            .edit(|e| {
+                e.data_mut()
+                    .set_field(&sdf::path(path)?, "instanceable", vt::Value::Bool(true));
+                Ok(())
+            })
+            .expect("the layer is free");
+    }
+
+    /// A load whose resolver commits an instance: the load's notice names
+    /// the prototype the load composed, the edit's commit follows it, and
+    /// the prototype the load's settlement composed for the edit follows the
+    /// commit, though the load's notice was reserved first.
+    #[test]
+    fn load_resolver_instance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\ndef \"T\" (references = @lib.usda@</Q>) {}\n";
+        let (stage, hook) = payload_stage(dir.path(), root)?;
+        let layer = stage.root_layer();
+        hook.replace(Some(Box::new(move || instance_raw(&layer, "/T"))));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+
+        stage.load("/W", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        let loaded = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+        let edited = stage.prim("/T")?.prototype()?.expect("/T is an instance");
+        let w = sdf::path("/W")?;
+        let t = sdf::path("/T")?;
+        assert_eq!(
+            *events.borrow(),
+            [
+                ("load", vec![w, loaded]),
+                ("commit", vec![t]),
+                ("recomposed", vec![edited]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// Two instances of one source in a payload, the one the load exposes
+    /// and the one the edit its resolver commits makes, by an override in
+    /// the root layer: whichever registers first mints the shared root,
+    /// which the callbacks name exactly once.
+    #[test]
+    fn shared_key_named_once() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\n";
+        let (stage, hook) = payload_stage(dir.path(), root)?;
+        fs::write(
+            dir.path().join("w.usda"),
+            PAYLOAD_FILES[0].1.replace(
+                "    def \"C\"",
+                "    def \"T\" (references = @lib.usda@</P>) {}\n    def \"C\"",
+            ),
+        )?;
+        let layer = stage.root_layer();
+        hook.replace(Some(Box::new(move || {
+            layer
+                .edit(|e| {
+                    sdf::PrimSpec::new(e.data_mut(), "/W/T", sdf::Specifier::Over, "")?;
+                    e.data_mut()
+                        .set_field(&sdf::path("/W/T")?, "instanceable", vt::Value::Bool(true));
+                    Ok(())
+                })
+                .expect("the layer is free");
+        })));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+
+        stage.load("/W", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        let shared = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+        assert_eq!(stage.prim("/W/T")?.prototype()?, Some(shared.clone()));
+        let named = events
+            .borrow()
+            .iter()
+            .flat_map(|(_, paths)| paths.clone())
+            .filter(|path| *path == shared)
+            .count();
+        assert_eq!(named, 1, "{:?}", events.borrow());
+        Ok(())
+    }
+
+    /// A deferred retarget of a registered instance: the edit a load's
+    /// resolver commits retargets `/T` to a source whose layer is not loaded
+    /// yet. The transfer of `/T`'s retired prototype waits for that layer,
+    /// and the replacement and the prototype nested in it follow the edit's
+    /// commit, though the load's settlement composed them.
+    #[test]
+    fn deferred_retarget_follows() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("src2.usda"),
+            "#usda 1.0\ndef \"S\"\n{\n    def \"Inner\" (\n        instanceable = true\n        references = @lib.usda@</Q>\n    ) {}\n}\n",
+        )?;
+        let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\ndef \"T\" (\n    instanceable = true\n    references = @lib.usda@</P>\n) {}\n";
+        let (stage, hook) = payload_stage(dir.path(), root)?;
+        let retired = stage.prim("/T")?.prototype()?.expect("/T is an instance");
+        let layer = stage.root_layer();
+        hook.replace(Some(Box::new(move || {
+            layer
+                .edit(|e| {
+                    let references = sdf::ReferenceListOp::explicit([sdf::Reference {
+                        asset_path: "src2.usda".into(),
+                        prim_path: sdf::path("/S")?,
+                        ..Default::default()
+                    }]);
+                    e.data_mut()
+                        .set_field(&sdf::path("/T")?, "references", vt::Value::ReferenceListOp(references));
+                    Ok(())
+                })
+                .expect("the layer is free");
+        })));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+
+        stage.load("/W", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        let replaced = stage.prim("/T")?.prototype()?.expect("/T is an instance");
+        let nested = stage.prim("/T/Inner")?.prototype()?.expect("/T/Inner is an instance");
+        let loaded = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+        let mut follow = vec![replaced, nested];
+        follow.sort();
+        let t = sdf::path("/T")?;
+        let w = sdf::path("/W")?;
+        assert_eq!(
+            *events.borrow(),
+            [
+                ("load", vec![w, loaded]),
+                ("commit", vec![t, retired]),
+                ("recomposed", follow),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A library class and two prims referencing it, neither an instance.
+    const REFERRERS: &str = "#usda 1.0\nclass \"Lib\"\n{\n    def \"P\"\n    {\n        def \"Body\" {}\n    }\n}\ndef \"W\"\n{\n    def \"A\" (\n        instanceable = false\n        references = </Lib/P>\n    ) {}\n    def \"B\" (\n        instanceable = false\n        references = </Lib/P>\n    ) {}\n}\n";
+
+    /// Two transactions settled together name what they composed once, in
+    /// their snapshot's recomposed notice: a read's load runs a resolver
+    /// that commits both, its drain takes them as one snapshot, and neither
+    /// commit claims the prototype their instances share.
+    #[test]
+    fn joint_snapshot_recomposed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let text = format!("{REFERRERS}def \"R\" (references = @r.usda@) {{}}\n");
+        let (stage, hook) = hooked_stage(
+            dir.path(),
+            &text,
+            &[("r.usda", "#usda 1.0\n(\n    defaultPrim = \"X\"\n)\ndef \"X\" {}\n")],
+            "r.usda",
+        )?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        let layer = stage.root_layer();
+        hook.replace(Some(Box::new(move || {
+            instance_raw(&layer, "/W/A");
+            instance_raw(&layer, "/W/B");
+        })));
+        assert!(stage.prim("/R")?.is_valid()?);
+        stage.flush()?;
+        let prototype = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+        assert_eq!(
+            *events.borrow(),
+            [
+                ("commit", vec![sdf::path("/W/A")?]),
+                ("commit", vec![sdf::path("/W/B")?]),
+                ("recomposed", vec![prototype]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A load drains the commits queued before it first, as one snapshot,
+    /// and its own notice follows them.
+    #[test]
+    fn load_after_pending() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\n";
+        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        let layer = stage.root_layer();
+        define_raw(&layer, "/X");
+        define_raw(&layer, "/Y");
+        stage.load("/W", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        let loaded = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
+        assert_eq!(
+            *events.borrow(),
+            [
+                ("commit", vec![sdf::path("/X")?]),
+                ("commit", vec![sdf::path("/Y")?]),
+                ("load", vec![sdf::path("/W")?, loaded]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A settlement an edit's load interrupts names what it settled, and the
+    /// edit the load committed names the prototype its own change composed:
+    /// adding `w.usda` under `/W` loads it, whose resolver makes `/W/B` an
+    /// instance, and only the second commit names `/W/B`'s prototype.
+    #[test]
+    fn interrupted_settlement_once() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = hooked_stage(
+            dir.path(),
+            REFERRERS,
+            &[("w.usda", "#usda 1.0\n(\n    defaultPrim = \"R\"\n)\ndef \"R\" {}\n")],
+            "w.usda",
+        )?;
+        let layer = stage.root_layer();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        hook.replace(Some(Box::new(move || instance_raw(&layer, "/W/B"))));
+        stage.prim("/W")?.references().add(sdf::Reference {
+            asset_path: "w.usda".into(),
+            ..Default::default()
+        })?;
+        stage.flush()?;
+        let prototype = stage.prim("/W/B")?.prototype()?.expect("/W/B is an instance");
+        let heard = events.borrow();
+        let named: Vec<usize> = heard
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, paths))| paths.contains(&prototype))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(named.len(), 1, "{heard:?}");
+        assert_eq!(heard[named[0]].0, "commit", "{heard:?}");
+        assert!(heard[named[0]].1.contains(&sdf::path("/W/B")?), "{heard:?}");
+        Ok(())
+    }
+
+    /// A walk under temporary load rules publishes nothing it alone
+    /// registered: `find_loadable` reaches the instance inside an unloaded
+    /// payload, and once the rules are restored, no notice names its
+    /// prototype and the stage holds none.
+    #[test]
+    fn find_loadable_quiet() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\n";
+        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+
+        let loadable = stage.find_loadable("/")?;
+        assert!(loadable.contains(&sdf::path("/W")?), "{loadable:?}");
+        stage.flush()?;
+        let named: Vec<_> = events
+            .borrow()
+            .iter()
+            .flat_map(|(_, paths)| paths.clone())
+            .filter(pcp::is_prototype_namespace)
+            .collect();
+        assert!(named.is_empty(), "{:?}", events.borrow());
+        assert!(stage.prototypes()?.is_empty());
+        Ok(())
+    }
+
+    /// A root with `/W`, whose payload is [`PAYLOAD_FILES`]' `w.usda` and
+    /// whose reference to `c.usda` composes, and runs the hook, before the
+    /// payload loads, and `/T`, which references `lib.usda`'s `Q`.
+    const FLIPPED_ROOT: &str = "#usda 1.0\ndef \"W\" (\n    payload = @w.usda@\n    references = @c.usda@\n) {}\ndef \"T\" (references = @lib.usda@</Q>) {}\n";
+
+    /// A load beneath an ancestor that has not composed yet: the edit the
+    /// resolver commits while the ancestor composes follows the load's
+    /// notice, which the load reserved before composing anything.
+    #[test]
+    fn load_reserves_first() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = payload_stage(dir.path(), FLIPPED_ROOT)?;
+        let layer = stage.root_layer();
+        let ran = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&ran);
+        hook.replace(Some(Box::new(move || {
+            flag.set(true);
+            instance_raw(&layer, "/T");
+        })));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        assert!(!ran.get(), "nothing has composed /W");
+
+        stage.load("/W/A", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        assert!(ran.get());
+        let heard = events.borrow();
+        assert_eq!(heard.first().map(|(kind, _)| *kind), Some("load"), "{heard:?}");
+        let commit = heard.iter().position(|(kind, _)| *kind == "commit");
+        assert_eq!(commit, Some(1), "{heard:?}");
+        Ok(())
+    }
+
+    /// A load beneath an instance no read has reached refreshes the
+    /// instance, whose inclusion flipped, and names its prototype.
+    #[test]
+    fn load_names_refreshed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0
+def \"I\" (
+    instanceable = true
+    references = @lib.usda@</P>
+) {}
+";
+        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        stage.load("/I/Body", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        let prototype = stage.prim("/I")?.prototype()?.expect("/I is an instance");
+        let heard = events.borrow();
+        assert_eq!(heard.first().map(|(kind, _)| *kind), Some("load"), "{heard:?}");
+        assert!(heard[0].1.contains(&prototype), "{heard:?}");
+        Ok(())
+    }
+
+    /// A load and work a read left, settling together, each demanding a
+    /// layer of their own: the prototype the load composes goes out in its
+    /// notice, and the one the read's work composes after it.
+    #[test]
+    fn demands_owned_apart() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let files = [
+            (
+                "root.usda",
+                "#usda 1.0\nclass \"Lib\"\n{\n    def \"P\"\n    {\n        def \"Inner\" (\n            instanceable = true\n            references = @b.usda@\n        ) {}\n    }\n}\ndef \"A\" (\n    instanceable = true\n    references = </Lib/P>\n) {}\ndef \"W\" (payload = @w.usda@) {}\n",
+            ),
+            (
+                "w.usda",
+                "#usda 1.0\n(\n    defaultPrim = \"R\"\n)\ndef \"R\"\n{\n    def \"I\" (\n        instanceable = true\n        references = @a.usda@\n    ) {}\n}\n",
+            ),
+            (
+                "a.usda",
+                "#usda 1.0\n(\n    defaultPrim = \"X\"\n)\ndef \"X\"\n{\n    def \"m\" {}\n}\n",
+            ),
+            (
+                "b.usda",
+                "#usda 1.0\n(\n    defaultPrim = \"Y\"\n)\ndef \"Y\"\n{\n    def \"n\" {}\n}\n",
+            ),
+        ];
+        for (file, content) in files {
+            fs::write(dir.path().join(file), content)?;
+        }
+        let stage = Stage::builder()
+            .load(InitialLoadSet::LoadNone)
+            .open(&dir.path().join("root.usda").to_string_lossy())?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        // The read leaves the walk of `/A`'s prototype, which demands
+        // `b.usda`, for the next settlement.
+        assert!(stage.prim("/A")?.prototype()?.is_some());
+        stage.load("/W", usd::LoadPolicy::WithDescendants)?;
+        stage.flush()?;
+        let loaded = stage.prim("/W/I")?.prototype()?.expect("/W/I is an instance");
+        let heard = events.borrow();
+        let load = heard.iter().find(|(kind, _)| *kind == "load");
+        assert!(load.is_some_and(|(_, paths)| paths.contains(&loaded)), "{heard:?}");
+        Ok(())
+    }
+
+    /// A metadata edit beneath the source of prototypes `find_loadable`
+    /// registered privately names no path in their namespaces.
+    #[test]
+    fn private_info_hidden() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let heard: Rc<RefCell<Vec<sdf::Path>>> = Rc::default();
+        let log = Rc::clone(&heard);
+        stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
+            let paths = change.resynced.iter().chain(change.changed_info_only);
+            log.borrow_mut().extend(paths.cloned());
+        })?;
+        stage.find_loadable("/A")?;
+        stage.flush()?;
+        assert_eq!(stage.cache().prototypes().len(), 2);
+        stage.root_layer().edit(|e| {
+            e.data_mut().set_field(
+                &sdf::path("/Geo/m")?,
+                "documentation",
+                vt::Value::String("a note".to_string()),
+            );
+            Ok(())
+        })?;
+        stage.flush()?;
+        let heard = heard.borrow();
+        assert!(heard.contains(&sdf::path("/Geo/m")?), "{heard:?}");
+        assert!(!heard.iter().any(pcp::is_prototype_namespace), "{heard:?}");
+        Ok(())
+    }
+
+    /// An edit a read's resolver commits retargets the instance the read
+    /// resolves beneath: with a default sink, the prototype the edit mints
+    /// and the one nested in it, which the read goes on to mint, go out in
+    /// one notice.
+    #[test]
+    fn lazy_retarget_together() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0\nclass \"Lib\"\n{\n    def \"P\"\n    {\n        def \"Inner\" (\n            instanceable = true\n            references = @g.usda@\n        ) {}\n    }\n    def \"Q\"\n    {\n        def \"Inner\" (\n            instanceable = true\n            references = </Geo>\n        ) {}\n    }\n}\ndef \"Geo\"\n{\n    def \"m\" {}\n}\ndef \"T\" (\n    instanceable = true\n    references = </Lib/P>\n) {}\n";
+        let (stage, hook) = hooked_stage(
+            dir.path(),
+            root,
+            &[("g.usda", "#usda 1.0\n(\n    defaultPrim = \"G\"\n)\ndef \"G\" {}\n")],
+            "g.usda",
+        )?;
+        let layer = stage.root_layer();
+        hook.replace(Some(Box::new(move || {
+            layer
+                .edit(|e| {
+                    let reference = sdf::Reference {
+                        prim_path: sdf::path("/Lib/Q")?,
+                        ..Default::default()
+                    };
+                    e.data_mut().set_field(
+                        &sdf::path("/T")?,
+                        "references",
+                        vt::Value::ReferenceListOp(sdf::ReferenceListOp::explicit(vec![reference])),
+                    );
+                    Ok(())
+                })
+                .expect("the layer is free");
+        })));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), false))?;
+        assert!(stage.prim("/T/Inner")?.prototype()?.is_some());
+        stage.flush()?;
+        let outer = stage.prim("/T")?.prototype()?.expect("/T is an instance");
+        let inner = stage.prim("/T/Inner")?.prototype()?.expect("/T/Inner is an instance");
+        let heard = events.borrow();
+        let naming = |root: &sdf::Path| heard.iter().position(|(_, paths)| paths.contains(root));
+        assert!(naming(&outer).is_some(), "{heard:?}");
+        assert_eq!(naming(&outer), naming(&inner), "{heard:?}");
+        Ok(())
+    }
+
+    /// Muting the layer a privately registered instance references names no
+    /// path in its prototype's namespace, though settling the mute retires
+    /// the prototype before the notice goes out.
+    #[test]
+    fn private_mute_hidden() -> Result<()> {
+        struct Muting(Rc<RefCell<Vec<sdf::Path>>>);
+        impl usd::StageSink for Muting {
+            fn layer_muting_changed(&self, _: &Stage, _: &str, _: bool, resynced: usd::Resynced<'_>) {
+                let paths = resynced.subtrees.iter().chain(resynced.prims);
+                self.0.borrow_mut().extend(paths.cloned());
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0\ndef \"A\" (\n    instanceable = true\n    references = @lib.usda@</P>\n) {}\n";
+        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let heard: Rc<RefCell<Vec<sdf::Path>>> = Rc::default();
+        stage.add_sink(Muting(Rc::clone(&heard)))?;
+        stage.find_loadable("/A")?;
+        stage.flush()?;
+        assert_eq!(stage.cache().prototypes().len(), 1);
+        let identifier = stage
+            .layer_identifiers()
+            .into_iter()
+            .find(|id| id.ends_with("lib.usda"))
+            .expect("lib.usda is open");
+        stage.mute_layer(identifier);
+        stage.flush()?;
+        let heard = heard.borrow();
+        assert!(!heard.is_empty());
+        assert!(!heard.iter().any(pcp::is_prototype_namespace), "{heard:?}");
+        Ok(())
+    }
+
+    /// The stage asks a sink for complete notices once, when it is
+    /// installed: removing another sink asks no one, so a sink that reads
+    /// the stage as it answers is never asked while the set is borrowed.
+    #[test]
+    fn complete_asked_once() -> Result<()> {
+        struct Reading(WeakStage, Rc<Cell<u32>>);
+        impl usd::StageSink for Reading {
+            fn complete_prototypes(&self) -> bool {
+                self.1.set(self.1.get() + 1);
+                let stage = self.0.upgrade().expect("the stage is alive");
+                let _ = stage.prim("/A").expect("a prim path").is_valid();
+                true
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let asked = Rc::new(Cell::new(0));
+        stage.add_sink(Reading(stage.downgrade(), Rc::clone(&asked)))?;
+        let other = stage.add_sink(Events(Rc::default(), true))?;
+        stage.remove_sink(other)?;
+        assert_eq!(asked.get(), 1);
+        Ok(())
+    }
+
+    /// A library prototype holding a nested instance, and an instance of it.
+    const NESTED: &str = "#usda 1.0\nclass \"Lib\"\n{\n    def \"P\"\n    {\n        def \"Inner\" (\n            instanceable = true\n            references = </Geo>\n        ) {}\n    }\n}\ndef \"Geo\"\n{\n    def \"m\" {}\n}\ndef \"A\" (\n    instanceable = true\n    references = </Lib/P>\n) {}\n";
+
+    /// What a read registered, and the prototype nested in it that settles
+    /// later, go out together ahead of an edit queued after the read, at a
+    /// flush.
+    #[test]
+    fn flush_read_before_queued() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+        let layer = stage.root_layer();
+        {
+            let _layers = stage.layers();
+            define_raw(&layer, "/Later");
+        }
+        stage.flush()?;
+        let prototypes = stage.prototypes()?;
+        assert_eq!(prototypes.len(), 2, "{prototypes:?}");
+        assert!(prototypes.contains(&outer));
+        assert_eq!(
+            *events.borrow(),
+            [("recomposed", prototypes), ("commit", vec![sdf::path("/Later")?])]
+        );
+        Ok(())
+    }
+
+    /// The prototypes `find_loadable` registered under its temporary rules,
+    /// an outer one and the one nested in it, stay unannounced when an edit
+    /// retires them: the deactivation names the prim alone, and no path in
+    /// their namespaces.
+    #[test]
+    fn private_retire_quiet() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        stage.find_loadable("/A")?;
+        stage.flush()?;
+        assert_eq!(
+            stage.cache().prototypes().len(),
+            2,
+            "find_loadable registered /A and its nested instance"
+        );
+        let layer = stage.root_layer();
+        layer
+            .edit(|e| {
+                e.data_mut()
+                    .set_field(&sdf::path("/A")?, "active", vt::Value::Bool(false));
+                Ok(())
+            })
+            .expect("the layer is free");
+        stage.flush()?;
+        let heard = events.borrow();
+        let named = heard
+            .iter()
+            .flat_map(|(_, paths)| paths)
+            .any(pcp::is_prototype_namespace);
+        assert!(!named, "{heard:?}");
+        Ok(())
+    }
+
+    /// A private prototype an edit retires and takes back is named once,
+    /// by that edit, and not again by an instance joining it.
+    #[test]
+    fn private_taken_back_once() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = "#usda 1.0
+def \"A\" (
+    instanceable = true
+    references = @lib.usda@</P>
+) {}
+def \"B\" (references = @lib.usda@</P>) {}
+";
+        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        stage.find_loadable("/A")?;
+        stage.flush()?;
+        // A spec beneath the instance retires its prototype, and settling
+        // the edit takes the root back under the key it kept.
+        define_raw(&stage.root_layer(), "/A/Extra");
+        stage.flush()?;
+        stage.prim("/B")?.set_instanceable(true)?;
+        stage.flush()?;
+        let prototype = stage.prim("/A")?.prototype()?.expect("/A is an instance");
+        assert_eq!(stage.prim("/B")?.prototype()?, Some(prototype.clone()));
+        let heard = events.borrow();
+        let named = heard.iter().filter(|(_, paths)| paths.contains(&prototype)).count();
+
+        assert_eq!(named, 1, "{heard:?}");
+        Ok(())
+    }
+
+    /// A load a resolver runs inside a read panics once its scope is open,
+    /// the resolver catching the panic: the read closes cleanly, and an
+    /// instance made next names its prototype in its own commit.
+    #[test]
+    fn caught_load_panic_scope() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (stage, hook) = payload_stage(dir.path(), FLIPPED_ROOT)?;
+        let weak = stage.downgrade();
+        hook.replace(Some(Box::new(move || {
+            let stage = weak.upgrade().expect("the stage is alive");
+            let load = panic::catch_unwind(AssertUnwindSafe(|| {
+                let _ = stage.load("/W/A", usd::LoadPolicy::WithDescendants);
+            }));
+            assert!(load.is_err(), "a load inside a read panics");
+        })));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        stage.add_sink(Events(Rc::clone(&events), true))?;
+        assert!(stage.prim("/W")?.is_valid()?);
+        assert!(!stage.composition.is_poisoned());
+        stage.flush()?;
+        events.borrow_mut().clear();
+        stage.prim("/T")?.set_instanceable(true)?;
+        let prototype = stage.prim("/T")?.prototype()?.expect("/T is an instance");
+        let heard = events.borrow();
+        assert_eq!(
+            heard.first(),
+            Some(&("commit", vec![sdf::path("/T")?, prototype])),
+            "{heard:?}"
+        );
         Ok(())
     }
 

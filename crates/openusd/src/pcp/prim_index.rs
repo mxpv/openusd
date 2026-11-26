@@ -16,6 +16,7 @@ use crate::sdf::{self, LayerOffset, Path};
 use crate::vt::Value;
 
 use super::diagnostics::Diagnostics;
+use super::index_store::Owner;
 use super::index_store::PrimRevision;
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
@@ -280,6 +281,10 @@ pub(crate) struct Demand {
     /// the barrier to look for it once more. The index such a build produced
     /// is complete as it stands; one from a build that waits is not.
     pub recheck: bool,
+    /// Who the settlement that raised the demand is reported for, and so
+    /// the work loading the target invalidates is recorded for; `None` for
+    /// a demand no settlement unit raised.
+    pub owner: Option<Owner>,
 }
 
 impl PrimIndex {

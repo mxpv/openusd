@@ -27,7 +27,7 @@ use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::clip_manifest;
 use super::diagnostics::Diagnostics;
-use super::index_store::{IndexStore, PrimRevision, ScopedInvalidation, ValueScope};
+use super::index_store::{IndexStore, Owner, PrimRevision, ScopedInvalidation, ValueScope};
 use super::instancing::{Answer, PrimRecord, PrototypeRegistry, RetiredPrototype};
 use super::layer_graph::{LayerGraph, LayerStackIdentifier, LayerView, MuteChange, sublayer_introducer};
 use super::layer_stack::{LayerStackId, StackMarks};
@@ -77,7 +77,7 @@ pub struct IndexCache {
     /// The per-prim composition index storage and its dependency map (see
     /// [`IndexStore`]). The instancing pass and the builder reach composed
     /// indices through [`Self::cached`] and the store's accessors.
-    store: IndexStore,
+    pub(super) store: IndexStore,
     /// Variant fallback selections tried when no authored selection exists.
     variant_fallbacks: VariantFallbackMap,
     /// Per-path payload-inclusion policy (C++ `UsdStageLoadRules`), seeded at
@@ -161,6 +161,28 @@ pub struct IndexCache {
     /// instancing pass can detect a demand fired mid-redirect (see
     /// [`effective_path`](Self::effective_path)).
     pub(super) pending_loads: Vec<Demand>,
+    /// The owner of the unit settlement is settling, which what it
+    /// registers is credited to when no claim decides
+    /// ([`credit`](Self::credit)).
+    pub(super) active: Option<Owner>,
+    /// The owner every registration is credited to while temporary load
+    /// rules are installed ([`set_private`](Self::set_private)), the roots it
+    /// mints kept private.
+    pub(super) private: Option<Owner>,
+    /// The roots minted while [`private`](Self::private) was set that no
+    /// real work has reached since. One retired stays, for the notices
+    /// still to be built of its namespace to leave it out: a root's number
+    /// is never minted again.
+    pub(super) private_roots: sdf::PathSet,
+    /// The roots live when [`private`](Self::private) was set: one the
+    /// temporary rules retired and their restore took back is no private
+    /// mint.
+    pub(super) live_roots: sdf::PathSet,
+    /// Each `/__Prototype_N` root a registration materialized, with the
+    /// owner it is credited to, since they were last taken
+    /// ([`take_minted`](Self::take_minted)): a fresh mint, a retired root an
+    /// instance took back, or a private root real work reached.
+    pub(super) minted: Vec<(Path, Owner)>,
 }
 
 /// A prim's own contribution to its inherited status: the inputs C++
@@ -1508,6 +1530,11 @@ impl IndexCache {
             collection_diagnostics,
             query_diagnostics: Diagnostics::default(),
             pending_loads: Vec::new(),
+            active: None,
+            private: None,
+            private_roots: sdf::PathSet::default(),
+            live_roots: sdf::PathSet::default(),
+            minted: Vec::new(),
         }
     }
 
@@ -4353,7 +4380,11 @@ impl IndexCache {
             }
             self.tally.visits += 1;
             let retried = self.store.is_retried(&path);
-            match self.settle_prim(graph, &path) {
+            self.active = self.store.owner_at(&path);
+            let demands = self.pending_loads.len();
+            let settled = self.settle_prim(graph, &path);
+            self.note_demands(demands);
+            match settled {
                 // A prim served from elsewhere (an instance proxy reads its
                 // prototype's index) settles here, its build not at its path.
                 Ok(Settlement::Rebuilt) => {
@@ -4365,7 +4396,10 @@ impl IndexCache {
                     // whose rebuild read a recorded failure drops again, once,
                     // for the stage to forget the failure and settle it anew.
                     if !retried {
+                        // The prim drops again for the owner it settled for.
+                        let previous = self.store.set_owner(self.active.or(self.store.owner()));
                         self.store.retry_failed(&path);
+                        self.store.set_owner(previous);
                     }
                 }
                 Ok(Settlement::Excluded | Settlement::Absent) => {
@@ -4374,10 +4408,15 @@ impl IndexCache {
                     }
                 }
                 Ok(Settlement::Pending) => {}
-                Err(error) if error.is_busy() => return Err(error),
+                Err(error) if error.is_busy() => {
+                    self.active = None;
+                    return Err(error);
+                }
                 Err(error) => self.store.fail(&path, error.to_string()),
             }
         }
+        self.active = None;
+        self.walk_pass(graph)?;
         // Every instance this pass registered has taken its root back, so a
         // root still retired has none, unless a transfer still waiting on a
         // load claims it later.
@@ -4432,6 +4471,85 @@ impl IndexCache {
         Ok(())
     }
 
+    /// Takes the walk work's steps ([`IndexStore::queue_walk`]), each for
+    /// its owner, until none is left that can progress: a step that
+    /// demanded a layer waits for the load, and one that failed waits for
+    /// the next round. A busy store stops the pass, every walk kept.
+    // TODO(rayon): the steps of one round of `walk_work` are independent
+    // reads of distinct prims; only the registrations and the children they
+    // queue need merging, in path order, after them.
+    fn walk_pass(&mut self, graph: &LayerView<'_>) -> Result<(), QueryError> {
+        // Under temporary load rules nothing is walked: the walks queued
+        // before them settle once the rules are restored. With complete
+        // notices off, the walk work only claims namespaces.
+        if self.private.is_some() || !self.store.is_complete() {
+            return Ok(());
+        }
+        loop {
+            let work = self.store.walk_work();
+            let mut progressed = false;
+            for path in work {
+                let Some(item) = self.store.take_walk(&path) else {
+                    continue;
+                };
+                self.active = Some(item.here.owner);
+                let demands = self.pending_loads.len();
+                let step = self.walk_step(graph, &path, item.below.is_some());
+                self.note_demands(demands);
+                self.active = None;
+                match step {
+                    Ok(Some(children)) => {
+                        progressed = true;
+                        if let Some(below) = item.below {
+                            for child in children {
+                                self.store.queue_walk(child, true, false, below.owner);
+                            }
+                        }
+                    }
+                    Ok(None) => self.store.return_walk(path, item, false),
+                    Err(error) if error.is_busy() => {
+                        self.store.return_walk(path, item, false);
+                        return Err(error);
+                    }
+                    Err(_) => self.store.return_walk(path, item, true),
+                }
+            }
+            if !progressed || !self.pending_loads.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// One step of the walk at `path`: registers the prim's prototype when
+    /// it is an instance, whose subtree belongs to the prototype, and
+    /// otherwise returns its populated children to walk, when `below`. A
+    /// prim the population does not reach has none. `None` when the step
+    /// demanded a layer not yet loaded, so its answer is provisional.
+    fn walk_step(&mut self, graph: &LayerView<'_>, path: &Path, below: bool) -> Result<Option<Vec<Path>>, QueryError> {
+        let pending_before = self.pending_loads.len();
+        let children = if !self.is_populated(graph, path)? || self.prototype_of(graph, path)?.is_some() || !below {
+            Vec::new()
+        } else {
+            let names = self.prim_children(graph, path)?;
+            names.iter().filter_map(|name| path.append_child(name).ok()).collect()
+        };
+        if self.awaits_load(pending_before) {
+            return Ok(None);
+        }
+        Ok(Some(children))
+    }
+
+    /// Stamps the demands raised since there were `before` of them with
+    /// the active owner ([`Demand::owner`]), for the stage to report what
+    /// loading their targets causes for.
+    fn note_demands(&mut self, before: usize) {
+        if let Some(owner) = self.active {
+            for demand in &mut self.pending_loads[before..] {
+                demand.owner = Some(owner);
+            }
+        }
+    }
+
     /// Decides the work-set prim at `path`. Deciding it rebuilds its index,
     /// unless the prim is served from elsewhere (an instance proxy reads its
     /// prototype's index) or composes nothing.
@@ -4480,7 +4598,12 @@ impl IndexCache {
             let targets = if busy.is_some() || enclosed_kept || record.failed_in == Some(round) {
                 None
             } else {
-                match self.prototype_targets(graph, &record, &moved) {
+                self.active = record.owner;
+                let demands = self.pending_loads.len();
+                let targets = self.prototype_targets(graph, &record, &moved);
+                self.note_demands(demands);
+                self.active = None;
+                match targets {
                     Ok(targets) => targets,
                     Err(error) if error.is_busy() => {
                         busy = Some(error);

@@ -2912,6 +2912,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                             asset_path: asset_path.to_string(),
                             context,
                             recheck: false,
+                            owner: None,
                         });
                         return Ok(());
                     }
@@ -2936,6 +2937,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                         asset_path: asset_path.to_string(),
                         context,
                         recheck: true,
+                        owner: None,
                     }),
                 }
                 // An unresolvable asset is a recoverable error (C++ "Could not
@@ -2965,6 +2967,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                         asset_path: asset_path.to_string(),
                         context,
                         recheck: false,
+                        owner: None,
                     });
                     return Ok(());
                 }
