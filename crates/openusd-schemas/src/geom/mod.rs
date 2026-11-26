@@ -67,8 +67,9 @@
 //! single property declares, are written by hand at the end of this module.
 //! The purpose visibilities (`guideVisibility`, `proxyVisibility`,
 //! `renderVisibility`) share [`PurposeVisibility`], which derives no `Default`
-//! because their fallbacks differ; a model's `model:drawMode` and
-//! `model:cardGeometry` decode to [`DrawMode`] and [`CardGeometry`].
+//! because their fallbacks differ; a model's `model:drawMode`,
+//! `model:cardGeometry` and `model:cardVisibility` decode to [`DrawMode`],
+//! [`CardGeometry`] and [`CardVisibility`].
 //! `visibility`, `purpose` and the purpose visibilities are inherited down
 //! namespace. [`ImageableExt::compute_visibility`],
 //! [`ImageableExt::effective_visibility`] and
@@ -105,6 +106,10 @@
 //! [`frustum`](openusd::gf::Camera::frustum).
 //! [`Camera::linear_exposure_scale`] is the factor its exposure attributes
 //! scale an image by.
+//!
+//! [`BackPlateAPI`] places a textured card in the scene, constrained to the
+//! camera it is applied to. A camera holds any number of them, each under its
+//! own instance name.
 //!
 //! # Stage metrics
 //!

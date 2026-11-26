@@ -79,6 +79,8 @@ fn configured(schemas: &Path) -> openusd_build::Builder {
         .token_enum(TokenEnum::new("Purpose", "usdGeom", "Imageable.purpose").with_default())
         .token_enum(TokenEnum::new("DrawMode", "usdGeom", "GeomModelAPI.model:drawMode").with_default())
         .token_enum(TokenEnum::new("CardGeometry", "usdGeom", "GeomModelAPI.model:cardGeometry").with_default())
+        .token_enum(TokenEnum::new("CardVisibility", "usdGeom", "GeomModelAPI.model:cardVisibility").with_default())
+        .token_enum(TokenEnum::new("PlateVisibility", "usdGeom", "BackPlateAPI.plateVisibility").with_default())
         .token_enum(TokenEnum::new("Orientation", "usdGeom", "Gprim.orientation").with_default())
         .token_enum(TokenEnum::new("Axis", "usdGeom", "Cylinder.axis").with_default())
         .token_enum(TokenEnum::new("ElementType", "usdGeom", "GeomSubset.elementType").with_default())

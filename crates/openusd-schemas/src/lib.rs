@@ -9,7 +9,7 @@
 //! Every view is generated at build time by
 //! [`openusd-build`](https://docs.rs/openusd-build) from the definitions this
 //! crate vendors under `schemas/<library>/schema.usda`, copied from OpenUSD
-//! v26.05: a family's views, the tokens it names things by, and the schema
+//! v26.08: a family's views, the tokens it names things by, and the schema
 //! data a registry reads its fallbacks and inheritance from. What is
 //! hand-written beside them is what a property cannot say — a transform
 //! stack, a skinning topology, a render spec.

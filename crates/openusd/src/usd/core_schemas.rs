@@ -255,6 +255,14 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
                 ::openusd::usd::SchemaKind::SingleApplyApi,
             )
             .bases(&["APISchemaBase"])
+            .plug_info(
+                &[
+                    ::openusd::usd::Field::strings(
+                        "impliesCapabilities",
+                        &["usd.core.colorspace"],
+                    ),
+                ],
+            )
             .properties(
                 &[
                     ::openusd::usd::PropertyDecl::attribute("colorSpace:name", "token")
@@ -267,6 +275,14 @@ pub const SCHEMAS: &::openusd::usd::SchemaFamily<'static> = &::openusd::usd::Sch
             )
             .bases(&["APISchemaBase"])
             .property_namespace_prefix("colorSpaceDefinition")
+            .plug_info(
+                &[
+                    ::openusd::usd::Field::strings(
+                        "impliesCapabilities",
+                        &["usd.core.colorspace"],
+                    ),
+                ],
+            )
             .properties(
                 &[
                     ::openusd::usd::PropertyDecl::attribute(

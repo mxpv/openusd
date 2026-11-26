@@ -1,8 +1,8 @@
 # OpenUSD
 
 The licence and notice for everything this workspace takes from
-[OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD), at v26.05 (commit
-`2095fafafd033fa23386d7ec6d58c7cc33974518`). The content itself lives with the
+[OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD), at v26.08 (commit
+`ee47c679abde5b467a7b6a41f3b2285564a4222e`). The content itself lives with the
 crate that reads it; this records where it came from and what governs it.
 
 | Path | What it is |
