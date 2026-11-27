@@ -1932,8 +1932,9 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A layer whose resolver reports no modification time is read again
-    /// on every reload, as C++ compares an unknown time equal to none.
+    /// A layer whose resolver reports no modification time, as the base
+    /// trait does, is read again on every reload. C++ compares an unknown
+    /// time equal to none.
     #[test]
     fn reload_unknown_time() -> Result<()> {
         struct Timeless(ar::DefaultResolver);
@@ -1949,9 +1950,6 @@ pub(crate) mod tests {
             }
             fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
                 self.0.open_asset(resolved_path)
-            }
-            fn modification_timestamp(&self, _: &str, _: &ar::ResolvedPath) -> Option<SystemTime> {
-                None
             }
         }
 

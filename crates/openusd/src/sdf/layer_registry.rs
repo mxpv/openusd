@@ -1219,6 +1219,10 @@ pub(crate) mod tests {
             (self.hook)(resolved_path);
             self.inner.open_asset(resolved_path)
         }
+
+        fn modification_timestamp(&self, asset_path: &str, resolved_path: &ar::ResolvedPath) -> Option<SystemTime> {
+            self.inner.modification_timestamp(asset_path, resolved_path)
+        }
     }
 
     /// Opens a root layer and the full transitive closure of its sublayers,

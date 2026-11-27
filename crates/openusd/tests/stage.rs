@@ -11,7 +11,7 @@ use std::path::Path as FsPath;
 use std::rc::Rc;
 use std::slice;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use openusd::Result;
 use openusd::ar::Resolver as _;
@@ -5646,6 +5646,9 @@ impl ar::Resolver for RecordingResolver {
     }
     fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
         self.inner.in_memory_identifier(asset_path)
+    }
+    fn modification_timestamp(&self, asset_path: &str, resolved_path: &ar::ResolvedPath) -> Option<SystemTime> {
+        self.inner.modification_timestamp(asset_path, resolved_path)
     }
 }
 

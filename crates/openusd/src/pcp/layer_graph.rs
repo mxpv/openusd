@@ -3804,6 +3804,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::Path as FsPath;
+    use std::time::SystemTime;
 
     use super::*;
     use crate::ar;
@@ -5701,6 +5702,9 @@ mod tests {
         }
         fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
             self.inner.in_memory_identifier(asset_path)
+        }
+        fn modification_timestamp(&self, asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
+            self.inner.modification_timestamp(asset_path, resolved_path)
         }
     }
 }

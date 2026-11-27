@@ -505,9 +505,12 @@ pub trait Resolver {
         AssetInfo::default()
     }
 
-    /// Returns the modification timestamp of a resolved asset.
-    fn modification_timestamp(&self, _asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
-        fs::metadata(&**resolved_path).and_then(|m| m.modified()).ok()
+    /// The time the asset `asset_path` resolved to at `resolved_path` was
+    /// last modified, or `None` when it is unknown (C++
+    /// `ArResolver::GetModificationTimestamp`). A resolver that wraps another
+    /// forwards this to it.
+    fn modification_timestamp(&self, _asset_path: &str, _resolved_path: &ResolvedPath) -> Option<SystemTime> {
+        None
     }
 
     /// A stable token identifying this resolver's configuration, used as the
@@ -938,6 +941,12 @@ impl Resolver for DefaultResolver {
 
     fn cache_id(&self) -> Option<u64> {
         Some(self.id)
+    }
+
+    /// The file's modification time, as C++ `ArDefaultResolver` reads it
+    /// through `ArFilesystemAsset::GetModificationTimestamp`.
+    fn modification_timestamp(&self, _asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
+        fs::metadata(&**resolved_path).and_then(|m| m.modified()).ok()
     }
 
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
