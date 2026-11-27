@@ -580,9 +580,11 @@ impl Changes {
             // for a change to it (`_IsFallbackPrimTypesChange`).
             let stage_layer = graph.stage_metadata_layers().any(|id| id == edit.layer);
             for (path, entry) in edit.changes.entries() {
-                self.retries_sublayers |= [FieldKey::SubLayers, FieldKey::ExpressionVariables]
-                    .iter()
-                    .any(|key| entry.changed(key.as_str()));
+                // Sublayers or expression variables put back resolve every
+                // sublayer as before, so only ones that move retry a failed
+                // sublayer.
+                self.retries_sublayers |= entry.net_changed(FieldKey::SubLayers.as_str())
+                    || entry.net_changed(FieldKey::ExpressionVariables.as_str());
                 let effects = Self::effects_of(path, entry, stage_layer);
                 self.apply_effects(cache, graph, edit, path, effects);
             }
@@ -636,13 +638,28 @@ impl Changes {
             effects.value = Some(ValueScope::Prim);
             effects.properties = true;
         }
+        // A variant set added or removed, whether it stays or the edit takes
+        // it back, changes how the owner composes (C++
+        // `DidChangePrimVariantSets` making `Pcp_EntryRequiresPrimIndexChange`
+        // answer true). The set's own spec reports nothing.
+        // A prim's removal lists its variant sets among what it tears down, and
+        // reports itself through its removal flag.
+        let removal =
+            entry.flags.intersects(sdf::ChangeFlags::REMOVE) && !entry.flags.intersects(sdf::ChangeFlags::ADD);
+        let variant_sets = !removal && entry.changed(sdf::ChildrenKey::VariantSetChildren.as_str());
         if entry.is_child_bookkeeping() {
+            if variant_sets {
+                effects.significant = true;
+                effects.report = Some(Report::Rebuild);
+            }
             return effects;
         }
         let report = |rebuild| if rebuild { Report::Rebuild } else { Report::Info };
         if path.is_abs_root() {
             effects.stack = Self::stack_flags(entry);
-            effects.default_prim = entry.changed(FieldKey::DefaultPrim.as_str());
+            // A `defaultPrim` put back names the prim it named, so nothing
+            // that targets it moves (C++ skips a change with no effect).
+            effects.default_prim = entry.net_changed(FieldKey::DefaultPrim.as_str());
             // `fallbackPrimTypes` maps an unknown authored type to a substitute,
             // so editing it can move the schema identity of every prim on the
             // stage — no path names its reach. Only an edit to a layer the
@@ -676,7 +693,7 @@ impl Changes {
         // A significant one is named twice over — the resync tier reports it as
         // well — and the reporting layer drops the weaker of the two. A prim to
         // rebuild is named as a resync of its subtree.
-        effects.report = Some(report(Self::rebuilds(entry)));
+        effects.report = Some(report(Self::rebuilds(entry) || variant_sets));
 
         // The fields a prim's schema identity is composed from. `apiSchemas` is
         // significant as well, so this rides alongside that effect rather than
@@ -693,9 +710,13 @@ impl Changes {
         // The spec tier depends on this: `PrimIndex::respec_nodes` carries
         // `authors_clips` across a splice untouched, which holds only while a
         // clip field's presence never reaches that tier.
-        let significant = entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
+        let significant = variant_sets
+            || entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
             || entry.fields().any(|(field, change)| {
-                Self::field_promotes_to_significant(field.as_str())
+                // Relocates put back relocate as before, as C++ compares the
+                // old and new relocations.
+                let restored = change == sdf::FieldChange::Restored && *field == FieldKey::Relocates.as_str();
+                (Self::field_promotes_to_significant(field.as_str()) && !restored)
                     || (change == sdf::FieldChange::Presence && clip::is_clip_field(field.as_str()))
             });
         if significant {
@@ -734,14 +755,38 @@ impl Changes {
     /// The layer-stack flags a pseudo-root entry raises.
     fn stack_flags(entry: &ChangeEntry) -> LayerStackChanges {
         let mut flags = LayerStackChanges::empty();
-        for key in entry.authored_fields() {
-            if *key == FieldKey::SubLayers.as_str() {
+        for (key, change) in entry.fields() {
+            // A time rate, expression variables or relocates put back leave
+            // what the stack composes from them as it was, as C++ compares the
+            // old and new rate (`Pcp_NeedToRecomputeLayerStackTimeCodesPerSecond`),
+            // variables and relocations. So does a sublayer list put back
+            // after an empty layer came and went, which C++ finds has no
+            // effect on composed results (`PcpChanges::_DidChangeSublayer`).
+            //
+            // TODO: port the C++ rules that weigh each sublayer added or
+            // removed (`_DidChangeSublayer`: an empty one is insignificant),
+            // and the other per-field old-and-new comparisons of
+            // `PcpChanges::DidChange`. A change here is either restored or
+            // not: a sublayer list put back after a non-empty layer came and
+            // went resyncs nothing, where C++ resyncs what that layer
+            // touched, and an empty sublayer added outright resyncs the
+            // stack, where C++ registers no change.
+            let restored = change == sdf::FieldChange::Restored;
+            if !restored && *key == FieldKey::SubLayers.as_str() {
                 flags |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
-            } else if *key == FieldKey::SubLayerOffsets.as_str() {
+            } else if *key == FieldKey::SubLayerOffsets.as_str() && !entry.changed(FieldKey::SubLayers.as_str()) {
+                // C++ records an offset change only for a list that keeps its
+                // length: a sublayer added or removed resizes the list, and
+                // its own change stands for the resize. So an offsets change
+                // beside a sublayer change goes with that change, restored or
+                // not, and one offset changed on its own, even put back,
+                // counts.
                 flags |= LayerStackChanges::OFFSETS | LayerStackChanges::SIGNIFICANT;
-            } else if *key == FieldKey::LayerRelocates.as_str() {
+            } else if !restored && *key == FieldKey::LayerRelocates.as_str() {
                 flags |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
-            } else if *key == FieldKey::TimeCodesPerSecond.as_str() || *key == FieldKey::FramesPerSecond.as_str() {
+            } else if !restored
+                && (*key == FieldKey::TimeCodesPerSecond.as_str() || *key == FieldKey::FramesPerSecond.as_str())
+            {
                 // The effective timeCodesPerSecond (authored rate, else
                 // framesPerSecond) retimes each sublayer edge offset by the
                 // per-hop ratio (spec 12.3.2, folded into `LayerNode::children`
@@ -749,7 +794,7 @@ impl Changes {
                 // so the stale ratio is refreshed; `SIGNIFICANT` then drops the
                 // indices that read the re-offset stack.
                 flags |= LayerStackChanges::TIME_CODES | LayerStackChanges::SIGNIFICANT;
-            } else if *key == FieldKey::ExpressionVariables.as_str() {
+            } else if !restored && *key == FieldKey::ExpressionVariables.as_str() {
                 // An `expressionVariables` edit restales the graph's
                 // `${VAR}`-expanded sublayer edges and any reference/payload/
                 // variant `${VAR}` expression a layer in the stack resolves
@@ -1871,6 +1916,66 @@ mod tests {
         let replaced = effects("/S");
         assert_eq!(replaced.report, Some(Report::Rebuild));
         assert!(replaced.significant);
+    }
+
+    /// An offsets change beside a sublayer change goes with it, restored or
+    /// not, while one offset changed and put back on its own still marks the
+    /// stack (C++ records an offset change only for a list that keeps its
+    /// length).
+    #[test]
+    fn offsets_follow_sublayers() {
+        let offsets = FieldKey::SubLayerOffsets.as_str();
+        let sublayers = FieldKey::SubLayers.as_str();
+        for (with_sublayers, marks) in [(false, true), (true, false)] {
+            let mut cl = ChangeList::new();
+            let entry = cl.entry_mut(&Path::abs_root());
+            entry.note(offsets, sdf::FieldChange::Restored);
+            if with_sublayers {
+                entry.note(sublayers, sdf::FieldChange::Restored);
+            }
+            let stack = Changes::stack_flags(entry_at(&cl, "/"));
+            assert_eq!(stack.contains(LayerStackChanges::OFFSETS), marks, "{with_sublayers}");
+        }
+    }
+
+    /// A prim removed with its variant sets reports its removal, not a
+    /// rebuild: the variant sets it tears down are part of the removal.
+    #[test]
+    fn removal_with_variant_sets() {
+        let mut cl = ChangeList::new();
+        let entry = cl.entry_mut(&p("/P"));
+        entry.flags |= ChangeFlags::REMOVE_NON_INERT_PRIM;
+        entry.note(
+            sdf::ChildrenKey::VariantSetChildren.as_str(),
+            sdf::FieldChange::Presence,
+        );
+        let effects = Changes::effects_of(&p("/P"), entry_at(&cl, "/P"), true);
+        assert_ne!(effects.report, Some(Report::Rebuild));
+    }
+
+    /// A time rate, expression variables or `defaultPrim` an edit puts back
+    /// reports the pseudo-root's changed info and leaves the layer stack and
+    /// what targets the default prim alone; one the edit changes does not.
+    #[test]
+    fn restored_stack_fields() {
+        for field in [
+            FieldKey::TimeCodesPerSecond,
+            FieldKey::FramesPerSecond,
+            FieldKey::ExpressionVariables,
+            FieldKey::DefaultPrim,
+        ] {
+            for (change, moves) in [(sdf::FieldChange::Restored, false), (sdf::FieldChange::Value, true)] {
+                let mut cl = ChangeList::new();
+                cl.entry_mut(&Path::abs_root()).note(field.as_str(), change);
+                let effects = Changes::effects_of(&Path::abs_root(), entry_at(&cl, "/"), true);
+                assert_eq!(effects.report, Some(Report::Info), "{field:?} {change:?}");
+                assert_eq!(
+                    !effects.stack.is_empty() || effects.default_prim,
+                    moves,
+                    "{field:?} {change:?}"
+                );
+            }
+        }
     }
 
     /// The fields C++ `UsdStage` recomposes a prim for report it as a

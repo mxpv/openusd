@@ -274,7 +274,7 @@ fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> 
             if entry.flags.intersects(sdf::ChangeFlags::ADD) {
                 edits.push(spec_create_edit(src, &mut places, path, spec_type)?);
             } else {
-                for field in entry.authored_fields() {
+                for field in entry.net_fields() {
                     edits.push(field_op(src, path, spec_type, field)?);
                 }
             }
@@ -326,9 +326,9 @@ pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
                 edits.push(spec_create_edit(base, &mut places, path, spec_type)?);
             }
         } else if let Some(spec_type) = base_type {
-            // Field-level edits on a surviving spec: restore each touched field
+            // Field-level edits on a surviving spec: restore each changed field
             // to its base value, or erase it when the base did not hold it.
-            for field in entry.authored_fields() {
+            for field in entry.net_fields() {
                 edits.push(field_op(base, path, spec_type, field)?);
             }
         }
@@ -1909,7 +1909,9 @@ pub(crate) mod tests {
 
     /// An exact replay of a variant-produced diff reports composed stage paths
     /// in its own change notice — the diff's mapping translates the authored
-    /// layer paths back — so a chained mirror sees the right namespace.
+    /// layer paths back — so a chained mirror sees the right namespace. The
+    /// replay adds the variant set to `/Prim`, which resyncs it, as C++
+    /// `DidChangePrimVariantSets` does.
     #[test]
     fn apply_diff_exact_notice_paths() -> Result<()> {
         let a = in_memory_stage()?;
@@ -1935,7 +1937,7 @@ pub(crate) mod tests {
             b.apply_diff(diff, ApplyMode::ExactLayer(&root_b))?;
         }
         let resynced = resynced.borrow();
-        assert!(resynced.contains(&sdf::path("/Prim/child")?));
+        assert!(resynced.contains(&sdf::path("/Prim")?), "{resynced:?}");
         assert!(
             !resynced.iter().any(|p| p.has_variant_selection()),
             "the authored variant path must not leak into stage namespace"

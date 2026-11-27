@@ -1650,6 +1650,65 @@ mod tests {
         Ok(())
     }
 
+    /// A field an edit changes and puts back records no undo step and no
+    /// replay edit; beside a field the edit changes, only that one is undone
+    /// and replayed.
+    #[test]
+    fn restored_field_unrecorded() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/World")?;
+        let replay = ReplayStage::from(stage.clone());
+        let undo = UndoStage::from(stage);
+        let root = undo.root_layer().identifier().to_string();
+        let world = sdf::path("/World")?;
+        let doc = sdf::FieldKey::Documentation.as_str();
+        let comment = sdf::FieldKey::Comment.as_str();
+        let draft = |layer: &mut sdf::LayerEdit<'_>| {
+            let data = layer.data_mut();
+            data.set_field(&world, doc, vt::Value::String("draft".into()));
+            data.erase_field(&world, doc);
+        };
+
+        undo.edit_layer(&root, |layer| {
+            draft(layer);
+            Ok(())
+        })?;
+        assert_eq!(undo.undo_depth(), 0);
+        assert!(replay.diff().is_empty());
+
+        undo.edit_layer(&root, |layer| {
+            draft(layer);
+            layer
+                .data_mut()
+                .set_field(&world, comment, vt::Value::String("c".into()));
+            Ok(())
+        })?;
+        let edits: Vec<Edit> = replay.diff().into_iter().flat_map(|diff| diff.edits).collect();
+        assert_eq!(
+            edits,
+            [Edit::SetField {
+                path: world.clone(),
+                spec_type: sdf::SpecType::Prim,
+                field: tf::Token::from(comment),
+                value: vt::Value::String("c".into()),
+            }]
+        );
+        assert_eq!(undo.undo_depth(), 1);
+        let inverse: Vec<Edit> = undo.capture.log().borrow().stack[0]
+            .iter()
+            .flat_map(|transaction| &transaction.layers)
+            .flat_map(|layer| layer.edits.clone())
+            .collect();
+        assert_eq!(
+            inverse,
+            [Edit::EraseField {
+                path: world,
+                field: tf::Token::from(comment),
+            }]
+        );
+        Ok(())
+    }
+
     /// Every spec created in one transaction undoes together as one step: an
     /// ancestor chain authored by a single `define_prim` is one step.
     #[test]

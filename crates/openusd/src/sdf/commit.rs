@@ -29,7 +29,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use super::{ChangeList, CommittedLayerChange, LayerSink, Patch, Path, PathMap, PendingLayerChange, is_children_field};
+use super::{
+    ChangeList, CommittedLayerChange, FieldChange, LayerSink, Patch, Path, PathMap, PendingLayerChange,
+    is_children_field,
+};
 
 /// The id of one atomic transaction: shared by every layer it commits,
 /// distinct from every other transaction's, and increasing in the order
@@ -89,8 +92,8 @@ impl TxnContext {
 pub(crate) struct Footprint {
     /// Every spec created ([`Patch::Created`]) or erased ([`Patch::Tombstone`]).
     pub specs: Vec<Path>,
-    /// Every `(path, field)` set or erased on a spec that already existed
-    /// ([`Patch::Edited`]).
+    /// Every `(path, field)` whose value the commit changed on a spec that
+    /// already existed ([`Patch::Edited`]).
     pub fields: Vec<(Path, String)>,
 }
 
@@ -124,18 +127,23 @@ impl Footprint {
             || under(&other.specs, &self.fields)
     }
 
-    /// The footprint of the edits staged in `overlay`, in path order.
-    pub(crate) fn of(overlay: &PathMap<Patch>) -> Self {
+    /// The footprint of the edits staged in `overlay`, in path order, with
+    /// the fields `changes`, the change list derived from it, records a net
+    /// change of: a field the edit puts back
+    /// ([`FieldChange::Restored`]) is left out.
+    pub(crate) fn of(overlay: &PathMap<Patch>, changes: &ChangeList) -> Self {
         let mut footprint = Self::default();
         for (path, patch) in overlay {
-            match patch {
-                Patch::Created(_) | Patch::Tombstone => footprint.specs.push(path.clone()),
-                Patch::Edited { set, erased } => {
-                    let fields = set.iter().map(|(field, _)| field).chain(erased);
-                    footprint
-                        .fields
-                        .extend(fields.map(|field| (path.clone(), field.clone())));
-                }
+            if matches!(patch, Patch::Created { .. } | Patch::Tombstone { .. }) {
+                footprint.specs.push(path.clone());
+            }
+        }
+        for (path, entry) in changes.entries() {
+            if matches!(overlay.get(path), Some(Patch::Edited { .. })) {
+                let fields = entry.fields().filter(|(_, change)| *change != FieldChange::Restored);
+                footprint
+                    .fields
+                    .extend(fields.map(|(field, _)| (path.clone(), field.as_str().to_owned())));
             }
         }
         // `PathMap` iterates in hash order; sort so the record is stable.

@@ -851,7 +851,9 @@ where
     }
 
     /// Remove the first `subLayers` entry matching `path` and its aligned
-    /// `subLayerOffsets` entry, returning whether anything was removed.
+    /// `subLayerOffsets` entry, returning whether anything was removed. The
+    /// last sublayer removed leaves `subLayers` unauthored and
+    /// `subLayerOffsets` an empty list, as C++ leaves them.
     pub fn remove_sublayer(&mut self, path: &str) -> bool {
         let Some(mut paths) = self.sublayer_paths() else {
             return false;
@@ -862,7 +864,10 @@ where
         let mut offsets = self.sublayer_offsets(paths.len());
         paths.remove(idx);
         offsets.remove(idx);
-        self.set(sdf::FieldKey::SubLayers.as_str(), vt::Value::StringVec(paths));
+        match paths.is_empty() {
+            true => self.erase(sdf::FieldKey::SubLayers.as_str()),
+            false => self.set(sdf::FieldKey::SubLayers.as_str(), vt::Value::StringVec(paths)),
+        }
         self.set(
             sdf::FieldKey::SubLayerOffsets.as_str(),
             vt::Value::LayerOffsetVec(offsets),

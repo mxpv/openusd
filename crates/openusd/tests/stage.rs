@@ -15478,8 +15478,10 @@ fn listener_info_under_variant_target() -> Result<()> {
 }
 
 /// A structural edit through a variant edit target reports its resynced path in
-/// stage namespace (`/Prim/child`). The literal authored path the change
-/// pipeline fans out (`/Prim{set=sel}child`) must not leak into `resynced`.
+/// stage namespace. The first child adds the variant set to `/Prim`, which
+/// resyncs it (C++ `DidChangePrimVariantSets`). The literal authored path the
+/// change pipeline fans out (`/Prim{set=sel}child`) must not leak into
+/// `resynced`.
 #[test]
 fn listener_resync_under_variant_target() -> Result<()> {
     let stage = in_memory_stage()?;
@@ -15499,8 +15501,41 @@ fn listener_resync_under_variant_target() -> Result<()> {
     };
     stage.define_prim("/Prim/child")?;
 
-    assert!(resynced.borrow().contains(&sdf::path("/Prim/child")?));
+    assert!(resynced.borrow().contains(&sdf::path("/Prim")?));
     assert!(!resynced.borrow().contains(&sdf::path("/Prim{set=sel}child")?));
+    Ok(())
+}
+
+/// A child authored inside a variant the prim already selects resyncs that
+/// child alone: the variant set stays as it was.
+#[test]
+fn selected_variant_child_narrow() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+def "Prim" (
+    variants = { string set = "sel" }
+    prepend variantSets = "set"
+)
+{
+    variantSet "set" = {
+        "sel" {
+        }
+    }
+}
+"#,
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/Prim")?.is_valid()?);
+    let notices = capture_notices(&stage);
+    stage.root_layer().edit(|e| {
+        sdf::PrimSpec::new(e.data_mut(), "/Prim{set=sel}child", sdf::Specifier::Def, "")?;
+        Ok(())
+    })?;
+    assert!(stage.prim("/Prim/child")?.is_valid()?);
+    assert_eq!(notices.borrow().resynced, paths(&["/Prim/child"]));
     Ok(())
 }
 
@@ -15568,8 +15603,9 @@ def \"MyPrim\" (
 }
 
 /// A local layer shares the stage's namespace only after variant selections are
-/// stripped: a spec authored straight into `/Prim{set=sel}child` composes into
-/// `/Prim/child`, and only that composed path may be reported.
+/// stripped: a spec authored straight into `/Prim{set=sel}child` is reported
+/// in stage namespace. The edit adds the variant set to `/Prim`, which
+/// resyncs it (C++ `DidChangePrimVariantSets`).
 #[test]
 fn local_variant_resync_stripped() -> Result<()> {
     let stage = in_memory_stage()?;
@@ -15586,7 +15622,7 @@ fn local_variant_resync_stripped() -> Result<()> {
     })?;
     stage.prim("/Prim")?.is_valid()?;
 
-    assert_eq!(notices.borrow().resynced, paths(&["/Prim/child"]));
+    assert_eq!(notices.borrow().resynced, paths(&["/Prim"]));
     Ok(())
 }
 
@@ -16329,6 +16365,417 @@ fn set_stamps_then_writes() -> Result<()> {
         *heard.borrow(),
         [(paths(&["/World.x"]), Vec::new()), (Vec::new(), paths(&["/World.x"]))]
     );
+    Ok(())
+}
+
+/// A root-layer edit that sets `timeCodesPerSecond` from 24 to 48 and back
+/// reports the pseudo-root as changed info and resyncs nothing, as C++ finds
+/// the stack's rate unchanged.
+#[test]
+fn restored_rate_info_only() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    timeCodesPerSecond = 24\n)\ndef \"World\"\n{\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/World")?.is_valid()?);
+    let notices = capture_notices(&stage);
+    let layer = stage.root_layer().identifier().to_string();
+    let rate = sdf::FieldKey::TimeCodesPerSecond.as_str();
+    stage.edit_layer(&layer, |edit| {
+        let data = edit.data_mut();
+        data.set_field(&sdf::Path::abs_root(), rate, vt::Value::Double(48.0));
+        data.set_field(&sdf::Path::abs_root(), rate, vt::Value::Double(24.0));
+        Ok(())
+    })?;
+    let notices = notices.borrow();
+    assert!(notices.resynced.is_empty(), "{:?}", notices.resynced);
+    assert_eq!(notices.changed_info_only, paths(&["/"]));
+    Ok(())
+}
+
+/// A root-layer edit that changes `framesPerSecond` and puts it back, on a
+/// layer that authors no `timeCodesPerSecond`, names both fields at `/`, as
+/// C++ reports the rate that falls back on it.
+#[test]
+fn restored_fps_names_rate() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    framesPerSecond = 24\n)\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let fields = Rc::new(RefCell::new(Vec::new()));
+    let recorder = fields.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage, change| {
+            let root = sdf::Path::abs_root();
+            let mut names: Vec<String> = change.changed_fields(&root).map(|f| f.to_string()).collect();
+            names.sort();
+            recorder.borrow_mut().push((change.resynced.to_vec(), names));
+        })),
+        ..Default::default()
+    })?;
+    let layer = stage.root_layer().identifier().to_string();
+    let fps = sdf::FieldKey::FramesPerSecond.as_str();
+    stage.edit_layer(&layer, |edit| {
+        let data = edit.data_mut();
+        data.set_field(&sdf::Path::abs_root(), fps, vt::Value::Double(48.0));
+        data.set_field(&sdf::Path::abs_root(), fps, vt::Value::Double(24.0));
+        Ok(())
+    })?;
+    assert_eq!(
+        *fields.borrow(),
+        [(
+            Vec::new(),
+            vec!["framesPerSecond".to_owned(), "timeCodesPerSecond".to_owned()]
+        )]
+    );
+    Ok(())
+}
+
+/// A root-layer edit that authors `layerRelocates` and clears it again
+/// reports the pseudo-root as changed info and resyncs nothing, as C++ finds
+/// the relocations unchanged.
+#[test]
+fn restored_relocates_info_only() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/A")?;
+    let notices = capture_notices(&stage);
+    let layer = stage.root_layer().identifier().to_string();
+    stage.edit_layer(&layer, |edit| {
+        edit.set_relocates(vec![(sdf::path("/A")?, sdf::path("/B")?)])?;
+        edit.clear_relocates()
+    })?;
+    let notices = notices.borrow();
+    assert!(notices.resynced.is_empty(), "{:?}", notices.resynced);
+    assert_eq!(notices.changed_info_only, paths(&["/"]));
+    Ok(())
+}
+
+/// Expression variables set and cleared in one edit leave a sublayer that
+/// failed to load unloaded, though its file now exists, as C++ composes the
+/// stack's variables unchanged.
+#[test]
+fn restored_vars_skip_retry() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./late.usda@]\n)\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"Late\"\n{\n}\n")?;
+    let layer = stage.root_layer().identifier().to_string();
+    stage.edit_layer(&layer, |edit| {
+        edit.set_expression_variables(HashMap::from([("X".to_owned(), vt::Value::String("x".into()))]))?;
+        edit.clear_expression_variables()
+    })?;
+    assert!(!stage.prim("/Late")?.is_valid()?);
+    Ok(())
+}
+
+/// A variant set added and removed in one edit resyncs its owner, which
+/// names `variantSetChildren` among its changed fields (C++
+/// `DidChangePrimVariantSets`).
+#[test]
+fn restored_variant_set_resyncs() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/P")?;
+    assert!(stage.prim("/P")?.is_valid()?);
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let recorder = heard.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage, change| {
+            let p = sdf::Path::new("/P").expect("path");
+            let fields: Vec<String> = change.changed_fields(&p).map(|f| f.to_string()).collect();
+            recorder.borrow_mut().push((change.resynced.to_vec(), fields));
+        })),
+        ..Default::default()
+    })?;
+    let layer = stage.root_layer().identifier().to_string();
+    stage.edit_layer(&layer, |edit| {
+        edit.prim_mut("/P")?.expect("/P").add_variant_set("v")?;
+        let data = edit.data_mut();
+        data.erase_spec(&sdf::path("/P{v=}")?);
+        data.erase_field(&sdf::path("/P")?, sdf::ChildrenKey::VariantSetChildren.as_str());
+        Ok(())
+    })?;
+    assert_eq!(
+        *heard.borrow(),
+        [(paths(&["/P"]), vec!["variantSetChildren".to_owned()])]
+    );
+    Ok(())
+}
+
+/// Renaming `/B` to `/B2` among `/A`, `/B` and `/C` resyncs the two names
+/// alone, as C++ does: the renamed child keeps its place without the parent
+/// reporting its children reordered.
+#[test]
+fn rename_resyncs_names() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    for path in ["/A", "/B", "/C"] {
+        stage.define_prim(path)?;
+    }
+    assert!(stage.prim("/B")?.is_valid()?);
+    let notices = capture_notices(&stage);
+    let mut editor = usd::NamespaceEditor::new(&stage);
+    editor.move_prim("/B", "/B2")?;
+    editor.apply()?;
+    let mut resynced = notices.borrow().resynced.clone();
+    resynced.sort();
+    assert_eq!(resynced, paths(&["/B", "/B2"]));
+    Ok(())
+}
+
+/// A variant set added to a prim and kept resyncs the prim (C++
+/// `DidChangePrimVariantSets`), though its new, empty spec reports nothing.
+#[test]
+fn variant_set_added_resyncs() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/P")?;
+    assert!(stage.prim("/P")?.is_valid()?);
+    let notices = capture_notices(&stage);
+    let layer = stage.root_layer().identifier().to_string();
+    stage.edit_layer(&layer, |edit| {
+        edit.prim_mut("/P")?.expect("/P").add_variant_set("v")?;
+        Ok(())
+    })?;
+    assert_eq!(notices.borrow().resynced, paths(&["/P"]));
+    Ok(())
+}
+
+/// A property whose documentation an edit sets, or sets and clears, before
+/// removing it names the field among its changed fields, and one removed and
+/// created again names each field the new spec authors, as C++ reports each
+/// write. A write of the value the field held names nothing.
+#[test]
+fn removed_property_history() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/P")?;
+    stage.create_attribute("/P.x", "double")?.set(1.0)?;
+    stage.create_attribute("/P.y", "double")?.set(1.0)?;
+    stage.create_attribute("/P.z", "double")?;
+    stage.create_attribute("/P.w", "double")?;
+    let layer = stage.root_layer().identifier().to_string();
+    let doc = sdf::FieldKey::Documentation.as_str();
+    stage.edit_layer(&layer, |edit| {
+        let w = sdf::path("/P.w")?;
+        edit.data_mut().set_field(&w, doc, vt::Value::String("kept".into()));
+        Ok(())
+    })?;
+    let fields = Rc::new(RefCell::new(Vec::new()));
+    let recorder = fields.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage, change| {
+            let named = |path: &str| {
+                let path = sdf::Path::new(path).expect("path");
+                let mut names: Vec<String> = change.changed_fields(&path).map(|f| f.to_string()).collect();
+                names.sort();
+                names
+            };
+            recorder
+                .borrow_mut()
+                .push([named("/P.x"), named("/P.y"), named("/P.z"), named("/P.w")]);
+        })),
+        ..Default::default()
+    })?;
+    stage.edit_layer(&layer, |edit| {
+        let z = sdf::path("/P.z")?;
+        edit.data_mut().set_field(&z, doc, vt::Value::String("draft".into()));
+        edit.remove_spec(&z)?;
+        let w = sdf::path("/P.w")?;
+        edit.data_mut().set_field(&w, doc, vt::Value::String("kept".into()));
+        edit.remove_spec(&w)?;
+        let x = sdf::path("/P.x")?;
+        edit.data_mut().set_field(&x, doc, vt::Value::String("draft".into()));
+        edit.data_mut().erase_field(&x, doc);
+        edit.remove_spec(&x)?;
+        let y = sdf::path("/P.y")?;
+        edit.remove_spec(&y)?;
+        sdf::AttributeSpec::new(edit.data_mut(), "/P.y", "double", sdf::Variability::Varying, false)?;
+        edit.data_mut()
+            .set_field(&y, sdf::FieldKey::Default.as_str(), vt::Value::Double(1.0));
+        Ok(())
+    })?;
+    let fields = fields.borrow();
+    let [[x, y, z, w]] = fields.as_slice() else {
+        panic!("one notice: {fields:?}");
+    };
+    assert!(x.iter().any(|field| field == doc), "{x:?}");
+    for field in ["default", "typeName"] {
+        assert!(y.iter().any(|named| named == field), "{field} in {y:?}");
+    }
+    assert!(z.iter().any(|field| field == doc), "{z:?}");
+    assert!(!w.iter().any(|field| field == doc), "{w:?}");
+    Ok(())
+}
+
+/// A root-layer edit that adds an empty sublayer and removes it again,
+/// after another sublayer that failed to load was repaired, leaves the
+/// repaired layer unloaded and reports `/` as changed info, as C++ finds the
+/// empty layer has no effect on composed results.
+#[test]
+fn restored_sublayers_info_only() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\n(\n    subLayers = [@./late.usda@]\n)\n")?;
+    fs::write(dir.path().join("empty.usda"), "#usda 1.0\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"Late\"\n{\n}\n")?;
+    let notices = capture_notices(&stage);
+    let layer = stage.root_layer().identifier().to_string();
+    stage.edit_layer(&layer, |edit| {
+        edit.pseudo_root_mut()?.set_sublayers(["./late.usda", "./empty.usda"]);
+        edit.pseudo_root_mut()?.set_sublayers(["./late.usda"]);
+        Ok(())
+    })?;
+    assert!(!stage.prim("/Late")?.is_valid()?);
+    {
+        let notices = notices.borrow();
+        assert!(notices.resynced.is_empty(), "{:?}", notices.resynced);
+        assert_eq!(notices.changed_info_only, paths(&["/"]));
+    }
+
+    // Inserted and removed, which resizes the offsets list and puts it back.
+    let fields = Rc::new(RefCell::new(Vec::new()));
+    let recorder = fields.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage, change| {
+            let mut names: Vec<String> = change
+                .changed_fields(&sdf::Path::abs_root())
+                .map(|f| f.to_string())
+                .collect();
+            names.sort();
+            recorder.borrow_mut().push((change.resynced.to_vec(), names));
+        })),
+        ..Default::default()
+    })?;
+    stage.edit_layer(&layer, |edit| {
+        let mut root = edit.pseudo_root_mut()?;
+        root.insert_sublayer(1, "./empty.usda", sdf::LayerOffset::IDENTITY);
+        root.remove_sublayer("./empty.usda");
+        Ok(())
+    })?;
+    assert!(!stage.prim("/Late")?.is_valid()?);
+    assert_eq!(
+        *fields.borrow(),
+        [(Vec::new(), vec!["subLayerOffsets".to_owned(), "subLayers".to_owned()])]
+    );
+    Ok(())
+}
+
+/// A sublayer inserted into a root layer with none and removed in the same
+/// edit leaves `subLayers` unauthored and `subLayerOffsets` an empty list,
+/// and reports `/` as changed info, as C++ does.
+#[test]
+fn first_sublayer_round_trip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\ndef \"World\"\n{\n}\n")?;
+    fs::write(dir.path().join("empty.usda"), "#usda 1.0\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/World")?.is_valid()?);
+    let notices = capture_notices(&stage);
+    let layer = stage.root_layer().identifier().to_string();
+    stage.edit_layer(&layer, |edit| {
+        let mut root = edit.pseudo_root_mut()?;
+        root.insert_sublayer(0, "./empty.usda", sdf::LayerOffset::IDENTITY);
+        root.remove_sublayer("./empty.usda");
+        Ok(())
+    })?;
+    {
+        let notices = notices.borrow();
+        assert!(notices.resynced.is_empty(), "{:?}", notices.resynced);
+        assert_eq!(notices.changed_info_only, paths(&["/"]));
+    }
+    let guard = stage.root_layer().borrow();
+    let abs_root = sdf::Path::abs_root();
+    assert!(!guard.data().has_field(&abs_root, sdf::FieldKey::SubLayers.as_str()));
+    let offsets = guard
+        .data()
+        .try_field(&abs_root, sdf::FieldKey::SubLayerOffsets.as_str())?
+        .map(|value| value.into_owned());
+    assert_eq!(offsets, Some(vt::Value::LayerOffsetVec(Vec::new())));
+    Ok(())
+}
+
+/// A prim created with documentation that the same edit clears names the
+/// field among its changed fields, as C++ reports each write.
+#[test]
+fn created_restored_named() -> Result<()> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    let fields = Rc::new(RefCell::new(Vec::new()));
+    let recorder = fields.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage, change| {
+            let p = sdf::Path::new("/P").expect("path");
+            recorder
+                .borrow_mut()
+                .extend(change.changed_fields(&p).map(|f| f.to_string()));
+        })),
+        ..Default::default()
+    })?;
+    let layer = stage.root_layer().identifier().to_string();
+    let doc = sdf::FieldKey::Documentation.as_str();
+    stage.edit_layer(&layer, |edit| {
+        sdf::PrimSpec::new(edit.data_mut(), "/P", sdf::Specifier::Def, "")?;
+        let p = sdf::path("/P")?;
+        edit.data_mut().set_field(&p, doc, vt::Value::String("draft".into()));
+        edit.data_mut().erase_field(&p, doc);
+        Ok(())
+    })?;
+    assert!(
+        fields.borrow().iter().any(|field| field == doc),
+        "{:?}",
+        fields.borrow()
+    );
+    Ok(())
+}
+
+/// An edit that changes a prim's documentation and puts it back sends one
+/// info-only notice for the prim and leaves the layer dirty, as C++
+/// `SdfChangeList` records the change; a write of the value the field holds
+/// sends nothing and leaves the layer clean.
+#[test]
+fn restored_field_notified() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(&root, "#usda 1.0\ndef \"World\" (\n    doc = \"kept\"\n)\n{\n}\n")?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let layer = stage.root_layer().identifier().to_string();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let heard = heard.clone();
+        stage.add_sink(RecordingSink {
+            after: Some(Box::new(move |_stage, change| {
+                heard
+                    .borrow_mut()
+                    .push((change.resynced.to_vec(), change.changed_info_only.to_vec()));
+            })),
+            ..Default::default()
+        })?
+    };
+    let world = sdf::path("/World")?;
+    let doc = sdf::FieldKey::Documentation.as_str();
+    let write = |values: &[Option<&str>]| {
+        stage.edit_layer(&layer, |edit| {
+            for value in values {
+                match value {
+                    Some(text) => edit
+                        .data_mut()
+                        .set_field(&world, doc, vt::Value::String(text.to_string())),
+                    None => edit.data_mut().erase_field(&world, doc),
+                }
+            }
+            Ok(())
+        })
+    };
+
+    write(&[Some("kept")])?;
+    assert!(heard.borrow().is_empty());
+    assert!(!stage.root_layer().is_dirty()?);
+
+    write(&[None, Some("kept")])?;
+    assert_eq!(*heard.borrow(), [(Vec::new(), paths(&["/World"]))]);
+    assert!(stage.root_layer().is_dirty()?);
     Ok(())
 }
 

@@ -465,7 +465,7 @@ impl Layer {
         let change = self.pending_change(txn);
         let commit = PendingCommit { change: &change, txn };
         let prepared = subscribers.iter().filter_map(|s| s.prepare(&commit)).collect();
-        (Footprint::of(self.data.overlay()), prepared)
+        (Footprint::of(self.data.overlay(), &self.changes), prepared)
     }
 
     /// Whether a commit to this layer has anyone to hand a record to: one of
@@ -487,9 +487,11 @@ impl Layer {
 
     /// Whether the layer holds edits not yet saved: committed since it was
     /// read or last [saved](Self::save), or staged in its overlay and not yet
-    /// committed (C++ `SdfLayer::IsDirty`). An edit that a commit found to
-    /// change nothing does not count; a staged one does, even one that re-sets
-    /// a field to the value the base already holds.
+    /// committed (C++ `SdfLayer::IsDirty`). A committed edit whose every write
+    /// left its field holding the value it held does not count. One that
+    /// changed a field and put it back does, as it does in C++. A staged edit
+    /// counts, even one that re-sets a field to the value the base already
+    /// holds.
     pub fn is_dirty(&self) -> bool {
         self.unsaved || !self.data.is_empty()
     }
@@ -2667,6 +2669,32 @@ pub(crate) mod tests {
             "the edit rolled back"
         );
         assert!(!layer.is_dirty());
+    }
+
+    /// A vetoed edit that changes a field and puts it back leaves a clean
+    /// layer clean, and fires no `after_commit`.
+    #[test]
+    fn veto_keeps_clean() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scene.usda");
+        fs::write(&path, "#usda 1.0\ndef \"A\" (\n    doc = \"kept\"\n)\n{\n}\n")?;
+        let mut layer = Layer::open(path.to_string_lossy())?;
+        let rec = Rc::new(Recorder {
+            veto: true,
+            ..Default::default()
+        });
+        layer.add_sink(rec.clone());
+        let a = Path::new("/A")?;
+        let doc = FieldKey::Documentation.as_str();
+        let result = layer.edit(|e| {
+            e.data_mut().erase_field(&a, doc);
+            e.data_mut().set_field(&a, doc, Value::String("kept".into()));
+            Ok(())
+        });
+        assert!(matches!(result, Err(EditError::Rejected(_))), "the sink vetoes");
+        assert_eq!((rec.before.get(), rec.after.get()), (1, 0));
+        assert!(!layer.is_dirty());
+        Ok(())
     }
 
     /// A removed sink no longer fires.

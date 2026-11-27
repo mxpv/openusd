@@ -90,6 +90,10 @@ pub enum FieldChange {
     /// removed. Only a list holding the same names (C++ `_IsOrderChangeOnly`)
     /// also raises a reorder flag.
     Order,
+    /// The edit changed the field and then put it back: it ends holding what
+    /// the base held, or stays unauthored. C++ `SdfChangeList` keeps such a
+    /// field among an entry's `infoChanged`, its old and new values equal.
+    Restored,
 }
 
 bitflags! {
@@ -145,7 +149,9 @@ impl ChangeEntry {
         self.flags.is_empty() && self.fields.is_empty()
     }
 
-    /// The fields this edit authored at the path.
+    /// The fields this edit changed at the path, those it put back
+    /// ([`FieldChange::Restored`]) among them; [`net_fields`](Self::net_fields)
+    /// leaves those out.
     pub fn info_changed(&self) -> impl Iterator<Item = &tf::Token> {
         self.fields.keys()
     }
@@ -159,14 +165,22 @@ impl ChangeEntry {
             .map(|(field, _)| field)
     }
 
-    /// Each field this edit authored, paired with how it changed.
+    /// Each field this edit changed, paired with how it changed.
     pub fn fields(&self) -> impl Iterator<Item = (&tf::Token, FieldChange)> {
         self.fields.iter().map(|(field, change)| (field, *change))
     }
 
-    /// Whether this edit authored `field` at the path.
+    /// Whether this edit changed `field` at the path, putting it back
+    /// ([`FieldChange::Restored`]) among the changes.
     pub fn changed(&self, field: &str) -> bool {
         self.fields.keys().any(|held| held == field)
+    }
+
+    /// Whether this edit changed `field` at the path and did not put it back:
+    /// [`changed`](Self::changed) less a [`FieldChange::Restored`] field.
+    pub fn net_changed(&self, field: &str) -> bool {
+        self.fields()
+            .any(|(held, change)| held == field && change != FieldChange::Restored)
     }
 
     /// Records that `field` changed at this path.
@@ -174,11 +188,13 @@ impl ChangeEntry {
     /// [`Presence`](FieldChange::Presence) wins over
     /// [`Value`](FieldChange::Value) when two records for one field combine: it
     /// is the stronger statement, and a consumer that invalidates only on
-    /// presence must not lose it to a weaker record of the same field.
+    /// presence must not lose it to a weaker record of the same field. Any
+    /// record wins over [`Restored`](FieldChange::Restored), the one that
+    /// leaves the value as it was.
     pub fn note(&mut self, field: &str, change: FieldChange) {
         let slot = self.fields.entry(tf::Token::from(field)).or_insert(change);
-        if change == FieldChange::Presence {
-            *slot = FieldChange::Presence;
+        if change == FieldChange::Presence || *slot == FieldChange::Restored {
+            *slot = change;
         }
         // The shape flag a target/connection write implies travels with the
         // field, so a consumer reading the flag and one reading the field name
@@ -190,16 +206,26 @@ impl ChangeEntry {
     /// flags, and every authored field a child-name list (`primChildren`,
     /// `propertyChildren`, or the variant-chain registration a descendant edit
     /// stamps on its ancestors). Such an entry marks a spec whose own opinions
-    /// did not change.
+    /// did not change, though a `variantSetChildren` change among them still
+    /// changes how the prim composes (C++ `DidChangePrimVariantSets`).
     pub fn is_child_bookkeeping(&self) -> bool {
         self.flags.is_empty() && self.authored_fields().next().is_none()
     }
 
-    /// The fields this entry authored as opinions —
+    /// The opinion fields this edit changed —
     /// [`info_changed`](Self::info_changed) without the structural child-name
     /// lists.
     pub fn authored_fields(&self) -> impl Iterator<Item = &tf::Token> {
         self.info_changed().filter(|f| !super::is_children_field(f.as_str()))
+    }
+
+    /// The [`authored_fields`](Self::authored_fields) whose value the edit
+    /// changed, leaving out each one it put back
+    /// ([`FieldChange::Restored`]).
+    pub fn net_fields(&self) -> impl Iterator<Item = &tf::Token> {
+        self.fields()
+            .filter(|(field, change)| *change != FieldChange::Restored && !super::is_children_field(field.as_str()))
+            .map(|(field, _)| field)
     }
 
     /// The child-name lists this entry reordered ([`FieldChange::Order`]).
@@ -305,11 +331,11 @@ impl ChangeList {
     /// the pre-edit values the idempotence and field-surfacing checks compare
     /// against.
     ///
-    /// The record is a pure function of the staged state, so it is also a touch
-    /// more precise than recording mutations as they happen: an edit that nets
-    /// to nothing — a field set back to its base value, or a field added and
-    /// then erased within the same window — leaves no entry here, since it never
-    /// changes what composition would resolve.
+    /// A write of the value a field already holds records nothing, as C++
+    /// `SdfLayer::SetField` records nothing for one. A field a write changed
+    /// that the edit then put back, set back to its base value or added and
+    /// erased, records [`FieldChange::Restored`], as C++ `SdfChangeList` keeps
+    /// such a field among its changed info.
     pub fn from_overlay<T: AbstractData>(cow: &CowData<T>) -> ChangeList {
         let mut changes = ChangeList::new();
         changes.update(cow);
@@ -326,7 +352,7 @@ impl ChangeList {
         for (path, patch) in cow.overlay() {
             let mut entry = ChangeEntry::default();
             match patch {
-                Patch::Created(spec) => {
+                Patch::Created { spec, changed } => {
                     // A create over a pre-existing spec replaces it. Its removal
                     // flag records the tear-down, but the fields are the net of
                     // what the base held against what the new spec authors —
@@ -375,9 +401,27 @@ impl ChangeList {
                             }
                         }
                     }
+                    // The `specifier` a create stamps is implied by its flag.
+                    // A replacement writes every field into a spec the removal
+                    // emptied, as C++ does, so each it authors is changed,
+                    // one holding the base's value among them.
+                    let authored = spec.fields.iter().map(|(field, _)| field).filter(|_| replaced);
+                    let changed = changed
+                        .iter()
+                        .chain(authored)
+                        .filter(|field| *field != FieldKey::Specifier.as_str());
+                    note_restored(&mut entry, changed);
                 }
-                Patch::Tombstone => note_removal(&mut entry, base, path),
-                Patch::Edited { set, erased } => {
+                Patch::Tombstone { changed } => {
+                    note_removal(&mut entry, base, path);
+                    note_restored(&mut entry, changed);
+                }
+                Patch::Edited {
+                    set,
+                    erased,
+                    changed,
+                    reordered,
+                } => {
                     for (field, value) in set {
                         note_field_change(&mut entry, base, path, field, value);
                     }
@@ -386,7 +430,34 @@ impl ChangeList {
                     for field in erased {
                         note_presence(&mut entry, field);
                     }
+                    note_restored(&mut entry, changed);
+                    // A child-name list a write permuted raises its reorder
+                    // when it ends as it began, or with the names it shares
+                    // with the base moved. One whose shared names keep their
+                    // order, as a rename's reposition of the renamed child
+                    // leaves it, reports the net change alone.
+                    let reorders = reordered
+                        .iter()
+                        .filter(|field| {
+                            entry
+                                .fields()
+                                .find(|(held, _)| *held == field.as_str())
+                                .is_none_or(|(_, change)| change == FieldChange::Order)
+                        })
+                        .fold(ChangeFlags::empty(), |flags, field| flags | children_flag(field));
+                    entry.flags |= reorders;
                 }
+            }
+            // C++ reports a `framesPerSecond` change as a `timeCodesPerSecond`
+            // one too on a layer that authors no rate of its own, since the
+            // rate falls back on it. That field stays unauthored, so it is
+            // recorded as one the edit leaves as it was: `net_changed` answers
+            // false for it, and the effective rate moves with
+            // `framesPerSecond`, which a consumer reads for it.
+            let fps = entry.changed(FieldKey::FramesPerSecond.as_str());
+            let tcps = FieldKey::TimeCodesPerSecond.as_str();
+            if fps && path.is_abs_root() && !entry.changed(tcps) && !cow.has_field(path, tcps) {
+                entry.note(tcps, FieldChange::Restored);
             }
             // Each overlay path is distinct, so the derived entry is new — push it
             // directly (a patch that nets to nothing leaves an empty entry to drop).
@@ -436,6 +507,45 @@ fn order_flag(field: &str) -> ChangeFlags {
     }
 }
 
+/// Notes in `entry` each field of `changed`, those a write changed, that it
+/// records no change of: the edit put it back
+/// ([`Restored`](FieldChange::Restored)), a `primOrder` with its reorder. A
+/// `propertyOrder` put back raises its reorder alone, as C++
+/// `Sdf_ChangeManager::DidChangeField` reports no changed info for one. Of
+/// the child-name lists only `variantSetChildren` is changed info there: a
+/// prim or property child, or a variant, added and removed again leaves its
+/// parent as it was.
+fn note_restored<'a>(entry: &mut ChangeEntry, changed: impl IntoIterator<Item = &'a String>) {
+    for field in changed {
+        let internal = super::is_children_field(field) && field != ChildrenKey::VariantSetChildren.as_str();
+        if internal || entry.changed(field) {
+            continue;
+        }
+        if field != FieldKey::PropertyOrder.as_str() {
+            entry.note(field, FieldChange::Restored);
+        }
+        entry.flags |= order_flag(field);
+    }
+}
+
+/// The reorder flag a permutation of the child-name list `field` raises:
+/// `primChildren` reorders children, `propertyChildren` properties.
+fn children_flag(field: &str) -> ChangeFlags {
+    if field == ChildrenKey::PrimChildren.as_str() {
+        ChangeFlags::REORDER_CHILDREN
+    } else if field == ChildrenKey::PropertyChildren.as_str() {
+        ChangeFlags::REORDER_PROPERTIES
+    } else {
+        ChangeFlags::empty()
+    }
+}
+
+/// Whether staging `new` over `old` in the child-name list `field` only
+/// permutes it: the same names in another order (C++ `_IsOrderChangeOnly`).
+pub(super) fn permutes(field: &str, old: &Value, new: &Value) -> bool {
+    !children_change(field, Some(old), new).1.is_empty()
+}
+
 /// How staging `new` over a different `old` in a `primChildren` or
 /// `propertyChildren` list orders it: whether the names both lists hold come in
 /// another order, whatever names were added or removed, and the reorder flag
@@ -443,13 +553,10 @@ fn order_flag(field: &str) -> ChangeFlags {
 /// flag (C++ `_IsOrderChangeOnly`); a child spec that comes or goes reports
 /// itself through its own entry.
 fn children_change(field: &str, old: Option<&Value>, new: &Value) -> (bool, ChangeFlags) {
-    let flag = if field == ChildrenKey::PrimChildren.as_str() {
-        ChangeFlags::REORDER_CHILDREN
-    } else if field == ChildrenKey::PropertyChildren.as_str() {
-        ChangeFlags::REORDER_PROPERTIES
-    } else {
+    let flag = children_flag(field);
+    if flag.is_empty() {
         return (false, ChangeFlags::empty());
-    };
+    }
     let (Some(Value::TokenVec(old)), Value::TokenVec(new)) = (old, new) else {
         return (false, ChangeFlags::empty());
     };
@@ -937,8 +1044,8 @@ mod tests {
         assert!(attr.1.flags.contains(ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION));
     }
 
-    /// Re-authoring a field with the value the base already holds nets to no
-    /// change — the derived record is more precise than a per-write log.
+    /// Re-authoring a field with the value the base already holds records no
+    /// change, as C++ `SdfLayer::SetField` records none.
     #[test]
     fn idempotent_set_no_change() {
         let mut base = Data::new();
@@ -959,10 +1066,10 @@ mod tests {
         assert!(cl.is_empty());
     }
 
-    /// Adding a field the base lacks and erasing it in the same window nets to
-    /// no change.
+    /// Adding a field the base lacks and erasing it in the same window
+    /// records it restored: changed, with no net field.
     #[test]
-    fn add_then_erase_field_no_change() {
+    fn add_then_erase_restored() {
         let mut base = Data::new();
         base.create_spec(p("/P"), SpecType::Prim);
 
@@ -974,7 +1081,139 @@ mod tests {
             );
             c.erase_field(&p("/P"), FieldKey::TypeName.as_str());
         });
-        assert!(cl.is_empty());
+        let [(path, entry)] = cl.entries() else {
+            panic!("one entry: {cl:?}");
+        };
+        assert_eq!(*path, p("/P"));
+        assert_eq!(
+            entry.fields().collect::<Vec<_>>(),
+            [(&tf::Token::from("typeName"), FieldChange::Restored)]
+        );
+        assert_eq!(entry.net_fields().count(), 0);
+    }
+
+    /// A field set to another value and back records it restored, while a
+    /// field changed beside it records its change; a second write of a value
+    /// already staged changes nothing more.
+    #[test]
+    fn set_back_restored() {
+        let mut base = Data::new();
+        base.create_spec(p("/P"), SpecType::Prim);
+        let doc = FieldKey::Documentation.as_str();
+        let comment = FieldKey::Comment.as_str();
+        base.set_field(&p("/P"), doc, Value::String("kept".into()));
+        base.set_field(&p("/P"), comment, Value::String("kept".into()));
+
+        let cl = derive(base, |c| {
+            c.set_field(&p("/P"), doc, Value::String("draft".into()));
+            c.set_field(&p("/P"), doc, Value::String("kept".into()));
+            c.set_field(&p("/P"), comment, Value::String("new".into()));
+            c.set_field(&p("/P"), comment, Value::String("new".into()));
+        });
+        let [(_, entry)] = cl.entries() else {
+            panic!("one entry: {cl:?}");
+        };
+        let mut fields: Vec<_> = entry.fields().collect();
+        fields.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        assert_eq!(
+            fields,
+            [
+                (&tf::Token::from(comment), FieldChange::Value),
+                (&tf::Token::from(doc), FieldChange::Restored),
+            ]
+        );
+        assert_eq!(entry.net_fields().collect::<Vec<_>>(), [&tf::Token::from(comment)]);
+    }
+
+    /// A field one layer restores and another changes merges as changed.
+    #[test]
+    fn merge_change_over_restored() {
+        let mut a = ChangeList::new();
+        a.entry_mut(&p("/P")).note("documentation", FieldChange::Restored);
+        let mut b = ChangeList::new();
+        b.entry_mut(&p("/P")).note("documentation", FieldChange::Value);
+        a.merge_from(&b);
+        let [(_, entry)] = a.entries() else {
+            panic!("one entry: {a:?}");
+        };
+        assert_eq!(
+            entry.fields().collect::<Vec<_>>(),
+            [(&tf::Token::from("documentation"), FieldChange::Value)]
+        );
+    }
+
+    /// A `primOrder` reordered and put back records it restored with its
+    /// reorder flag, as C++ raises one for each write; a child-name list
+    /// that gains a child and loses it again records nothing.
+    #[test]
+    fn restored_order_and_children() {
+        let names = |names: &[&str]| Value::TokenVec(names.iter().map(|n| tf::Token::from(*n)).collect());
+        let order = FieldKey::PrimOrder.as_str();
+        let children = ChildrenKey::PrimChildren.as_str();
+        let mut base = Data::new();
+        base.create_spec(p("/P"), SpecType::Prim);
+        base.set_field(&p("/P"), order, names(&["a", "b"]));
+        base.set_field(&p("/P"), children, names(&["a"]));
+
+        let cl = derive(base, |c| {
+            c.set_field(&p("/P"), order, names(&["b", "a"]));
+            c.set_field(&p("/P"), order, names(&["a", "b"]));
+            c.set_field(&p("/P"), children, names(&["a", "c"]));
+            c.set_field(&p("/P"), children, names(&["a"]));
+        });
+        let [(_, entry)] = cl.entries() else {
+            panic!("one entry: {cl:?}");
+        };
+        assert_eq!(
+            entry.fields().collect::<Vec<_>>(),
+            [(&tf::Token::from(order), FieldChange::Restored)]
+        );
+        assert!(entry.flags.contains(ChangeFlags::REORDER_CHILDREN));
+    }
+
+    /// A `primChildren` or `propertyChildren` list permuted and put back, or a
+    /// `propertyOrder` put back, raises its reorder flag alone: no field is
+    /// changed info (C++ `Sdf_ChangeManager::DidChangeField`).
+    #[test]
+    fn restored_reorder_flags_only() {
+        let names = |names: &[&str]| Value::TokenVec(names.iter().map(|n| tf::Token::from(*n)).collect());
+        for (field, flag) in [
+            (ChildrenKey::PrimChildren.as_str(), ChangeFlags::REORDER_CHILDREN),
+            (ChildrenKey::PropertyChildren.as_str(), ChangeFlags::REORDER_PROPERTIES),
+            (FieldKey::PropertyOrder.as_str(), ChangeFlags::REORDER_PROPERTIES),
+        ] {
+            let mut base = Data::new();
+            base.create_spec(p("/P"), SpecType::Prim);
+            base.set_field(&p("/P"), field, names(&["a", "b"]));
+            let cl = derive(base, |c| {
+                c.set_field(&p("/P"), field, names(&["b", "a"]));
+                c.set_field(&p("/P"), field, names(&["a", "b"]));
+            });
+            let [(_, entry)] = cl.entries() else {
+                panic!("one entry for {field}: {cl:?}");
+            };
+            assert_eq!(entry.flags, flag, "{field}");
+            assert_eq!(entry.fields().count(), 0, "{field}");
+        }
+    }
+
+    /// A child list one write permutes and a later one grows still raises the
+    /// reorder its permutation raised.
+    #[test]
+    fn reorder_then_grow_flagged() {
+        let names = |names: &[&str]| Value::TokenVec(names.iter().map(|n| tf::Token::from(*n)).collect());
+        let children = ChildrenKey::PrimChildren.as_str();
+        let mut base = Data::new();
+        base.create_spec(p("/P"), SpecType::Prim);
+        base.set_field(&p("/P"), children, names(&["a", "b"]));
+        let cl = derive(base, |c| {
+            c.set_field(&p("/P"), children, names(&["b", "a"]));
+            c.set_field(&p("/P"), children, names(&["b", "a", "c"]));
+        });
+        let [(_, entry)] = cl.entries() else {
+            panic!("one entry: {cl:?}");
+        };
+        assert!(entry.flags.contains(ChangeFlags::REORDER_CHILDREN));
     }
 
     /// A child-name-only edit is bookkeeping: no shape flags, and its only

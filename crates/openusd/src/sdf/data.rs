@@ -566,9 +566,21 @@ pub enum Patch {
     /// A spec created (or re-created, replacing a base spec) this transaction.
     /// Holds its whole field set, so reads ignore the base and commit
     /// reproduces it wholesale.
-    Created(SpecData),
+    Created {
+        /// The spec's type and every field it holds.
+        spec: SpecData,
+        /// Fields a write this transaction changed from the value the spec
+        /// held, or an erase removed, whatever they end holding, as
+        /// [`Edited`](Patch::Edited) records them, those of a spec the
+        /// create replaced among them.
+        changed: HashSet<String>,
+    },
     /// A pre-existing base spec erased in the overlay.
-    Tombstone,
+    Tombstone {
+        /// Fields a write changed before the erase, as the patch it replaced
+        /// recorded them.
+        changed: HashSet<String>,
+    },
     /// A pre-existing base spec with field-level edits staged over it. Only the
     /// touched fields are stored; untouched fields read through to the base.
     Edited {
@@ -577,16 +589,51 @@ pub enum Patch {
         set: Vec<(String, Value)>,
         /// Fields removed from the base this transaction. Disjoint from `set`.
         erased: HashSet<String>,
+        /// Fields a write this transaction changed from the value it staged
+        /// over, or an erase removed, whatever they end holding. C++
+        /// `SdfLayer::SetField` records a change for each write that changes
+        /// a field, so one changed and then put back still reports one. The
+        /// first write of a field is compared with the base once, at commit
+        /// ([`ChangeList::from_overlay`](super::ChangeList::from_overlay)).
+        changed: HashSet<String>,
+        /// The `primChildren` and `propertyChildren` lists a write this
+        /// transaction permuted, the same names in another order: C++ raises
+        /// a reorder for each such write, whatever the list ends holding.
+        reordered: HashSet<String>,
     },
 }
 
 impl Patch {
+    /// The fields a write changed while this patch was staged over `base`'s
+    /// spec at `path`, which a patch replacing it carries on. A first write
+    /// over a base spec, whose change is otherwise found at commit, counts
+    /// when it staged another value than the base holds; every field of a
+    /// created spec was written into it.
+    fn into_changed<D: AbstractData + ?Sized>(self, base: &D, path: &Path) -> HashSet<String> {
+        match self {
+            Patch::Created { spec, mut changed } => {
+                changed.extend(spec.fields.into_iter().map(|(field, _)| field));
+                changed
+            }
+            Patch::Tombstone { changed } => changed,
+            Patch::Edited { set, mut changed, .. } => {
+                let moved = set
+                    .into_iter()
+                    .filter(|(field, value)| !matches!(base.try_field(path, field), Ok(Some(held)) if *held == *value));
+                changed.extend(moved.map(|(field, _)| field));
+                changed
+            }
+        }
+    }
+
     /// A fresh field-level edit over a pre-existing base spec, with no staged
-    /// field writes and the given erased fields.
+    /// field writes and the given erased fields, each changed by its erase.
     fn edited(erased: HashSet<String>) -> Self {
         Patch::Edited {
             set: Vec::new(),
+            changed: erased.clone(),
             erased,
+            reordered: HashSet::new(),
         }
     }
 }
@@ -614,14 +661,14 @@ impl<T: AbstractData> CowData<T> {
     pub fn commit(&mut self) {
         for (path, patch) in self.overlay.drain() {
             match patch {
-                Patch::Created(spec) => {
+                Patch::Created { spec, .. } => {
                     self.base.create_spec(path.clone(), spec.ty);
                     for (field, value) in spec.fields {
                         self.base.set_field(&path, &field, value);
                     }
                 }
-                Patch::Tombstone => self.base.erase_spec(&path),
-                Patch::Edited { set, erased } => {
+                Patch::Tombstone { .. } => self.base.erase_spec(&path),
+                Patch::Edited { set, erased, .. } => {
                     for (field, value) in set {
                         self.base.set_field(&path, &field, value);
                     }
@@ -673,8 +720,8 @@ impl<T: AbstractData> CowData<T> {
             return Staged::Base;
         };
         match patch {
-            Patch::Created(spec) => Staged::Overlay(spec.get(field)),
-            Patch::Tombstone => Staged::Overlay(None),
+            Patch::Created { spec, .. } => Staged::Overlay(spec.get(field)),
+            Patch::Tombstone { .. } => Staged::Overlay(None),
             Patch::Edited { erased, .. } if erased.contains(field) => Staged::Overlay(None),
             Patch::Edited { set, .. } => match set.iter().find(|(f, _)| f == field) {
                 Some((_, value)) => Staged::Overlay(Some(value)),
@@ -704,7 +751,7 @@ impl<T: AbstractData> CowData<T> {
 impl<T: AbstractData> AbstractData for CowData<T> {
     fn has_spec(&self, path: &Path) -> bool {
         match self.staged(path) {
-            Some(Patch::Tombstone) => false,
+            Some(Patch::Tombstone { .. }) => false,
             // `Edited` exists only over a base spec, so the spec is present.
             Some(_) => true,
             None => self.base.has_spec(path),
@@ -720,8 +767,8 @@ impl<T: AbstractData> AbstractData for CowData<T> {
 
     fn spec_type(&self, path: &Path) -> Option<SpecType> {
         match self.staged(path) {
-            Some(Patch::Created(spec)) => Some(spec.ty),
-            Some(Patch::Tombstone) => None,
+            Some(Patch::Created { spec, .. }) => Some(spec.ty),
+            Some(Patch::Tombstone { .. }) => None,
             Some(Patch::Edited { .. }) | None => self.base.spec_type(path),
         }
     }
@@ -777,9 +824,9 @@ impl<T: AbstractData> AbstractData for CowData<T> {
 
     fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
         match self.staged(path) {
-            Some(Patch::Created(spec)) => Some(spec.fields.iter().map(|(k, _)| k.clone()).collect()),
-            Some(Patch::Tombstone) => None,
-            Some(Patch::Edited { set, erased }) => {
+            Some(Patch::Created { spec, .. }) => Some(spec.fields.iter().map(|(k, _)| k.clone()).collect()),
+            Some(Patch::Tombstone { .. }) => None,
+            Some(Patch::Edited { set, erased, .. }) => {
                 // Base fields in authored order minus the erased ones, then the
                 // newly-set fields appended — the same order commit reproduces.
                 let mut names: Vec<String> = self
@@ -816,10 +863,10 @@ impl<T: AbstractData> AbstractData for CowData<T> {
             .base
             .spec_paths()
             .into_iter()
-            .filter(|p| !matches!(self.overlay.get(p), Some(Patch::Tombstone)))
+            .filter(|p| !matches!(self.overlay.get(p), Some(Patch::Tombstone { .. })))
             .collect();
         for (path, patch) in &self.overlay {
-            if matches!(patch, Patch::Created(_)) && !self.base.has_spec(path) {
+            if matches!(patch, Patch::Created { .. }) && !self.base.has_spec(path) {
                 paths.push(path.clone());
             }
         }
@@ -828,12 +875,26 @@ impl<T: AbstractData> AbstractData for CowData<T> {
     }
 
     fn create_spec(&mut self, path: Path, ty: SpecType) {
-        self.overlay.insert(path, Patch::Created(SpecData::new(ty)));
+        let changed = match self.overlay.remove(&path) {
+            Some(patch) => patch.into_changed(&self.base, &path),
+            None => HashSet::new(),
+        };
+        self.overlay.insert(
+            path,
+            Patch::Created {
+                spec: SpecData::new(ty),
+                changed,
+            },
+        );
     }
 
     fn erase_spec(&mut self, path: &Path) {
         if self.base.has_spec(path) {
-            self.overlay.insert(path.clone(), Patch::Tombstone);
+            let changed = match self.overlay.remove(path) {
+                Some(patch) => patch.into_changed(&self.base, path),
+                None => HashSet::new(),
+            };
+            self.overlay.insert(path.clone(), Patch::Tombstone { changed });
         } else {
             // A spec that never reached the base needs no tombstone; dropping the
             // staged entry restores the (absent) base view.
@@ -853,16 +914,45 @@ impl<T: AbstractData> AbstractData for CowData<T> {
                 return;
             }
         }
+        // A child-name list a write permutes raises a reorder whatever the list
+        // ends holding, so its write reads the list it replaces, from the base
+        // on a first write. Every other field is compared with the base only
+        // at commit.
+        //
+        // TODO(perf): each write of a child-name list that does not only
+        // append hashes both lists until one write permutes it; a batch
+        // adding many children one at a time pays it per child.
+        let permutes = sdf::is_children_field(field)
+            && matches!(self.overlay.get(path), Some(Patch::Edited { reordered, .. }) if !reordered.contains(field))
+            && matches!(self.try_field(path, field), Ok(Some(held)) if super::change::permutes(field, &held, &value));
         match self.overlay.get_mut(path).expect("entry ensured above") {
-            Patch::Created(spec) => spec.add(field, value),
-            Patch::Edited { set, erased } => {
+            Patch::Created { spec, changed } => {
+                if !changed.contains(field) && spec.get(field).is_some_and(|held| *held != value) {
+                    changed.insert(field.to_owned());
+                }
+                spec.add(field, value);
+            }
+            Patch::Edited {
+                set,
+                erased,
+                changed,
+                reordered,
+            } => {
+                if permutes {
+                    reordered.insert(field.to_owned());
+                }
                 erased.remove(field);
                 match set.iter_mut().find(|(f, _)| f == field) {
-                    Some(slot) => slot.1 = value,
+                    Some(slot) => {
+                        if !changed.contains(field) && slot.1 != value {
+                            changed.insert(field.to_owned());
+                        }
+                        slot.1 = value;
+                    }
                     None => set.push((field.to_owned(), value)),
                 }
             }
-            Patch::Tombstone => debug_assert!(false, "set_field on erased spec at {path}"),
+            Patch::Tombstone { .. } => debug_assert!(false, "set_field on erased spec at {path}"),
         }
     }
 
@@ -881,11 +971,22 @@ impl<T: AbstractData> AbstractData for CowData<T> {
             return;
         }
         match self.overlay.get_mut(path).expect("entry present") {
-            Patch::Created(spec) => {
+            Patch::Created { spec, changed } => {
+                if spec.get(field).is_some() {
+                    changed.insert(field.to_owned());
+                }
                 spec.remove(field);
             }
-            Patch::Tombstone => {}
-            Patch::Edited { set, erased } => {
+            Patch::Tombstone { .. } => {}
+            Patch::Edited {
+                set, erased, changed, ..
+            } => {
+                // The erase changes the field when it removes a staged value
+                // or one the base holds that no earlier erase removed.
+                let staged = set.iter().any(|(f, _)| f == field);
+                if staged || (base_has_field && !erased.contains(field)) {
+                    changed.insert(field.to_owned());
+                }
                 set.retain(|(f, _)| f != field);
                 if base_has_field {
                     erased.insert(field.to_owned());

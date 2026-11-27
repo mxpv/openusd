@@ -2016,8 +2016,9 @@ pub(crate) mod tests {
         assert_eq!(documentation(&a).as_deref(), Some("outer"), "the outer edit committed");
     }
 
-    /// A footprint names each field set or erased on a spec that existed, and
-    /// each spec created or erased. A record carries its transaction's origin.
+    /// A footprint names each field set to another value or erased on a spec
+    /// that existed, and each spec created or erased; a field the edit puts
+    /// back is left out. A record carries its transaction's origin.
     #[test]
     fn footprint_fields_specs() {
         let registry = sdf::LayerRegistry::default();
@@ -2027,6 +2028,8 @@ pub(crate) mod tests {
                 let path = sdf::path("/P")?;
                 edit.data_mut()
                     .set_field(&path, "documentation", vt::Value::String("old".into()));
+                edit.data_mut()
+                    .set_field(&path, "kind", vt::Value::Token("group".into()));
                 sdf::PrimSpec::new(edit.data_mut(), "/Q", sdf::Specifier::Def, "Xform")?;
                 Ok(())
             })
@@ -2041,6 +2044,10 @@ pub(crate) mod tests {
                 edit.data_mut()
                     .set_field(&path, "comment", vt::Value::String("new".into()));
                 edit.data_mut().erase_field(&path, "documentation");
+                edit.data_mut()
+                    .set_field(&path, "kind", vt::Value::Token("component".into()));
+                edit.data_mut()
+                    .set_field(&path, "kind", vt::Value::Token("group".into()));
                 Ok(())
             })
             .unwrap();
