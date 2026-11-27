@@ -397,7 +397,7 @@ fn path_to(location: &str, entry: &str) -> String {
 
 /// The bytes of the asset at `resolved`.
 fn read_asset(graph: &pcp::LayerGraph, resolved: &ar::ResolvedPath) -> Result<Vec<u8>> {
-    Ok(graph.layer_registry().open_asset(resolved)?.read_all()?)
+    Ok(graph.layer_registry().resolver().open_asset(resolved)?.read_all()?)
 }
 
 /// Serializes `data` in the format of the graph's registry that the

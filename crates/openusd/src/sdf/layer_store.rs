@@ -1578,6 +1578,7 @@ pub(crate) mod tests {
     use std::fs;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::Path as FsPath;
+    use std::sync::atomic::Ordering;
 
     /// The footprint and origin of each commit a [`Footprints`] subscriber saw.
     type Seen = Rc<RefCell<Vec<(Footprint, Option<EditorId>)>>>;
@@ -1726,7 +1727,7 @@ pub(crate) mod tests {
 
         let first = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
         let second = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
-        assert_eq!(opens.get(), 1, "the second open finds the first");
+        assert_eq!(opens.load(Ordering::Relaxed), 1, "the second open finds the first");
         assert_eq!(first, second);
         assert_eq!(registry.find(&path.to_string_lossy())?, Some(first.clone()));
 
@@ -1745,7 +1746,7 @@ pub(crate) mod tests {
         let handle = registry.find_or_open(&path.to_string_lossy())?.expect("resolves");
         sdf::layer::tests::append(&path, "def \"P\" {}\n")?;
         assert!(LayerHandle::reload_all(&[handle.clone(), handle.clone()], false)?);
-        assert_eq!(opens.get(), 2, "one open, one reload");
+        assert_eq!(opens.load(Ordering::Relaxed), 2, "one open, one reload");
         assert!(handle.prim("/P")?.is_some());
         Ok(())
     }
@@ -1784,30 +1785,7 @@ pub(crate) mod tests {
 
         let inner = inside_edit(&held, || registry.find_or_open(&path.to_string_lossy()));
         assert!(matches!(inner, Err(crate::Error::Layer(LayerError::Busy))));
-        assert_eq!(opens.get(), 0, "nothing was read");
-        Ok(())
-    }
-
-    /// A layer whose resolver is a clone of the registry that holds it is
-    /// freed once its handles and the registry drop: the registry refers to its
-    /// layers weakly, so the layer keeping the registry does not keep itself.
-    #[test]
-    fn registry_resolver_no_cycle() -> crate::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("own.usda");
-        fs::write(&path, "#usda 1.0\n")?;
-        let registry = sdf::LayerRegistry::default();
-        let mut layer = Layer::open_with(registry.clone(), path.to_string_lossy())?;
-        let marker = Rc::new(());
-        let held = Rc::clone(&marker);
-        layer.add_sink(move |_: &str, _: &sdf::ChangeList| {
-            let _ = &held;
-        });
-        let handle = registry.adopt(layer).unwrap();
-
-        drop(handle);
-        drop(registry);
-        assert_eq!(Rc::strong_count(&marker), 1, "the layer was freed with its store");
+        assert_eq!(opens.load(Ordering::Relaxed), 0, "nothing was read");
         Ok(())
     }
 
@@ -2407,7 +2385,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir()?;
         let (registry, opens) = counting_registry();
         let handles = stale_pair(&registry, dir.path(), "#usda 1.0\n", "def \"P\" {}\n")?;
-        let opened = opens.get();
+        let opened = opens.load(Ordering::Relaxed);
 
         let guard = handles[1].borrow();
         let reloaded = LayerHandle::reload_all(&handles, false);
@@ -2415,7 +2393,7 @@ pub(crate) mod tests {
             matches!(reloaded, Err(crate::Error::Layer(LayerError::Busy))),
             "{reloaded:?}"
         );
-        assert_eq!(opens.get(), opened, "no file was read");
+        assert_eq!(opens.load(Ordering::Relaxed), opened, "no file was read");
         drop(guard);
         assert!(handles[0].borrow().prim("/P")?.is_none(), "nothing was reloaded");
         Ok(())
@@ -2485,31 +2463,29 @@ def (
     /// another target reloads to its file as it was computed.
     #[test]
     fn reload_refuses_resolver_edit() -> crate::Result<()> {
+        thread_local! {
+            /// The layer the resolver edits while it reads `b.usda`, once set.
+            static TARGET: RefCell<Option<LayerHandle>> = const { RefCell::new(None) };
+            /// What the resolver's edit returned.
+            static TRIED: RefCell<Option<Result<bool, LayerError>>> = const { RefCell::new(None) };
+        }
         let dir = tempfile::tempdir()?;
-        let target: HandleCell = Rc::default();
-        let armed = Rc::new(Cell::new(false));
-        let tried = Rc::new(RefCell::new(None));
-        let resolver = {
-            let (target, armed, tried) = (Rc::clone(&target), Rc::clone(&armed), Rc::clone(&tried));
-            HookResolver::new(move |resolved| {
-                let reading_b = resolved.to_str().is_some_and(|path| path.ends_with("b.usda"));
-                if armed.get() && reading_b {
-                    let a = target.borrow().clone().expect("the target is set");
-                    tried.replace(Some(document(&a, "from the resolver")));
-                }
-            })
-        };
+        let resolver = HookResolver::new(|resolved| {
+            let reading_b = resolved.to_str().is_some_and(|path| path.ends_with("b.usda"));
+            if reading_b && let Some(a) = TARGET.with_borrow(Clone::clone) {
+                TRIED.set(Some(document(&a, "from the resolver")));
+            }
+        });
         let registry = sdf::LayerRegistry::new(Box::new(resolver));
         let handles = stale_pair(&registry, dir.path(), "#usda 1.0\ndef \"P\" {}\n", "def \"Q\" {}\n")?;
-        target.replace(Some(handles[0].clone()));
+        TARGET.set(Some(handles[0].clone()));
 
-        armed.set(true);
         assert!(LayerHandle::reload_all(&handles, false)?);
-        let tried = tried.take().expect("the resolver ran");
+        let tried = TRIED.take().expect("the resolver ran");
         assert!(matches!(tried, Err(LayerError::Busy)), "{tried:?}");
         assert!(handles[0].borrow().prim("/Q")?.is_some(), "a reloaded");
         assert_eq!(documentation(&handles[0]), None, "a matches its file");
-        target.take();
+        TARGET.take();
         Ok(())
     }
 
@@ -2530,17 +2506,17 @@ def (
     /// edits a target then lands after the reload, as its own transaction.
     #[test]
     fn reload_defers_freeing() -> crate::Result<()> {
+        thread_local! {
+            /// The handle to `c.usda` the resolver drops while it reads
+            /// `b.usda`, once set.
+            static DOOMED: RefCell<Option<LayerHandle>> = const { RefCell::new(None) };
+        }
         let dir = tempfile::tempdir()?;
-        let doomed: HandleCell = Rc::default();
-        let armed = Rc::new(Cell::new(false));
-        let resolver = {
-            let (doomed, armed) = (Rc::clone(&doomed), Rc::clone(&armed));
-            HookResolver::new(move |resolved| {
-                if armed.get() && resolved.to_str().is_some_and(|path| path.ends_with("b.usda")) {
-                    doomed.take();
-                }
-            })
-        };
+        let resolver = HookResolver::new(|resolved| {
+            if resolved.to_str().is_some_and(|path| path.ends_with("b.usda")) {
+                DOOMED.take();
+            }
+        });
         let registry = sdf::LayerRegistry::new(Box::new(resolver));
         let handles = stale_pair(&registry, dir.path(), "#usda 1.0\ndef \"P\" {}\n", "def \"Q\" {}\n")?;
         let log: Log = Rc::default();
@@ -2557,11 +2533,10 @@ def (
         c.add_sink(move |_: &str, _: &sdf::ChangeList| {
             let _ = &on_drop;
         });
-        doomed.replace(Some(registry.adopt(c).unwrap()));
+        DOOMED.set(Some(registry.adopt(c).unwrap()));
 
-        armed.set(true);
         assert!(LayerHandle::reload_all(&handles, false)?);
-        assert!(doomed.borrow().is_none(), "the resolver dropped c's handle");
+        assert!(DOOMED.with_borrow(Option::is_none), "the resolver dropped c's handle");
         assert_eq!(*log.borrow(), ["reload", "edit"], "the drop's edit follows the reload");
         assert!(handles[0].borrow().prim("/Q")?.is_some(), "a reloaded");
         assert_eq!(documentation(&handles[0]).as_deref(), Some("from a drop"));

@@ -236,7 +236,7 @@ fn root_identifier(graph: &pcp::LayerGraph, asset_path: &str) -> String {
     if graph.id_of(asset_path).is_some() {
         return asset_path.to_owned();
     }
-    sdf::absolute_path_at(graph.layer_registry(), None, asset_path)
+    sdf::absolute_path_at(graph.layer_registry().resolver(), None, asset_path)
 }
 
 /// Walks from `roots` over every file they reach, breadth first. In the scope
@@ -458,11 +458,13 @@ impl<'a> Discoverer<'a> {
                 // One scope over the probe for the first tile and the walk of
                 // the rest: a packaged set opens its package once.
                 let _scope = ar::CacheScope::begin();
-                let first = udim.tiles(registry, anchor.as_ref().map(|_| anchored)).next()?;
+                let first = udim
+                    .tiles(registry.resolver(), anchor.as_ref().map(|_| anchored))
+                    .next()?;
                 let identifier = udim.with_pattern(&anchored(&udim.tile(first.number)))?;
                 let resolved = udim.with_pattern(first.path.to_str()?)?;
                 let numbers = ar::UdimPath::parse(&resolved)?
-                    .resolve_tiles(registry, None)
+                    .resolve_tiles(registry.resolver(), None)
                     .iter()
                     .map(|tile| tile.number)
                     .collect();
@@ -479,7 +481,14 @@ impl<'a> Discoverer<'a> {
     /// resolve, which is recorded.
     fn add(&mut self, current: usize, path: &str, kind: AssetKind) -> Result<Option<(Use, bool)>> {
         let located = self.locate(current, path, kind);
-        if located.probe && self.graph.layer_registry().resolve(&located.target).is_none() {
+        if located.probe
+            && self
+                .graph
+                .layer_registry()
+                .resolver()
+                .resolve(&located.target)
+                .is_none()
+        {
             self.record_unresolved(located.target, kind);
             return Ok(None);
         }
@@ -622,14 +631,14 @@ impl<'a> Discoverer<'a> {
                 }
             }
             Admission::Asset => {
-                let Some(resolved) = registry.resolve(&located.identifier) else {
+                let Some(resolved) = registry.resolver().resolve(&located.identifier) else {
                     return Ok(None);
                 };
                 Content::Asset(resolved)
             }
             Admission::Tiles => Content::Tiles(Vec::new()),
             Admission::Package => {
-                let Some(resolved) = registry.resolve(&located.identifier) else {
+                let Some(resolved) = registry.resolver().resolve(&located.identifier) else {
                     return Ok(None);
                 };
                 Content::Package {

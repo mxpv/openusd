@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path as FsPath;
 use std::rc::Rc;
 use std::slice;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use openusd::Result;
@@ -4226,7 +4226,7 @@ fn mute_nested_reference_target() -> Result<()> {
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
 
-    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened = Arc::new(Mutex::new(Vec::new()));
     let stage = Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
         .mute(["sub/model.usda"])
@@ -4236,12 +4236,12 @@ fn mute_nested_reference_target() -> Result<()> {
     // muted model reference; its identifier matches the muted one, so it is
     // recognized at the demand point and never read.
     assert!(stage.prim("/P")?.is_valid()?);
-    let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
+    let opened_has = |needle: &str| opened.lock().unwrap().iter().any(|p| p.contains(needle));
     assert!(opened_has("mid.usda"), "the nested referrer must load");
     assert!(
         !opened_has("model.usda"),
         "the muted nested target must never be opened, got {:?}",
-        opened.borrow()
+        opened.lock().unwrap()
     );
     Ok(())
 }
@@ -4271,19 +4271,19 @@ fn mute_target_under_nested_sublayer() -> Result<()> {
         "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
     )?;
 
-    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened = Arc::new(Mutex::new(Vec::new()));
     let stage = Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
         .mute(["detail/model.usda"])
         .open(root.to_str().unwrap())?;
 
     assert!(stage.prim("/P")?.is_valid()?);
-    let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
+    let opened_has = |needle: &str| opened.lock().unwrap().iter().any(|p| p.contains(needle));
     assert!(opened_has("extra.usda"), "the authoring sublayer must load");
     assert!(
         !opened_has("model.usda"),
         "the muted target under the nested sublayer must not be opened, got {:?}",
-        opened.borrow()
+        opened.lock().unwrap()
     );
     Ok(())
 }
@@ -5612,11 +5612,11 @@ fn active_loaded() -> Result<()> {
 /// arc, never at stage-open time.
 struct RecordingResolver {
     inner: ar::DefaultResolver,
-    opened: Rc<RefCell<Vec<String>>>,
+    opened: Arc<Mutex<Vec<String>>>,
 }
 
 impl RecordingResolver {
-    fn new(opened: Rc<RefCell<Vec<String>>>) -> Self {
+    fn new(opened: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             inner: ar::DefaultResolver::new(),
             opened,
@@ -5635,7 +5635,7 @@ impl ar::Resolver for RecordingResolver {
         self.inner.resolve_for_new_asset(asset_path)
     }
     fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> std::io::Result<Box<dyn ar::Asset>> {
-        self.opened.borrow_mut().push(resolved_path.to_string());
+        self.opened.lock().unwrap().push(resolved_path.to_string());
         self.inner.open_asset(resolved_path)
     }
     fn identity(&self) -> String {
@@ -5657,12 +5657,12 @@ impl ar::Resolver for RecordingResolver {
 #[test]
 fn lazy_reference_loads_on_demand() -> Result<()> {
     let path = composition_path("references/reference_same_folder.usda");
-    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened = Arc::new(Mutex::new(Vec::new()));
     let stage = Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
         .open(&path)?;
 
-    let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
+    let opened_has = |needle: &str| opened.lock().unwrap().iter().any(|p| p.contains(needle));
 
     // Opening the stage reads only the root layer; the reference target stays
     // closed until composition reaches the arc on `/World`.
@@ -5674,7 +5674,12 @@ fn lazy_reference_loads_on_demand() -> Result<()> {
     let _ = child_names(&stage, "/World")?;
     assert!(opened_has("_stage.usda"), "composing the prim must load its reference");
     assert_eq!(stage.layer_count(), 2);
-    let target_opens = opened.borrow().iter().filter(|p| p.contains("_stage.usda")).count();
+    let target_opens = opened
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.contains("_stage.usda"))
+        .count();
     assert_eq!(target_opens, 1, "the reference target loads exactly once");
     Ok(())
 }
@@ -5717,13 +5722,20 @@ fn root_layers_read_once() -> Result<()> {
     let session = dir.path().join("session.usda");
     fs::write(&root, "#usda 1.0\ndef \"World\" {}\n")?;
     fs::write(&session, "#usda 1.0\n")?;
-    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened = Arc::new(Mutex::new(Vec::new()));
     Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
         .session_layer(session.to_str().unwrap())
         .open(root.to_str().unwrap())?;
 
-    let opens = |name: &str| opened.borrow().iter().filter(|path| path.ends_with(name)).count();
+    let opens = |name: &str| {
+        opened
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with(name))
+            .count()
+    };
     assert_eq!(opens("root.usda"), 1);
     assert_eq!(opens("session.usda"), 1);
     Ok(())
@@ -5736,7 +5748,7 @@ fn root_layers_read_once() -> Result<()> {
 fn muted_reference_target_not_opened() -> Result<()> {
     let path = composition_path("references/reference_same_folder.usda");
     let target = composition_path("references/_stage.usda");
-    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened = Arc::new(Mutex::new(Vec::new()));
     // Mute the reference target by its canonical identifier.
     let muted_id = ar::DefaultResolver::new().create_identifier(&target, None);
     let stage = Stage::builder()
@@ -5748,7 +5760,7 @@ fn muted_reference_target_not_opened() -> Result<()> {
     // before the loader would open it.
     let _ = child_names(&stage, "/World")?;
     assert!(
-        !opened.borrow().iter().any(|p| p.contains("_stage.usda")),
+        !opened.lock().unwrap().iter().any(|p| p.contains("_stage.usda")),
         "a muted reference target must never be opened"
     );
     let errors = stage.composition_errors();
@@ -5778,7 +5790,7 @@ fn muted_reference_target_not_opened() -> Result<()> {
 fn unmute_unloaded_reference_recomposes() -> Result<()> {
     let path = composition_path("references/reference_same_folder.usda");
     let target = composition_path("references/_stage.usda");
-    let opened = Rc::new(RefCell::new(Vec::new()));
+    let opened = Arc::new(Mutex::new(Vec::new()));
     let muted_id = ar::DefaultResolver::new().create_identifier(&target, None);
     let stage = Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
@@ -5789,7 +5801,7 @@ fn unmute_unloaded_reference_recomposes() -> Result<()> {
     // `/World` composes with no referenced children.
     assert_eq!(child_names(&stage, "/World")?, Vec::<String>::new());
     assert!(
-        !opened.borrow().iter().any(|p| p.contains("_stage.usda")),
+        !opened.lock().unwrap().iter().any(|p| p.contains("_stage.usda")),
         "a muted reference target must never be opened"
     );
 
@@ -5802,7 +5814,7 @@ fn unmute_unloaded_reference_recomposes() -> Result<()> {
         "unmuting a never-loaded reference target recomposes the referrer"
     );
     assert!(
-        opened.borrow().iter().any(|p| p.contains("_stage.usda")),
+        opened.lock().unwrap().iter().any(|p| p.contains("_stage.usda")),
         "unmuting must let the load barrier open the now-unmuted target"
     );
     Ok(())

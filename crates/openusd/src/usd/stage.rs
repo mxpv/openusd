@@ -5281,7 +5281,7 @@ impl StageBuilder {
         let layer_stack_id = pcp::LayerStackIdentifier {
             root_layer: root_layer.identifier().to_string(),
             session_layer: session_layer.as_ref().map(|l| l.identifier().to_string()),
-            resolver: self.registry.identity(),
+            resolver: self.registry.resolver().identity(),
         };
         // The root layer is the strongest authoring target by default.
         let edit_target = EditTarget {
@@ -5332,6 +5332,7 @@ pub(crate) mod tests {
     use std::fs;
     use std::panic::{self, AssertUnwindSafe};
     use std::path::Path as FsPath;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
     use crate::usd;
@@ -7698,13 +7699,13 @@ def \"Sub\" {}
             .registry(registry)
             .open(&dir.path().join("root.usda").to_string_lossy())?;
         assert!(stage.prim("/P")?.is_valid()?);
-        let tried = opens.get();
+        let tried = opens.load(Ordering::Relaxed);
 
         stage.define_prim("/Q")?;
         assert!(stage.prim("/P")?.is_valid()?);
-        assert_eq!(opens.get(), tried, "the edit opens nothing");
+        assert_eq!(opens.load(Ordering::Relaxed), tried, "the edit opens nothing");
         stage.retry_loads()?;
-        assert!(opens.get() > tried, "the retry opens the asset again");
+        assert!(opens.load(Ordering::Relaxed) > tried, "the retry opens the asset again");
         Ok(())
     }
 
@@ -8063,7 +8064,11 @@ def "P" (payload = @./clip.usda@</M>) {}
         let b = Stage::builder().registry(registry).open(&root)?;
         assert_eq!(clip_x(&a)?, Some(5.0));
         assert_eq!(clip_x(&b)?, Some(5.0));
-        assert_eq!(opens.get(), 2, "the root and the clip, each read once");
+        assert_eq!(
+            opens.load(Ordering::Relaxed),
+            2,
+            "the root and the clip, each read once"
+        );
         set_clip_x(&b, 7.0)?;
         assert_eq!(clip_x(&a)?, Some(7.0), "the edit through the other stage");
         Ok(())
@@ -8643,12 +8648,12 @@ def "P" (payload = @./clip.usda@</M>) {}
         let (registry, opens) = sdf::layer_registry::tests::counting_registry();
         let stage = Stage::builder().registry(registry).open(&root)?;
         assert!(stage.prim("/Sub")?.is_valid()?);
-        let read = opens.get();
+        let read = opens.load(Ordering::Relaxed);
         stage.reload()?;
-        assert_eq!(opens.get(), read, "unchanged files are not read");
+        assert_eq!(opens.load(Ordering::Relaxed), read, "unchanged files are not read");
         sdf::layer::tests::rewrite(&dir.path().join("sub.usda"), "#usda 1.0\ndef \"New\" {}\n")?;
         stage.reload()?;
-        assert_eq!(opens.get(), read + 1, "only the changed file is read");
+        assert_eq!(opens.load(Ordering::Relaxed), read + 1, "only the changed file is read");
         assert!(!stage.prim("/Sub")?.is_valid()?);
         assert!(stage.prim("/New")?.is_valid()?);
         Ok(())
@@ -9342,9 +9347,9 @@ def "P" (payload = @./clip.usda@</M>) {}
         let path = shared_fixture(dir.path())?;
         let (registry, opens) = sdf::layer_registry::tests::counting_registry();
         let a = Stage::builder().registry(registry.clone()).open(&path)?;
-        assert_eq!(opens.get(), 2, "the root and its sublayer");
+        assert_eq!(opens.load(Ordering::Relaxed), 2, "the root and its sublayer");
         let b = Stage::builder().registry(registry).open(&path)?;
-        assert_eq!(opens.get(), 2, "the second stage finds both layers");
+        assert_eq!(opens.load(Ordering::Relaxed), 2, "the second stage finds both layers");
         assert!(a.prim("/Sub")?.is_valid()?);
         assert!(b.prim("/Sub")?.is_valid()?);
         Ok(())
@@ -9403,7 +9408,7 @@ def "P" (payload = @./clip.usda@</M>) {}
         a.define_prim("/Unsaved")?;
         let b = Stage::builder().registry(registry).open(&path)?;
         assert!(b.prim("/Unsaved")?.is_valid()?);
-        assert_eq!(opens.get(), 2, "nothing is read again");
+        assert_eq!(opens.load(Ordering::Relaxed), 2, "nothing is read again");
         Ok(())
     }
 
@@ -10646,24 +10651,38 @@ def "P" (payload = @./clip.usda@</M>) {}
         assert_eq!(stage.spec_type(size)?, Some(sdf::SpecType::Attribute));
         Ok(())
     }
-    /// A hook a stage's resolver runs once, on opening one file.
-    type Hook = Rc<Cell<Option<Box<dyn FnOnce()>>>>;
+    thread_local! {
+        /// The hook a stage's resolver runs once, on opening one file. A
+        /// resolver is `Send + Sync` and cannot hold the hook, which edits
+        /// layers through their handles, so the hook is kept on the thread
+        /// the test opens its stage on.
+        static HOOK: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+    }
+
+    /// Sets the hook the resolver of a [`hooked_stage`] or a
+    /// [`payload_stage`] runs.
+    fn set_hook(hook: impl FnOnce() + 'static) {
+        HOOK.set(Some(Box::new(hook)));
+    }
+
+    /// Runs the hook, once.
+    fn run_hook() {
+        if let Some(hook) = HOOK.take() {
+            hook();
+        }
+    }
 
     /// The stage over `root` in `dir`, whose other files are `files`,
-    /// opened through a resolver that runs the returned hook on opening
-    /// `name`.
-    fn hooked_stage(dir: &FsPath, root: &str, files: &[(&str, &str)], name: &'static str) -> Result<(Stage, Hook)> {
-        let hook: Hook = Rc::default();
-        let run = Rc::clone(&hook);
+    /// opened through a resolver that runs the hook on opening `name`. No
+    /// hook is set.
+    fn hooked_stage(dir: &FsPath, root: &str, files: &[(&str, &str)], name: &'static str) -> Result<Stage> {
+        HOOK.take();
         let open = move |file: &str| {
-            if file == name
-                && let Some(hook) = run.take()
-            {
-                hook();
+            if file == name {
+                run_hook();
             }
         };
-        let stage = resolving_stage(dir, root, files, open, |_| {})?;
-        Ok((stage, hook))
+        resolving_stage(dir, root, files, open, |_| {})
     }
 
     /// Defines `path` in `layer` through its handle, as user code outside the
@@ -10717,9 +10736,9 @@ def "P" (payload = @./clip.usda@</M>) {}
     #[test]
     fn read_reconciles_load_commit() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
+        let stage = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
         let root = stage.root_layer();
-        hook.replace(Some(Box::new(move || define_raw(&root, "/Late"))));
+        set_hook(move || define_raw(&root, "/Late"));
         let resyncs = record_resyncs(&stage);
 
         assert!(stage.prim("/P/Inner")?.is_valid()?);
@@ -10751,9 +10770,9 @@ def "P" (payload = @./clip.usda@</M>) {}
 def \"I\" (references = </Lib/Q>) {{}}
 "
         );
-        let (stage, hook) = hooked_stage(dir.path(), &root, &[("a.usda", TARGET)], "a.usda")?;
+        let stage = hooked_stage(dir.path(), &root, &[("a.usda", TARGET)], "a.usda")?;
         let layer = stage.root_layer();
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             layer
                 .edit(|e| {
                     e.data_mut()
@@ -10761,7 +10780,7 @@ def \"I\" (references = </Lib/Q>) {{}}
                     Ok(())
                 })
                 .expect("the layer is free");
-        })));
+        });
         struct Recomposed(Rc<RefCell<Vec<sdf::Path>>>);
         impl usd::StageSink for Recomposed {
             fn complete_prototypes(&self) -> bool {
@@ -10819,26 +10838,22 @@ def \"I\" (references = </Lib/Q>) {{}}
     ];
 
     /// A stage on `root` and [`PAYLOAD_FILES`] that loads nothing, whose
-    /// resolver runs the hook when `c.usda` opens.
-    fn payload_stage(dir: &FsPath, root: &str) -> Result<(Stage, Hook)> {
+    /// resolver runs the hook when `c.usda` opens. No hook is set.
+    fn payload_stage(dir: &FsPath, root: &str) -> Result<Stage> {
         fs::write(dir.join("root.usda"), root)?;
         for (file, content) in PAYLOAD_FILES {
             fs::write(dir.join(file), content)?;
         }
-        let hook: Hook = Rc::default();
-        let run = Rc::clone(&hook);
-        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
-            if resolved.file_name().and_then(|file| file.to_str()) == Some("c.usda")
-                && let Some(hook) = run.take()
-            {
-                hook();
+        HOOK.take();
+        let resolver = sdf::layer_registry::tests::HookResolver::new(|resolved| {
+            if resolved.file_name().and_then(|file| file.to_str()) == Some("c.usda") {
+                run_hook();
             }
         });
-        let stage = Stage::builder()
+        Stage::builder()
             .resolver(resolver)
             .load(InitialLoadSet::LoadNone)
-            .open(&dir.join("root.usda").to_string_lossy())?;
-        Ok((stage, hook))
+            .open(&dir.join("root.usda").to_string_lossy())
     }
 
     /// Makes `path` an instance in `layer` through its handle, as user code a
@@ -10861,9 +10876,9 @@ def \"I\" (references = </Lib/Q>) {{}}
     fn load_resolver_instance() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\ndef \"T\" (references = @lib.usda@</Q>) {}\n";
-        let (stage, hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let layer = stage.root_layer();
-        hook.replace(Some(Box::new(move || instance_raw(&layer, "/T"))));
+        set_hook(move || instance_raw(&layer, "/T"));
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
 
@@ -10892,7 +10907,7 @@ def \"I\" (references = </Lib/Q>) {{}}
     fn shared_key_named_once() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\n";
-        let (stage, hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         fs::write(
             dir.path().join("w.usda"),
             PAYLOAD_FILES[0].1.replace(
@@ -10901,7 +10916,7 @@ def \"I\" (references = </Lib/Q>) {{}}
             ),
         )?;
         let layer = stage.root_layer();
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             layer
                 .edit(|e| {
                     sdf::PrimSpec::new(e.data_mut(), "/W/T", sdf::Specifier::Over, "")?;
@@ -10910,7 +10925,7 @@ def \"I\" (references = </Lib/Q>) {{}}
                     Ok(())
                 })
                 .expect("the layer is free");
-        })));
+        });
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
 
@@ -10941,10 +10956,10 @@ def \"I\" (references = </Lib/Q>) {{}}
             "#usda 1.0\ndef \"S\"\n{\n    def \"Inner\" (\n        instanceable = true\n        references = @lib.usda@</Q>\n    ) {}\n}\n",
         )?;
         let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\ndef \"T\" (\n    instanceable = true\n    references = @lib.usda@</P>\n) {}\n";
-        let (stage, hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let retired = stage.prim("/T")?.prototype()?.expect("/T is an instance");
         let layer = stage.root_layer();
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             layer
                 .edit(|e| {
                     let references = sdf::ReferenceListOp::explicit([sdf::Reference {
@@ -10957,7 +10972,7 @@ def \"I\" (references = </Lib/Q>) {{}}
                     Ok(())
                 })
                 .expect("the layer is free");
-        })));
+        });
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
 
@@ -10992,7 +11007,7 @@ def \"I\" (references = </Lib/Q>) {{}}
     fn joint_snapshot_recomposed() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let text = format!("{REFERRERS}def \"R\" (references = @r.usda@) {{}}\n");
-        let (stage, hook) = hooked_stage(
+        let stage = hooked_stage(
             dir.path(),
             &text,
             &[("r.usda", "#usda 1.0\n(\n    defaultPrim = \"X\"\n)\ndef \"X\" {}\n")],
@@ -11001,10 +11016,10 @@ def \"I\" (references = </Lib/Q>) {{}}
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         let layer = stage.root_layer();
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             instance_raw(&layer, "/W/A");
             instance_raw(&layer, "/W/B");
-        })));
+        });
         assert!(stage.prim("/R")?.is_valid()?);
         stage.flush()?;
         let prototype = stage.prim("/W/A")?.prototype()?.expect("/W/A is an instance");
@@ -11025,7 +11040,7 @@ def \"I\" (references = </Lib/Q>) {{}}
     fn load_after_pending() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\n";
-        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         let layer = stage.root_layer();
@@ -11052,7 +11067,7 @@ def \"I\" (references = </Lib/Q>) {{}}
     #[test]
     fn interrupted_settlement_once() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(
+        let stage = hooked_stage(
             dir.path(),
             REFERRERS,
             &[("w.usda", "#usda 1.0\n(\n    defaultPrim = \"R\"\n)\ndef \"R\" {}\n")],
@@ -11061,7 +11076,7 @@ def \"I\" (references = </Lib/Q>) {{}}
         let layer = stage.root_layer();
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
-        hook.replace(Some(Box::new(move || instance_raw(&layer, "/W/B"))));
+        set_hook(move || instance_raw(&layer, "/W/B"));
         stage.prim("/W")?.references().add(sdf::Reference {
             asset_path: "w.usda".into(),
             ..Default::default()
@@ -11089,7 +11104,7 @@ def \"I\" (references = </Lib/Q>) {{}}
     fn find_loadable_quiet() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = "#usda 1.0\ndef \"W\" (payload = @w.usda@) {}\n";
-        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
 
@@ -11118,14 +11133,14 @@ def \"I\" (references = </Lib/Q>) {{}}
     #[test]
     fn load_reserves_first() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = payload_stage(dir.path(), FLIPPED_ROOT)?;
+        let stage = payload_stage(dir.path(), FLIPPED_ROOT)?;
         let layer = stage.root_layer();
         let ran = Rc::new(Cell::new(false));
         let flag = Rc::clone(&ran);
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             flag.set(true);
             instance_raw(&layer, "/T");
-        })));
+        });
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         assert!(!ran.get(), "nothing has composed /W");
@@ -11151,7 +11166,7 @@ def \"I\" (
     references = @lib.usda@</P>
 ) {}
 ";
-        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         stage.load("/I/Body", usd::LoadPolicy::WithDescendants)?;
@@ -11212,7 +11227,7 @@ def \"I\" (
     #[test]
     fn private_info_hidden() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let stage = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
         let heard: Rc<RefCell<Vec<sdf::Path>>> = Rc::default();
         let log = Rc::clone(&heard);
         stage.add_sink(move |_: &Stage, change: &usd::CommittedChange<'_>| {
@@ -11245,14 +11260,14 @@ def \"I\" (
     fn lazy_retarget_together() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = "#usda 1.0\nclass \"Lib\"\n{\n    def \"P\"\n    {\n        def \"Inner\" (\n            instanceable = true\n            references = @g.usda@\n        ) {}\n    }\n    def \"Q\"\n    {\n        def \"Inner\" (\n            instanceable = true\n            references = </Geo>\n        ) {}\n    }\n}\ndef \"Geo\"\n{\n    def \"m\" {}\n}\ndef \"T\" (\n    instanceable = true\n    references = </Lib/P>\n) {}\n";
-        let (stage, hook) = hooked_stage(
+        let stage = hooked_stage(
             dir.path(),
             root,
             &[("g.usda", "#usda 1.0\n(\n    defaultPrim = \"G\"\n)\ndef \"G\" {}\n")],
             "g.usda",
         )?;
         let layer = stage.root_layer();
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             layer
                 .edit(|e| {
                     let reference = sdf::Reference {
@@ -11267,7 +11282,7 @@ def \"I\" (
                     Ok(())
                 })
                 .expect("the layer is free");
-        })));
+        });
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), false))?;
         assert!(stage.prim("/T/Inner")?.prototype()?.is_some());
@@ -11295,7 +11310,7 @@ def \"I\" (
         }
         let dir = tempfile::tempdir()?;
         let root = "#usda 1.0\ndef \"A\" (\n    instanceable = true\n    references = @lib.usda@</P>\n) {}\n";
-        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let heard: Rc<RefCell<Vec<sdf::Path>>> = Rc::default();
         stage.add_sink(Muting(Rc::clone(&heard)))?;
         stage.find_loadable("/A")?;
@@ -11329,7 +11344,7 @@ def \"I\" (
             }
         }
         let dir = tempfile::tempdir()?;
-        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let stage = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
         let asked = Rc::new(Cell::new(0));
         stage.add_sink(Reading(stage.downgrade(), Rc::clone(&asked)))?;
         let other = stage.add_sink(Events(Rc::default(), true))?;
@@ -11347,7 +11362,7 @@ def \"I\" (
     #[test]
     fn flush_read_before_queued() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let stage = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         let outer = stage.prim("/A")?.prototype()?.expect("/A is an instance");
@@ -11374,7 +11389,7 @@ def \"I\" (
     #[test]
     fn private_retire_quiet() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, _hook) = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
+        let stage = hooked_stage(dir.path(), NESTED, &[], "none.usda")?;
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         stage.find_loadable("/A")?;
@@ -11414,7 +11429,7 @@ def \"A\" (
 ) {}
 def \"B\" (references = @lib.usda@</P>) {}
 ";
-        let (stage, _hook) = payload_stage(dir.path(), root)?;
+        let stage = payload_stage(dir.path(), root)?;
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         stage.find_loadable("/A")?;
@@ -11440,15 +11455,15 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn caught_load_panic_scope() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = payload_stage(dir.path(), FLIPPED_ROOT)?;
+        let stage = payload_stage(dir.path(), FLIPPED_ROOT)?;
         let weak = stage.downgrade();
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             let stage = weak.upgrade().expect("the stage is alive");
             let load = panic::catch_unwind(AssertUnwindSafe(|| {
                 let _ = stage.load("/W/A", usd::LoadPolicy::WithDescendants);
             }));
             assert!(load.is_err(), "a load inside a read panics");
-        })));
+        });
         let events = Rc::new(RefCell::new(Vec::new()));
         stage.add_sink(Events(Rc::clone(&events), true))?;
         assert!(stage.prim("/W")?.is_valid()?);
@@ -11471,9 +11486,9 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn taken_fixpoint_interrupts() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
+        let stage = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
         let root = stage.root_layer();
-        hook.replace(Some(Box::new(move || define_raw(&root, "/Late"))));
+        set_hook(move || define_raw(&root, "/Late"));
 
         let inner = sdf::path("/P/Inner")?;
         let stopped = stage.composition.fixpoint(
@@ -11495,18 +11510,18 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn drain_reentry_busy() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
+        let stage = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
         let seen = Rc::new(Cell::new(None));
         let reader = stage.clone();
         let record = Rc::clone(&seen);
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             let read = reader.prim("/P").expect("a prim path").is_valid();
             let busy = matches!(read, Err(crate::Error::Query(error)) if error.is_busy());
             let panicked = panics_part_composed(|| {
                 reader.layer_count();
             });
             record.set(Some((busy, panicked)));
-        })));
+        });
         let root = stage.root_layer();
         sublayer_raw(&root);
 
@@ -11521,10 +11536,10 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn drain_load_commit_ordered() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
+        let stage = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
         let root = stage.root_layer();
         let late = root.clone();
-        hook.replace(Some(Box::new(move || define_raw(&late, "/C"))));
+        set_hook(move || define_raw(&late, "/C"));
         let resyncs = record_resyncs(&stage);
 
         // A: a sublayer whose load commits C. B: a prim, queued behind A.
@@ -11563,11 +11578,11 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn read_load_reentry_busy() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
+        let stage = hooked_stage(dir.path(), REFERENCED, &[("a.usda", TARGET)], "a.usda")?;
         let seen = Rc::new(Cell::new(None));
         let reader = stage.clone();
         let record = Rc::clone(&seen);
-        hook.replace(Some(Box::new(move || {
+        set_hook(move || {
             let read = reader.prim("/P").expect("a prim path").is_valid();
             let busy = matches!(read, Err(crate::Error::Query(error)) if error.is_busy());
             record.set(Some((
@@ -11576,7 +11591,7 @@ def \"B\" (references = @lib.usda@</P>) {}
                     reader.layer_count();
                 }),
             )));
-        })));
+        });
 
         assert!(stage.prim("/P/Inner")?.is_valid()?);
         assert_eq!(seen.get(), Some((true, true)), "busy, then a panic");
@@ -11594,24 +11609,28 @@ def \"B\" (references = @lib.usda@</P>) {}
             "#usda 1.0\ndef \"P\" (references = @broken.usda@</X>) {}\n",
         )?;
         fs::write(dir.path().join("broken.usda"), "not a layer")?;
-        let root: Rc<RefCell<Option<sdf::LayerHandle>>> = Rc::default();
-        let opens = Rc::new(Cell::new(0));
-        let (log, count) = (Rc::clone(&root), Rc::clone(&opens));
-        let resolver = sdf::layer_registry::tests::HookResolver::new(move |resolved| {
+        thread_local! {
+            /// The stage's root layer, which the resolver edits.
+            static ROOT: RefCell<Option<sdf::LayerHandle>> = const { RefCell::new(None) };
+            /// How many times the resolver has opened `broken.usda`.
+            static OPENS: Cell<usize> = const { Cell::new(0) };
+        }
+        let resolver = sdf::layer_registry::tests::HookResolver::new(|resolved| {
             if resolved.file_name().is_some_and(|file| file == "broken.usda") {
-                count.set(count.get() + 1);
-                assert!(count.get() < 10, "the read keeps retrying the asset");
-                let layer = log.borrow().clone().expect("the stage is open");
-                define_raw(&layer, &format!("/Log{}", count.get()));
+                let opened = OPENS.get() + 1;
+                OPENS.set(opened);
+                assert!(opened < 10, "the read keeps retrying the asset");
+                let layer = ROOT.with_borrow(Clone::clone).expect("the stage is open");
+                define_raw(&layer, &format!("/Log{opened}"));
             }
         });
         let stage = Stage::builder()
             .resolver(resolver)
             .open(&dir.path().join("root.usda").to_string_lossy())?;
-        root.replace(Some(stage.root_layer()));
+        ROOT.set(Some(stage.root_layer()));
 
         assert!(stage.prim("/P")?.is_valid()?);
-        assert_eq!(opens.get(), 1);
+        assert_eq!(OPENS.get(), 1);
         assert!(stage.prim("/Log1")?.is_valid()?);
         Ok(())
     }
@@ -11623,8 +11642,8 @@ def \"B\" (references = @lib.usda@</P>) {}
         dir: &FsPath,
         root: &str,
         files: &[(&str, &str)],
-        open: impl Fn(&str) + 'static,
-        identify: impl Fn(&str) + 'static,
+        open: impl Fn(&str) + Send + Sync + 'static,
+        identify: impl Fn(&str) + Send + Sync + 'static,
     ) -> Result<Stage> {
         fs::write(dir.join("root.usda"), root)?;
         for (file, content) in files {
@@ -11652,7 +11671,7 @@ def \"B\" (references = @lib.usda@</P>) {}
             }
         }
         let dir = tempfile::tempdir()?;
-        let (stage, _hook) = hooked_stage(dir.path(), PLAIN, &[], "none.usda")?;
+        let stage = hooked_stage(dir.path(), PLAIN, &[], "none.usda")?;
         let root = stage.root_layer();
 
         let message = panic_message(|| {
@@ -11699,15 +11718,15 @@ def \"B\" (references = @lib.usda@</P>) {}
     /// layer's handle, poisoned by a resolver panic while a sublayer's change
     /// is applied.
     fn poisoned_stage(dir: &FsPath) -> Result<(Stage, Resyncs, sdf::LayerHandle)> {
-        let armed = Rc::new(Cell::new(false));
-        let trigger = Rc::clone(&armed);
+        let armed = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&armed);
         let stage = resolving_stage(
             dir,
             PLAIN,
             &[],
             |_| {},
             move |asset_path| {
-                if trigger.get() && asset_path == "poison.usda" {
+                if trigger.load(Ordering::Relaxed) && asset_path == "poison.usda" {
                     panic!("the resolver failed");
                 }
             },
@@ -11723,10 +11742,10 @@ def \"B\" (references = @lib.usda@</P>) {}
                 Ok(())
             })?;
         }
-        armed.set(true);
+        armed.store(true, Ordering::Relaxed);
         let message = panic_message(|| stage.process_pending());
         assert_eq!(message.as_deref(), Some("the resolver failed"));
-        armed.set(false);
+        armed.store(false, Ordering::Relaxed);
         Ok((stage, resyncs, root))
     }
 
@@ -11772,8 +11791,8 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn drain_load_panic_poisons() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
-        hook.replace(Some(Box::new(|| panic!("the resolver failed"))));
+        let stage = hooked_stage(dir.path(), PLAIN, &[SUBLAYER], "b.usda")?;
+        set_hook(|| panic!("the resolver failed"));
         let resyncs = record_resyncs(&stage);
         let root = stage.root_layer();
         {
@@ -11798,14 +11817,14 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn retry_panic_poisons() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let armed = Rc::new(Cell::new(false));
-        let trigger = Rc::clone(&armed);
+        let armed = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&armed);
         let stage = resolving_stage(
             dir.path(),
             "#usda 1.0\n(\n    subLayers = [@late.usda@]\n)\n",
             &[],
             move |file| {
-                if file == "late.usda" && trigger.get() {
+                if file == "late.usda" && trigger.load(Ordering::Relaxed) {
                     panic!("the resolver failed");
                 }
             },
@@ -11813,7 +11832,7 @@ def \"B\" (references = @lib.usda@</P>) {}
         )?;
         assert!(!stage.prim("/Late")?.is_valid()?, "the sublayer is missing");
         fs::write(dir.path().join("late.usda"), "#usda 1.0\ndef \"Late\" {}\n")?;
-        armed.set(true);
+        armed.store(true, Ordering::Relaxed);
 
         let message = panic_message(|| drop(stage.retry_loads()));
         assert_eq!(message.as_deref(), Some("the resolver failed"));
@@ -11830,26 +11849,26 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn index_build_panic_poisons() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let armed = Rc::new(Cell::new(false));
-        let trigger = Rc::clone(&armed);
+        let armed = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&armed);
         let stage = resolving_stage(
             dir.path(),
             REFERENCED,
             &[("a.usda", TARGET)],
             |_| {},
             move |asset_path| {
-                if trigger.get() && asset_path == "a.usda" {
+                if trigger.load(Ordering::Relaxed) && asset_path == "a.usda" {
                     panic!("the resolver failed");
                 }
             },
         )?;
-        armed.set(true);
+        armed.store(true, Ordering::Relaxed);
 
         let message = panic_message(|| {
             let _ = stage.prim("/P/Inner").expect("a prim path").is_valid();
         });
         assert_eq!(message.as_deref(), Some("the resolver failed"));
-        armed.set(false);
+        armed.store(false, Ordering::Relaxed);
         let read = stage.prim("/P")?.is_valid();
         assert!(
             matches!(read, Err(crate::Error::Query(pcp::QueryError::Poisoned(None)))),
@@ -11863,29 +11882,32 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn build_read_busy() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let weak: Rc<RefCell<Option<WeakStage>>> = Rc::default();
-        let seen: Rc<RefCell<Vec<String>>> = Rc::default();
-        let (handle, log) = (Rc::clone(&weak), Rc::clone(&seen));
+        thread_local! {
+            /// The stage the resolver reads, once open.
+            static WEAK: RefCell<Option<WeakStage>> = const { RefCell::new(None) };
+            /// What each read the resolver made of the stage returned.
+            static READS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
         let stage = resolving_stage(
             dir.path(),
             REFERENCED,
             &[("a.usda", TARGET)],
             |_| {},
-            move |asset_path| {
-                let stage = handle.borrow().as_ref().and_then(WeakStage::upgrade);
+            |asset_path| {
+                let stage = WEAK.with_borrow(|weak| weak.as_ref().and_then(WeakStage::upgrade));
                 if let Some(stage) = stage.filter(|_| asset_path == "a.usda") {
                     let read = stage
                         .prim("/P")
                         .map_err(crate::Error::from)
                         .and_then(|prim| prim.is_valid());
-                    log.borrow_mut().push(format!("{read:?}"));
+                    READS.with_borrow_mut(|reads| reads.push(format!("{read:?}")));
                 }
             },
         )?;
-        weak.replace(Some(stage.downgrade()));
+        WEAK.set(Some(stage.downgrade()));
 
         stage.prim("/P/Inner")?.is_valid()?;
-        let reads = seen.borrow().clone();
+        let reads = READS.take();
         assert!(!reads.is_empty(), "the resolver read the stage");
         assert!(reads.iter().all(|read| read.contains("Busy")), "{reads:?}");
         assert!(stage.prim("/P")?.is_valid()?, "the stage is sound");
@@ -11896,7 +11918,7 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn unmute_panic_poisons() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let (stage, hook) = hooked_stage(
+        let stage = hooked_stage(
             dir.path(),
             "#usda 1.0\n(\n    subLayers = [@b.usda@]\n)\n",
             &[SUBLAYER],
@@ -11904,7 +11926,7 @@ def \"B\" (references = @lib.usda@</P>) {}
         )?;
         let sublayer = dir.path().join("b.usda").to_string_lossy().into_owned();
         stage.mute_layer(sublayer.as_str());
-        hook.replace(Some(Box::new(|| panic!("the resolver failed"))));
+        set_hook(|| panic!("the resolver failed"));
 
         let message = panic_message(|| stage.unmute_layer(&sublayer));
         assert_eq!(message.as_deref(), Some("the resolver failed"));
@@ -11989,15 +12011,15 @@ def \"B\" (references = @lib.usda@</P>) {}
     #[test]
     fn delivery_stops_when_poisoned() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let armed = Rc::new(Cell::new(false));
-        let trigger = Rc::clone(&armed);
+        let armed = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&armed);
         let stage = resolving_stage(
             dir.path(),
             REFERENCED,
             &[("a.usda", TARGET)],
             |_| {},
             move |asset_path| {
-                if trigger.get() && asset_path == "a.usda" {
+                if trigger.load(Ordering::Relaxed) && asset_path == "a.usda" {
                     panic!("the resolver failed");
                 }
             },
@@ -12006,7 +12028,7 @@ def \"B\" (references = @lib.usda@</P>) {}
         let count = Rc::clone(&delivered);
         stage.add_sink(move |stage: &Stage, _: &usd::CommittedChange<'_>| {
             count.set(count.get() + 1);
-            armed.set(true);
+            armed.store(true, Ordering::Relaxed);
             let read = panic::catch_unwind(AssertUnwindSafe(|| {
                 let _ = stage.prim("/P/Inner").expect("a prim path").is_valid();
             }));
@@ -12034,7 +12056,7 @@ def \"B\" (references = @lib.usda@</P>) {}
 
     /// Two payloaded prims, `/P` and `/Q`, and a class `/P` can inherit,
     /// opened through a registry that counts the assets it opens.
-    fn payload_pair(dir: &FsPath) -> Result<(Stage, Rc<Cell<usize>>)> {
+    fn payload_pair(dir: &FsPath) -> Result<(Stage, Arc<AtomicUsize>)> {
         fs::write(
             dir.join("root.usda"),
             "#usda 1.0\ndef \"P\" (payload = @p.usda@</X>) {}\ndef \"Q\" (payload = @q.usda@</Y>) {}\nclass \
@@ -12077,14 +12099,14 @@ def \"B\" (references = @lib.usda@</P>) {}
             dir.path().join("p.usda"),
             "#usda 1.0\ndef \"X\" {\n    def \"D\" {}\n}\n",
         )?;
-        let opened = opens.get();
+        let opened = opens.load(Ordering::Relaxed);
 
         assert!(
             stage.prim("/P/C")?.is_valid()?,
             "the layer held before the file changed"
         );
         assert!(!stage.prim("/P/D")?.is_valid()?);
-        assert_eq!(opens.get(), opened, "the payload is not read again");
+        assert_eq!(opens.load(Ordering::Relaxed), opened, "the payload is not read again");
         Ok(())
     }
 

@@ -425,11 +425,14 @@ impl Asset for io::Cursor<AssetBuffer> {
 /// implementation, [`DefaultResolver`], performs filesystem-based resolution
 /// with configurable search paths.
 ///
+/// A resolver is `Send + Sync`, so one instance can serve every thread, as
+/// the one resolver C++ `ArGetResolver` constructs does.
+///
 /// # Correspondence
 ///
 /// This trait corresponds to `ArResolver` in the C++ USD API:
 /// <https://openusd.org/dev/api/class_ar_resolver.html>
-pub trait Resolver {
+pub trait Resolver: Send + Sync {
     /// Canonicalizes an asset path into a stable identifier.
     ///
     /// The `anchor` path, if provided, is used to resolve relative paths.
@@ -1514,7 +1517,7 @@ pub(crate) mod tests {
     /// resolved asset.
     pub(crate) struct TestResolver<F>(pub(crate) F);
 
-    impl<F: Fn() -> io::Result<Box<dyn Asset>>> Resolver for TestResolver<F> {
+    impl<F: Fn() -> io::Result<Box<dyn Asset>> + Send + Sync> Resolver for TestResolver<F> {
         fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
             asset_path.to_string()
         }

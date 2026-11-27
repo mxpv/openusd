@@ -103,7 +103,7 @@ pub struct Layer {
     sinks: sink::Set<dyn LayerSink>,
     /// The resolver the layer was opened through, which a save reopens the
     /// saved file with. `None` for a layer that was not read from an asset.
-    resolver: Option<Rc<dyn ar::Resolver>>,
+    resolver: Option<Arc<dyn ar::Resolver>>,
     /// The formats of the registry the layer was opened through or is held
     /// in, or `None` for a layer no registry has had, which reads and writes
     /// in the built-in ones.
@@ -143,7 +143,7 @@ pub(crate) enum Due {
     /// with its modification time.
     Read {
         /// The resolver the layer was opened through, which reads the asset.
-        resolver: Rc<dyn ar::Resolver>,
+        resolver: Arc<dyn ar::Resolver>,
         /// Where the layer's identifier resolves.
         resolved: ar::ResolvedPath,
         /// The asset's modification time.
@@ -216,7 +216,7 @@ impl Layer {
         // Canonicalized first, as every other load path does: the layer is
         // addressed by the identifier it keeps, so a caller's spelling of one
         // file must not become a second identity for it.
-        let identifier = sdf::absolute_path_at(&registry, None, identifier.as_ref());
+        let identifier = sdf::absolute_path_at(registry.resolver(), None, identifier.as_ref());
         let layer = registry.open_layer(&identifier)?;
         layer.ok_or(crate::Error::UnresolvedAsset(identifier))
     }
@@ -277,7 +277,7 @@ impl Layer {
     /// it was read among, to reload and write in.
     pub(crate) fn new_resolved(
         prepared: sdf::PreparedLayer,
-        resolver: Rc<dyn ar::Resolver>,
+        resolver: Arc<dyn ar::Resolver>,
         formats: sdf::layer_registry::FormatSet,
     ) -> Self {
         let sdf::PreparedLayer {
@@ -301,9 +301,9 @@ impl Layer {
     /// `formats`. Returns the resolver and formats it had.
     pub(crate) fn set_registry(
         &mut self,
-        resolver: Option<Rc<dyn ar::Resolver>>,
+        resolver: Option<Arc<dyn ar::Resolver>>,
         formats: Option<sdf::layer_registry::FormatSet>,
-    ) -> (Option<Rc<dyn ar::Resolver>>, Option<sdf::layer_registry::FormatSet>) {
+    ) -> (Option<Arc<dyn ar::Resolver>>, Option<sdf::layer_registry::FormatSet>) {
         (
             mem::replace(&mut self.resolver, resolver),
             mem::replace(&mut self.formats, formats),
@@ -531,7 +531,7 @@ impl Layer {
 
     /// The resolver the layer reads and saves through, once a registry or an
     /// open gave it one.
-    pub(crate) fn resolver(&self) -> Option<&Rc<dyn ar::Resolver>> {
+    pub(crate) fn resolver(&self) -> Option<&Arc<dyn ar::Resolver>> {
         self.resolver.as_ref()
     }
 
@@ -820,7 +820,7 @@ impl Layer {
             return Ok(None);
         }
         Ok(Some(Due::Read {
-            resolver: Rc::clone(resolver),
+            resolver: Arc::clone(resolver),
             resolved,
             modified,
         }))
@@ -1808,8 +1808,8 @@ pub(crate) mod tests {
     use std::io;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -2294,7 +2294,7 @@ pub(crate) mod tests {
         // file beside it.
         let resolver = unsafe { ar::DefaultResolver::new().map_files() };
         let registry = crate::sdf::LayerRegistry::new(Box::new(resolver));
-        let identifier = sdf::absolute_path_at(&registry, None, &path.to_string_lossy());
+        let identifier = sdf::absolute_path_at(registry.resolver(), None, &path.to_string_lossy());
         let mut editing = registry.open_layer(&identifier)?.expect("the layer resolves");
         let other = registry.open_layer(&identifier)?.expect("the layer resolves");
         set_component(&mut editing);
@@ -3529,8 +3529,8 @@ pub(crate) mod tests {
 
     /// Puts `layer` behind a resolver that opens every asset to what `open`
     /// gives, as if the layer had been read through it.
-    fn opened_through(layer: &mut Layer, open: impl Fn() -> io::Result<Box<dyn ar::Asset>> + 'static) {
-        layer.resolver = Some(Rc::new(ar::tests::TestResolver(open)));
+    fn opened_through(layer: &mut Layer, open: impl Fn() -> io::Result<Box<dyn ar::Asset>> + Send + Sync + 'static) {
+        layer.resolver = Some(Arc::new(ar::tests::TestResolver(open)));
     }
 
     /// A layer read from its file is clean, a committed edit makes it dirty,
@@ -3561,15 +3561,18 @@ pub(crate) mod tests {
     /// for a mapping when `mapping` is set, and for bytes in memory
     /// otherwise. `sources` collects a handle that is shared with each
     /// source made; its count tells whether a view of the source lives.
-    fn shared_asset(bytes: Vec<u8>, mapping: bool, sources: &RefCell<Vec<ar::tests::AdviceLog>>) -> Box<dyn ar::Asset> {
+    fn shared_asset(bytes: Vec<u8>, mapping: bool, sources: &Mutex<Vec<ar::tests::AdviceLog>>) -> Box<dyn ar::Asset> {
         let (buffer, log) = ar::tests::recording_source(bytes, mapping);
-        sources.borrow_mut().push(log);
+        tf::lock(sources).push(log);
         Box::new(io::Cursor::new(ar::AssetBuffer::Shared(buffer)))
     }
 
     /// How many of `sources` a view still holds alive.
-    fn live_sources(sources: &RefCell<Vec<ar::tests::AdviceLog>>) -> usize {
-        sources.borrow().iter().filter(|log| Arc::strong_count(log) > 1).count()
+    fn live_sources(sources: &Mutex<Vec<ar::tests::AdviceLog>>) -> usize {
+        tf::lock(sources)
+            .iter()
+            .filter(|log| Arc::strong_count(log) > 1)
+            .count()
     }
 
     /// A save through the registry puts the layer on the mapping the
@@ -3578,14 +3581,14 @@ pub(crate) mod tests {
     fn save_remaps() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (path, mut layer) = edited_fixture(dir.path())?;
-        let sources = Rc::new(RefCell::new(Vec::new()));
+        let sources = Arc::new(Mutex::new(Vec::new()));
         opened_through(&mut layer, {
-            let (path, sources) = (path.clone(), Rc::clone(&sources));
+            let (path, sources) = (path.clone(), Arc::clone(&sources));
             move || Ok(shared_asset(fs::read(&path)?, true, &sources))
         });
 
         layer.save()?;
-        assert_eq!(sources.borrow().len(), 1, "the saved file is opened once");
+        assert_eq!(tf::lock(&sources).len(), 1, "the saved file is opened once");
         assert_eq!(live_sources(&sources), 1, "the layer holds the mapping");
         assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
         let size = layer.data().field(&Path::new("/World.size")?, "default")?;
@@ -3606,14 +3609,14 @@ pub(crate) mod tests {
             move |_: &str, _: &ChangeList| fired.set(fired.get() + 1)
         });
         let before = fs::read(&path)?;
-        let sources = Rc::new(RefCell::new(Vec::new()));
+        let sources = Arc::new(Mutex::new(Vec::new()));
         opened_through(&mut layer, {
-            let sources = Rc::clone(&sources);
+            let sources = Arc::clone(&sources);
             move || Ok(shared_asset(before.clone(), true, &sources))
         });
 
         layer.save()?;
-        assert_eq!(sources.borrow().len(), 1);
+        assert_eq!(tf::lock(&sources).len(), 1);
         assert_eq!(live_sources(&sources), 0, "the stale mapping is let go");
         assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
         assert_eq!(fired.get(), 0, "a save is not a layer change");
@@ -3630,14 +3633,14 @@ pub(crate) mod tests {
     fn save_skips_heap() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (path, mut layer) = edited_fixture(dir.path())?;
-        let sources = Rc::new(RefCell::new(Vec::new()));
+        let sources = Arc::new(Mutex::new(Vec::new()));
         opened_through(&mut layer, {
-            let sources = Rc::clone(&sources);
+            let sources = Arc::clone(&sources);
             move || Ok(shared_asset(fs::read(&path)?, false, &sources))
         });
 
         layer.save()?;
-        assert_eq!(sources.borrow().len(), 1);
+        assert_eq!(tf::lock(&sources).len(), 1);
         assert_eq!(live_sources(&sources), 0);
         assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
         Ok(())
@@ -3671,11 +3674,11 @@ pub(crate) mod tests {
 
         let dir = tempfile::tempdir()?;
         let (path, mut layer) = edited_fixture(dir.path())?;
-        let (opens, reads) = (Rc::new(Cell::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (opens, reads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         opened_through(&mut layer, {
-            let (opens, reads) = (Rc::clone(&opens), Arc::clone(&reads));
+            let (opens, reads) = (Arc::clone(&opens), Arc::clone(&reads));
             move || {
-                opens.set(opens.get() + 1);
+                opens.fetch_add(1, Ordering::Relaxed);
                 Ok(Box::new(Counting(
                     io::Cursor::new(fs::read(&path)?),
                     Arc::clone(&reads),
@@ -3684,7 +3687,7 @@ pub(crate) mod tests {
         });
 
         layer.save()?;
-        assert_eq!(opens.get(), 1);
+        assert_eq!(opens.load(Ordering::Relaxed), 1);
         assert_eq!(reads.load(Ordering::Relaxed), 0);
         assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
         Ok(())
@@ -3711,11 +3714,11 @@ pub(crate) mod tests {
     fn save_replace_failure() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let (path, mut layer) = edited_fixture(dir.path())?;
-        let opens = Rc::new(Cell::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
         opened_through(&mut layer, {
-            let opens = Rc::clone(&opens);
+            let opens = Arc::clone(&opens);
             move || {
-                opens.set(opens.get() + 1);
+                opens.fetch_add(1, Ordering::Relaxed);
                 Err(io::Error::from(io::ErrorKind::NotFound))
             }
         });
@@ -3724,7 +3727,7 @@ pub(crate) mod tests {
 
         let error = layer.save().expect_err("the replacement fails");
         assert!(matches!(error, ExportError::Replace { .. }), "{error:?}");
-        assert_eq!(opens.get(), 0);
+        assert_eq!(opens.load(Ordering::Relaxed), 0);
         assert_eq!(world_kind(&layer), Some(tf::Token::from("component")));
         Ok(())
     }
@@ -3745,7 +3748,7 @@ pub(crate) mod tests {
         // file beside it.
         let resolver = unsafe { ar::DefaultResolver::new().map_files() };
         let registry = sdf::LayerRegistry::new(Box::new(resolver));
-        let identifier = sdf::absolute_path_at(&registry, None, &path.to_string_lossy());
+        let identifier = sdf::absolute_path_at(registry.resolver(), None, &path.to_string_lossy());
         let mut editing = registry.open_layer(&identifier)?.expect("the layer resolves");
         let other = registry.open_layer(&identifier)?.expect("the layer resolves");
         set_component(&mut editing);

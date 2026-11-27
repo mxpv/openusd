@@ -464,7 +464,7 @@ fn resolve_path(
         return (asset, outcome);
     }
     let identifier = registry.absolute_path(anchor, asset.asset_path());
-    if let Some(resolved) = registry.resolve(&identifier) {
+    if let Some(resolved) = registry.resolver().resolve(&identifier) {
         asset.set_resolved_path(resolved.to_string_lossy().into_owned());
     }
     (asset, outcome)
@@ -517,7 +517,7 @@ mod tests {
             assert!(errors.is_empty(), "{errors:?}");
             value.try_as_asset_path().expect("an asset").as_str().to_string()
         };
-        let beside = |name: &str| sdf::absolute_path_at(&registry, Some(&anchor), name);
+        let beside = |name: &str| sdf::absolute_path_at(registry.resolver(), Some(&anchor), name);
 
         assert!(anchored("./missing.png").contains("missing.png") && !anchored("./missing.png").starts_with('.'));
         assert_eq!(anchored("`\"./tex_${V}.png\"`"), beside("./tex_x.png"));

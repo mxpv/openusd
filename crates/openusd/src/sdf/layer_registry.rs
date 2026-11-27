@@ -21,10 +21,8 @@
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use crate::sdf::{self, expr};
 use crate::usda::UsdaFileFormat;
@@ -201,13 +199,12 @@ impl From<LoadError> for crate::Error {
 /// A layer stays held while any handle to it exists. Once its last handle
 /// drops, it is freed at the next [`sweep`](Self::sweep), or at once when no
 /// handle into the registry remains. The registry itself refers to its layers
-/// weakly, as C++ `Sdf_LayerRegistry` does. A registry kept by a layer it
-/// holds, as that layer's resolver, therefore does not keep the layer alive.
-/// An edit through one handle borrows the registry's layers whole, so it
-/// conflicts with any other access to them (see [`sdf::LayerHandle`]).
+/// weakly, as C++ `Sdf_LayerRegistry` does. An edit through one handle
+/// borrows the registry's layers whole, so it conflicts with any other access
+/// to them (see [`sdf::LayerHandle`]).
 #[derive(Clone)]
 pub struct LayerRegistry {
-    resolver: Rc<dyn ar::Resolver>,
+    resolver: Arc<dyn ar::Resolver>,
     /// The formats layers are read in, shared by every clone of the
     /// registry, so the stages holding layers in one store read them in one
     /// set of formats.
@@ -287,63 +284,6 @@ impl From<sdf::LayerHandle> for LoadedLayer {
     }
 }
 
-/// The registry as the resolver it fronts. `create_identifier` passes an
-/// anonymous layer identifier through, and `in_memory_identifier` and
-/// `is_context_dependent_path` pass the registry's own rules; every other
-/// call reaches the resolver as it is.
-impl ar::Resolver for LayerRegistry {
-    fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
-        if sdf::Layer::is_anonymous_identifier(asset_path) {
-            return asset_path.to_owned();
-        }
-        self.resolver.create_identifier(asset_path, anchor)
-    }
-
-    fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-        LayerRegistry::resolve(self, asset_path)
-    }
-
-    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-        self.resolver.resolve_for_new_asset(asset_path)
-    }
-
-    fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-        LayerRegistry::open_asset(self, resolved_path)
-    }
-
-    fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
-        self.resolver.extension(asset_path)
-    }
-
-    fn uri_schemes(&self) -> &[&str] {
-        self.resolver.uri_schemes()
-    }
-
-    fn is_context_dependent_path(&self, asset_path: &str) -> bool {
-        LayerRegistry::is_context_dependent_path(self, asset_path)
-    }
-
-    fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
-        LayerRegistry::in_memory_identifier(self, asset_path)
-    }
-
-    fn asset_info(&self, asset_path: &str, resolved_path: &ar::ResolvedPath) -> ar::AssetInfo {
-        self.resolver.asset_info(asset_path, resolved_path)
-    }
-
-    fn modification_timestamp(&self, asset_path: &str, resolved_path: &ar::ResolvedPath) -> Option<SystemTime> {
-        self.resolver.modification_timestamp(asset_path, resolved_path)
-    }
-
-    fn identity(&self) -> String {
-        LayerRegistry::identity(self)
-    }
-
-    fn cache_id(&self) -> Option<u64> {
-        self.resolver.cache_id()
-    }
-}
-
 impl Default for LayerRegistry {
     /// A registry over the filesystem [`DefaultResolver`](ar::DefaultResolver)
     /// and the built-in formats — what [`Stage::builder`](crate::usd::Stage)
@@ -357,10 +297,17 @@ impl LayerRegistry {
     /// A registry resolving asset paths through `resolver`.
     pub fn new(resolver: Box<dyn ar::Resolver>) -> Self {
         Self {
-            resolver: Rc::from(resolver),
+            resolver: Arc::from(resolver),
             formats: FormatSet::default(),
             store: Rc::default(),
         }
+    }
+
+    /// The resolver the registry resolves asset paths through. It knows
+    /// nothing of anonymous layers, whose identifiers the registry answers
+    /// for itself.
+    pub fn resolver(&self) -> &dyn ar::Resolver {
+        self.resolver.as_ref()
     }
 
     /// Reads layers in `format` too, after the formats the registry already
@@ -399,10 +346,12 @@ impl LayerRegistry {
     /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
     /// edit on this registry.
     pub fn find(&self, asset_path: &str) -> Result<Option<sdf::LayerHandle>, sdf::LayerError> {
-        Ok(match self.locate(sdf::absolute_path_at(self, None, asset_path))? {
-            Located::Open(handle) => Some(handle),
-            Located::Closed { .. } | Located::Unresolved => None,
-        })
+        Ok(
+            match self.locate(sdf::absolute_path_at(self.resolver(), None, asset_path))? {
+                Located::Open(handle) => Some(handle),
+                Located::Closed { .. } | Located::Unresolved => None,
+            },
+        )
     }
 
     /// The layer open in this registry at `asset_path`, or else that layer read
@@ -416,7 +365,7 @@ impl LayerRegistry {
     /// or from a resolver a stage calls while it reads the registry's layers.
     pub fn find_or_open(&self, asset_path: &str) -> crate::Result<Option<sdf::LayerHandle>> {
         let _scope = ar::CacheScope::begin();
-        let identifier = sdf::absolute_path_at(self, None, asset_path);
+        let identifier = sdf::absolute_path_at(self.resolver(), None, asset_path);
         Ok(self.find_or_read(&identifier)?.map(|layer| layer.handle))
     }
 
@@ -480,7 +429,7 @@ impl LayerRegistry {
     /// registry, or from a resolver a stage calls while it reads the registry's
     /// layers.
     pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
-        let (resolver, formats) = layer.set_registry(Some(Rc::clone(&self.resolver)), Some(self.formats.clone()));
+        let (resolver, formats) = layer.set_registry(Some(Arc::clone(&self.resolver)), Some(self.formats.clone()));
         let packages = self.package_listings(layer.real_path());
         self.store().insert(layer, packages).map_err(|mut refused| {
             refused.layer.set_registry(resolver, formats);
@@ -556,27 +505,16 @@ impl LayerRegistry {
         !sdf::Layer::is_anonymous_identifier(asset_path) && self.resolver.is_context_dependent_path(asset_path)
     }
 
-    /// Resolves an asset identifier to a physical location, or `None` if it does
-    /// not exist.
-    pub(crate) fn resolve(&self, identifier: &str) -> Option<ar::ResolvedPath> {
-        self.resolver.resolve(identifier)
-    }
-
-    /// Opens the asset at a [`resolve`](Self::resolve)d location for reading.
-    pub(crate) fn open_asset(&self, resolved: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
-        self.resolver.open_asset(resolved)
-    }
-
     /// Resolves the layer the composition graph should open at `identifier`.
     ///
-    /// This is [`resolve`](Self::resolve) deferred to the selected format's
+    /// This is [`resolve`](ar::Resolver::resolve) deferred to the selected format's
     /// [`resolve_layer`](sdf::FileFormat::resolve_layer): a package
     /// (`pkg.usdz`) resolves to its root layer, its first entry followed into a
     /// package nested there (`pkg.usdz[root.usd]`), so it composes as an
     /// ordinary layer stack and the sublayers and references authored inside
     /// it anchor in-package, while
     /// an ordinary format keeps the resolved location. Generic
-    /// [`resolve`](Self::resolve) stays package-agnostic for asset-value
+    /// [`resolve`](ar::Resolver::resolve) stays package-agnostic for asset-value
     /// resolution and the resolvability probe, which want the package path
     /// itself rather than a layer inside it. A resolved location no registered
     /// format claims passes through unchanged, so [`read`](Self::read) reports
@@ -603,12 +541,6 @@ impl LayerRegistry {
             Some(format) => format.resolve_layer(resolver, &resolved),
             None => Some(resolved),
         }
-    }
-
-    /// The resolver's [`identity`](ar::Resolver::identity) token — the
-    /// configuration the stack's asset paths resolve under.
-    pub(crate) fn identity(&self) -> String {
-        self.resolver.identity()
     }
 
     /// Decodes `bytes` as a layer, choosing the registered format whose
@@ -668,10 +600,10 @@ impl LayerRegistry {
     pub(crate) fn absolute_path(&self, anchor: Option<&ar::ResolvedPath>, asset_path: &str) -> String {
         let store = self.held();
         sdf::absolute_path_with(
-            self,
+            self.resolver(),
             anchor,
             asset_path,
-            &mut sdf::ReadListing::new(self, store.as_deref()),
+            &mut sdf::ReadListing::new(self.resolver(), store.as_deref()),
         )
     }
 
@@ -754,7 +686,7 @@ impl LayerRegistry {
         )?;
         Ok(sdf::Layer::new_resolved(
             prepared,
-            Rc::clone(&self.resolver),
+            Arc::clone(&self.resolver),
             self.formats.clone(),
         ))
     }
@@ -771,7 +703,7 @@ impl LayerRegistry {
     /// propagates.
     pub(crate) fn prepare_root(&self, asset_path: &str) -> Result<LoadedLayer, LoadError> {
         self.ensure_writable()?;
-        let identifier = sdf::absolute_path_at(self, None, asset_path);
+        let identifier = sdf::absolute_path_at(self.resolver(), None, asset_path);
         let unresolved = || LoadError::Unresolved {
             asset_path: asset_path.to_owned(),
         };
@@ -1145,7 +1077,9 @@ pub(crate) mod tests {
     use crate::Result;
     use crate::sdf::FileFormatCaps;
     use crate::tf;
-    use std::{fs, str};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
+    use std::{fs, io, str};
 
     /// `layer` held in `store`, or the live layer already carrying its
     /// identifier or real path, which a fixture repeating a layer collapses
@@ -1164,10 +1098,12 @@ pub(crate) mod tests {
 
     /// A registry over a filesystem resolver, with the count of the assets it
     /// has opened.
-    pub(crate) fn counting_registry() -> (LayerRegistry, Rc<Cell<usize>>) {
-        let opens = Rc::new(Cell::new(0));
-        let count = Rc::clone(&opens);
-        let resolver = HookResolver::new(move |_| count.set(count.get() + 1));
+    pub(crate) fn counting_registry() -> (LayerRegistry, Arc<AtomicUsize>) {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&opens);
+        let resolver = HookResolver::new(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+        });
         (LayerRegistry::new(Box::new(resolver)), opens)
     }
 
@@ -1176,14 +1112,14 @@ pub(crate) mod tests {
     /// sublayer's resolution, runs.
     pub(crate) struct HookResolver {
         inner: ar::DefaultResolver,
-        hook: Box<dyn Fn(&ar::ResolvedPath)>,
-        identify: Box<dyn Fn(&str)>,
+        hook: Box<dyn Fn(&ar::ResolvedPath) + Send + Sync>,
+        identify: Box<dyn Fn(&str) + Send + Sync>,
     }
 
     impl HookResolver {
         /// A resolver calling `hook` with each asset's resolved path before
         /// opening it.
-        pub(crate) fn new(hook: impl Fn(&ar::ResolvedPath) + 'static) -> Self {
+        pub(crate) fn new(hook: impl Fn(&ar::ResolvedPath) + Send + Sync + 'static) -> Self {
             Self {
                 inner: ar::DefaultResolver::new(),
                 hook: Box::new(hook),
@@ -1193,7 +1129,7 @@ pub(crate) mod tests {
 
         /// The resolver calling `identify` with each asset path before
         /// creating its identifier.
-        pub(crate) fn on_identify(self, identify: impl Fn(&str) + 'static) -> Self {
+        pub(crate) fn on_identify(self, identify: impl Fn(&str) + Send + Sync + 'static) -> Self {
             Self {
                 identify: Box::new(identify),
                 ..self
@@ -1248,7 +1184,7 @@ pub(crate) mod tests {
         layers: &mut Vec<sdf::Layer>,
         visited: &mut HashSet<String>,
     ) -> Result<(), LoadError> {
-        let identifier = sdf::absolute_path_at(registry, anchor, asset_path);
+        let identifier = sdf::absolute_path_at(registry.resolver(), anchor, asset_path);
         if identifier.is_empty() || visited.contains(&identifier) {
             return Ok(());
         }
@@ -1281,7 +1217,7 @@ pub(crate) mod tests {
         }
         layers.push(sdf::Layer::new_resolved(
             layer,
-            Rc::clone(&registry.resolver),
+            Arc::clone(&registry.resolver),
             registry.formats.clone(),
         ));
         Ok(())
@@ -1557,7 +1493,7 @@ pub(crate) mod tests {
     /// or an unresolvable root.
     fn open_stack(path: &str) -> Result<Vec<LoadedLayer>> {
         let registry = registry();
-        let identifier = sdf::absolute_path_at(&registry, None, path);
+        let identifier = sdf::absolute_path_at(registry.resolver(), None, path);
         Ok(registry
             .open_stack(&identifier, &HashMap::new(), false, &Err, &|_| Presence::Absent)?
             .expect("root did not resolve"))
@@ -1673,7 +1609,11 @@ pub(crate) mod tests {
         let registry = registry();
         let layers = registry
             .open_stack(
-                &sdf::absolute_path_at(&registry, None, &composition_path("subLayer/sublayer_invalid.usda")),
+                &sdf::absolute_path_at(
+                    registry.resolver(),
+                    None,
+                    &composition_path("subLayer/sublayer_invalid.usda"),
+                ),
                 &HashMap::new(),
                 false,
                 &|e| {

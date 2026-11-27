@@ -1347,7 +1347,7 @@ impl LayerGraph {
                 // per referrer.
                 let anchored = self.read_view().absolute_path(demand.parent, &demand.evaluated);
                 match self.failed_loads.get(&anchored) {
-                    Some(LoadFailure::Unresolved) if self.registry.resolve(&anchored).is_some() => {
+                    Some(LoadFailure::Unresolved) if self.registry.resolver().resolve(&anchored).is_some() => {
                         self.failed_loads.remove(&anchored);
                     }
                     Some(failure) => {
@@ -1907,7 +1907,7 @@ impl LayerGraph {
             .failed_loads
             .iter()
             .filter(|(asset_path, failure)| {
-                matches!(failure, LoadFailure::Unresolved) && registry.resolve(asset_path).is_some()
+                matches!(failure, LoadFailure::Unresolved) && registry.resolver().resolve(asset_path).is_some()
             })
             .map(|(asset_path, _)| asset_path.clone())
             .collect();
@@ -2384,7 +2384,8 @@ impl LayerGraph {
         self.failed_loads.get(asset_path).filter(|failure| match failure {
             LoadFailure::Unreadable(_) => true,
             LoadFailure::Unresolved => {
-                self.registry.resolve(asset_path).is_none() && !matches!(self.registry.find(asset_path), Ok(Some(_)))
+                self.registry.resolver().resolve(asset_path).is_none()
+                    && !matches!(self.registry.find(asset_path), Ok(Some(_)))
             }
         })
     }
@@ -3271,7 +3272,12 @@ impl LayerGraph {
         // fixed per spelling and could be kept beside the pending mute.
         if anchor.is_none() {
             let view = self.read_view();
-            let loaded = sdf::absolute_path_with(&self.registry, None, canonical, &mut sdf::HeldListing(&view.store));
+            let loaded = sdf::absolute_path_with(
+                self.registry.resolver(),
+                None,
+                canonical,
+                &mut sdf::HeldListing(&view.store),
+            );
             if loaded != canonical {
                 keys.push(loaded);
             }
@@ -3514,7 +3520,12 @@ impl LayerGraph {
             return path.to_string();
         }
         let view = self.read_view();
-        sdf::absolute_path_with(&self.registry, anchor, path, &mut sdf::HeldListing(&view.store))
+        sdf::absolute_path_with(
+            self.registry.resolver(),
+            anchor,
+            path,
+            &mut sdf::HeldListing(&view.store),
+        )
     }
 }
 
@@ -3586,7 +3597,7 @@ impl LayerView<'_> {
     /// no asset is read.
     pub(crate) fn absolute_path(&self, anchor: LayerId, asset_path: &str) -> String {
         sdf::absolute_path_with(
-            &self.registry,
+            self.registry.resolver(),
             self.anchor_location(Some(anchor)),
             asset_path,
             &mut sdf::HeldListing(&self.store),

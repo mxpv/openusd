@@ -2183,7 +2183,7 @@ impl StageComposition {
     /// is terminal, where a resolvable asset whose failure was `Unresolved`
     /// would be opened again every pass.
     fn unopened(&self, asset_path: &str) -> pcp::LoadFailure {
-        match self.layers.borrow().layer_registry().resolve(asset_path) {
+        match self.layers.borrow().layer_registry().resolver().resolve(asset_path) {
             None => pcp::LoadFailure::Unresolved,
             Some(_) => pcp::LoadFailure::Unreadable(Arc::new(sdf::layer_registry::LoadError::Unresolved {
                 asset_path: asset_path.to_owned(),
