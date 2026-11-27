@@ -22,12 +22,12 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::sdf::{self, expr};
 use crate::usda::UsdaFileFormat;
 use crate::usdc::UsdcFileFormat;
-use crate::usdz::UsdzFileFormat;
+use crate::usdz::{UsdzFileFormat, UsdzResolver};
 use crate::{ar, vt};
 
 static USDA: UsdaFileFormat = UsdaFileFormat;
@@ -294,18 +294,20 @@ impl Default for LayerRegistry {
 }
 
 impl LayerRegistry {
-    /// A registry resolving asset paths through `resolver`.
+    /// A registry resolving asset paths through `resolver`, and the paths
+    /// into the built-in package formats through an [`ar::Dispatcher`] over
+    /// it.
     pub fn new(resolver: Box<dyn ar::Resolver>) -> Self {
         Self {
-            resolver: Arc::from(resolver),
+            resolver: Arc::new(dispatcher(resolver)),
             formats: FormatSet::default(),
             store: Rc::default(),
         }
     }
 
-    /// The resolver the registry resolves asset paths through. It knows
-    /// nothing of anonymous layers, whose identifiers the registry answers
-    /// for itself.
+    /// The resolver the registry resolves asset paths through: the
+    /// [`ar::Dispatcher`] over the one it was made with. It knows nothing of
+    /// anonymous layers, whose identifiers the registry answers for itself.
     pub fn resolver(&self) -> &dyn ar::Resolver {
         self.resolver.as_ref()
     }
@@ -463,11 +465,25 @@ impl LayerRegistry {
         if store.as_ref().is_some_and(|store| store.read().is_err()) {
             return Vec::new();
         }
-        sdf::held_packages(real_path, &mut sdf::ReadListing::new(&*self.resolver, store.as_deref()))
+        sdf::held_packages(
+            &*self.resolver,
+            real_path,
+            &mut sdf::ReadListing::new(&*self.resolver, store.as_deref()),
+        )
     }
 
     /// What the package at `package` holds, listed by the format its
     /// extension names, or `None` where no format lists it.
+    // TODO: the listing, and the cache drop in `forget_packages`, are package
+    // reader concerns that `sdf::FileFormat` carries, found among the
+    // built-in formats only. C++ asks the package resolver
+    // (`ArPackageResolver`) both. Moving them onto `ar::PackageResolver`,
+    // reached through the registry's dispatcher by extension, would leave one
+    // owner of what a package holds. The listing reports no files for a
+    // package that cannot be opened, where `usdz::UsdzResolver::resolve`
+    // takes it to hold every entry.
+    // A package format added with `add_format` would then bring its package
+    // resolver, which the dispatcher reads its entries through.
     pub(crate) fn list_package(resolver: &dyn ar::Resolver, package: &str) -> Option<sdf::PackageFiles> {
         builtin_format(resolver.extension(package))?.package_files(resolver, &ar::ResolvedPath::new(package))
     }
@@ -537,7 +553,7 @@ impl LayerRegistry {
         identifier: &str,
     ) -> Option<ar::ResolvedPath> {
         let resolved = resolver.resolve(identifier)?;
-        match by_extension(formats, &resolved.extension()) {
+        match by_extension(formats, resolver.extension(&resolved.to_string_lossy())) {
             Some(format) => format.resolve_layer(resolver, &resolved),
             None => Some(resolved),
         }
@@ -855,16 +871,17 @@ impl LayerRegistry {
         resolved: ar::ResolvedPath,
         modified: sdf::layer::AssetTime,
     ) -> Result<PreparedLayer, LoadError> {
-        let ext = resolved.extension();
+        let path = resolved.to_string_lossy();
+        let ext = resolver.extension(&path);
         let (data, format) = if ext.eq_ignore_ascii_case("usd") {
             let bytes = resolver
                 .open_asset(&resolved)
                 .and_then(|asset| asset.into_buffer())
                 .map_err(sdf::FormatError::from)?;
-            read_bytes_in(BUILTIN_FORMATS, bytes, &resolved.to_string())?
+            read_bytes_in(BUILTIN_FORMATS, bytes, &path)?
         } else {
-            let format = by_extension(formats, &ext).ok_or_else(|| LoadError::UnsupportedFormat {
-                resolved: resolved.to_string(),
+            let format = by_extension(formats, ext).ok_or_else(|| LoadError::UnsupportedFormat {
+                resolved: path.to_string(),
             })?;
             (format.read(resolver, &resolved)?, format)
         };
@@ -1071,15 +1088,39 @@ pub(crate) fn read_bytes_in(
         .ok_or_else(|| sdf::FormatError::Unrecognized(source_name.into()))?;
     Ok((format.read_bytes(bytes, source_name)?, format))
 }
+
+/// The [`ar::Dispatcher`] over `primary` that reads the built-in package
+/// formats.
+fn dispatcher(primary: Box<dyn ar::Resolver>) -> ar::Dispatcher {
+    ar::Dispatcher::new(primary, &[&UsdzResolver])
+}
+
+/// The dispatcher over a [`DefaultResolver`](ar::DefaultResolver) with no
+/// search paths that reads the built-in package formats, shared by every
+/// caller: what a layer read through no registry anchors its asset paths
+/// through.
+pub(crate) fn default_resolver() -> &'static ar::Dispatcher {
+    static DEFAULT: LazyLock<ar::Dispatcher> = LazyLock::new(|| dispatcher(Box::new(ar::DefaultResolver::new())));
+    &DEFAULT
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::Result;
     use crate::sdf::FileFormatCaps;
     use crate::tf;
+    use crate::usdz::tests::package;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
     use std::{fs, io, str};
+
+    /// A dispatcher over a [`DefaultResolver`](ar::DefaultResolver) that
+    /// reads the built-in package formats, as a registry resolves asset
+    /// paths.
+    pub(crate) fn dispatcher() -> ar::Dispatcher {
+        super::dispatcher(Box::new(ar::DefaultResolver::new()))
+    }
 
     /// `layer` held in `store`, or the live layer already carrying its
     /// identifier or real path, which a fixture repeating a layer collapses
@@ -1362,6 +1403,46 @@ pub(crate) mod tests {
         let layer = added.find_or_open(path)?.expect("resolves");
         assert!(layer.borrow().prim("/B")?.is_some());
         assert!(registry().find_or_open(path).is_err(), "no format reads it");
+        Ok(())
+    }
+
+    /// A resolver that serves the one package it holds at every `repo://`
+    /// location, reading an extension up to the query that versions it
+    /// (`repo://models/scene.usdz?rev=2` is a `usdz`).
+    pub(crate) struct Repo(pub(crate) Vec<u8>);
+
+    impl ar::Resolver for Repo {
+        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ar::ResolvedPath>) -> String {
+            asset_path.to_owned()
+        }
+
+        fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            asset_path
+                .starts_with("repo://")
+                .then(|| ar::ResolvedPath::new(asset_path))
+        }
+
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+            self.resolve(asset_path)
+        }
+
+        fn open_asset(&self, _resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+            Ok(Box::new(io::Cursor::new(self.0.clone())))
+        }
+
+        fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
+            ar::extension(asset_path.split_once('?').map_or(asset_path, |(path, _)| path))
+        }
+    }
+
+    /// A layer opens in the format the resolver's extension hook names: a
+    /// package served under a location that ends in a query is read as the
+    /// usdz its resolver reports, and its root layer as its own entry.
+    #[test]
+    fn extension_hook_formats() -> Result<()> {
+        let package = package(&[("root.usda", b"#usda 1.0\ndef \"A\" {}\n")]);
+        let layer = sdf::Layer::open_with(Repo(package), "repo://models/scene.usdz?rev=2")?;
+        assert!(layer.prim("/A")?.is_some());
         Ok(())
     }
 

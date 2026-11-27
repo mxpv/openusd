@@ -478,7 +478,8 @@ impl LayerHandle {
                 listed = true;
                 let mut listing = ReadListing::new(resolver.as_ref(), None);
                 for member in &mut members {
-                    member.packages = held_packages(read.layer(&member.handle).real_path(), &mut listing);
+                    member.packages =
+                        held_packages(resolver.as_ref(), read.layer(&member.handle).real_path(), &mut listing);
                 }
                 // A package whose listing changed, a nested one included,
                 // brings every live layer in it into the batch, so none keeps
@@ -519,7 +520,7 @@ impl LayerHandle {
                     members.push(Member {
                         asked: false,
                         held: read.held_by(&handle).to_vec(),
-                        packages: held_packages(layer.real_path(), &mut listing),
+                        packages: held_packages(resolver.as_ref(), layer.real_path(), &mut listing),
                         handle,
                         step: None,
                         package_changed: false,

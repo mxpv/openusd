@@ -102,8 +102,8 @@ pub(crate) fn absolute_path_at(
 /// the package holds that entry, else beside the package's root layer when
 /// the package holds that one, else as the resolver anchors it at the
 /// package. A package's root layer here is its first entry, of any type,
-/// followed into a package nested there. Every other path goes through
-/// [`ar::create_identifier`].
+/// followed into a package nested there. Every other path goes through the
+/// resolver's [`create_identifier`](ar::Resolver::create_identifier).
 //
 // TODO: format arguments (`:SDF_FORMAT_ARGS:`) are not split from the path
 // before it is anchored, nor joined back after.
@@ -139,8 +139,8 @@ pub(crate) fn absolute_path_with(
         // (`outer.usdz[inner.usdz]`) included, or a layer inside a package.
         // A layer anchored at a package is its root layer already, so the
         // root's fallback is the same lookup.
-        let (site, at_root) = if LayerRegistry::is_package(resolver.extension(&anchor)) {
-            (Some(expand_root(listing, anchor.into_owned())), true)
+        let (site, at_root) = if is_package(resolver, &anchor) {
+            (Some(expand_root(resolver, listing, anchor.into_owned())), true)
         } else {
             (ar::split_package_relative_path_inner(&anchor), false)
         };
@@ -151,7 +151,7 @@ pub(crate) fn absolute_path_with(
                 return ar::nest_packaged_path(&package, &entry);
             }
             if !at_root {
-                let (package, root) = expand_root(listing, package);
+                let (package, root) = expand_root(resolver, listing, package);
                 let entry = ar::join_packaged_path(parent(&root), asset_path);
                 if holds(listing, &package, &entry) {
                     return ar::nest_packaged_path(&package, &entry);
@@ -159,7 +159,7 @@ pub(crate) fn absolute_path_with(
             }
         }
     }
-    ar::create_identifier(resolver, asset_path, anchor)
+    resolver.create_identifier(asset_path, anchor)
 }
 
 /// The packages a layer read from `real_path` holds while it lives,
@@ -167,15 +167,19 @@ pub(crate) fn absolute_path_with(
 /// anchored at when that is a package, and those the innermost one's root
 /// descends through. These are the packages [`absolute_path_with`] reads
 /// for a path the layer authors.
-pub(crate) fn held_packages(real_path: &str, listing: &mut dyn Listing) -> PackageListings {
-    let innermost = if is_package(real_path) {
+pub(crate) fn held_packages(
+    resolver: &dyn ar::Resolver,
+    real_path: &str,
+    listing: &mut dyn Listing,
+) -> PackageListings {
+    let innermost = if is_package(resolver, real_path) {
         real_path.to_owned()
     } else if let Some((package, _)) = ar::split_package_relative_path_inner(real_path) {
         package
     } else {
         return Vec::new();
     };
-    let (innermost, _) = expand_root(listing, innermost);
+    let (innermost, _) = expand_root(resolver, listing, innermost);
     let mut packages = ar::enclosing_packages(&innermost);
     packages.push(innermost);
     packages
@@ -190,14 +194,16 @@ pub(crate) fn held_packages(real_path: &str, listing: &mut dyn Listing) -> Packa
 /// `package` paired with its root layer, its first entry followed into each
 /// package nested there, the pair naming that innermost package (C++
 /// `_ExpandPackagePath`). A package that holds nothing has an empty root.
-fn expand_root(listing: &mut dyn Listing, mut package: String) -> (String, String) {
-    let mut root = first_entry(listing, &package);
+/// Each package's format is the one its extension names, as `resolver`
+/// reads the extension.
+fn expand_root(resolver: &dyn ar::Resolver, listing: &mut dyn Listing, mut package: String) -> (String, String) {
+    let mut root = first_entry(resolver, listing, &package);
     for _ in 0..usdz::MAX_NESTING {
-        if !is_package(&root) {
+        if !is_package(resolver, &root) {
             break;
         }
         package = ar::nest_packaged_path(&package, &root);
-        root = first_entry(listing, &package);
+        root = first_entry(resolver, listing, &package);
     }
     (package, root)
 }
@@ -205,11 +211,11 @@ fn expand_root(listing: &mut dyn Listing, mut package: String) -> (String, Strin
 /// The root layer of `package` as its format names it from the package's
 /// listing ([`FileFormat::package_root`](super::FileFormat::package_root)),
 /// or empty.
-fn first_entry(listing: &mut dyn Listing, package: &str) -> String {
+fn first_entry(resolver: &dyn ar::Resolver, listing: &mut dyn Listing, package: &str) -> String {
     let Some(files) = listing.files(package) else {
         return String::new();
     };
-    super::layer_registry::builtin_format(ar::extension(package))
+    super::layer_registry::builtin_format(resolver.extension(package))
         .and_then(|format| format.package_root(&files))
         .unwrap_or_default()
         .to_owned()
@@ -227,9 +233,9 @@ fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-/// Whether `path` names a package by its extension.
-fn is_package(path: &str) -> bool {
-    LayerRegistry::is_package(ar::extension(path))
+/// Whether `path` names a package by its extension, as `resolver` reads it.
+fn is_package(resolver: &dyn ar::Resolver, path: &str) -> bool {
+    LayerRegistry::is_package(resolver.extension(path))
 }
 
 #[cfg(test)]
@@ -239,6 +245,7 @@ mod tests {
 
     use super::*;
     use crate::Result;
+    use crate::sdf::layer_registry::tests::{Repo, dispatcher};
     use crate::usdz::tests::package;
 
     /// A package of `entries` written in a new directory, and its canonical
@@ -259,7 +266,7 @@ mod tests {
 ";
         let (_dir, pkg) = package_at(&[("dir/root.usda", layer), ("dir/x.usda", layer), ("x.usda", layer)])?;
         let anchor = ar::ResolvedPath::new(ar::join_package_relative_path(&pkg, "dir/root.usda"));
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         assert_eq!(
             absolute_path_at(&resolver, Some(&anchor), "x.usda"),
             ar::join_package_relative_path(&pkg, "dir/x.usda")
@@ -279,7 +286,7 @@ mod tests {
             ("dir/x.usda", layer),
         ])?;
         let anchor = ar::ResolvedPath::new(ar::join_package_relative_path(&pkg, "sub/layer.usda"));
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         assert_eq!(
             absolute_path_at(&resolver, Some(&anchor), "x.usda"),
             ar::join_package_relative_path(&pkg, "dir/x.usda")
@@ -307,11 +314,30 @@ mod tests {
 ",
         )?;
         let anchor = ar::ResolvedPath::new(ar::join_package_relative_path(&pkg, "root.usda"));
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         let beside = dir.path().join("x.usda").canonicalize()?;
         assert_eq!(
             absolute_path_at(&resolver, Some(&anchor), "x.usda"),
             beside.to_string_lossy()
+        );
+        Ok(())
+    }
+
+    /// A search path the authoring layer's directory lacks is found beside
+    /// the root layer of a package whose location carries a query, its
+    /// format read through the resolver's extension hook.
+    #[test]
+    fn search_path_versioned_root() -> Result<()> {
+        let bytes = package(&[
+            ("main/root.usda", b"#usda 1.0\n"),
+            ("main/t.png", b"png"),
+            ("other/sub.usda", b"#usda 1.0\n"),
+        ]);
+        let resolver = Repo(bytes);
+        let layer = Layer::open_with(resolver, "repo://models/scene.usdz?rev=2[other/sub.usda]")?;
+        assert_eq!(
+            layer.absolute_path("t.png"),
+            "repo://models/scene.usdz?rev=2[main/t.png]"
         );
         Ok(())
     }
@@ -323,17 +349,18 @@ mod tests {
     fn in_package_anchor_crosses_dirs() {
         let anchor = ar::ResolvedPath::new("pkg.usdz[geom/scene.usda]");
         assert_eq!(
-            absolute_path_at(&ar::DefaultResolver::new(), Some(&anchor), "../tex/foo.usda"),
+            absolute_path_at(&dispatcher(), Some(&anchor), "../tex/foo.usda"),
             "pkg.usdz[tex/foo.usda]",
         );
     }
 
-    /// The package rules apply whatever the resolver: one that knows nothing
-    /// of packages still has a packaged layer's paths anchored inside its
-    /// package.
+    /// The package rules apply whatever the resolver the dispatcher wraps:
+    /// one that knows nothing of packages still has a packaged layer's paths
+    /// anchored inside its package.
     #[test]
     fn custom_resolver_nests() {
-        let resolver = ar::tests::TestResolver(|| Err(io::ErrorKind::NotFound.into()));
+        let primary = ar::tests::TestResolver(|| Err(io::ErrorKind::NotFound.into()));
+        let resolver = ar::Dispatcher::new(Box::new(primary), &[]);
         let packaged = ar::ResolvedPath::new("pkg.usdz[geom/scene.usda]");
         assert_eq!(
             absolute_path_at(&resolver, Some(&packaged), "./tex/a.png"),

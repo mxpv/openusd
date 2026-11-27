@@ -180,8 +180,9 @@ fn located(
     let doc = decode(bytes, &source_name, &mut |href| {
         // TODO: read the includes of a document inside a package. C++ joins
         // the `href` onto the document's packaged path
-        // (`ArJoinPackageRelativePath`); `ar::create_identifier` anchors at
-        // the package file, where another document of the name may sit.
+        // (`ArJoinPackageRelativePath`); the resolver's `create_identifier`
+        // anchors at the package file, where another document of the name
+        // may sit.
         if ar::is_package_relative_path(&source_name) {
             return Ok(Included::Unfound);
         }
@@ -191,7 +192,7 @@ fn located(
                 href: href.to_owned(),
             });
         }
-        let identifier = ar::create_identifier(resolver, href, Some(resolved));
+        let identifier = resolver.create_identifier(href, Some(resolved));
         let target = resolver
             .resolve(&identifier)
             .ok_or_else(|| ReadError::IncludeUnresolved {
@@ -235,9 +236,9 @@ fn located(
             } else if beside {
                 document::with_prefix(directory, path)
             } else if path.starts_with("./") || path.starts_with("../") {
-                ar::create_identifier(resolver, path, Some(&target))
+                resolver.create_identifier(path, Some(&target))
             } else {
-                ar::create_identifier(resolver, &format!("./{path}"), Some(&target))
+                resolver.create_identifier(&format!("./{path}"), Some(&target))
             }
         });
         Ok(Included::Document(Box::new(library)))

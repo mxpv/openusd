@@ -83,7 +83,9 @@ type PackageSlot = Arc<OnceLock<Result<Package, PackageError>>>;
 /// Opens the package at `package` through `resolver`, reading only its
 /// central directory. `package` is a resolved path, itself package-relative
 /// for a package nested in another (`outer.usdz[inner.usdz]`), whose asset
-/// the resolver serves as an entry of the package around it.
+/// the resolver serves as an entry of the package around it: such a path
+/// needs a resolver that serves package-relative paths, an
+/// [`ar::Dispatcher`].
 ///
 /// With an [`ar::CacheScope`] open on the calling thread, and a resolver
 /// that names itself to caches ([`ar::Resolver::cache_id`]), the package
@@ -139,36 +141,43 @@ pub fn open_package(resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> 
     slot.get_or_init(open).clone()
 }
 
-/// Whether `inner` should be treated as present in the package at `package`
-/// (C++ `Sdf_UsdzResolver::Resolve`).
-///
-/// Reading only the archive's central directory, not its entry data, a
-/// readable archive that lacks a flat entry reports it absent. A nested
-/// packaged path (`inner.usdz[deep.usd]`) is checked one bracket at a time,
-/// the inner package read from its entry. A package that cannot be opened
-/// (an I/O error or a corrupt archive, as distinct from an absent entry) is
-/// treated as present. The open that follows then reports the real error,
-/// where an absent package would read as a missing asset.
-pub fn package_contains(resolver: &dyn ar::Resolver, package: &str, inner: &str) -> bool {
-    let Ok(found) = open_package(resolver, &ar::ResolvedPath::new(package)) else {
-        return true;
-    };
-    let Some((nested, rest)) = ar::split_package_relative_path_outer(inner) else {
-        return found.with(|archive| archive.contains(inner));
-    };
-    found.with(|archive| archive.contains(&nested))
-        && package_contains(resolver, &ar::nest_packaged_path(package, &nested), &rest)
-}
+/// The reader of usdz packages (C++ `Sdf_UsdzResolver`), each package
+/// opened once per cache scope.
+pub struct UsdzResolver;
 
-/// The bytes of the entry `inner` names in the package at `package` (C++
-/// `Sdf_UsdzResolver::OpenAsset`). A nested packaged path
-/// (`inner.usdz[deep.usd]`) is followed one bracket at a time from the
-/// outside, as [`package_contains`] follows it, each level a view of the
-/// one around it when the package shares its bytes.
-pub fn package_entry(resolver: &dyn ar::Resolver, package: &str, inner: &str) -> Result<ar::AssetBuffer, PackageError> {
-    match ar::split_package_relative_path_outer(inner) {
-        Some((nested, rest)) => package_entry(resolver, &ar::nest_packaged_path(package, &nested), &rest),
-        None => Ok(open_package(resolver, &ar::ResolvedPath::new(package))?.with(|archive| archive.entry(inner))?),
+impl ar::PackageResolver for UsdzResolver {
+    fn handles(&self, extension: &str) -> bool {
+        extension.eq_ignore_ascii_case("usdz")
+    }
+
+    fn identity(&self) -> &str {
+        "usdz"
+    }
+
+    /// `packaged` when the package holds the entry it names, read from the
+    /// archive's central directory alone. A package that cannot be opened
+    /// (an I/O error or a corrupt archive, as distinct from an absent entry)
+    /// is taken to hold it: the open that follows then reports the real
+    /// error, where an absent entry would read as a missing asset.
+    fn resolve(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath, packaged: &str) -> Option<String> {
+        let held =
+            open_package(resolver, package).map_or(true, |found| found.with(|archive| archive.contains(packaged)));
+        held.then(|| packaged.to_owned())
+    }
+
+    /// The entry's bytes, a view of the package's when the package shares
+    /// its bytes, so a package nested here serves its own entries as views
+    /// of them too.
+    fn open_asset(
+        &self,
+        resolver: &dyn ar::Resolver,
+        package: &ar::ResolvedPath,
+        packaged: &str,
+    ) -> io::Result<Box<dyn ar::Asset>> {
+        let entry = open_package(resolver, package)?
+            .with(|archive| archive.entry(packaged))
+            .map_err(PackageError::from)?;
+        Ok(Box::new(io::Cursor::new(ar::AssetBuffer::Shared(entry.into_shared()))))
     }
 }
 
@@ -219,6 +228,7 @@ mod tests {
 
     use super::*;
     use crate::ar::Resolver as _;
+    use crate::sdf::layer_registry::tests::dispatcher;
     use crate::usd;
     use crate::usdz::tests::package;
 
@@ -259,7 +269,7 @@ mod tests {
     }
 
     /// Resolves and opens the entry `name` of `package`.
-    fn read_entry(resolver: &ar::DefaultResolver, package: &str, name: &str) -> io::Result<Vec<u8>> {
+    fn read_entry(resolver: &ar::Dispatcher, package: &str, name: &str) -> io::Result<Vec<u8>> {
         let path = ar::join_package_relative_path(package, name);
         let resolved = resolver
             .resolve(&path)
@@ -272,7 +282,7 @@ mod tests {
     #[test]
     fn scope_opens_once() {
         let (_dir, pkg) = packaged_dir();
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         {
             let _scope = ar::CacheScope::begin();
             read_entry(&resolver, &pkg, "a.usda").unwrap();
@@ -296,7 +306,7 @@ mod tests {
     #[test]
     fn no_scope_no_cache() {
         let (_dir, pkg) = packaged_dir();
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         let path = ar::join_package_relative_path(&pkg, "a.usda");
         resolver.resolve(&path).unwrap();
         resolver.resolve(&path).unwrap();
@@ -307,7 +317,7 @@ mod tests {
     #[test]
     fn nested_levels_once() {
         let (_dir, outer) = nested_dir();
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         let _scope = ar::CacheScope::begin();
         for _ in 0..2 {
             assert_eq!(
@@ -329,7 +339,7 @@ mod tests {
         let path = dir.path().join("outer.usdz");
         fs::write(&path, package(&[("root.usda", b"#usda 1.0\n"), ("inner.usdz", &inner)])).unwrap();
         let outer = canonical(&path);
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         let _scope = ar::CacheScope::begin();
         read_entry(&resolver, &outer, "inner.usdz[deep.usdz[a.usda]]").unwrap();
         assert_eq!(work(), (1, 3));
@@ -348,7 +358,7 @@ mod tests {
     #[test]
     fn nested_unscoped_opens_once() {
         let (_dir, outer) = nested_dir();
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         let nested = ar::join_package_relative_path(&outer, "inner.usdz[a.usda]");
         let resolved = resolver.resolve(&nested).expect("the entry exists");
         assert_eq!(work(), (1, 2), "the resolve");
@@ -367,7 +377,7 @@ mod tests {
             package(&[("root.usda", b"#usda 1.0\n"), ("textures/tile[0].png", b"pixels")]),
         )
         .unwrap();
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         assert_eq!(
             read_entry(&resolver, &canonical(&path), "textures/tile[0].png").unwrap(),
             b"pixels"
@@ -379,7 +389,7 @@ mod tests {
     #[test]
     fn concurrent_miss_one_open() {
         let (_dir, pkg) = packaged_dir();
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         let scope = ar::CacheScope::begin();
         let handle = scope.handle();
         let start = Barrier::new(8);
@@ -404,7 +414,7 @@ mod tests {
     #[test]
     fn cache_keyed_by_resolver() {
         let (_dir, pkg) = packaged_dir();
-        let (first, second) = (ar::DefaultResolver::new(), ar::DefaultResolver::new());
+        let (first, second) = (dispatcher(), dispatcher());
         let _scope = ar::CacheScope::begin();
         read_entry(&first, &pkg, "a.usda").unwrap();
         read_entry(&first, &pkg, "b.usda").unwrap();
@@ -442,7 +452,7 @@ mod tests {
         let path = dir.path().join("outer.usdz");
         fs::write(&path, b"not a package").unwrap();
         let nested = ar::ResolvedPath::new(ar::join_package_relative_path(&path.to_string_lossy(), "inner.usdz"));
-        let error = open_package(&ar::DefaultResolver::new(), &nested)
+        let error = open_package(&dispatcher(), &nested)
             .err()
             .expect("an unreadable package");
         assert!(
@@ -459,7 +469,7 @@ mod tests {
         let path = dir.path().join("pkg.usdz");
         fs::write(&path, package(&[("a.usda", b"#usda 1.0\n# old\n")])).unwrap();
         let pkg = canonical(&path);
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         {
             let _scope = ar::CacheScope::begin();
             assert_eq!(read_entry(&resolver, &pkg, "a.usda").unwrap(), b"#usda 1.0\n# old\n");
@@ -481,9 +491,9 @@ mod tests {
 
         let mut attempts = 0;
         for (package, kind) in [(corrupt, io::ErrorKind::Other), (missing, io::ErrorKind::NotFound)] {
-            let resolver = ar::DefaultResolver::new();
+            let resolver = dispatcher();
             let entry = ar::ResolvedPath::new(ar::join_package_relative_path(&package.to_string_lossy(), "a.usda"));
-            let failure = |resolver: &ar::DefaultResolver| {
+            let failure = |resolver: &ar::Dispatcher| {
                 let error = resolver.open_asset(&entry).err().expect("an unreadable package");
                 (error.kind(), error.to_string())
             };

@@ -312,7 +312,7 @@ impl Layer {
 
     /// The formats the layer reads and writes in: those of its registry, or
     /// the built-in ones.
-    fn formats(&self) -> Rc<[&'static dyn super::FileFormat]> {
+    pub(crate) fn formats(&self) -> Rc<[&'static dyn super::FileFormat]> {
         match &self.formats {
             Some(formats) => formats.list(),
             None => Rc::from(sdf::layer_registry::BUILTIN_FORMATS),
@@ -564,10 +564,15 @@ impl Layer {
     /// that entry, else beside the package's root layer when it holds that
     /// one, else as the resolver anchors it at the package.
     pub fn absolute_path(&self, asset_path: &str) -> String {
-        let anchor = self.anchor_location();
+        sdf::absolute_path_at(self.asset_resolver(), self.anchor_location().as_ref(), asset_path)
+    }
+
+    /// The resolver the layer's asset paths resolve through: the one it was
+    /// read through, or the shared default for a layer read through none.
+    pub(crate) fn asset_resolver(&self) -> &dyn ar::Resolver {
         match &self.resolver {
-            Some(resolver) => sdf::absolute_path_at(resolver.as_ref(), anchor.as_ref(), asset_path),
-            None => sdf::absolute_path_at(&ar::DefaultResolver::new(), anchor.as_ref(), asset_path),
+            Some(resolver) => resolver.as_ref(),
+            None => sdf::layer_registry::default_resolver(),
         }
     }
 }
@@ -1741,9 +1746,11 @@ impl AssetTime {
 }
 
 /// The modification time of the asset `identifier` resolved to at `resolved`
-/// ([`ar::modification_timestamp`]).
+/// ([`ar::Resolver::modification_timestamp`]).
 pub(crate) fn asset_time(resolver: &dyn ar::Resolver, identifier: &str, resolved: &ar::ResolvedPath) -> AssetTime {
-    ar::modification_timestamp(resolver, identifier, resolved).map_or(AssetTime::Unknown, AssetTime::At)
+    resolver
+        .modification_timestamp(identifier, resolved)
+        .map_or(AssetTime::Unknown, AssetTime::At)
 }
 
 /// The edits that bring `old`'s content to `new`'s (C++

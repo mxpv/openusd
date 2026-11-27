@@ -93,8 +93,10 @@ pub struct LayerStackIdentifier {
     pub root_layer: String,
     /// Canonical identifier of the strongest session layer, if any.
     pub session_layer: Option<String>,
-    /// The resolver's [`identity`](crate::ar::Resolver::identity) token — the
-    /// configuration the stack's asset paths resolve under.
+    /// The [`identity`](crate::ar::Resolver::identity) token of the resolver
+    /// the stack's asset paths resolve through, the registry's
+    /// [`ar::Dispatcher`](crate::ar::Dispatcher): the configuration they
+    /// resolve under.
     pub resolver: String,
 }
 

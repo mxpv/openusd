@@ -44,13 +44,21 @@ pub fn modify_asset_paths(
     let mut modified: HashMap<String, String> = HashMap::new();
     let edits = {
         let layer = layer.try_borrow()?;
-        visit_asset_paths(layer.data(), layer.identifier(), mode, |asset| {
-            if !modified.contains_key(asset.path) {
-                modified.insert(asset.path.to_owned(), modify(asset.path));
-            }
-            let path = &modified[asset.path];
-            Ok((path != asset.path).then(|| path.clone()))
-        })?
+        let formats = layer.formats();
+        visit_asset_paths(
+            layer.asset_resolver(),
+            &formats,
+            layer.data(),
+            layer.identifier(),
+            mode,
+            |asset| {
+                if !modified.contains_key(asset.path) {
+                    modified.insert(asset.path.to_owned(), modify(asset.path));
+                }
+                let path = &modified[asset.path];
+                Ok((path != asset.path).then(|| path.clone()))
+            },
+        )?
     };
     if edits.is_empty() {
         return Ok(());
@@ -74,7 +82,8 @@ pub(super) struct AssetRef<'a> {
 }
 
 /// What an asset path names, decided by the format registered for its
-/// extension (the innermost packaged one for a package-relative path).
+/// extension (the innermost packaged one for a package-relative path), as
+/// the resolver reads the extension.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum AssetKind {
     /// A layer a format reads, or whatever a sublayer, reference, payload or
@@ -87,10 +96,16 @@ pub(super) enum AssetKind {
 }
 
 impl AssetKind {
-    /// What `path` names. `arc` marks a path a sublayer, reference, payload
-    /// or clip template names, which is a layer whatever its extension.
-    pub(super) fn of(path: &str, arc: bool) -> Self {
-        match sdf::layer_registry::builtin_format(ar::extension(path)) {
+    /// What `path` names among `formats`, its extension read through
+    /// `resolver`. `arc` marks a path a sublayer, reference, payload or clip
+    /// template names, which is a layer whatever its extension.
+    pub(super) fn of(
+        resolver: &dyn ar::Resolver,
+        formats: &[&'static dyn sdf::FileFormat],
+        path: &str,
+        arc: bool,
+    ) -> Self {
+        match sdf::layer_registry::by_extension(formats, resolver.extension(path)) {
             Some(format) if format.is_package() => Self::Package,
             Some(_) => Self::Layer,
             None if arc => Self::Layer,
@@ -143,8 +158,11 @@ pub(super) fn apply_edits(data: &mut dyn AbstractData, edits: Vec<FieldEdit>) {
 /// attribute's default and time samples only when it is asset-typed. A path
 /// `visit` returns a replacement for is rewritten, an emptied one removed as
 /// [`modify_asset_paths`] describes, and the rewritten fields are returned
-/// for the caller to apply. `layer` names the layer in errors.
+/// for the caller to apply. `layer` names the layer in errors. What each path
+/// names is told among `formats` by its extension, as `resolver` reads it.
 pub(super) fn visit_asset_paths(
+    resolver: &dyn ar::Resolver,
+    formats: &[&'static dyn sdf::FileFormat],
     data: &dyn AbstractData,
     layer: &str,
     mode: Visit,
@@ -152,6 +170,8 @@ pub(super) fn visit_asset_paths(
 ) -> Result<Vec<FieldEdit>> {
     let mut edits = Vec::new();
     let mut walk = Walk {
+        resolver,
+        formats,
         layer,
         mode,
         visit: &mut visit,
@@ -220,6 +240,10 @@ pub(super) fn visit_asset_paths(
 
 /// The walk over one layer's fields for [`visit_asset_paths`].
 struct Walk<'a> {
+    /// What reads the extensions of the paths walked.
+    resolver: &'a dyn ar::Resolver,
+    /// The formats the paths walked are told by.
+    formats: &'a [&'static dyn sdf::FileFormat],
     layer: &'a str,
     mode: Visit,
     visit: &'a mut dyn FnMut(AssetRef<'_>) -> Result<Option<String>>,
@@ -243,7 +267,7 @@ impl Walk<'_> {
         }
         let asset = AssetRef {
             path,
-            kind: AssetKind::of(path, arc),
+            kind: AssetKind::of(self.resolver, self.formats, path, arc),
             applied: self.applied,
         };
         let Some(rewritten) = (self.visit)(asset)? else {
@@ -455,6 +479,8 @@ fn may_hold_paths(kind: vt::ValueKind) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::sdf::layer_registry::tests::{PLANTED, Repo};
+    use crate::sdf::layer_registry::{BUILTIN_FORMATS, default_resolver};
     use crate::{gf, usdc};
 
     /// The layer `text` parses to, held in a registry of its own.
@@ -463,6 +489,23 @@ pub(crate) mod tests {
         Ok(sdf::LayerRegistry::default()
             .adopt(layer)
             .expect("a new registry holds the layer"))
+    }
+
+    /// What a path names is read through the resolver's extension hook, among
+    /// the formats in play: a package whose location carries a query is a
+    /// package, and a file of a registered format a layer.
+    #[test]
+    fn kind_through_resolver() {
+        let resolver = Repo(Vec::new());
+        let formats: Vec<&'static dyn sdf::FileFormat> =
+            BUILTIN_FORMATS.iter().copied().chain([&PLANTED as _]).collect();
+        let kind = |path| AssetKind::of(&resolver, &formats, path, false);
+        assert!(kind("repo://models/scene.usdz?rev=2") == AssetKind::Package);
+        assert!(kind("repo://tex/a.png?rev=2") == AssetKind::Asset);
+        assert!(
+            kind("repo://look.planted?rev=2") == AssetKind::Layer,
+            "a registered format's file is a layer"
+        );
     }
 
     /// An attribute's values are visited only when it is asset-typed, as in
@@ -504,10 +547,17 @@ pub(crate) mod tests {
         let crate_data = usdc::CrateData::open(file.bytes().clone(), true)?;
         for data in [&layer as &dyn AbstractData, &crate_data] {
             let mut seen = Vec::new();
-            visit_asset_paths(data, "a.usdc", Visit::DISCOVER, |asset| {
-                seen.push(asset.path.to_owned());
-                Ok(None)
-            })?;
+            visit_asset_paths(
+                default_resolver(),
+                BUILTIN_FORMATS,
+                data,
+                "a.usdc",
+                Visit::DISCOVER,
+                |asset| {
+                    seen.push(asset.path.to_owned());
+                    Ok(None)
+                },
+            )?;
             seen.sort();
             assert_eq!(seen, ["./file.png", "./tex.png"]);
         }

@@ -94,7 +94,7 @@ pub fn create_usdz_package<'a>(
         }
         .into());
     }
-    let entries = assign_entries(&discovery, &name, HashSet::new());
+    let entries = assign_entries(graph.layer_registry().resolver(), &discovery, &name, HashSet::new());
 
     let mut temp = tf::SafeOutputFile::create(usdz_file_path.as_ref())?;
     let mut archive = usdz::ArchiveWriter::new(temp.file());
@@ -123,8 +123,14 @@ struct Entries {
 /// tile found through it takes the name the set's entry gives its number. A
 /// tile a set has placed stays there; a later set sharing it stores it again
 /// under its own name. `reserved` holds the entry names already in use, every
-/// entry of a package being rebuilt.
-fn assign_entries(discovery: &Discovery<'_>, first_name: &str, reserved: HashSet<String>) -> Entries {
+/// entry of a package being rebuilt. `resolver` reads the extensions moved
+/// entries keep.
+fn assign_entries(
+    resolver: &dyn ar::Resolver,
+    discovery: &Discovery<'_>,
+    first_name: &str,
+    reserved: HashSet<String>,
+) -> Entries {
     let mut entries: Vec<String> = Vec::with_capacity(discovery.sources.len());
     let mut again = Vec::new();
     let mut taken = reserved;
@@ -138,7 +144,7 @@ fn assign_entries(discovery: &Discovery<'_>, first_name: &str, reserved: HashSet
             Placement::Entry(name) => name.clone(),
             Placement::Named { by, path } => kept_entry(&entries[*by], path)
                 .filter(|entry| free(entry))
-                .unwrap_or_else(|| moved_entry(&mut directories, moved_name(source), free)),
+                .unwrap_or_else(|| moved_entry(&mut directories, moved_name(resolver, source), free)),
             Placement::Tile { of, number } => ar::UdimPath::parse(&entries[*of])
                 .expect("a set's entry keeps its pattern")
                 .tile(*number),
@@ -191,8 +197,10 @@ fn free(source: &Source<'_>, entry: &str, entries: &[String], taken: &HashSet<St
 /// spelled with `/` as every entry is: the split before its file name, or
 /// for a set of tiles before the pattern's directory, which keeps a pattern
 /// in a directory with the name. For a source inside a package, the split and
-/// the name fall within its innermost packaged path.
-fn moved_name<'s>(source: &'s Source<'_>) -> (&'s str, String) {
+/// the name fall within its innermost packaged path. The name ends in the
+/// extension `resolver` reads in the source's identifier, which tells the
+/// entry's format where the package is read.
+fn moved_name<'s>(resolver: &dyn ar::Resolver, source: &'s Source<'_>) -> (&'s str, String) {
     let identifier = source.identifier.as_str();
     let span = ar::innermost_span(identifier);
     let before = match &source.content {
@@ -203,7 +211,27 @@ fn moved_name<'s>(source: &'s Source<'_>) -> (&'s str, String) {
     };
     let (directory, _) = ar::split_file_name(&identifier[span.start..before]);
     let split = span.start + directory.len();
-    (&identifier[..split], identifier[split..span.end].replace('\\', "/"))
+    let name = identifier[split..span.end].replace('\\', "/");
+    (
+        &identifier[..split],
+        with_extension(name, resolver.extension(identifier)),
+    )
+}
+
+/// `name` ending in `.extension`: cut after the extension where it appears
+/// in the name (`scene.usdz?rev=2` gives `scene.usdz`), else added. A name
+/// already ending in it, or no extension, keeps the name.
+fn with_extension(name: String, extension: &str) -> String {
+    let dotted = format!(".{extension}");
+    if extension.is_empty() || name.to_ascii_lowercase().ends_with(&dotted.to_ascii_lowercase()) {
+        return name;
+    }
+    if let Some(at) = name.to_ascii_lowercase().rfind(&dotted.to_ascii_lowercase()) {
+        return name[..at + dotted.len()].to_owned();
+    }
+    let mut name = name;
+    name.push_str(&dotted);
+    name
 }
 
 /// The entry a moved source takes: its `name` in the numbered directory of
@@ -265,9 +293,25 @@ fn source_bytes(
 ) -> Result<Vec<u8>> {
     match &source.content {
         Content::Layer { layer, uses } => {
-            let edits = visit_asset_paths(layer.data(), layer.identifier(), Visit::DISCOVER, |asset| {
-                Ok(rewrite(location, asset.path, uses, entries))
-            })?;
+            let registry = graph.layer_registry();
+            let formats = registry.formats();
+            let edits = visit_asset_paths(
+                registry.resolver(),
+                &formats,
+                layer.data(),
+                layer.identifier(),
+                Visit::DISCOVER,
+                |asset| Ok(rewrite(location, asset.path, uses, entries)),
+            )?;
+            if edits.is_empty() && sdf::LayerRegistry::export_format(&formats, location).is_err() {
+                // A layer its format cannot write, with no path to rewrite, is
+                // stored as it was read, as C++ copies an unmodified layer from
+                // its real path.
+                return match original {
+                    Some(bytes) => Ok(bytes),
+                    None => read_asset(graph, &ar::ResolvedPath::new(layer.real_path())),
+                };
+            }
             if edits.is_empty() {
                 serialize(graph, layer.data(), location)
             } else {
@@ -306,7 +350,7 @@ fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'
         .map(|name| name.map(Cow::into_owned))
         .collect::<Result<_, _>>()
         .map_err(usdz::ArchiveError::from)?;
-    let entries = assign_entries(inside, "", reserved);
+    let entries = assign_entries(graph.layer_registry().resolver(), inside, "", reserved);
     let existing: HashMap<&str, usize> = inside
         .sources
         .iter()
@@ -416,6 +460,7 @@ mod tests {
     use std::fs;
 
     use crate::ar::Resolver;
+    use crate::sdf::layer_registry::tests::PLANTED;
     use crate::usd::stage::tests::attribute_value;
     use crate::usd_utils::all_dependencies;
     use crate::usd_utils::discover::tests::{open, write};
@@ -442,7 +487,7 @@ mod tests {
     /// The entry names of the package at `packaged`, a path into one or more
     /// packages, and the text of its `.usda` entries.
     fn nested_entries(packaged: &str) -> (Vec<String>, HashMap<String, String>) {
-        let bytes = ar::DefaultResolver::new()
+        let bytes = crate::sdf::layer_registry::tests::dispatcher()
             .open_asset(&ar::ResolvedPath::new(packaged))
             .unwrap()
             .read_all()
@@ -503,6 +548,41 @@ def "T"
     asset tex = @./tex/t.png@
 }
 "#;
+
+    /// A file of a format the stage reads but cannot write, with no path to
+    /// rewrite, is packaged as it was read.
+    #[test]
+    fn read_only_layer_copied() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"A\" {\n    asset look = @look.planted@\n}\n",
+        );
+        write(dir.path(), "look.planted", "Scene\n");
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let stage = Stage::builder().format(&PLANTED).open(&root)?;
+        let output = dir.path().join("out.usdz");
+        let skipped = create_usdz_package(&stage, &root, &output, None)?;
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let (names, _) = entries(&output);
+        let look = names
+            .iter()
+            .find(|name| name.ends_with("look.planted"))
+            .expect("the look is packaged");
+        let packaged = usdz::Archive::open(&output)?.entry(look)?;
+        assert_eq!(&*packaged, b"Scene\n");
+        Ok(())
+    }
+
+    /// A moved entry ends in the extension its resolver reads.
+    #[test]
+    fn entry_keeps_extension() {
+        assert_eq!(with_extension("scene.usdz?rev=2".into(), "usdz"), "scene.usdz");
+        assert_eq!(with_extension("scene.USDZ".into(), "usdz"), "scene.USDZ");
+        assert_eq!(with_extension("scene".into(), "usdz"), "scene.usdz");
+        assert_eq!(with_extension("notes".into(), ""), "notes");
+    }
 
     /// The layout C++ gives the same scene, with two differences: the paths a
     /// layer in a subdirectory authors are made to reach their moved entries

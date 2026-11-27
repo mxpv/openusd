@@ -529,15 +529,24 @@ impl<'a> Discoverer<'a> {
             return Ok(Vec::new());
         };
         let mut found = Vec::new();
-        visit_asset_paths(layer.data(), layer.identifier(), Visit::DISCOVER, |asset| {
-            if (asset.applied || self.policy.inactive)
-                && !uses.contains_key(asset.path)
-                && !found.iter().any(|(path, _)| path == asset.path)
-            {
-                found.push((asset.path.to_owned(), asset.kind));
-            }
-            Ok(None)
-        })?;
+        let registry = self.graph.layer_registry();
+        let formats = registry.formats();
+        visit_asset_paths(
+            registry.resolver(),
+            &formats,
+            layer.data(),
+            layer.identifier(),
+            Visit::DISCOVER,
+            |asset| {
+                if (asset.applied || self.policy.inactive)
+                    && !uses.contains_key(asset.path)
+                    && !found.iter().any(|(path, _)| path == asset.path)
+                {
+                    found.push((asset.path.to_owned(), asset.kind));
+                }
+                Ok(None)
+            },
+        )?;
         Ok(found)
     }
 

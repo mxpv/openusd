@@ -14,6 +14,10 @@
 //! for matching files. Custom resolvers can map asset paths to databases, cloud storage,
 //! or other backends.
 //!
+//! A [`Dispatcher`] serves package-relative paths above any resolver: it
+//! resolves and opens the outermost package through the resolver, and the
+//! assets inside it through a [`PackageResolver`].
+//!
 //! # Example
 //!
 //! ```no_run
@@ -30,6 +34,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -41,7 +46,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::{tf, usdz};
+use crate::tf;
 
 /// A resolved asset path representing the physical location of an asset.
 ///
@@ -62,14 +67,6 @@ impl ResolvedPath {
     /// Returns `true` if the resolved path is empty (resolution failed).
     pub fn is_empty(&self) -> bool {
         self.0.as_os_str().is_empty()
-    }
-
-    /// The file extension (without the leading dot), lowercased, or `""` when
-    /// there is none or it is not valid UTF-8. Lowercased so a caller can match a
-    /// format case-insensitively — `resolved.extension() == "usdz"` — the way the
-    /// format registry's `find_by_extension` does, without juggling `OsStr`.
-    pub(crate) fn extension(&self) -> String {
-        extension(&self.0.to_string_lossy()).to_ascii_lowercase()
     }
 }
 
@@ -440,7 +437,7 @@ pub trait Resolver: Send + Sync {
     ///
     /// Both are plain paths, neither package-relative (C++
     /// `ArResolver::_CreateIdentifier`). A caller with a package-relative
-    /// one goes through [`create_identifier`].
+    /// one goes through a [`Dispatcher`].
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String;
 
     /// Resolves an asset path to a physical location.
@@ -457,10 +454,12 @@ pub trait Resolver: Send + Sync {
     /// Opens a resolved asset for reading.
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>>;
 
-    /// Returns the file extension of the given asset path (without the leading
-    /// dot), the innermost packaged path's for a package-relative one.
+    /// The file extension of `asset_path`, without the leading dot, or `""`
+    /// when it has none. The path is a plain one, not package-relative (C++
+    /// `ArResolver::_GetExtension`): a [`Dispatcher`] asks about the
+    /// innermost packaged path of one.
     fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
-        extension(asset_path)
+        file_extension(asset_path)
     }
 
     /// The URI schemes the resolver handles, lowercase and without the `:`
@@ -548,26 +547,6 @@ pub trait Resolver: Send + Sync {
     }
 }
 
-/// `asset_path` as an identifier through `resolver`, anchored at `anchor`'s
-/// outer package (C++ `ArResolver::CreateIdentifier`, through the
-/// dispatching resolver's `_CreateIdentifierHelper`). A packaged anchor
-/// (`pkg.usdz[layer.usda]`) anchors at the package file, not at the layer
-/// inside it. A package-relative `asset_path` (`pkg.usdz[entry]`) anchors
-/// its package and keeps the entry it names, its packaged path normalized to
-/// the entry name (`pkg.usdz[tex\stone.png]` names `tex/stone.png`, where
-/// C++ leaves it as authored).
-pub fn create_identifier(resolver: &dyn Resolver, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
-    let outer = anchor.and_then(|anchor| {
-        let (package, _) = split_package_relative_path_outer(&anchor.to_string_lossy())?;
-        Some(ResolvedPath::new(package))
-    });
-    let anchor = outer.as_ref().or(anchor);
-    match split_authored_package(asset_path) {
-        Some((package, entry)) => nest_packaged_path(&resolver.create_identifier(&package, anchor), &entry),
-        None => resolver.create_identifier(asset_path, anchor),
-    }
-}
-
 /// Whether `asset_path` opens with one of `resolver`'s
 /// [`uri_schemes`](Resolver::uri_schemes) followed by `:`, so it names an
 /// asset the resolver identifies whole (C++ the dispatching resolver's
@@ -579,6 +558,244 @@ pub fn is_uri(resolver: &dyn Resolver, asset_path: &str) -> bool {
             .iter()
             .any(|known| known.eq_ignore_ascii_case(scheme))
     })
+}
+
+/// A reader of one kind of package, the assets inside a package file
+/// (C++ `ArPackageResolver`). A [`Dispatcher`] hands it each level of a
+/// package-relative path whose package has an extension it
+/// [`handles`](Self::handles).
+///
+/// Each call is given the resolver that opens the package itself, which for
+/// a package nested in another is an entry of the package around it.
+pub trait PackageResolver: Send + Sync {
+    /// Whether the resolver reads packages whose file extension, without the
+    /// leading dot, is `extension`. The extension is matched as the package
+    /// path spells it.
+    fn handles(&self, extension: &str) -> bool;
+
+    /// A token naming this reader, part of the [`identity`](Resolver::identity)
+    /// of a dispatcher that holds it: two readers that read any package
+    /// differently return different tokens.
+    fn identity(&self) -> &str;
+
+    /// The packaged path `packaged` names inside the package resolved at
+    /// `package`, or `None` when the package holds no such asset (C++
+    /// `ArPackageResolver::Resolve`).
+    fn resolve(&self, resolver: &dyn Resolver, package: &ResolvedPath, packaged: &str) -> Option<String>;
+
+    /// Opens the asset `packaged` names inside the package resolved at
+    /// `package` (C++ `ArPackageResolver::OpenAsset`).
+    fn open_asset(&self, resolver: &dyn Resolver, package: &ResolvedPath, packaged: &str)
+    -> io::Result<Box<dyn Asset>>;
+}
+
+/// The resolver that hands each asset path to the resolver that serves it
+/// (C++ `ArDispatchingResolver`, the resolver `ArGetResolver` returns). A
+/// package-relative path (`pkg.usdz[layer.usda]`) is served here: its
+/// outermost package through the primary resolver, and each packaged path
+/// inside it through the [`PackageResolver`] for its package's extension.
+/// Every other path goes to the primary resolver as it is, so a resolver
+/// written for one storage never sees a package-relative path.
+pub struct Dispatcher {
+    primary: Box<dyn Resolver>,
+    packages: &'static [&'static dyn PackageResolver],
+    /// This dispatcher's [`cache_id`](Resolver::cache_id).
+    id: u64,
+}
+
+impl Dispatcher {
+    /// A dispatcher over `primary` that reads the packages `packages`
+    /// handle, asking them in order.
+    pub(crate) fn new(primary: Box<dyn Resolver>, packages: &'static [&'static dyn PackageResolver]) -> Self {
+        Self {
+            primary,
+            packages,
+            id: crate::next_id(),
+        }
+    }
+
+    /// The package resolver for the package resolved at `package`, by the
+    /// extension of its innermost path.
+    fn package(&self, package: &ResolvedPath) -> Option<&'static dyn PackageResolver> {
+        let package = package.to_string_lossy();
+        let extension = self.extension(&package);
+        self.packages.iter().copied().find(|reader| reader.handles(extension))
+    }
+}
+
+impl Resolver for Dispatcher {
+    /// `asset_path` as an identifier, anchored at `anchor`'s outer package
+    /// (C++ `_CreateIdentifierHelper`): a packaged anchor
+    /// (`pkg.usdz[layer.usda]`) anchors at the package file, not at the layer
+    /// inside it. A package-relative `asset_path` (`pkg.usdz[entry]`) anchors
+    /// its package and keeps the entry it names, its packaged path normalized
+    /// to the entry name (`pkg.usdz[tex\stone.png]` names `tex/stone.png`,
+    /// where C++ leaves it as authored).
+    fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
+        let outer = anchor
+            .and_then(|anchor| outer_package(&anchor.to_string_lossy()))
+            .map(ResolvedPath::new);
+        let anchor = outer.as_ref().or(anchor);
+        match split_authored_package(asset_path) {
+            Some((package, entry)) => nest_packaged_path(&self.primary.create_identifier(&package, anchor), &entry),
+            None => self.primary.create_identifier(asset_path, anchor),
+        }
+    }
+
+    /// Resolves the outermost package of a package-relative path through the
+    /// primary resolver, then each packaged path inside it in turn, from the
+    /// outside in (C++ `_ResolveHelper`). The path is unresolved when any
+    /// level is missing: a missing entry is reported as a missing asset, not
+    /// as a malformed layer.
+    fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+        let Some((package, packaged)) = split_authored_package(asset_path) else {
+            return self.primary.resolve(asset_path);
+        };
+        let mut resolved = self.primary.resolve(&package)?;
+        // The levels of a nested path share this call's scope when the caller
+        // holds none: each package is opened once.
+        let _scope = is_package_relative_path(&packaged).then(CacheScope::begin);
+        for level in package_levels(packaged) {
+            let found = self.package(&resolved)?.resolve(self, &resolved, &level)?;
+            resolved = ResolvedPath::new(nest_packaged_path(&resolved.to_string_lossy(), &found));
+        }
+        Some(resolved)
+    }
+
+    /// A new asset inside a package is placed in the new location of its
+    /// outer package.
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+        let Some((package, packaged)) = split_authored_package(asset_path) else {
+            return self.primary.resolve_for_new_asset(asset_path);
+        };
+        let package = self.primary.resolve_for_new_asset(&package)?;
+        Some(ResolvedPath::new(nest_packaged_path(
+            &package.to_string_lossy(),
+            &packaged,
+        )))
+    }
+
+    /// Opens an asset inside a package through the package resolver of its
+    /// innermost package, which opens that package through this dispatcher
+    /// in turn. The path is followed from the outside in, as
+    /// [`resolve`](Self::resolve) follows it, so an entry whose name holds
+    /// brackets (`tile[0].png`) stays one entry.
+    fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+        let path = resolved_path.to_string_lossy();
+        let Some((outer, packaged)) = split_package_relative_path_outer(&path) else {
+            return self.primary.open_asset(resolved_path);
+        };
+        let mut levels: Vec<String> = package_levels(packaged).collect();
+        let packaged = levels.pop().unwrap_or_default();
+        let package = ResolvedPath::new(
+            levels
+                .iter()
+                .fold(outer, |package, level| nest_packaged_path(&package, level)),
+        );
+        let reader = self.package(&package).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("no package resolver reads {package}"),
+            )
+        })?;
+        reader.open_asset(self, &package, &packaged)
+    }
+
+    /// The extension of the innermost packaged path, as the primary resolver
+    /// reads it.
+    fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
+        self.primary.extension(&asset_path[innermost_span(asset_path)])
+    }
+
+    fn uri_schemes(&self) -> &[&str] {
+        self.primary.uri_schemes()
+    }
+
+    /// Whether the outer package of a package-relative path is context
+    /// dependent.
+    fn is_context_dependent_path(&self, asset_path: &str) -> bool {
+        match outer_package(asset_path) {
+            Some(package) => self.primary.is_context_dependent_path(&package),
+            None => self.primary.is_context_dependent_path(asset_path),
+        }
+    }
+
+    /// The outer package of a package-relative path as the primary resolver
+    /// interns it, and its packaged path as the entry name it reaches.
+    fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
+        match split_authored_package(asset_path) {
+            Some((package, packaged)) => Cow::Owned(nest_packaged_path(
+                &self.primary.in_memory_identifier(&package),
+                &packaged,
+            )),
+            None => self.primary.in_memory_identifier(asset_path),
+        }
+    }
+
+    /// An asset resolved inside a package has its outermost package's
+    /// information, with the repository path led into the package as the
+    /// resolved path is (C++ `_GetAssetInfo`). The resolved location decides,
+    /// since a plain asset path can resolve into a package (a `.usdz` to its
+    /// root layer).
+    fn asset_info(&self, asset_path: &str, resolved_path: &ResolvedPath) -> AssetInfo {
+        let Some((resolved, packaged)) = split_package_relative_path_outer(&resolved_path.to_string_lossy()) else {
+            return self.primary.asset_info(asset_path, resolved_path);
+        };
+        let asset_path = outer_package(asset_path).map_or(Cow::Borrowed(asset_path), Cow::Owned);
+        let mut info = self.primary.asset_info(&asset_path, &ResolvedPath::new(resolved));
+        if !info.repo_path.is_empty() {
+            info.repo_path = nest_packaged_path(&info.repo_path, &packaged);
+        }
+        info
+    }
+
+    /// An asset inside a package (`pkg.usdz[layer.usda]`) has its outermost
+    /// package's modification timestamp (C++ `_GetModificationTimestamp`).
+    fn modification_timestamp(&self, asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
+        let asset_path = outer_package(asset_path).map_or(Cow::Borrowed(asset_path), Cow::Owned);
+        let package = outer_package(&resolved_path.to_string_lossy()).map(ResolvedPath::new);
+        self.primary
+            .modification_timestamp(&asset_path, package.as_ref().unwrap_or(resolved_path))
+    }
+
+    /// The primary resolver's identity and the package readers', in the
+    /// order they are asked, each rendered losslessly so distinct
+    /// configurations never share a token.
+    fn identity(&self) -> String {
+        let readers: Vec<&str> = self.packages.iter().map(|reader| reader.identity()).collect();
+        format!("{:?}{readers:?}", self.primary.identity())
+    }
+
+    /// The dispatcher's own id, so a cache never answers it with what the
+    /// primary resolver opened alone, or `None` when the primary resolver
+    /// caches nothing.
+    fn cache_id(&self) -> Option<u64> {
+        self.primary.cache_id().map(|_| self.id)
+    }
+}
+
+/// The levels of the packaged path `packaged`, from the outside in:
+/// `inner.usdz[deep.usdz[a.usda]]` gives `inner.usdz`, `deep.usdz` and
+/// `a.usda`. The path is split at its outermost bracket at each level, so an
+/// entry whose name holds brackets (`tile[0].png`) stays one level.
+fn package_levels(packaged: String) -> impl Iterator<Item = String> {
+    let mut rest = Some(packaged);
+    iter::from_fn(move || {
+        let path = rest.take()?;
+        Some(match split_package_relative_path_outer(&path) {
+            Some((level, deeper)) => {
+                rest = Some(deeper);
+                level
+            }
+            None => path,
+        })
+    })
+}
+
+/// The outermost package of the package-relative `path`, or `None` for a
+/// path that is not package-relative.
+fn outer_package(path: &str) -> Option<String> {
+    split_package_relative_path_outer(path).map(|(package, _)| package)
 }
 
 /// A cache scope (C++ `ArResolverScopedCache`): a span, on one thread,
@@ -755,38 +972,6 @@ impl DefaultResolver {
         resolver.search_paths = paths.into_iter().map(|p| normalize_search_path(p.into())).collect();
         resolver
     }
-
-    /// Searches for an asset by trying the path against the resolver's search
-    /// directories, then the current working directory.
-    fn resolve_with_search_paths(&self, asset_path: &str) -> Option<ResolvedPath> {
-        let rel_path = &*host_path(asset_path)?;
-
-        // If the path is absolute, just check existence.
-        if rel_path.is_absolute() {
-            return if rel_path.exists() {
-                Some(ResolvedPath::new(rel_path.canonicalize().ok()?))
-            } else {
-                None
-            };
-        }
-
-        for dir in &self.search_paths {
-            let candidate = dir.join(rel_path);
-            if candidate.exists() {
-                return Some(ResolvedPath::new(candidate.canonicalize().ok()?));
-            }
-        }
-
-        // Try relative to the current working directory.
-        if let Ok(cwd) = std::env::current_dir() {
-            let candidate = cwd.join(rel_path);
-            if candidate.exists() {
-                return Some(ResolvedPath::new(candidate.canonicalize().ok()?));
-            }
-        }
-
-        None
-    }
 }
 
 impl Default for DefaultResolver {
@@ -822,6 +1007,10 @@ impl Resolver for DefaultResolver {
     ///
     /// A path absolute for another platform (`C:\tex\a.png` or `a:b.usda` on
     /// Unix) names no location on this host and is returned unchanged.
+    ///
+    /// The anchor is a plain path, as the trait has it: a layer inside a
+    /// package is anchored through a [`Dispatcher`], which anchors at its
+    /// package file.
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
         if asset_path.is_empty() {
             return String::new();
@@ -836,65 +1025,59 @@ impl Resolver for DefaultResolver {
             return canonical_identifier(path.into_owned());
         }
 
-        // Anchor relative paths. A packaged anchor anchors at its package
-        // file, as `create_identifier` hands it one.
-        let package = anchor.and_then(|anchor| {
-            let (package, _) = split_package_relative_path_outer(&anchor.to_string_lossy())?;
-            Some(PathBuf::from(package))
-        });
-        let anchor = package.as_deref().or(anchor.map(|anchor| &**anchor));
-        if let Some(dir) = anchor.and_then(Path::parent) {
+        // Anchor relative paths.
+        if let Some(dir) = anchor.and_then(|anchor| anchor.parent()) {
             return anchor_in(dir, &path, asset_path);
         }
 
         // Without an anchor, the current working directory is the anchor
         // directory. C++ `ArDefaultResolver::_Resolve` looks there first for
         // a relative path.
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(cwd) = env::current_dir() {
             return anchor_in(&cwd, &path, asset_path);
         }
 
         asset_path.to_string()
     }
 
+    /// Tries the path against the resolver's search directories, then the
+    /// current working directory.
     fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
         if asset_path.is_empty() {
             return None;
         }
+        let rel_path = &*host_path(asset_path)?;
 
-        // A package-relative path (`pkg.usdz[inner]`) resolves its outer package
-        // as a plain file, then reattaches the inner packaged path. The inner
-        // entry must actually exist in the archive: a path to a missing entry is
-        // unresolved, not merely unreadable, so the caller reports it as such
-        // rather than as a malformed layer.
-        if let Some((package, inner)) = split_authored_package(asset_path) {
-            let resolved_package = self.resolve_with_search_paths(&package)?;
-            let package_str = resolved_package.to_string_lossy();
-            // The levels of a nested path share this call's scope when the
-            // caller holds none: the outer package is opened once.
-            let _scope = is_package_relative_path(&inner).then(CacheScope::begin);
-            if !usdz::package_contains(self, &package_str, &inner) {
-                return None;
-            }
-            return Some(ResolvedPath::new(join_package_relative_path(&package_str, &inner)));
+        // If the path is absolute, just check existence.
+        if rel_path.is_absolute() {
+            return if rel_path.exists() {
+                Some(ResolvedPath::new(rel_path.canonicalize().ok()?))
+            } else {
+                None
+            };
         }
 
-        self.resolve_with_search_paths(asset_path)
+        for dir in &self.search_paths {
+            let candidate = dir.join(rel_path);
+            if candidate.exists() {
+                return Some(ResolvedPath::new(candidate.canonicalize().ok()?));
+            }
+        }
+
+        // Try relative to the current working directory.
+        if let Ok(cwd) = env::current_dir() {
+            let candidate = cwd.join(rel_path);
+            if candidate.exists() {
+                return Some(ResolvedPath::new(candidate.canonicalize().ok()?));
+            }
+        }
+
+        None
     }
 
     fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
         if asset_path.is_empty() {
             return None;
-        }
-
-        // A new asset inside a package is placed in the new location of
-        // its outer package.
-        if let Some((package, inner)) = split_authored_package(asset_path) {
-            let package = self.resolve_for_new_asset(&package)?;
-            return Some(ResolvedPath::new(join_package_relative_path(
-                &package.to_string_lossy(),
-                &inner,
-            )));
         }
 
         let path = host_path(asset_path)?;
@@ -904,9 +1087,7 @@ impl Resolver for DefaultResolver {
         }
 
         // Resolve relative to the current working directory.
-        std::env::current_dir()
-            .ok()
-            .map(|cwd| ResolvedPath::new(cwd.join(path)))
+        env::current_dir().ok().map(|cwd| ResolvedPath::new(cwd.join(path)))
     }
 
     /// Whether `asset_path` is a search path, the one form whose identifier
@@ -918,16 +1099,12 @@ impl Resolver for DefaultResolver {
     }
 
     /// A relative `asset_path` in its normalized spelling (`\` read as a
-    /// separator, `.` segments and repeated separators dropped), and the
-    /// packaged part of a package-relative one as the entry name it reaches.
-    /// So `sub\layer.usda`, `./sub/layer.usda` and `sub/layer.usda` all name
+    /// separator, `.` segments and repeated separators dropped). So
+    /// `sub\layer.usda`, `./sub/layer.usda` and `sub/layer.usda` all name
     /// the in-memory layer `sub/layer.usda`. An absolute path is returned
     /// unchanged.
     fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
-        match split_authored_package(asset_path) {
-            Some((package, inner)) => Cow::Owned(join_package_relative_path(&normalize_if_relative(&package), &inner)),
-            None => normalize_if_relative(asset_path),
-        }
+        normalize_if_relative(asset_path)
     }
 
     /// Renders the canonicalized search paths as the resolver's identity token,
@@ -952,45 +1129,15 @@ impl Resolver for DefaultResolver {
         fs::metadata(&**resolved_path).and_then(|m| m.modified()).ok()
     }
 
+    /// Opens the file as an asset: over a mapping of it when the resolver
+    /// maps files, over the file itself otherwise. A package is opened the
+    /// same way, so its entries are views of the mapping too.
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
-        let path_str = resolved_path.to_str().unwrap_or_default();
-
-        // A package-relative path is an entry of its innermost package.
-        // TODO(ar-package-resolver): the resolver reads a package through
-        // `usdz::Archive` directly, so `ar` depends on the one package
-        // format. C++ keeps `Ar` format-agnostic behind `ArPackageResolver`,
-        // a per-extension trait the usdz resolver implements; `open_asset`
-        // and `package_contains` would dispatch to it by the package's
-        // extension.
-        if is_package_relative_path(path_str) {
-            let (package, inner) = split_package_relative_path_outer(path_str).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid package-relative path: {}", resolved_path),
-                )
-            })?;
-            // The entry's bytes are shared: a package nested here serves
-            // its own entries as views of them.
-            let bytes = usdz::package_entry(self, &package, &inner)?.into_shared();
-            return Ok(Box::new(io::Cursor::new(AssetBuffer::Shared(bytes))));
-        }
-
-        self.open_file(resolved_path)
-    }
-}
-
-impl DefaultResolver {
-    /// Opens the file at `path` as an asset: over a mapping of it when the
-    /// resolver maps files, over the file itself otherwise. A package is
-    /// opened the same way, so its entries are views of the mapping too.
-    // Without the feature there is no mapping policy to consult.
-    #[cfg_attr(not(feature = "mmap"), allow(clippy::unused_self))]
-    fn open_file(&self, path: &Path) -> io::Result<Box<dyn Asset>> {
         #[cfg(feature = "mmap")]
         if self.map_files {
-            return open_mapped(path);
+            return open_mapped(resolved_path);
         }
-        Ok(Box::new(fs::File::open(path)?))
+        Ok(Box::new(fs::File::open(&**resolved_path)?))
     }
 }
 
@@ -1152,7 +1299,7 @@ fn canonical_identifier(path: PathBuf) -> String {
 /// canonical rendering.
 fn normalize_search_path(path: PathBuf) -> PathBuf {
     let path = if path.is_relative() {
-        std::env::current_dir().unwrap_or_default().join(path)
+        env::current_dir().unwrap_or_default().join(path)
     } else {
         path
     };
@@ -1304,22 +1451,6 @@ pub fn is_package_relative_path(path: &str) -> bool {
     path.contains('[') && path.ends_with(']')
 }
 
-/// The modification timestamp of the asset `asset_path` resolved to at
-/// `resolved`, asked of `resolver`. An asset inside a package
-/// (`pkg.usdz[layer.usda]`) has its outermost package's, as C++
-/// `ArResolver::GetModificationTimestamp` dispatches a package-relative path
-/// above the resolver that serves it.
-pub fn modification_timestamp(
-    resolver: &dyn Resolver,
-    asset_path: &str,
-    resolved: &ResolvedPath,
-) -> Option<SystemTime> {
-    let outer = |path: &str| split_package_relative_path_outer(path).map(|(package, _)| package);
-    let asset_path = outer(asset_path).map_or(Cow::Borrowed(asset_path), Cow::Owned);
-    let package = resolved.to_str().and_then(outer).map(ResolvedPath::new);
-    resolver.modification_timestamp(&asset_path, package.as_ref().unwrap_or(resolved))
-}
-
 /// Splits a package-relative path at the outermost bracket.
 ///
 /// Returns the outer package path and the inner packaged path.
@@ -1425,10 +1556,13 @@ pub(crate) fn innermost_span(path: &str) -> Range<usize> {
 /// innermost package bracket (C++ `ArResolver::GetExtension`), or `""` when
 /// there is none.
 pub(crate) fn extension(path: &str) -> &str {
-    Path::new(&path[innermost_span(path)])
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
+    file_extension(&path[innermost_span(path)])
+}
+
+/// The file extension of the plain `path` without its leading dot, or `""`
+/// when there is none.
+fn file_extension(path: &str) -> &str {
+    Path::new(path).extension().and_then(OsStr::to_str).unwrap_or_default()
 }
 
 /// Splits `path` before its file name, read inside the innermost package
@@ -1511,6 +1645,8 @@ pub(crate) mod tests {
     use std::thread;
 
     use super::*;
+    use crate::sdf::layer_registry::tests::dispatcher;
+    use crate::usdz;
 
     /// A resolver under which every asset path resolves to itself and opens
     /// to what `open` gives, standing in for the storage underneath a
@@ -1555,12 +1691,8 @@ pub(crate) mod tests {
     #[test]
     fn resolved_path_deref() {
         let p = ResolvedPath::new("some/path/model.usda");
-        // The string-typed `extension` accessor, then a Path method via Deref.
-        assert_eq!(p.extension(), "usda");
+        // A Path method via Deref.
         assert_eq!(p.file_name().unwrap(), "model.usda");
-        // The extension is lowercased for case-insensitive format matching.
-        assert_eq!(ResolvedPath::new("x/Model.USDZ").extension(), "usdz");
-        assert_eq!(ResolvedPath::new("x/noext").extension(), "");
     }
 
     #[test]
@@ -1577,7 +1709,7 @@ pub(crate) mod tests {
 
         // Equivalent spellings canonicalize to one identity: a relative path
         // anchors to the cwd, and `.` lexical noise is collapsed.
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = env::current_dir().unwrap();
         let rel = DefaultResolver::with_search_paths(["assets"]);
         let abs = DefaultResolver::with_search_paths([cwd.join("assets")]);
         assert_eq!(rel.identity(), abs.identity());
@@ -1671,7 +1803,7 @@ pub(crate) mod tests {
         assert_eq!(resolver.extension("archive.usdz"), "usdz");
         assert_eq!(resolver.extension("no_extension"), "");
         assert_eq!(resolver.extension("path/to/file.usdc"), "usdc");
-        assert_eq!(resolver.extension("pkg.usdz[inner.usdz[a.usda]]"), "usda");
+        assert_eq!(dispatcher().extension("pkg.usdz[inner.usdz[a.usda]]"), "usda");
     }
 
     #[test]
@@ -1731,7 +1863,7 @@ pub(crate) mod tests {
         assert_eq!(id, "only_in_search.usda");
         assert!(resolver.resolve(&id).is_some());
 
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = env::current_dir().unwrap();
         assert_eq!(
             resolver.create_identifier("./missing.usda", None),
             canonical_identifier(cwd.join("missing.usda"))
@@ -1981,11 +2113,11 @@ pub(crate) mod tests {
         writer.finish().unwrap();
 
         let anchor = ResolvedPath::new(dir.path().join("root.usda"));
-        let resolver = DefaultResolver::new();
-        let package = create_identifier(&resolver, "packages/model.usdz", Some(&anchor));
+        let resolver = dispatcher();
+        let package = resolver.create_identifier("packages/model.usdz", Some(&anchor));
         assert!(Path::new(&package).is_absolute());
 
-        let id = create_identifier(&resolver, r"packages\model.usdz[tex\stone.png]", Some(&anchor));
+        let id = resolver.create_identifier(r"packages\model.usdz[tex\stone.png]", Some(&anchor));
         assert_eq!(id, format!("{package}[tex/stone.png]"));
         let resolved = resolver.resolve(&id).expect("the entry is in the archive");
         assert_eq!(resolver.open_asset(&resolved).unwrap().read_all().unwrap(), b"png");
@@ -1995,7 +2127,7 @@ pub(crate) mod tests {
         );
 
         assert_eq!(
-            create_identifier(&resolver, r"outer.usdz[inner.usdz[tex\stone.png]]", Some(&anchor)),
+            resolver.create_identifier(r"outer.usdz[inner.usdz[tex\stone.png]]", Some(&anchor)),
             "outer.usdz[inner.usdz[tex/stone.png]]",
             "a missing package keeps its bare spelling around the normalized entry"
         );
@@ -2004,24 +2136,24 @@ pub(crate) mod tests {
             "a packaged path leading out of the package names no entry"
         );
         assert_eq!(
-            create_identifier(&resolver, r".\outer.usdz[inner.usdz[tex\stone.png]]", Some(&anchor)),
+            resolver.create_identifier(r".\outer.usdz[inner.usdz[tex\stone.png]]", Some(&anchor)),
             format!(
                 "{}[inner.usdz[tex/stone.png]]",
-                create_identifier(&resolver, "./outer.usdz", Some(&anchor))
+                resolver.create_identifier("./outer.usdz", Some(&anchor))
             )
         );
     }
 
     #[test]
     fn dispatch_nests_package_entry() {
-        let resolver = DefaultResolver::new();
+        let resolver = dispatcher();
         let anchor = ResolvedPath::new(PathBuf::from("/scene/root.usda"));
         // A package-relative target anchors its outer package path to the
         // anchor's directory (not returned verbatim), then reattaches the inner
         // packaged path — the same identifier as anchoring the bare package.
         assert_eq!(
-            create_identifier(&resolver, "model.usdz[geom.usd]", Some(&anchor)),
-            join_package_relative_path(&create_identifier(&resolver, "model.usdz", Some(&anchor)), "geom.usd"),
+            resolver.create_identifier("model.usdz[geom.usd]", Some(&anchor)),
+            join_package_relative_path(&resolver.create_identifier("model.usdz", Some(&anchor)), "geom.usd"),
         );
     }
 
@@ -2053,28 +2185,67 @@ pub(crate) mod tests {
         writer.add_layer("root.usda", b"#usda 1.0\n").unwrap();
         writer.add_layer("a.usda", b"#usda 1.0\n").unwrap();
         writer.finish().unwrap();
-        let resolver = DefaultResolver::new();
+        let resolver = dispatcher();
         let package = package.to_string_lossy();
         let climbed = nest_packaged_path(&package, &join_packaged_path("", "../a.usda"));
         assert_eq!(climbed, format!("{package}[../a.usda]"));
         assert!(resolver.resolve(&climbed).is_none(), "{climbed} names no entry");
     }
 
+    /// A primary resolver that places every new asset inside a package
+    /// already, and caches nothing.
+    struct Packaged;
+
+    impl Resolver for Packaged {
+        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
+            asset_path.to_owned()
+        }
+
+        fn resolve(&self, _asset_path: &str) -> Option<ResolvedPath> {
+            None
+        }
+
+        fn resolve_for_new_asset(&self, _asset_path: &str) -> Option<ResolvedPath> {
+            Some(ResolvedPath::new("outer.usdz[inner.usdz]"))
+        }
+
+        fn open_asset(&self, _resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+    }
+
+    /// A new asset inside a package the primary resolver places in a
+    /// package nests into the innermost one.
+    #[test]
+    fn dispatch_nests_new_asset() {
+        let resolver = Dispatcher::new(Box::new(Packaged), &[]);
+        assert_eq!(
+            resolver.resolve_for_new_asset("alias.usdz[new.usda]"),
+            Some(ResolvedPath::new("outer.usdz[inner.usdz[new.usda]]"))
+        );
+    }
+
+    /// A dispatcher caches only for a primary resolver that caches, and its
+    /// identity names the package readers it holds.
+    #[test]
+    fn dispatch_identity_cache() {
+        assert_eq!(Dispatcher::new(Box::new(Packaged), &[]).cache_id(), None);
+        let bare = Dispatcher::new(Box::new(DefaultResolver::new()), &[]);
+        assert!(bare.cache_id().is_some());
+        assert_ne!(bare.identity(), dispatcher().identity());
+        assert_eq!(dispatcher().identity(), dispatcher().identity());
+    }
+
     /// The dispatcher anchors at a packaged anchor's outer package, beside the
     /// package file, as C++ `_CreateIdentifierHelper` does.
     #[test]
     fn dispatch_strips_package_anchor() {
-        let resolver = DefaultResolver::new();
+        let resolver = dispatcher();
         let package = ResolvedPath::new(PathBuf::from("/scene/pkg.usdz"));
         let packaged = ResolvedPath::new(PathBuf::from("/scene/pkg.usdz[geom/scene.usda]"));
         assert_eq!(
-            create_identifier(&resolver, "./tex.png", Some(&packaged)),
-            resolver.create_identifier("./tex.png", Some(&package)),
-        );
-        assert_eq!(
             resolver.create_identifier("./tex.png", Some(&packaged)),
             resolver.create_identifier("./tex.png", Some(&package)),
-            "the default resolver anchors a packaged anchor at its package too"
         );
     }
 
@@ -2431,7 +2602,7 @@ pub(crate) mod tests {
     /// leave out, resolved as a layer beside them would resolve them.
     struct UdimFixture {
         _dir: tempfile::TempDir,
-        resolver: DefaultResolver,
+        resolver: Dispatcher,
         anchor: ResolvedPath,
     }
 
@@ -2459,7 +2630,7 @@ pub(crate) mod tests {
             let anchor = ResolvedPath::new(dir.path().join("layer.usda"));
             Self {
                 _dir: dir,
-                resolver: DefaultResolver::new(),
+                resolver: dispatcher(),
                 anchor,
             }
         }
@@ -2471,7 +2642,7 @@ pub(crate) mod tests {
 
         /// `tile` anchored beside the tiles.
         fn anchored(&self, tile: &str) -> String {
-            create_identifier(&self.resolver, tile, Some(&self.anchor))
+            self.resolver.create_identifier(tile, Some(&self.anchor))
         }
 
         /// The tiles of the UDIM path `path`.

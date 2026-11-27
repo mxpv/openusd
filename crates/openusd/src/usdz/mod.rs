@@ -18,7 +18,7 @@ mod package;
 mod reader;
 mod writer;
 
-pub use package::{Package, PackageError, PackageStats, open_package, package_contains, package_entry, package_stats};
+pub use package::{Package, PackageError, PackageStats, UsdzResolver, open_package, package_stats};
 pub use reader::Archive;
 pub(crate) use reader::is_layer_name;
 pub use writer::ArchiveWriter;
@@ -209,7 +209,7 @@ impl sdf::FileFormat for UsdzFileFormat {
                 return Some(package);
             };
             let nested = ar::ResolvedPath::new(ar::nest_packaged_path(&package.to_string_lossy(), &root));
-            if !sdf::LayerRegistry::is_package(ar::extension(&root)) {
+            if !sdf::LayerRegistry::is_package(resolver.extension(&root)) {
                 return Some(nested);
             }
             package = nested;
@@ -276,6 +276,7 @@ pub(crate) mod tests {
     use crate::ar::Resolver;
     use crate::ar::tests::TestResolver;
     use crate::sdf::FileFormat;
+    use crate::sdf::layer_registry::tests::dispatcher;
     use crate::usd::{PrimPredicate, Stage, TimeCode};
     use crate::vt;
     use std::cell::RefCell;
@@ -615,7 +616,7 @@ pub(crate) mod tests {
 
         // A missing entry at any bracket level is unresolved, not an entry
         // that fails to read.
-        let resolver = ar::DefaultResolver::new();
+        let resolver = dispatcher();
         for missing in ["inner.usdz[missing.usda]", "missing.usdz[inner.usda]"] {
             let nested = ar::join_package_relative_path(path.to_str().unwrap(), missing);
             assert_eq!(resolver.resolve(&nested), None, "{nested}");
@@ -636,7 +637,7 @@ pub(crate) mod tests {
         )?;
         let outer = ar::ResolvedPath::new(path.canonicalize()?);
 
-        let resolved = UsdzFileFormat.resolve_layer(&ar::DefaultResolver::new(), &outer);
+        let resolved = UsdzFileFormat.resolve_layer(&dispatcher(), &outer);
         let expected = ar::join_package_relative_path(&outer.to_string_lossy(), "inner.usdz[root.usda]");
         assert_eq!(resolved.map(|path| path.to_string_lossy().into_owned()), Some(expected));
         let stage = Stage::open(path.to_str().unwrap())?;
