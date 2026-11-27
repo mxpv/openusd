@@ -16368,6 +16368,88 @@ fn set_stamps_then_writes() -> Result<()> {
     Ok(())
 }
 
+/// The resyncs and changed info of each `after_commit` a sink heard.
+type Notified = Rc<RefCell<Vec<(Vec<sdf::Path>, Vec<sdf::Path>)>>>;
+
+/// A stage with `/world.r` targeting `/asset` and `/world.c` connected to
+/// `/asset.out`, with a sink recording what each `after_commit` reports.
+fn listed_properties() -> Result<(Stage, Notified)> {
+    let stage = Stage::builder().in_memory("anon.usda")?;
+    stage.define_prim("/asset")?;
+    stage.create_attribute("/asset.out", "float")?;
+    stage.define_prim("/world")?;
+    stage.create_relationship("/world.r")?.set_targets(["/asset"])?;
+    stage
+        .create_attribute("/world.c", "float")?
+        .set_connections(["/asset.out"])?;
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let recorder = heard.clone();
+    stage.add_sink(RecordingSink {
+        after: Some(Box::new(move |_stage, change| {
+            recorder
+                .borrow_mut()
+                .push((change.resynced.to_vec(), change.changed_info_only.to_vec()));
+        })),
+        ..Default::default()
+    })?;
+    Ok((stage, heard))
+}
+
+/// Setting a relationship's targets, or an attribute's connections, to the
+/// list it holds sends one info-only notice for the property, as C++
+/// `SetTargets` and `SetConnections` clear the list before writing it; it
+/// records no undo step and no replay edit.
+#[test]
+fn same_list_notified() -> Result<()> {
+    let (stage, heard) = listed_properties()?;
+    let replay = usd::ReplayStage::from(stage.clone());
+    let undo = usd::UndoStage::from(stage.clone());
+
+    stage.relationship("/world.r")?.set_targets(["/asset"])?;
+    stage.attribute("/world.c")?.set_connections(["/asset.out"])?;
+    stage.relationship_builder("/world.r").set_targets(["/asset"]).build()?;
+
+    assert_eq!(
+        *heard.borrow(),
+        [
+            (Vec::new(), paths(&["/world.r"])),
+            (Vec::new(), paths(&["/world.c"])),
+            (Vec::new(), paths(&["/world.r"])),
+        ]
+    );
+    assert_eq!(stage.relationship("/world.r")?.targets()?, paths(&["/asset"]));
+    assert_eq!(stage.attribute("/world.c")?.connections()?, paths(&["/asset.out"]));
+    assert_eq!(undo.undo_depth(), 0);
+    assert!(replay.diff().is_empty());
+    Ok(())
+}
+
+/// An explicit empty target list set again sends nothing: neither write
+/// changes it.
+#[test]
+fn same_empty_list_quiet() -> Result<()> {
+    let (stage, heard) = listed_properties()?;
+    stage.relationship("/world.r")?.set_targets(Vec::<sdf::Path>::new())?;
+    heard.borrow_mut().clear();
+    stage.relationship("/world.r")?.set_targets(Vec::<sdf::Path>::new())?;
+    stage.relationship("/world.r")?.block_targets()?;
+    assert!(heard.borrow().is_empty());
+    Ok(())
+}
+
+/// A target list with a path it refuses leaves the list as it was and
+/// sends nothing.
+#[test]
+fn refused_list_kept() -> Result<()> {
+    let (stage, heard) = listed_properties()?;
+    assert!(stage.relationship("/world.r")?.set_targets(["/asset", ""]).is_err());
+    assert!(stage.attribute("/world.c")?.set_connections([""]).is_err());
+    assert_eq!(stage.relationship("/world.r")?.targets()?, paths(&["/asset"]));
+    assert_eq!(stage.attribute("/world.c")?.connections()?, paths(&["/asset.out"]));
+    assert!(heard.borrow().is_empty());
+    Ok(())
+}
+
 /// A root-layer edit that sets `timeCodesPerSecond` from 24 to 48 and back
 /// reports the pseudo-root as changed info and resyncs nothing, as C++ finds
 /// the stack's rate unchanged.

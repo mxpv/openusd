@@ -37,14 +37,31 @@ where
     }
 
     /// Author the list as the explicit list `paths`, which replaces what
-    /// weaker layers list (C++ `ClearEditsAndMakeExplicit` with the explicit
-    /// items set).
+    /// weaker layers list, in one write (C++ `GetExplicitItems() = items`).
     pub fn set(self, paths: impl IntoIterator<Item: sdf::IntoPath>) -> Result<(), sdf::AuthoringError> {
-        let paths = paths
-            .into_iter()
-            .map(|path| canonical(&self.anchor, path))
-            .collect::<Result<Vec<_>, _>>()?;
+        let paths = self.anchored(paths)?;
         self.spec.edit_list(self.key, |op| *op = sdf::ListOp::explicit(paths))
+    }
+
+    /// [`set`](Self::set) after clearing the list to an explicit empty one,
+    /// as C++ `UsdRelationship::SetTargets` and `UsdAttribute::SetConnections`
+    /// write it (`ClearEditsAndMakeExplicit`, then the explicit items set): a
+    /// list set to the paths it holds is reported changed
+    /// ([`FieldChange::Restored`](sdf::FieldChange::Restored)). Every path is
+    /// anchored before either write.
+    pub(crate) fn clear_and_set(
+        self,
+        paths: impl IntoIterator<Item: sdf::IntoPath>,
+    ) -> Result<(), sdf::AuthoringError> {
+        let paths = self.anchored(paths)?;
+        self.spec
+            .edit_list(self.key, |op| *op = sdf::PathListOp::explicit([]))?;
+        self.spec.edit_list(self.key, |op| *op = sdf::ListOp::explicit(paths))
+    }
+
+    /// `paths`, each made absolute against the edit's anchor.
+    fn anchored(&self, paths: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Vec<sdf::Path>, sdf::AuthoringError> {
+        paths.into_iter().map(|path| canonical(&self.anchor, path)).collect()
     }
 
     /// Put `path` first among the prepended paths, as

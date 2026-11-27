@@ -267,9 +267,10 @@ impl Relationship {
     /// path, or one relative to this prim, mapped into the edit target's
     /// layer namespace; one the mapping does not reach is
     /// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget).
+    /// Setting the targets it holds still reports it changed, as in C++.
     pub fn set_targets(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
         let targets = authoring::targets_for_authoring(&self.stage, &self.path, targets)?;
-        self.edit(|spec| Ok(spec.edit_targets().set(targets)?))
+        self.edit(|spec| Ok(spec.edit_targets().clear_and_set(targets)?))
     }
 
     /// Author an explicit empty target list on the edit target, which hides

@@ -606,9 +606,10 @@ impl Attribute {
     /// the mapping does not reach being
     /// [`OutsideEditTarget`](StageAuthoringError::OutsideEditTarget). This is
     /// the primitive every UsdShade input/output connection is built on.
+    /// Setting the connections it holds still reports it changed, as in C++.
     pub fn set_connections(self, targets: impl IntoIterator<Item: sdf::IntoPath>) -> Result<Self, StageAuthoringError> {
         let targets = authoring::targets_for_authoring(&self.stage, &self.path, targets)?;
-        self.edit(|spec| Ok(spec.edit_connections().set(targets)?))
+        self.edit(|spec| Ok(spec.edit_connections().clear_and_set(targets)?))
     }
 
     /// Author an explicit empty connection list on the edit target, which

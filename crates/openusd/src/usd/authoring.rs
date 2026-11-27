@@ -975,7 +975,7 @@ impl PropertyWrite {
                     return Ok(());
                 };
                 edit_spec(data, path.clone(), Relationship::KIND, Relationship::view, |spec| {
-                    Ok(spec.edit_targets().set(targets)?)
+                    Ok(spec.edit_targets().clear_and_set(targets)?)
                 })
             }
         }
