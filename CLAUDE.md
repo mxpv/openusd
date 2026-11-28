@@ -90,8 +90,9 @@ source of truth for specifics.
 - **`ar/`** - Asset Resolution (C++ `Ar`): the `Resolver` trait maps `@...@`
   asset paths to physical locations; `DefaultResolver` searches the filesystem.
   `Dispatcher` (C++ `ArDispatchingResolver`) is the resolver a registry and
-  its layers hold: it serves package-relative paths above the resolver it
-  wraps, through a `PackageResolver` per package format
+  its layers hold: it routes a path by its URI scheme to the scheme resolver
+  declaring it, else to the primary resolver, and serves package-relative
+  paths above them through a `PackageResolver` per package format
   (`usdz::UsdzResolver` for usdz).
   `CacheScope` (C++ `ArResolverScopedCache`) is the span, on one thread, over
   which opened packages are kept.

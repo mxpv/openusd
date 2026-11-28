@@ -45,20 +45,19 @@ pub fn modify_asset_paths(
     let edits = {
         let layer = layer.try_borrow()?;
         let formats = layer.formats();
-        visit_asset_paths(
-            layer.asset_resolver(),
-            &formats,
-            layer.data(),
-            layer.identifier(),
-            mode,
-            |asset| {
-                if !modified.contains_key(asset.path) {
-                    modified.insert(asset.path.to_owned(), modify(asset.path));
-                }
-                let path = &modified[asset.path];
-                Ok((path != asset.path).then(|| path.clone()))
-            },
-        )?
+        let anchor = layer.anchor_location();
+        let kinds = AssetKinds {
+            resolver: layer.asset_resolver(),
+            formats: &formats,
+            anchor: anchor.as_ref(),
+        };
+        visit_asset_paths(kinds, layer.data(), layer.identifier(), mode, |asset| {
+            if !modified.contains_key(asset.path) {
+                modified.insert(asset.path.to_owned(), modify(asset.path));
+            }
+            let path = &modified[asset.path];
+            Ok((path != asset.path).then(|| path.clone()))
+        })?
     };
     if edits.is_empty() {
         return Ok(());
@@ -95,21 +94,35 @@ pub(super) enum AssetKind {
     Asset,
 }
 
-impl AssetKind {
-    /// What `path` names among `formats`, its extension read through
-    /// `resolver`. `arc` marks a path a sublayer, reference, payload or clip
-    /// template names, which is a layer whatever its extension.
-    pub(super) fn of(
-        resolver: &dyn ar::Resolver,
-        formats: &[&'static dyn sdf::FileFormat],
-        path: &str,
-        arc: bool,
-    ) -> Self {
-        match sdf::layer_registry::by_extension(formats, resolver.extension(path)) {
-            Some(format) if format.is_package() => Self::Package,
-            Some(_) => Self::Layer,
-            None if arc => Self::Layer,
-            None => Self::Asset,
+/// What tells an [`AssetKind`] for the paths one layer authors: the formats
+/// in play, the resolver that reads a path's extension, and the location the
+/// layer anchors its paths at.
+#[derive(Clone, Copy)]
+pub(super) struct AssetKinds<'a> {
+    /// The resolver that reads the extensions.
+    pub resolver: &'a dyn ar::Resolver,
+    /// The formats a path is told by.
+    pub formats: &'a [&'static dyn sdf::FileFormat],
+    /// Where the layer anchors the paths it authors.
+    pub anchor: Option<&'a ar::ResolvedPath>,
+}
+
+impl AssetKinds<'_> {
+    /// What `path` names. `arc` marks a path a sublayer, reference, payload
+    /// or clip template names, which is a layer whatever its extension. A
+    /// path with no URI scheme of its own, authored in a layer on one, is
+    /// told as that scheme's resolver anchors it, which reads its extension.
+    pub(super) fn of(&self, path: &str, arc: bool) -> AssetKind {
+        let anchored = self
+            .anchor
+            .filter(|anchor| !self.resolver.is_uri(path) && self.resolver.is_uri(&anchor.to_string_lossy()))
+            .map(|anchor| self.resolver.create_identifier(path, Some(anchor)));
+        let path = anchored.as_deref().unwrap_or(path);
+        match sdf::layer_registry::by_extension(self.formats, self.resolver.extension(path)) {
+            Some(format) if format.is_package() => AssetKind::Package,
+            Some(_) => AssetKind::Layer,
+            None if arc => AssetKind::Layer,
+            None => AssetKind::Asset,
         }
     }
 }
@@ -158,11 +171,10 @@ pub(super) fn apply_edits(data: &mut dyn AbstractData, edits: Vec<FieldEdit>) {
 /// attribute's default and time samples only when it is asset-typed. A path
 /// `visit` returns a replacement for is rewritten, an emptied one removed as
 /// [`modify_asset_paths`] describes, and the rewritten fields are returned
-/// for the caller to apply. `layer` names the layer in errors. What each path
-/// names is told among `formats` by its extension, as `resolver` reads it.
+/// for the caller to apply. `layer` names the layer in errors, and `kinds`
+/// tells what each path names.
 pub(super) fn visit_asset_paths(
-    resolver: &dyn ar::Resolver,
-    formats: &[&'static dyn sdf::FileFormat],
+    kinds: AssetKinds<'_>,
     data: &dyn AbstractData,
     layer: &str,
     mode: Visit,
@@ -170,8 +182,7 @@ pub(super) fn visit_asset_paths(
 ) -> Result<Vec<FieldEdit>> {
     let mut edits = Vec::new();
     let mut walk = Walk {
-        resolver,
-        formats,
+        kinds,
         layer,
         mode,
         visit: &mut visit,
@@ -240,10 +251,8 @@ pub(super) fn visit_asset_paths(
 
 /// The walk over one layer's fields for [`visit_asset_paths`].
 struct Walk<'a> {
-    /// What reads the extensions of the paths walked.
-    resolver: &'a dyn ar::Resolver,
-    /// The formats the paths walked are told by.
-    formats: &'a [&'static dyn sdf::FileFormat],
+    /// What tells the kind of each path walked.
+    kinds: AssetKinds<'a>,
     layer: &'a str,
     mode: Visit,
     visit: &'a mut dyn FnMut(AssetRef<'_>) -> Result<Option<String>>,
@@ -267,7 +276,7 @@ impl Walk<'_> {
         }
         let asset = AssetRef {
             path,
-            kind: AssetKind::of(self.resolver, self.formats, path, arc),
+            kind: self.kinds.of(path, arc),
             applied: self.applied,
         };
         let Some(rewritten) = (self.visit)(asset)? else {
@@ -499,7 +508,12 @@ pub(crate) mod tests {
         let resolver = Repo(Vec::new());
         let formats: Vec<&'static dyn sdf::FileFormat> =
             BUILTIN_FORMATS.iter().copied().chain([&PLANTED as _]).collect();
-        let kind = |path| AssetKind::of(&resolver, &formats, path, false);
+        let kinds = AssetKinds {
+            resolver: &resolver,
+            formats: &formats,
+            anchor: None,
+        };
+        let kind = |path| kinds.of(path, false);
         assert!(kind("repo://models/scene.usdz?rev=2") == AssetKind::Package);
         assert!(kind("repo://tex/a.png?rev=2") == AssetKind::Asset);
         assert!(
@@ -547,17 +561,15 @@ pub(crate) mod tests {
         let crate_data = usdc::CrateData::open(file.bytes().clone(), true)?;
         for data in [&layer as &dyn AbstractData, &crate_data] {
             let mut seen = Vec::new();
-            visit_asset_paths(
-                default_resolver(),
-                BUILTIN_FORMATS,
-                data,
-                "a.usdc",
-                Visit::DISCOVER,
-                |asset| {
-                    seen.push(asset.path.to_owned());
-                    Ok(None)
-                },
-            )?;
+            let kinds = AssetKinds {
+                resolver: default_resolver(),
+                formats: BUILTIN_FORMATS,
+                anchor: None,
+            };
+            visit_asset_paths(kinds, data, "a.usdc", Visit::DISCOVER, |asset| {
+                seen.push(asset.path.to_owned());
+                Ok(None)
+            })?;
             seen.sort();
             assert_eq!(seen, ["./file.png", "./tex.png"]);
         }

@@ -119,7 +119,7 @@ pub fn open_package(resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> 
             })?;
         Ok(Package(Arc::new(Mutex::new(Archive::from_asset(asset)?))))
     };
-    let (Some(scope), Some(resolver_id)) = (ar::CacheScope::current(), resolver.cache_id()) else {
+    let (Some(scope), Some(resolver_id)) = (ar::CacheScope::current(), resolver.cache_id(&path)) else {
         return open();
     };
     // The slot map is locked only to find the package's slot. The open runs
@@ -207,7 +207,7 @@ thread_local! {
 /// `package`, opened through `resolver`, and of every package nested in it,
 /// so the scope's next [`open_package`] of them opens them as they are now.
 pub(crate) fn forget_package(resolver: &dyn ar::Resolver, package: &str) {
-    let (Some(scope), Some(resolver_id)) = (ar::CacheScope::current(), resolver.cache_id()) else {
+    let (Some(scope), Some(resolver_id)) = (ar::CacheScope::current(), resolver.cache_id(package)) else {
         return;
     };
     let cache = scope.cache::<PackageCache>();

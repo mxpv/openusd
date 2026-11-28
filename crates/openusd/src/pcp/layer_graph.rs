@@ -1100,7 +1100,15 @@ impl LayerGraph {
         let Some(resolved) = self.anchored_or_bare(&anchored, sub_path) else {
             return Err(anchored);
         };
-        if !self.registry.is_context_dependent_path(sub_path) {
+        // A relative path in a layer on a URI scheme is anchored by the
+        // scheme's resolver, which `is_context_dependent_path` does not ask:
+        // it is anchored afresh.
+        let resolver = self.registry.resolver();
+        let on_scheme = !resolver.is_uri(sub_path)
+            && self
+                .anchor_location(Some(parent))
+                .is_some_and(|anchor| resolver.is_uri(&anchor.to_string_lossy()));
+        if !on_scheme && !self.registry.is_context_dependent_path(sub_path) {
             cache.entry(parent).or_default().insert(sub_path.to_string(), anchored);
         }
         Ok(resolved)

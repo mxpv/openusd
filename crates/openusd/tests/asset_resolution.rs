@@ -8,12 +8,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use openusd::pcp;
 use openusd::sdf;
 use openusd::usd::{self, Stage};
 use openusd::usdz::ArchiveWriter;
-use openusd::{ar, gf, vt};
+use openusd::{ar, gf, usd_utils, vt};
 
 /// Writes `source` as `scene.usda` under `dir` and opens it against the
 /// process-wide schemas.
@@ -2418,4 +2419,464 @@ fn insert_layer_incompatible_identifier() {
     assert!(authored.unwrap_or_default().is_empty(), "nothing was authored");
     assert_eq!(stage.layer_count(), 1, "nothing joined the stage");
     assert_eq!(double_at(&stage, "/P.y"), None);
+}
+
+/// A scheme resolver that serves the files it holds at `mem://` locations
+/// and knows nothing of local files or packages: a relative path is anchored
+/// beside the `mem://` layer that authors it, and any other path is left as
+/// written.
+struct Mem {
+    files: HashMap<String, Vec<u8>>,
+    schemes: &'static [&'static str],
+    /// The location each logical identifier is stored at.
+    aliases: HashMap<String, String>,
+}
+
+impl Mem {
+    /// A resolver over `files`, by `mem://` location, declaring `mem`.
+    fn new(files: impl IntoIterator<Item = (&'static str, Vec<u8>)>) -> Self {
+        let files = files
+            .into_iter()
+            .map(|(path, bytes)| (path.to_owned(), bytes))
+            .collect();
+        Self {
+            files,
+            schemes: &["mem"],
+            aliases: HashMap::new(),
+        }
+    }
+
+    /// `path` with its scheme spelled `mem`, if it opens with one.
+    fn canonical(path: &str) -> Option<String> {
+        let (scheme, rest) = path.split_once("://")?;
+        scheme.eq_ignore_ascii_case("mem").then(|| format!("mem://{rest}"))
+    }
+}
+
+impl ar::Resolver for Mem {
+    fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+        if let Some(canonical) = Mem::canonical(asset_path) {
+            return canonical;
+        }
+        if self.is_uri(asset_path) {
+            return asset_path.to_owned();
+        }
+        let anchor = anchor.map(|anchor| anchor.to_string_lossy().into_owned());
+        match anchor.as_deref().and_then(Mem::canonical) {
+            Some(anchor) if !Path::new(asset_path).is_absolute() => {
+                let mut dir: Vec<&str> = anchor.rsplit_once('/').map_or("", |(dir, _)| dir).split('/').collect();
+                for part in asset_path.split('/') {
+                    match part {
+                        "." => {}
+                        ".." => {
+                            dir.pop();
+                        }
+                        other => dir.push(other),
+                    }
+                }
+                dir.join("/")
+            }
+            _ => asset_path.to_owned(),
+        }
+    }
+
+    fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        let stored = self.aliases.get(asset_path).map_or(asset_path, String::as_str);
+        self.files.contains_key(stored).then(|| ar::ResolvedPath::new(stored))
+    }
+
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        Some(ar::ResolvedPath::new(asset_path))
+    }
+
+    fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+        let bytes = self
+            .files
+            .get(&*resolved_path.to_string_lossy())
+            .ok_or(io::ErrorKind::NotFound)?;
+        Ok(Box::new(io::Cursor::new(bytes.clone())))
+    }
+
+    fn uri_schemes(&self) -> &[&str] {
+        self.schemes
+    }
+
+    /// The extension up to the query a location may carry.
+    fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
+        let path = asset_path.split_once('?').map_or(asset_path, |(path, _)| path);
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+    }
+
+    fn modification_timestamp(&self, _asset_path: &str, _resolved_path: &ar::ResolvedPath) -> Option<SystemTime> {
+        Some(SystemTime::UNIX_EPOCH)
+    }
+
+    fn identity(&self) -> String {
+        "mem".to_owned()
+    }
+}
+
+/// The bytes of a usdz package holding `entries`, in order.
+fn usdz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut writer = ArchiveWriter::new(io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        writer.add_layer(name, bytes).expect("add an entry");
+    }
+    writer.finish().expect("finish the package").into_inner()
+}
+
+/// A stage on `mem://shots/root.usda`, which sublayers `./layout.usda` on the
+/// scheme and references the local `model.usda` in `dir` by absolute path.
+fn mixed_stage(dir: &Path) -> openusd::Result<Stage> {
+    let model = dir.join("model.usda");
+    fs::write(&model, "#usda 1.0\ndef \"Model\" {\n    def \"Mesh\" {}\n}\n")?;
+    let root = format!(
+        "#usda 1.0\n(\n    subLayers = [@./layout.usda@]\n)\ndef \"Shot\" (\n    references = @{}@</Model>\n)\n{{\n}}\n",
+        model.display().to_string().replace('\\', "/")
+    );
+    let mem = Mem::new([
+        ("mem://shots/root.usda", root.into_bytes()),
+        ("mem://shots/layout.usda", b"#usda 1.0\ndef \"Layout\" {}\n".to_vec()),
+    ]);
+    Stage::builder().uri_resolver(mem).open("mem://shots/root.usda")
+}
+
+/// A stage on a scheme root composes the layer a `./` path authored in it
+/// names on the scheme, and a local file it names by absolute path, through
+/// the primary resolver.
+#[test]
+fn scheme_root_composes() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = mixed_stage(dir.path())?;
+    assert!(stage.prim("/Layout")?.is_valid()?, "the scheme sublayer composes");
+    assert!(stage.prim("/Shot/Mesh")?.is_valid()?, "the local reference composes");
+    Ok(())
+}
+
+/// A local layer composes a layer it names on the scheme, the scheme matched
+/// case-insensitively.
+#[test]
+fn local_root_scheme_reference() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"Shot\" (\n    references = @MEM://props/prop.usda@</Prop>\n)\n{\n}\n",
+    )?;
+    let mem = Mem::new([(
+        "mem://props/prop.usda",
+        b"#usda 1.0\ndef \"Prop\" {\n    def \"Leg\" {}\n}\n".to_vec(),
+    )]);
+    let stage = Stage::builder().uri_resolver(mem).open(root.to_str().unwrap())?;
+    assert!(stage.prim("/Shot/Leg")?.is_valid()?);
+    Ok(())
+}
+
+/// A package on the scheme, and one nested in it, is read through the stage:
+/// the scheme resolver serves only the package file.
+#[test]
+fn scheme_package_composes() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let inner = usdz(&[("inner.usda", b"#usda 1.0\ndef \"Inner\" {\n    def \"Deep\" {}\n}\n")]);
+    let outer = usdz(&[("root.usda", b"#usda 1.0\ndef \"Outer\" {}\n"), ("inner.usdz", &inner)]);
+    let model = usdz(&[("model.usda", b"#usda 1.0\ndef \"Model\" {\n    def \"Mesh\" {}\n}\n")]);
+    let root = dir.path().join("root.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\ndef \"A\" (\n    references = @mem://pkg/model.usdz@</Model>\n)\n{\n}\n\
+         def \"B\" (\n    references = @mem://pkg/outer.usdz[inner.usdz]@</Inner>\n)\n{\n}\n",
+    )?;
+    let mem = Mem::new([("mem://pkg/model.usdz", model), ("mem://pkg/outer.usdz", outer)]);
+    let stage = Stage::builder().uri_resolver(mem).open(root.to_str().unwrap())?;
+    assert!(stage.prim("/A/Mesh")?.is_valid()?, "the package's root layer composes");
+    assert!(
+        stage.prim("/B/Deep")?.is_valid()?,
+        "the nested package's root layer composes"
+    );
+    assert!(
+        stage.root_layer().identifier().ends_with("root.usda"),
+        "the root stays local"
+    );
+    Ok(())
+}
+
+/// A reload asks the scheme resolver for a scheme layer's modification time:
+/// a layer whose time is unchanged is not read again.
+#[test]
+fn scheme_reload_timestamp() -> openusd::Result<()> {
+    let mem = Mem::new([("mem://shots/root.usda", b"#usda 1.0\ndef \"Shot\" {}\n".to_vec())]);
+    let stage = Stage::builder().uri_resolver(mem).open("mem://shots/root.usda")?;
+    assert!(
+        !stage.root_layer().reload(false)?,
+        "an unchanged layer is not read again"
+    );
+    Ok(())
+}
+
+/// The dependencies of a scheme root are found through the scheme resolver
+/// and the primary one alike.
+#[test]
+fn scheme_dependencies() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let stage = mixed_stage(dir.path())?;
+    let dependencies = usd_utils::all_dependencies(&stage, "mem://shots/root.usda")?;
+    assert_eq!(dependencies.layers[0], "mem://shots/root.usda");
+    assert!(
+        dependencies
+            .layers
+            .iter()
+            .any(|layer| layer == "mem://shots/layout.usda")
+    );
+    assert!(dependencies.layers.iter().any(|layer| layer.ends_with("model.usda")));
+    assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+    Ok(())
+}
+
+/// A scheme resolver is refused when it declares no scheme, a scheme that is
+/// not one, or one another declares.
+#[test]
+fn scheme_resolver_refused() {
+    let refused = |builder: usd::StageBuilder| match builder.in_memory("refused") {
+        Err(openusd::Error::Scheme(error)) => error,
+        other => panic!("not refused: {:?}", other.map(|_| ())),
+    };
+    let declaring = |schemes: &'static [&'static str]| Mem {
+        files: HashMap::new(),
+        schemes,
+        aliases: HashMap::new(),
+    };
+    assert_eq!(
+        refused(Stage::builder().uri_resolver(declaring(&[]))),
+        ar::SchemeError::NoScheme
+    );
+    assert_eq!(
+        refused(Stage::builder().uri_resolver(declaring(&["1x"]))),
+        ar::SchemeError::Invalid("1x".into())
+    );
+    assert_eq!(
+        refused(Stage::builder().uri_resolver(declaring(&["s 3"]))),
+        ar::SchemeError::Invalid("s 3".into())
+    );
+    assert_eq!(
+        refused(
+            Stage::builder()
+                .uri_resolver(declaring(&["mem"]))
+                .uri_resolver(declaring(&["MEM"]))
+        ),
+        ar::SchemeError::Duplicate("mem".into())
+    );
+}
+
+/// A package a layer on the scheme names by a relative path is told a
+/// package as the scheme's resolver reads its extension, so what it holds
+/// is found too.
+#[test]
+fn scheme_relative_package() -> openusd::Result<()> {
+    let package = usdz(&[
+        (
+            "root.usda",
+            b"#usda 1.0
+def \"Look\" {
+    asset tex = @./tex.png@
+}
+",
+        ),
+        ("tex.png", b"png"),
+    ]);
+    let mem = Mem::new([
+        (
+            "mem://shots/root.usda",
+            b"#usda 1.0
+def \"Shot\" {
+    asset look = @./pkg.usdz?rev=2@
+}
+"
+            .to_vec(),
+        ),
+        ("mem://shots/pkg.usdz?rev=2", package),
+    ]);
+    let stage = Stage::builder().uri_resolver(mem).open("mem://shots/root.usda")?;
+    let dependencies = usd_utils::all_dependencies(&stage, "mem://shots/root.usda")?;
+    assert!(
+        dependencies
+            .layers
+            .iter()
+            .any(|layer| layer == "mem://shots/pkg.usdz?rev=2"),
+        "{:?}",
+        dependencies.layers
+    );
+    assert!(
+        dependencies.assets.iter().any(|asset| asset.ends_with("[tex.png]")),
+        "{:?}",
+        dependencies.assets
+    );
+    assert!(dependencies.unresolved.is_empty(), "{:?}", dependencies.unresolved);
+    Ok(())
+}
+
+/// A versioned root and the versioned sublayer it names relative to itself
+/// are packaged under names ending in the extension the scheme's resolver
+/// reads, the sublayer path rewritten to its entry, so the package composes
+/// as the stage did.
+#[test]
+fn versioned_names_packaged() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mem = Mem::new([
+        (
+            "mem://shots/root.usda?rev=2",
+            b"#usda 1.0
+(
+    subLayers = [@./layout.usda?rev=2@]
+)
+"
+            .to_vec(),
+        ),
+        (
+            "mem://shots/layout.usda?rev=2",
+            b"#usda 1.0
+def \"Layout\" {}
+"
+            .to_vec(),
+        ),
+    ]);
+    let stage = Stage::builder().uri_resolver(mem).open("mem://shots/root.usda?rev=2")?;
+    assert!(stage.prim("/Layout")?.is_valid()?);
+    let output = dir.path().join("out.usdz");
+    let skipped = usd_utils::create_usdz_package(&stage, "mem://shots/root.usda?rev=2", &output, None)?;
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let packaged = Stage::open(output.to_str().unwrap())?;
+    assert!(
+        packaged.prim("/Layout")?.is_valid()?,
+        "the sublayer composes from the package"
+    );
+    Ok(())
+}
+
+/// A layer whose identifier has no extension is packaged under a name
+/// ending in the extension of the location its resolver stores it at, so
+/// the package composes as the stage did.
+#[test]
+fn alias_extension_packaged() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut mem = Mem::new([
+        (
+            "mem://shots/root.usda",
+            b"#usda 1.0\ndef \"Shot\" (\n    references = @mem://catalog/chair@</Chair>\n)\n{\n}\n".to_vec(),
+        ),
+        (
+            "mem://storage/chair.usda",
+            b"#usda 1.0\ndef \"Chair\" {\n    def \"Seat\" {}\n}\n".to_vec(),
+        ),
+    ]);
+    mem.aliases
+        .insert("mem://catalog/chair".into(), "mem://storage/chair.usda".into());
+    let stage = Stage::builder().uri_resolver(mem).open("mem://shots/root.usda")?;
+    assert!(stage.prim("/Shot/Seat")?.is_valid()?);
+    let output = dir.path().join("out.usdz");
+    usd_utils::create_usdz_package(&stage, "mem://shots/root.usda", &output, None)?;
+    let packaged = Stage::open(output.to_str().unwrap())?;
+    assert!(
+        packaged.prim("/Shot/Seat")?.is_valid()?,
+        "the chair composes from the package"
+    );
+    Ok(())
+}
+
+/// An edit the stage holds in a package whose identifier names another
+/// stored location is packaged with it.
+#[test]
+fn aliased_package_edit() -> openusd::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let model = usdz(&[("root.usda", b"#usda 1.0\ndef \"Model\" {}\n")]);
+    let mut mem = Mem::new([
+        (
+            "mem://shots/root.usda",
+            b"#usda 1.0\ndef \"Shot\" (\n    references = @mem://catalog/model.usdz@</Model>\n)\n{\n}\n".to_vec(),
+        ),
+        ("mem://storage/v1.usdz", model),
+    ]);
+    mem.aliases
+        .insert("mem://catalog/model.usdz".into(), "mem://storage/v1.usdz".into());
+    let registry = sdf::LayerRegistry::with_uri_resolvers(Box::new(ar::DefaultResolver::new()), vec![Box::new(mem)])?;
+    let stage = Stage::builder()
+        .registry(registry.clone())
+        .open("mem://shots/root.usda")?;
+    assert!(stage.prim("/Shot")?.is_valid()?);
+    let model = registry
+        .find("mem://catalog/model.usdz")?
+        .expect("the stage holds the package's root layer");
+    model.edit(|edit| {
+        sdf::PrimSpec::new(edit.data_mut(), "/Model/Edited", sdf::Specifier::Def, "")?;
+        Ok(())
+    })?;
+    let output = dir.path().join("out.usdz");
+    usd_utils::create_usdz_package(&stage, "mem://shots/root.usda", &output, None)?;
+    let packaged = Stage::open(output.to_str().unwrap())?;
+    assert!(packaged.prim("/Shot/Edited")?.is_valid()?, "the edit is packaged");
+    Ok(())
+}
+
+/// A URI the primary resolver declares reaches it from a layer another
+/// scheme resolver serves, not that resolver as a path beside the layer.
+#[test]
+fn primary_uri_from_scheme() -> openusd::Result<()> {
+    let primary = Mem {
+        files: HashMap::from([(
+            "repo:chair.usda".to_owned(),
+            b"#usda 1.0\ndef \"Chair\" {\n    def \"Seat\" {}\n}\n".to_vec(),
+        )]),
+        schemes: &["repo"],
+        aliases: HashMap::new(),
+    };
+    let mem = Mem::new([(
+        "mem://shots/root.usda",
+        b"#usda 1.0\ndef \"Shot\" (\n    references = @repo:chair.usda@</Chair>\n)\n{\n}\n".to_vec(),
+    )]);
+    let stage = Stage::builder()
+        .resolver(primary)
+        .uri_resolver(mem)
+        .open("mem://shots/root.usda")?;
+    assert!(stage.prim("/Shot/Seat")?.is_valid()?);
+    Ok(())
+}
+
+/// A one-letter scheme a resolver declares opens its `x://` paths.
+#[test]
+fn one_letter_scheme() -> openusd::Result<()> {
+    let catalog = Mem {
+        files: HashMap::from([(
+            "x://catalog/model.usda".to_owned(),
+            b"#usda 1.0\ndef \"Model\" {}\n".to_vec(),
+        )]),
+        schemes: &["x"],
+        aliases: HashMap::new(),
+    };
+    let stage = Stage::builder().uri_resolver(catalog).open("x://catalog/model.usda")?;
+    assert!(stage.prim("/Model")?.is_valid()?);
+    Ok(())
+}
+
+/// A stage opened over a registry handed to the builder refuses scheme
+/// resolvers, named before the registry or after it.
+#[test]
+fn uri_resolver_given_registry() {
+    let shared = sdf::LayerRegistry::default();
+    for builder in [
+        Stage::builder().registry(shared.clone()).uri_resolver(Mem::new([])),
+        Stage::builder().uri_resolver(Mem::new([])).registry(shared.clone()),
+    ] {
+        let refused = builder.in_memory("refused").map(|_| ());
+        assert!(
+            matches!(
+                refused,
+                Err(openusd::Error::StageBuilder(
+                    usd::StageBuilderError::UriResolversOverRegistry
+                ))
+            ),
+            "{refused:?}"
+        );
+    }
 }

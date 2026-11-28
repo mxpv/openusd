@@ -8,7 +8,7 @@ use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 
 use super::discover::{Content, Discover, Discovery, Placement, Root, Source, Use, discover};
-use super::walk::{Visit, apply_edits, visit_asset_paths};
+use super::walk::{AssetKinds, Visit, apply_edits, visit_asset_paths};
 use crate::sdf::{self, AbstractData};
 use crate::usd::Stage;
 use crate::{Error, Result, ar, pcp, tf, usdz};
@@ -85,7 +85,8 @@ pub fn create_usdz_package<'a>(
                 name: String::new(),
                 reason: "is missing: a root read from nowhere needs first_layer_name to name the package's default layer",
             })?;
-        ar::split_file_name(location).1.to_owned()
+        let resolver = graph.layer_registry().resolver();
+        with_extension(ar::split_file_name(location).1.to_owned(), resolver.extension(location))
     };
     if !usdz::is_layer_name(&name) {
         return Err(usdz::ArchiveError::InvalidEntryName {
@@ -143,6 +144,7 @@ fn assign_entries(
             Placement::Root => first_name.to_owned(),
             Placement::Entry(name) => name.clone(),
             Placement::Named { by, path } => kept_entry(&entries[*by], path)
+                .map(|entry| with_extension(entry, resolver.extension(located(source))))
                 .filter(|entry| free(entry))
                 .unwrap_or_else(|| moved_entry(&mut directories, moved_name(resolver, source), free)),
             Placement::Tile { of, number } => ar::UdimPath::parse(&entries[*of])
@@ -198,7 +200,7 @@ fn free(source: &Source<'_>, entry: &str, entries: &[String], taken: &HashSet<St
 /// for a set of tiles before the pattern's directory, which keeps a pattern
 /// in a directory with the name. For a source inside a package, the split and
 /// the name fall within its innermost packaged path. The name ends in the
-/// extension `resolver` reads in the source's identifier, which tells the
+/// extension `resolver` reads in the source's location, which tells the
 /// entry's format where the package is read.
 fn moved_name<'s>(resolver: &dyn ar::Resolver, source: &'s Source<'_>) -> (&'s str, String) {
     let identifier = source.identifier.as_str();
@@ -214,8 +216,14 @@ fn moved_name<'s>(resolver: &dyn ar::Resolver, source: &'s Source<'_>) -> (&'s s
     let name = identifier[split..span.end].replace('\\', "/");
     (
         &identifier[..split],
-        with_extension(name, resolver.extension(identifier)),
+        with_extension(name, resolver.extension(located(source))),
     )
+}
+
+/// Where `source` was read from, or its identifier for one read from
+/// nowhere: the spelling whose extension tells its format.
+fn located<'s>(source: &'s Source<'_>) -> &'s str {
+    source.content.location().unwrap_or(&source.identifier)
 }
 
 /// `name` ending in `.extension`: cut after the extension where it appears
@@ -295,18 +303,19 @@ fn source_bytes(
         Content::Layer { layer, uses } => {
             let registry = graph.layer_registry();
             let formats = registry.formats();
-            let edits = visit_asset_paths(
-                registry.resolver(),
-                &formats,
-                layer.data(),
-                layer.identifier(),
-                Visit::DISCOVER,
-                |asset| Ok(rewrite(location, asset.path, uses, entries)),
-            )?;
-            if edits.is_empty() && sdf::LayerRegistry::export_format(&formats, location).is_err() {
-                // A layer its format cannot write, with no path to rewrite, is
-                // stored as it was read, as C++ copies an unmodified layer from
-                // its real path.
+            let anchor = layer.anchor_location();
+            let kinds = AssetKinds {
+                resolver: registry.resolver(),
+                formats: &formats,
+                anchor: anchor.as_ref(),
+            };
+            let edits = visit_asset_paths(kinds, layer.data(), layer.identifier(), Visit::DISCOVER, |asset| {
+                Ok(rewrite(location, asset.path, uses, entries))
+            })?;
+            if edits.is_empty() && !layer.is_dirty() && sdf::LayerRegistry::export_format(&formats, location).is_err() {
+                // A layer its format cannot write, unedited and with no path to
+                // rewrite, is stored as it was read, as C++ copies an unmodified
+                // layer from its real path.
                 return match original {
                     Some(bytes) => Ok(bytes),
                     None => read_asset(graph, &ar::ResolvedPath::new(layer.real_path())),
@@ -572,6 +581,35 @@ def "T"
             .expect("the look is packaged");
         let packaged = usdz::Archive::open(&output)?.entry(look)?;
         assert_eq!(&*packaged, b"Scene\n");
+        Ok(())
+    }
+
+    /// A layer of a format that cannot write, edited in memory, fails the
+    /// package rather than having the edit dropped.
+    #[test]
+    fn read_only_edit_refused() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\n(\n    subLayers = [@look.planted@]\n)\n",
+        );
+        write(dir.path(), "look.planted", "Look\n");
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder()
+            .registry(registry.clone())
+            .format(&PLANTED)
+            .open(&root)?;
+        let look = registry
+            .find(&dir.path().join("look.planted").to_string_lossy())?
+            .expect("the stage holds the look");
+        look.edit(|edit| {
+            sdf::PrimSpec::new(edit.data_mut(), "/Edited", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        let output = dir.path().join("out.usdz");
+        assert!(create_usdz_package(&stage, &root, &output, None).is_err());
         Ok(())
     }
 

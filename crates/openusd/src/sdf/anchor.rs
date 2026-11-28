@@ -132,7 +132,7 @@ pub(crate) fn absolute_path_with(
     // otherwise name fails to resolve.
     if let Some(anchor) = anchor.map(|anchor| anchor.to_string_lossy())
         && ar::is_relative_path(asset_path)
-        && !ar::is_uri(resolver, asset_path)
+        && !resolver.is_uri(asset_path)
     {
         // C++ `Sdf_IsPackageOrPackagedLayer`: the anchor is a package itself,
         // whose root layer the path is authored in, a nested one
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn custom_resolver_nests() {
         let primary = ar::tests::TestResolver(|| Err(io::ErrorKind::NotFound.into()));
-        let resolver = ar::Dispatcher::new(Box::new(primary), &[]);
+        let resolver = ar::Dispatcher::new(Box::new(primary), Vec::new(), &[]).unwrap();
         let packaged = ar::ResolvedPath::new("pkg.usdz[geom/scene.usda]");
         assert_eq!(
             absolute_path_at(&resolver, Some(&packaged), "./tex/a.png"),
@@ -392,7 +392,7 @@ mod tests {
                 asset_path.to_owned()
             }
             fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
-                ar::is_uri(self, asset_path).then(|| ar::ResolvedPath::new(asset_path))
+                self.is_uri(asset_path).then(|| ar::ResolvedPath::new(asset_path))
             }
             fn resolve_for_new_asset(&self, _asset_path: &str) -> Option<ar::ResolvedPath> {
                 None
@@ -414,7 +414,7 @@ mod tests {
             "pkg.usdz[dir/tex.png]"
         );
         assert!(
-            !ar::is_uri(&ar::DefaultResolver::new(), "https://host/tex.png"),
+            !ar::Resolver::is_uri(&ar::DefaultResolver::new(), "https://host/tex.png"),
             "the default resolver handles no URI scheme"
         );
     }

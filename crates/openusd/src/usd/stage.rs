@@ -4861,6 +4861,11 @@ impl Drop for LoadRulesGuard<'_> {
 /// load through (resolver + file formats) and composition options.
 pub struct StageBuilder {
     registry: sdf::LayerRegistry,
+    /// Where the registry the stage opens over comes from.
+    source: RegistrySource,
+    /// The scheme resolvers [`uri_resolver`](Self::uri_resolver) named, given
+    /// to the registry made when the stage opens.
+    uri_resolvers: Vec<Box<dyn ar::Resolver>>,
     /// The formats [`format`](Self::format) named, added to the registry
     /// when the stage opens.
     formats: Vec<&'static dyn sdf::FileFormat>,
@@ -4872,6 +4877,27 @@ pub struct StageBuilder {
     muted: HashSet<String>,
     schema_registry: Option<Arc<SchemaRegistry>>,
     color_config_fallbacks: ColorConfigFallbacks,
+}
+
+/// Where the registry a [`StageBuilder`] opens its stage over comes from.
+enum RegistrySource {
+    /// A registry made over the [`ar::DefaultResolver`].
+    Default,
+    /// The builder's registry, handed to it whole, resolvers and all.
+    Given,
+    /// A registry made over the resolver [`StageBuilder::resolver`] named.
+    Resolver(Box<dyn ar::Resolver>),
+}
+
+/// Why a [`StageBuilder`] cannot open its stage as configured.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StageBuilderError {
+    /// Scheme resolvers ([`StageBuilder::uri_resolver`]) were named for a
+    /// stage opened over a registry handed to the builder
+    /// ([`StageBuilder::registry`]), whose resolvers are fixed when it is
+    /// made ([`sdf::LayerRegistry::with_uri_resolvers`]).
+    #[error("scheme resolvers are given to a registry when it is made, not to a stage opened over one")]
+    UriResolversOverRegistry,
 }
 
 /// What a stack open collected: its layers, the diagnostics of the
@@ -4888,6 +4914,8 @@ impl StageBuilder {
     fn new() -> Self {
         Self {
             registry: sdf::LayerRegistry::default(),
+            source: RegistrySource::Default,
+            uri_resolvers: Vec::new(),
             formats: Vec::new(),
             variant_fallbacks: pcp::VariantFallbackMap::new(),
             session_layer: None,
@@ -4908,17 +4936,63 @@ impl StageBuilder {
     /// Opening a stage from inside an edit of the registry's layers, or from
     /// user code (a resolver, a file format) a stage's composition runs, fails
     /// with [`sdf::LayerError::Busy`].
+    ///
+    /// The registry's resolvers are the ones it was made with: naming a
+    /// scheme resolver ([`uri_resolver`](Self::uri_resolver)) as well fails
+    /// the open with [`StageBuilderError::UriResolversOverRegistry`]. A
+    /// [`resolver`](Self::resolver) named after this takes its place.
     pub fn registry(mut self, registry: sdf::LayerRegistry) -> Self {
         self.registry = registry;
+        self.source = RegistrySource::Given;
         self
     }
 
-    /// Sets a custom asset resolver, wrapping it in a [`sdf::LayerRegistry`]
-    /// that takes the place of the builder's registry, the formats added to
-    /// that one directly included. A convenience over
-    /// [`registry`](Self::registry).
-    pub fn resolver<R: ar::Resolver + 'static>(self, resolver: R) -> Self {
-        self.registry(sdf::LayerRegistry::new(Box::new(resolver)))
+    /// Sets a custom asset resolver, the primary one of the
+    /// [`sdf::LayerRegistry`] the stage opens over, which takes the place of
+    /// a [`registry`](Self::registry) named before it.
+    pub fn resolver<R: ar::Resolver + 'static>(mut self, resolver: R) -> Self {
+        self.source = RegistrySource::Resolver(Box::new(resolver));
+        self
+    }
+
+    /// Resolves every path that opens with one of the URI schemes `resolver`
+    /// declares ([`uri_schemes`](ar::Resolver::uri_schemes)) through it, and
+    /// every other path through the primary [`resolver`](Self::resolver) (C++
+    /// the URI resolvers `ArGetResolver` dispatches to). A package on one of
+    /// the schemes is read through the stage, so the resolver serves only the
+    /// package file. A location the resolver
+    /// resolves a path to keeps the scheme, so the asset there opens through
+    /// it too. Calls add up.
+    ///
+    /// The open fails with [`ar::SchemeError`] on schemes that cannot be
+    /// routed, and with [`StageBuilderError::UriResolversOverRegistry`] over
+    /// a [`registry`](Self::registry) handed to the builder.
+    pub fn uri_resolver<R: ar::Resolver + 'static>(mut self, resolver: R) -> Self {
+        self.uri_resolvers.push(Box::new(resolver));
+        self
+    }
+
+    /// The builder over the registry the stage opens over: the one handed
+    /// to it, or one made from the resolvers it names, with the formats it
+    /// names added.
+    fn settle(mut self) -> Result<Self> {
+        let uri_resolvers = mem::take(&mut self.uri_resolvers);
+        let resolver: Option<Box<dyn ar::Resolver>> = match mem::replace(&mut self.source, RegistrySource::Given) {
+            RegistrySource::Given if !uri_resolvers.is_empty() => {
+                return Err(StageBuilderError::UriResolversOverRegistry.into());
+            }
+            RegistrySource::Given => None,
+            RegistrySource::Default if uri_resolvers.is_empty() => None,
+            RegistrySource::Default => Some(Box::new(ar::DefaultResolver::new())),
+            RegistrySource::Resolver(resolver) => Some(resolver),
+        };
+        if let Some(resolver) = resolver {
+            self.registry = sdf::LayerRegistry::with_uri_resolvers(resolver, uri_resolvers)?;
+        }
+        for &format in &self.formats {
+            self.registry.add_format(format);
+        }
+        Ok(self)
     }
 
     /// Reads layers in `format` too, beside the built-in formats, so a
@@ -4932,13 +5006,6 @@ impl StageBuilder {
     pub fn format(mut self, format: &'static dyn sdf::FileFormat) -> Self {
         self.formats.push(format);
         self
-    }
-
-    /// Adds the formats the builder names to its registry.
-    fn add_formats(&self) {
-        for &format in &self.formats {
-            self.registry.add_format(format);
-        }
     }
 
     /// Sets the stage-level interpolation mode for time-sampled
@@ -5087,9 +5154,9 @@ impl StageBuilder {
         // One cache scope spans the open. A packaged root is opened once for
         // its default-layer lookup, its probes and its entry reads.
         let _scope = ar::CacheScope::begin();
-        self.add_formats();
-        let root = self.registry.prepare_root(root_path)?;
-        self.open_root(root)
+        let builder = self.settle()?;
+        let root = builder.registry.prepare_root(root_path)?;
+        builder.open_root(root)
     }
 
     /// Opens a stage whose root is `layer`, a layer already read (C++
@@ -5103,9 +5170,9 @@ impl StageBuilder {
     /// already holds a layer with its identifier or read from its file.
     pub fn open_layer(self, layer: sdf::Layer) -> Result<Stage> {
         let _scope = ar::CacheScope::begin();
-        self.add_formats();
-        let root = self.registry.adopt(layer).map_err(|refused| refused.error)?;
-        self.open_root(root.into())
+        let builder = self.settle()?;
+        let root = builder.registry.adopt(layer).map_err(|refused| refused.error)?;
+        builder.open_root(root.into())
     }
 
     /// Opens a stage over `root`, a root layer the builder's registry holds,

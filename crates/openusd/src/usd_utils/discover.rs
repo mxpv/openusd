@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Deref;
 
-use super::walk::{AssetKind, Visit, visit_asset_paths};
+use super::walk::{AssetKind, AssetKinds, Visit, visit_asset_paths};
 use crate::sdf;
 use crate::usd::Stage;
 use crate::{Error, Result, ar, pcp};
@@ -531,22 +531,21 @@ impl<'a> Discoverer<'a> {
         let mut found = Vec::new();
         let registry = self.graph.layer_registry();
         let formats = registry.formats();
-        visit_asset_paths(
-            registry.resolver(),
-            &formats,
-            layer.data(),
-            layer.identifier(),
-            Visit::DISCOVER,
-            |asset| {
-                if (asset.applied || self.policy.inactive)
-                    && !uses.contains_key(asset.path)
-                    && !found.iter().any(|(path, _)| path == asset.path)
-                {
-                    found.push((asset.path.to_owned(), asset.kind));
-                }
-                Ok(None)
-            },
-        )?;
+        let anchor = layer.anchor_location();
+        let kinds = AssetKinds {
+            resolver: registry.resolver(),
+            formats: &formats,
+            anchor: anchor.as_ref(),
+        };
+        visit_asset_paths(kinds, layer.data(), layer.identifier(), Visit::DISCOVER, |asset| {
+            if (asset.applied || self.policy.inactive)
+                && !uses.contains_key(asset.path)
+                && !found.iter().any(|(path, _)| path == asset.path)
+            {
+                found.push((asset.path.to_owned(), asset.kind));
+            }
+            Ok(None)
+        })?;
         Ok(found)
     }
 
@@ -650,10 +649,10 @@ impl<'a> Discoverer<'a> {
                 let Some(resolved) = registry.resolver().resolve(&located.identifier) else {
                     return Ok(None);
                 };
-                Content::Package {
-                    resolved,
-                    inside: discover_inside(self.graph, self.policy, &located.identifier)?,
-                }
+                // What the stage holds inside the package is found by the
+                // location it was read from, whatever identifier names it.
+                let inside = discover_inside(self.graph, self.policy, &resolved.to_string_lossy())?;
+                Content::Package { resolved, inside }
             }
         };
         Ok(Some(content))

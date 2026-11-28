@@ -298,8 +298,24 @@ impl LayerRegistry {
     /// into the built-in package formats through an [`ar::Dispatcher`] over
     /// it.
     pub fn new(resolver: Box<dyn ar::Resolver>) -> Self {
+        Self::with_dispatcher(dispatcher(resolver, Vec::new()).expect("no scheme resolver to refuse"))
+    }
+
+    /// A registry resolving asset paths through `resolver`, and each path
+    /// that opens with a URI scheme one of `uri_resolvers` declares
+    /// ([`uri_schemes`](ar::Resolver::uri_schemes)) through that one. Fails
+    /// with [`ar::SchemeError`].
+    pub fn with_uri_resolvers(
+        resolver: Box<dyn ar::Resolver>,
+        uri_resolvers: Vec<Box<dyn ar::Resolver>>,
+    ) -> Result<Self, ar::SchemeError> {
+        Ok(Self::with_dispatcher(dispatcher(resolver, uri_resolvers)?))
+    }
+
+    /// A registry resolving asset paths through `dispatcher`.
+    fn with_dispatcher(dispatcher: ar::Dispatcher) -> Self {
         Self {
-            resolver: Arc::new(dispatcher(resolver)),
+            resolver: Arc::new(dispatcher),
             formats: FormatSet::default(),
             store: Rc::default(),
         }
@@ -1089,10 +1105,13 @@ pub(crate) fn read_bytes_in(
     Ok((format.read_bytes(bytes, source_name)?, format))
 }
 
-/// The [`ar::Dispatcher`] over `primary` that reads the built-in package
-/// formats.
-fn dispatcher(primary: Box<dyn ar::Resolver>) -> ar::Dispatcher {
-    ar::Dispatcher::new(primary, &[&UsdzResolver])
+/// The [`ar::Dispatcher`] over `primary` and the scheme resolvers `schemed`
+/// that reads the built-in package formats.
+fn dispatcher(
+    primary: Box<dyn ar::Resolver>,
+    schemed: Vec<Box<dyn ar::Resolver>>,
+) -> Result<ar::Dispatcher, ar::SchemeError> {
+    ar::Dispatcher::new(primary, schemed, &[&UsdzResolver])
 }
 
 /// The dispatcher over a [`DefaultResolver`](ar::DefaultResolver) with no
@@ -1100,7 +1119,9 @@ fn dispatcher(primary: Box<dyn ar::Resolver>) -> ar::Dispatcher {
 /// caller: what a layer read through no registry anchors its asset paths
 /// through.
 pub(crate) fn default_resolver() -> &'static ar::Dispatcher {
-    static DEFAULT: LazyLock<ar::Dispatcher> = LazyLock::new(|| dispatcher(Box::new(ar::DefaultResolver::new())));
+    static DEFAULT: LazyLock<ar::Dispatcher> = LazyLock::new(|| {
+        dispatcher(Box::new(ar::DefaultResolver::new()), Vec::new()).expect("no scheme resolver to refuse")
+    });
     &DEFAULT
 }
 
@@ -1119,7 +1140,7 @@ pub(crate) mod tests {
     /// reads the built-in package formats, as a registry resolves asset
     /// paths.
     pub(crate) fn dispatcher() -> ar::Dispatcher {
-        super::dispatcher(Box::new(ar::DefaultResolver::new()))
+        super::dispatcher(Box::new(ar::DefaultResolver::new()), Vec::new()).expect("no scheme resolver to refuse")
     }
 
     /// `layer` held in `store`, or the live layer already carrying its

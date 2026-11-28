@@ -231,7 +231,7 @@ fn located(
         let directory = href.rfind(['/', '\\']).map_or("", |end| &href[..=end]);
         let beside = identifier != href && !document::is_absolute(href);
         library.anchor_filenames(&|path| {
-            if ar::is_uri(resolver, path) || document::is_absolute(path) {
+            if resolver.is_uri(path) || document::is_absolute(path) {
                 path.to_owned()
             } else if beside {
                 document::with_prefix(directory, path)

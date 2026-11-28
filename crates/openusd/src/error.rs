@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 use std::{error, io, mem, result};
 
-use crate::{pcp, sdf, ts, usd, usd_utils, usda, usdc, usdz, vt};
+use crate::{ar, pcp, sdf, ts, usd, usd_utils, usda, usdc, usdz, vt};
 
 /// Largest module error nested directly in [`enum@Error`]; anything bigger is
 /// boxed so the enum stays within the size the assertion below pins. The
@@ -89,6 +89,14 @@ pub enum Error {
     /// A `usdz` package failed to read or write.
     #[error(transparent)]
     Archive(Box<usdz::ArchiveError>),
+
+    /// A scheme resolver could not be given to a dispatcher.
+    #[error(transparent)]
+    Scheme(#[from] ar::SchemeError),
+
+    /// A stage builder could not open its stage as configured.
+    #[error(transparent)]
+    StageBuilder(#[from] usd::StageBuilderError),
 
     /// A stage population mask was built from an invalid path.
     #[error(transparent)]

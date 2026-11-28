@@ -462,15 +462,29 @@ pub trait Resolver: Send + Sync {
         file_extension(asset_path)
     }
 
-    /// The URI schemes the resolver handles, lowercase and without the `:`
-    /// (C++ the `uriSchemes` a resolver plugin declares). A path spelled
-    /// with one names an asset the resolver identifies whole, wherever it is
-    /// authored ([`is_uri`]).
+    /// The URI schemes the resolver itself declares, lowercase and without
+    /// the `:` (C++ the `uriSchemes` a resolver plugin declares). Whether a
+    /// path names an asset identified whole is [`is_uri`](Self::is_uri)'s
+    /// answer.
     ///
-    /// The base trait handles none. A resolver that wraps another forwards
+    /// The base trait declares none. A resolver that wraps another forwards
     /// this to it.
     fn uri_schemes(&self) -> &[&str] {
         &[]
+    }
+
+    /// Whether `asset_path` opens with one of the
+    /// [`uri_schemes`](Self::uri_schemes) followed by `:`, so it names an
+    /// asset identified whole, wherever it is authored (C++ the dispatching
+    /// resolver's `_GetURIResolver`). The scheme matches case-insensitively,
+    /// and a declared scheme that is not one ([`SchemeError::Invalid`])
+    /// matches no path.
+    fn is_uri(&self, asset_path: &str) -> bool {
+        uri_scheme(asset_path).is_some_and(|scheme| {
+            self.uri_schemes()
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(scheme))
+        })
     }
 
     /// Whether the asset `asset_path` names depends on more than the path
@@ -536,28 +550,35 @@ pub trait Resolver: Send + Sync {
     }
 
     /// An id unique to this resolver among every resolver the process has
-    /// made, under which a [`CacheScope`] keeps what was opened through it,
-    /// or `None` for a resolver nothing is cached for.
+    /// made, under which a [`CacheScope`] keeps what was opened through it at
+    /// the resolved `location`, or `None` for a location nothing is cached
+    /// for.
     ///
     /// A cache keyed by it never answers one resolver with what another
     /// opened, whatever the two have in common. A resolver that forwards
     /// to another may answer with that one's id.
-    fn cache_id(&self) -> Option<u64> {
+    fn cache_id(&self, _location: &str) -> Option<u64> {
         None
     }
 }
 
-/// Whether `asset_path` opens with one of `resolver`'s
-/// [`uri_schemes`](Resolver::uri_schemes) followed by `:`, so it names an
-/// asset the resolver identifies whole (C++ the dispatching resolver's
-/// `_GetURIResolver`). The scheme matches case-insensitively.
-pub fn is_uri(resolver: &dyn Resolver, asset_path: &str) -> bool {
-    asset_path.split_once(':').is_some_and(|(scheme, _)| {
-        resolver
-            .uri_schemes()
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(scheme))
-    })
+/// The URI scheme `asset_path` opens with, the part before its first `:`,
+/// or `None` where that part is not a scheme ([`is_scheme`]). A one-letter
+/// scheme counts only before `//`, since one letter and a colon open a
+/// Windows drive (AOUSD core spec 9.9): `x://catalog/a.usda` opens with the
+/// scheme `x`, and `C:\tex\a.png` and `C:/tex/a.png` with a drive.
+fn uri_scheme(asset_path: &str) -> Option<&str> {
+    let (scheme, rest) = asset_path.split_once(':')?;
+    let drive = scheme.len() == 1 && !rest.starts_with("//");
+    (is_scheme(scheme) && !drive).then_some(scheme)
+}
+
+/// Whether `scheme` is a URI scheme (C++ `_ValidateResourceIdentifierScheme`):
+/// an ASCII letter, then letters, digits, `+`, `-` or `.`.
+fn is_scheme(scheme: &str) -> bool {
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|first| first.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// A reader of one kind of package, the assets inside a package file
@@ -590,28 +611,89 @@ pub trait PackageResolver: Send + Sync {
 }
 
 /// The resolver that hands each asset path to the resolver that serves it
-/// (C++ `ArDispatchingResolver`, the resolver `ArGetResolver` returns). A
-/// package-relative path (`pkg.usdz[layer.usda]`) is served here: its
-/// outermost package through the primary resolver, and each packaged path
-/// inside it through the [`PackageResolver`] for its package's extension.
-/// Every other path goes to the primary resolver as it is, so a resolver
-/// written for one storage never sees a package-relative path.
+/// (C++ `ArDispatchingResolver`, the resolver `ArGetResolver` returns).
+///
+/// A path that opens with a URI scheme a scheme resolver declares goes to
+/// that resolver, and every other path to the primary one. A package-relative path (`pkg.usdz[layer.usda]`) is served
+/// here: its outermost package through the resolver its scheme picks, and
+/// each packaged path inside it through the [`PackageResolver`] for its
+/// package's extension. A resolver written for one storage therefore never
+/// sees a package-relative path, nor a path of another resolver's scheme.
 pub struct Dispatcher {
     primary: Box<dyn Resolver>,
+    /// The scheme resolvers, each serving the schemes it declares.
+    schemed: Vec<Box<dyn Resolver>>,
     packages: &'static [&'static dyn PackageResolver],
     /// This dispatcher's [`cache_id`](Resolver::cache_id).
     id: u64,
 }
 
+/// Why a scheme resolver cannot be given to a [`Dispatcher`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SchemeError {
+    /// The resolver declares no [`uri_schemes`](Resolver::uri_schemes), so
+    /// no path would reach it.
+    #[error("a scheme resolver declares no URI scheme")]
+    NoScheme,
+    /// The scheme is not one a URI can open with: an ASCII letter, then
+    /// letters, digits, `+`, `-` or `.`.
+    #[error("`{0}` is not a URI scheme")]
+    Invalid(String),
+    /// Two resolvers declare the scheme: two scheme resolvers, or a scheme
+    /// resolver and the primary one.
+    #[error("the URI scheme `{0}` is declared twice")]
+    Duplicate(String),
+}
+
 impl Dispatcher {
-    /// A dispatcher over `primary` that reads the packages `packages`
-    /// handle, asking them in order.
-    pub(crate) fn new(primary: Box<dyn Resolver>, packages: &'static [&'static dyn PackageResolver]) -> Self {
-        Self {
+    /// A dispatcher over `primary` and the scheme resolvers `schemed`, each
+    /// serving the [`uri_schemes`](Resolver::uri_schemes) it declares, that
+    /// reads the packages `packages` handle, asking them in order. Fails with
+    /// [`SchemeError`].
+    pub(crate) fn new(
+        primary: Box<dyn Resolver>,
+        schemed: Vec<Box<dyn Resolver>>,
+        packages: &'static [&'static dyn PackageResolver],
+    ) -> Result<Self, SchemeError> {
+        let mut declared: Vec<&str> = primary.uri_schemes().to_vec();
+        for resolver in &schemed {
+            if resolver.uri_schemes().is_empty() {
+                return Err(SchemeError::NoScheme);
+            }
+            for &scheme in resolver.uri_schemes() {
+                if !is_scheme(scheme) {
+                    return Err(SchemeError::Invalid(scheme.to_owned()));
+                }
+                if declared.iter().any(|known| known.eq_ignore_ascii_case(scheme)) {
+                    return Err(SchemeError::Duplicate(scheme.to_ascii_lowercase()));
+                }
+                declared.push(scheme);
+            }
+        }
+        Ok(Self {
             primary,
+            schemed,
             packages,
             id: crate::next_id(),
+        })
+    }
+
+    /// The scheme resolver for the scheme `path` opens with, if one serves
+    /// it.
+    fn schemed(&self, path: &str) -> Option<&dyn Resolver> {
+        if self.schemed.is_empty() {
+            return None;
         }
+        self.schemed
+            .iter()
+            .map(AsRef::as_ref)
+            .find(|resolver| resolver.is_uri(path))
+    }
+
+    /// The resolver that serves `path`: the scheme resolver for its scheme,
+    /// else the primary one.
+    fn route(&self, path: &str) -> &dyn Resolver {
+        self.schemed(path).unwrap_or(self.primary.as_ref())
     }
 
     /// The package resolver for the package resolved at `package`, by the
@@ -624,34 +706,46 @@ impl Dispatcher {
 }
 
 impl Resolver for Dispatcher {
-    /// `asset_path` as an identifier, anchored at `anchor`'s outer package
-    /// (C++ `_CreateIdentifierHelper`): a packaged anchor
+    /// `asset_path` as an identifier, through the resolver its scheme picks,
+    /// else the one `anchor`'s scheme picks (C++ `_CreateIdentifierHelper`):
+    /// a scheme resolver identifies the relative paths authored in its
+    /// layers, and the local paths they name too. A URI the primary resolver
+    /// declares is the primary resolver's wherever it is authored.
+    ///
+    /// The anchor is `anchor`'s outer package: a packaged anchor
     /// (`pkg.usdz[layer.usda]`) anchors at the package file, not at the layer
     /// inside it. A package-relative `asset_path` (`pkg.usdz[entry]`) anchors
     /// its package and keeps the entry it names, its packaged path normalized
     /// to the entry name (`pkg.usdz[tex\stone.png]` names `tex/stone.png`,
     /// where C++ leaves it as authored).
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
-        let outer = anchor
-            .and_then(|anchor| outer_package(&anchor.to_string_lossy()))
-            .map(ResolvedPath::new);
+        let spelled = anchor.map(|anchor| anchor.to_string_lossy());
+        let outer = spelled.as_deref().and_then(outer_package).map(ResolvedPath::new);
+        let resolver = match self.schemed(asset_path) {
+            Some(resolver) => resolver,
+            None if self.primary.is_uri(asset_path) => self.primary.as_ref(),
+            None => spelled
+                .as_deref()
+                .and_then(|anchor| self.schemed(anchor))
+                .unwrap_or(self.primary.as_ref()),
+        };
         let anchor = outer.as_ref().or(anchor);
         match split_authored_package(asset_path) {
-            Some((package, entry)) => nest_packaged_path(&self.primary.create_identifier(&package, anchor), &entry),
-            None => self.primary.create_identifier(asset_path, anchor),
+            Some((package, entry)) => nest_packaged_path(&resolver.create_identifier(&package, anchor), &entry),
+            None => resolver.create_identifier(asset_path, anchor),
         }
     }
 
     /// Resolves the outermost package of a package-relative path through the
-    /// primary resolver, then each packaged path inside it in turn, from the
-    /// outside in (C++ `_ResolveHelper`). The path is unresolved when any
-    /// level is missing: a missing entry is reported as a missing asset, not
-    /// as a malformed layer.
+    /// resolver its scheme picks, then each packaged path inside it in turn,
+    /// from the outside in (C++ `_ResolveHelper`). The path is unresolved
+    /// when any level is missing: a missing entry is reported as a missing
+    /// asset, not as a malformed layer.
     fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
         let Some((package, packaged)) = split_authored_package(asset_path) else {
-            return self.primary.resolve(asset_path);
+            return self.route(asset_path).resolve(asset_path);
         };
-        let mut resolved = self.primary.resolve(&package)?;
+        let mut resolved = self.route(&package).resolve(&package)?;
         // The levels of a nested path share this call's scope when the caller
         // holds none: each package is opened once.
         let _scope = is_package_relative_path(&packaged).then(CacheScope::begin);
@@ -666,24 +760,25 @@ impl Resolver for Dispatcher {
     /// outer package.
     fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
         let Some((package, packaged)) = split_authored_package(asset_path) else {
-            return self.primary.resolve_for_new_asset(asset_path);
+            return self.route(asset_path).resolve_for_new_asset(asset_path);
         };
-        let package = self.primary.resolve_for_new_asset(&package)?;
+        let package = self.route(&package).resolve_for_new_asset(&package)?;
         Some(ResolvedPath::new(nest_packaged_path(
             &package.to_string_lossy(),
             &packaged,
         )))
     }
 
-    /// Opens an asset inside a package through the package resolver of its
-    /// innermost package, which opens that package through this dispatcher
-    /// in turn. The path is followed from the outside in, as
+    /// Opens a plain resolved location through the resolver its scheme
+    /// picks, and an asset inside a package through the package resolver of
+    /// its innermost package, which opens that package through this
+    /// dispatcher in turn. The path is followed from the outside in, as
     /// [`resolve`](Self::resolve) follows it, so an entry whose name holds
     /// brackets (`tile[0].png`) stays one entry.
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
         let path = resolved_path.to_string_lossy();
         let Some((outer, packaged)) = split_package_relative_path_outer(&path) else {
-            return self.primary.open_asset(resolved_path);
+            return self.route(&path).open_asset(resolved_path);
         };
         let mut levels: Vec<String> = package_levels(packaged).collect();
         let packaged = levels.pop().unwrap_or_default();
@@ -701,34 +796,38 @@ impl Resolver for Dispatcher {
         reader.open_asset(self, &package, &packaged)
     }
 
-    /// The extension of the innermost packaged path, as the primary resolver
-    /// reads it.
+    /// The extension of the innermost packaged path, as the resolver the
+    /// path's scheme picks reads it.
     fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
-        self.primary.extension(&asset_path[innermost_span(asset_path)])
+        self.route(asset_path)
+            .extension(&asset_path[innermost_span(asset_path)])
     }
 
-    fn uri_schemes(&self) -> &[&str] {
-        self.primary.uri_schemes()
+    /// Whether `asset_path` opens with a scheme a scheme resolver serves, or
+    /// one the primary resolver declares.
+    fn is_uri(&self, asset_path: &str) -> bool {
+        self.schemed(asset_path).is_some() || self.primary.is_uri(asset_path)
     }
 
     /// Whether the outer package of a package-relative path is context
-    /// dependent.
+    /// dependent, as the resolver its scheme picks answers.
     fn is_context_dependent_path(&self, asset_path: &str) -> bool {
         match outer_package(asset_path) {
-            Some(package) => self.primary.is_context_dependent_path(&package),
-            None => self.primary.is_context_dependent_path(asset_path),
+            Some(package) => self.route(&package).is_context_dependent_path(&package),
+            None => self.route(asset_path).is_context_dependent_path(asset_path),
         }
     }
 
-    /// The outer package of a package-relative path as the primary resolver
-    /// interns it, and its packaged path as the entry name it reaches.
+    /// The outer package of a package-relative path as the resolver its
+    /// scheme picks interns it, and its packaged path as the entry name it
+    /// reaches.
     fn in_memory_identifier<'a>(&self, asset_path: &'a str) -> Cow<'a, str> {
         match split_authored_package(asset_path) {
             Some((package, packaged)) => Cow::Owned(nest_packaged_path(
-                &self.primary.in_memory_identifier(&package),
+                &self.route(&package).in_memory_identifier(&package),
                 &packaged,
             )),
-            None => self.primary.in_memory_identifier(asset_path),
+            None => self.route(asset_path).in_memory_identifier(asset_path),
         }
     }
 
@@ -738,11 +837,12 @@ impl Resolver for Dispatcher {
     /// since a plain asset path can resolve into a package (a `.usdz` to its
     /// root layer).
     fn asset_info(&self, asset_path: &str, resolved_path: &ResolvedPath) -> AssetInfo {
+        let resolver = self.route(asset_path);
         let Some((resolved, packaged)) = split_package_relative_path_outer(&resolved_path.to_string_lossy()) else {
-            return self.primary.asset_info(asset_path, resolved_path);
+            return resolver.asset_info(asset_path, resolved_path);
         };
         let asset_path = outer_package(asset_path).map_or(Cow::Borrowed(asset_path), Cow::Owned);
-        let mut info = self.primary.asset_info(&asset_path, &ResolvedPath::new(resolved));
+        let mut info = resolver.asset_info(&asset_path, &ResolvedPath::new(resolved));
         if !info.repo_path.is_empty() {
             info.repo_path = nest_packaged_path(&info.repo_path, &packaged);
         }
@@ -750,27 +850,45 @@ impl Resolver for Dispatcher {
     }
 
     /// An asset inside a package (`pkg.usdz[layer.usda]`) has its outermost
-    /// package's modification timestamp (C++ `_GetModificationTimestamp`).
+    /// package's modification timestamp (C++ `_GetModificationTimestamp`),
+    /// as the resolver the asset path's scheme picks reports it.
     fn modification_timestamp(&self, asset_path: &str, resolved_path: &ResolvedPath) -> Option<SystemTime> {
+        let resolver = self.route(asset_path);
         let asset_path = outer_package(asset_path).map_or(Cow::Borrowed(asset_path), Cow::Owned);
         let package = outer_package(&resolved_path.to_string_lossy()).map(ResolvedPath::new);
-        self.primary
-            .modification_timestamp(&asset_path, package.as_ref().unwrap_or(resolved_path))
+        resolver.modification_timestamp(&asset_path, package.as_ref().unwrap_or(resolved_path))
     }
 
-    /// The primary resolver's identity and the package readers', in the
-    /// order they are asked, each rendered losslessly so distinct
-    /// configurations never share a token.
+    /// The primary resolver's identity, each scheme with its resolver's in
+    /// scheme order, and the package readers' in the order they are asked,
+    /// each rendered losslessly so distinct configurations never share a
+    /// token.
     fn identity(&self) -> String {
+        let mut schemes: Vec<(String, String)> = self
+            .schemed
+            .iter()
+            .flat_map(|resolver| {
+                let identity = resolver.identity();
+                resolver
+                    .uri_schemes()
+                    .iter()
+                    .map(move |scheme| (scheme.to_ascii_lowercase(), identity.clone()))
+            })
+            .collect();
+        schemes.sort();
         let readers: Vec<&str> = self.packages.iter().map(|reader| reader.identity()).collect();
-        format!("{:?}{readers:?}", self.primary.identity())
+        format!("{:?}{schemes:?}{readers:?}", self.primary.identity())
     }
 
-    /// The dispatcher's own id, so a cache never answers it with what the
-    /// primary resolver opened alone, or `None` when the primary resolver
-    /// caches nothing.
-    fn cache_id(&self) -> Option<u64> {
-        self.primary.cache_id().map(|_| self.id)
+    /// The dispatcher's own id, so a cache never answers it with what a
+    /// resolver behind it opened alone, or `None` where the resolver that
+    /// serves `location` caches nothing there. A location inside a package
+    /// is asked about as its outermost package, the location that resolver
+    /// serves, so what is nested there is cached as the package is.
+    fn cache_id(&self, location: &str) -> Option<u64> {
+        let package = outer_package(location);
+        let location = package.as_deref().unwrap_or(location);
+        self.route(location).cache_id(location).map(|_| self.id)
     }
 }
 
@@ -1119,7 +1237,7 @@ impl Resolver for DefaultResolver {
         self.search_paths.iter().map(|p| format!("{p:?}")).collect()
     }
 
-    fn cache_id(&self) -> Option<u64> {
+    fn cache_id(&self, _location: &str) -> Option<u64> {
         Some(self.id)
     }
 
@@ -2218,20 +2336,83 @@ pub(crate) mod tests {
     /// package nests into the innermost one.
     #[test]
     fn dispatch_nests_new_asset() {
-        let resolver = Dispatcher::new(Box::new(Packaged), &[]);
+        let resolver = Dispatcher::new(Box::new(Packaged), Vec::new(), &[]).unwrap();
         assert_eq!(
             resolver.resolve_for_new_asset("alias.usdz[new.usda]"),
             Some(ResolvedPath::new("outer.usdz[inner.usdz[new.usda]]"))
         );
     }
 
+    /// A scheme resolver serving `mem://` locations that caches every one but
+    /// `mem://node/volatile.usdz`.
+    struct Uncached;
+
+    impl Resolver for Uncached {
+        fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
+            asset_path.to_owned()
+        }
+
+        fn resolve(&self, _asset_path: &str) -> Option<ResolvedPath> {
+            None
+        }
+
+        fn resolve_for_new_asset(&self, _asset_path: &str) -> Option<ResolvedPath> {
+            None
+        }
+
+        fn open_asset(&self, _resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+
+        fn uri_schemes(&self) -> &[&str] {
+            &["mem"]
+        }
+
+        fn cache_id(&self, location: &str) -> Option<u64> {
+            (location != "mem://node/volatile.usdz").then_some(1)
+        }
+    }
+
+    /// A location is cached as the resolver serving it caches it, and one
+    /// inside a package as that package is: the scheme resolver's opt-out
+    /// holds for what is nested in the package, whatever the primary
+    /// resolver caches.
+    #[test]
+    fn cache_follows_server() {
+        let resolver = Dispatcher::new(Box::new(DefaultResolver::new()), vec![Box::new(Uncached)], &[]).unwrap();
+        assert_eq!(resolver.cache_id("mem://node/volatile.usdz"), None);
+        assert_eq!(
+            resolver.cache_id("mem://node/volatile.usdz[inner.usdz[stamp.txt]]"),
+            None
+        );
+        assert!(resolver.cache_id("mem://node/stable.usdz[inner.usdz]").is_some());
+        assert!(resolver.cache_id("/local/model.usdz").is_some());
+    }
+
+    /// A one-letter scheme opens a path only before `//`, so a drive path
+    /// never reads as a URI.
+    #[test]
+    fn scheme_or_drive() {
+        assert_eq!(uri_scheme("x://catalog/model.usda"), Some("x"));
+        assert_eq!(uri_scheme("mem:model.usda"), Some("mem"));
+        assert_eq!(uri_scheme(r"C:\tex\a.png"), None);
+        assert_eq!(uri_scheme("C:/tex/a.png"), None);
+        assert_eq!(uri_scheme("1x://model.usda"), None);
+        assert_eq!(uri_scheme("tex/a:b.png"), None);
+    }
+
     /// A dispatcher caches only for a primary resolver that caches, and its
     /// identity names the package readers it holds.
     #[test]
     fn dispatch_identity_cache() {
-        assert_eq!(Dispatcher::new(Box::new(Packaged), &[]).cache_id(), None);
-        let bare = Dispatcher::new(Box::new(DefaultResolver::new()), &[]);
-        assert!(bare.cache_id().is_some());
+        assert_eq!(
+            Dispatcher::new(Box::new(Packaged), Vec::new(), &[])
+                .unwrap()
+                .cache_id(""),
+            None
+        );
+        let bare = Dispatcher::new(Box::new(DefaultResolver::new()), Vec::new(), &[]).unwrap();
+        assert!(bare.cache_id("").is_some());
         assert_ne!(bare.identity(), dispatcher().identity());
         assert_eq!(dispatcher().identity(), dispatcher().identity());
     }
