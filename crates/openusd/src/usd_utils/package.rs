@@ -2,6 +2,7 @@
 //! [`discover`] finds, each given one entry, rewritten to reach each other
 //! there, and written out.
 
+use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, Write};
@@ -334,7 +335,7 @@ fn source_bytes(
                 Some(bytes) => bytes,
                 None => read_asset(graph, resolved)?,
             };
-            rebuild_package(graph, bytes, inside)
+            rebuild_package(graph, resolved, bytes, inside)
         }
         Content::Asset(resolved) => match original {
             Some(bytes) => Ok(bytes),
@@ -344,14 +345,36 @@ fn source_bytes(
     }
 }
 
-/// `bytes`, a package, as they are when the stage holds no layer inside it,
-/// otherwise rebuilt from its scope `inside`: each entry the stage holds a
-/// layer for re-serialized from memory, each nested package holding one
-/// rebuilt the same way, every other entry copied, and whatever those layers
-/// named outside the package added at its entry.
-fn rebuild_package(graph: &pcp::LayerGraph, bytes: Vec<u8>, inside: &Discovery<'_>) -> Result<Vec<u8>> {
+/// `bytes`, the package at `resolved`, as they are when the stage holds no
+/// layer inside it, otherwise rebuilt from its scope `inside`: each entry
+/// the stage holds a layer for re-serialized from memory, each nested
+/// package holding one rebuilt the same way, every other entry copied, and
+/// whatever those layers named outside the package added at its entry.
+///
+/// Only a usdz is rebuilt. A package of another format is stored as it was
+/// read while nothing inside it needs carrying, and fails the packaging
+/// otherwise: an edited layer inside it, or an asset outside it that a layer
+/// inside names.
+fn rebuild_package(
+    graph: &pcp::LayerGraph,
+    resolved: &ar::ResolvedPath,
+    bytes: Vec<u8>,
+    inside: &Discovery<'_>,
+) -> Result<Vec<u8>> {
     if inside.sources.is_empty() {
         return Ok(bytes);
+    }
+    let registry = graph.layer_registry();
+    let location = resolved.to_string_lossy();
+    let reader = registry.resolver().package(&location);
+    if !reader.is_some_and(|reader| (reader as &dyn Any).is::<usdz::UsdzResolver>()) {
+        if !carries(registry.resolver(), inside) {
+            return Ok(bytes);
+        }
+        let extension = registry.resolver().extension(&location);
+        let format = sdf::layer_registry::by_extension(&registry.formats(), extension)
+            .map_or_else(|| tf::Token::from(extension), |format| format.format_id());
+        return Err(sdf::ExportError::NotWritable { format }.into());
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).map_err(usdz::ArchiveError::from)?;
     let reserved = archive
@@ -432,6 +455,58 @@ fn rewrite(location: &str, path: &str, uses: &HashMap<String, Use>, entries: &[S
     })
 }
 
+/// Whether a package with the scope `inside` needs something carried into
+/// it that its stored bytes lack: an edited layer, an asset outside it that
+/// a layer inside names, a path a layer inside names something by that
+/// stops reaching it once the package moves ([`moves_away`]), or any of
+/// these within a package nested in it.
+fn carries(resolver: &dyn ar::Resolver, inside: &Discovery<'_>) -> bool {
+    inside.sources.iter().any(|source| {
+        let Placement::Entry(entry) = &source.placement else {
+            return true;
+        };
+        match &source.content {
+            Content::Layer { layer, uses } => {
+                layer.is_dirty() || uses.keys().any(|path| moves_away(resolver, inside, entry, path))
+            }
+            Content::Package { inside, .. } => carries(resolver, inside),
+            Content::Asset(_) | Content::Tiles(_) => false,
+        }
+    })
+}
+
+/// Whether `path`, authored in the layer stored at `entry` of a package with
+/// the scope `inside`, stops reaching what it names once the package moves:
+/// an absolute path or a URI, or a package-relative one whose package the
+/// anchoring rules find beside the package file rather than inside it, as
+/// `x.bundle[tex.png]` names `x.bundle` from inside `x.bundle`. A package
+/// spelled from `.` (`./inner.usdz[tex.png]`), or named by an entry the
+/// package holds, stays inside it.
+// TODO: this re-derives an anchoring decision: the package's root layer's
+// directory, where anchoring also looks, is not consulted, so a path found
+// there refuses the package. The generalization is for `sdf::absolute_path_with`
+// to report which rule placed a path, in the package or beside it, and for
+// export to read that.
+fn moves_away(resolver: &dyn ar::Resolver, inside: &Discovery<'_>, entry: &str, path: &str) -> bool {
+    if !ar::is_relative_path(path) || resolver.is_uri(path) {
+        return true;
+    }
+    let Some((package, _)) = ar::split_authored_package(path) else {
+        return false;
+    };
+    if ar::is_file_relative_path(&package) {
+        return false;
+    }
+    let directory = entry.rsplit_once('/').map_or("", |(directory, _)| directory);
+    let held = |name: &str| {
+        inside
+            .sources
+            .iter()
+            .any(|source| matches!(&source.placement, Placement::Entry(stored) if stored == name))
+    };
+    !held(&ar::join_packaged_path(directory, &package)) && !held(&ar::join_packaged_path("", &package))
+}
+
 /// The entry a path authored relative to the layer at `location` (`./a.usda`,
 /// `../tex/t.png`) reaches, or `None` for any other path or one leading out
 /// of the package.
@@ -469,7 +544,7 @@ mod tests {
     use std::fs;
 
     use crate::ar::Resolver;
-    use crate::sdf::layer_registry::tests::PLANTED;
+    use crate::sdf::layer_registry::tests::{BUNDLE, PLANTED, bundle};
     use crate::usd::stage::tests::attribute_value;
     use crate::usd_utils::all_dependencies;
     use crate::usd_utils::discover::tests::{open, write};
@@ -581,6 +656,158 @@ def "T"
             .expect("the look is packaged");
         let packaged = usdz::Archive::open(&output)?.entry(look)?;
         assert_eq!(&*packaged, b"Scene\n");
+        Ok(())
+    }
+
+    /// A package of a format other than usdz is stored as it was read while
+    /// nothing inside it needs carrying, and fails the package once a layer
+    /// inside it is edited.
+    #[test]
+    fn package_format_stored() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let bytes = bundle(&[("root.usda", b"#usda 1.0\ndef \"A\" {}\n")]);
+        fs::write(dir.path().join("x.bundle"), &bytes)?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"S\" (\n    references = @x.bundle@</A>\n)\n{\n}\n",
+        );
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let registry = sdf::LayerRegistry::default();
+        let stage = Stage::builder()
+            .registry(registry.clone())
+            .format(&BUNDLE)
+            .open(&root)?;
+        // Composing the reference loads the bundle's root layer into the stage.
+        assert!(stage.prim("/S")?.is_valid()?);
+        let stored = dir.path().join("stored.usdz");
+        create_usdz_package(&stage, &root, &stored, None)?;
+        let (names, _) = entries(&stored);
+        let entry = names
+            .iter()
+            .find(|name| name.ends_with("x.bundle"))
+            .expect("the bundle is packaged");
+        assert_eq!(&*usdz::Archive::open(&stored)?.entry(entry)?, bytes.as_slice());
+
+        let layer = registry
+            .find(&dir.path().join("x.bundle").to_string_lossy())?
+            .expect("the stage holds the bundle's root layer");
+        layer.edit(|edit| {
+            sdf::PrimSpec::new(edit.data_mut(), "/Edited", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(create_usdz_package(&stage, &root, dir.path().join("edited.usdz"), None).is_err());
+        Ok(())
+    }
+
+    /// A layer inside a package of another format that names an entry of it
+    /// by an absolute path fails the package: the path stops reaching the
+    /// entry once the package moves, and the package cannot be rewritten.
+    #[test]
+    fn package_format_absolute_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("x.bundle");
+        let entry = format!("{}[tex.png]", path.display()).replace('\\', "/");
+        let layer = format!("#usda 1.0\ndef \"A\" {{\n    asset tex = @{entry}@\n}}\n");
+        fs::write(&path, bundle(&[("root.usda", layer.as_bytes()), ("tex.png", b"png")]))?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"S\" (\n    references = @x.bundle@</A>\n)\n{\n}\n",
+        );
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let stage = Stage::builder().format(&BUNDLE).open(&root)?;
+        assert!(stage.prim("/S")?.is_valid()?);
+        assert!(create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None).is_err());
+        Ok(())
+    }
+
+    /// A layer inside a package of another format that names an entry of it
+    /// through the package's own name (`x.bundle[tex.png]`) fails the package:
+    /// that path reaches the entry only beside the package's original file.
+    #[test]
+    fn package_format_named_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let layer = b"#usda 1.0\ndef \"A\" {\n    asset tex = @x.bundle[tex.png]@\n}\n";
+        fs::write(
+            dir.path().join("x.bundle"),
+            bundle(&[("root.usda", layer), ("tex.png", b"png")]),
+        )?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"S\" (\n    references = @x.bundle@</A>\n)\n{\n}\n",
+        );
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let stage = Stage::builder().format(&BUNDLE).open(&root)?;
+        assert!(stage.prim("/S")?.is_valid()?);
+        assert!(create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None).is_err());
+        Ok(())
+    }
+
+    /// A clean package of another format whose layers name a package nested
+    /// in it from `.` is stored whole: the path reaches its entry wherever
+    /// the package moves.
+    #[test]
+    fn package_format_nested_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let inner = usdz::tests::package(&[("tex.png", b"png")]);
+        let layer = b"#usda 1.0\ndef \"A\" {\n    asset tex = @./inner.usdz[tex.png]@\n}\n";
+        let bytes = bundle(&[("root.usda", layer), ("inner.usdz", &inner)]);
+        fs::write(dir.path().join("x.bundle"), &bytes)?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"S\" (\n    references = @x.bundle@</A>\n)\n{\n}\n",
+        );
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let stage = Stage::builder().format(&BUNDLE).open(&root)?;
+        assert!(stage.prim("/S")?.is_valid()?);
+        let output = dir.path().join("out.usdz");
+        let skipped = create_usdz_package(&stage, &root, &output, None)?;
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let (names, _) = entries(&output);
+        let entry = names
+            .iter()
+            .find(|name| name.ends_with("x.bundle"))
+            .expect("the bundle is packaged");
+        assert_eq!(&*usdz::Archive::open(&output)?.entry(entry)?, bytes.as_slice());
+        Ok(())
+    }
+
+    /// An edit in a usdz nested in a package of another format fails the
+    /// package too: the outer package cannot carry it.
+    #[test]
+    fn nested_package_edit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let inner = usdz::tests::package(&[("root.usda", b"#usda 1.0\ndef \"I\" {}\n")]);
+        let outer = bundle(&[
+            (
+                "root.usda",
+                b"#usda 1.0\ndef \"A\" (\n    references = @./inner.usdz@</I>\n)\n{\n}\n",
+            ),
+            ("inner.usdz", &inner),
+        ]);
+        fs::write(dir.path().join("x.bundle"), outer)?;
+        write(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\ndef \"S\" (\n    references = @x.bundle@</A>\n)\n{\n}\n",
+        );
+        let root = dir.path().join("root.usda").to_string_lossy().into_owned();
+        let stage = Stage::builder().format(&BUNDLE).open(&root)?;
+        assert!(stage.prim("/S")?.is_valid()?);
+        let dependencies = all_dependencies(&stage, &root)?;
+        let nested = dependencies
+            .layers
+            .iter()
+            .find(|layer| layer.contains("inner.usdz"))
+            .expect("the nested package's layer is held");
+        stage.layer(nested)?.expect("the stage holds it").edit(|edit| {
+            sdf::PrimSpec::new(edit.data_mut(), "/Edited", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+        assert!(create_usdz_package(&stage, &root, dir.path().join("out.usdz"), None).is_err());
         Ok(())
     }
 

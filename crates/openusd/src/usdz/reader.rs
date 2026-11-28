@@ -200,7 +200,7 @@ impl Archive {
     fn read_at(&mut self, file_path: &str, depth: usize) -> Result<Box<dyn sdf::AbstractData>, ArchiveError> {
         let bytes = self.entry(file_path)?;
 
-        if sdf::LayerRegistry::is_package(ar::extension(file_path)) {
+        if is_package_name(file_path) {
             if depth >= MAX_NESTING {
                 return Err(ArchiveError::NestedTooDeep);
             }
@@ -248,6 +248,12 @@ fn header_starts(
 /// layer format reads, a native USD layer or a nested package.
 fn is_root_name(name: &str) -> bool {
     sdf::layer_registry::builtin_format(ar::extension(name)).is_some()
+}
+
+/// Whether `name` names a nested package, one a built-in package format
+/// reads.
+fn is_package_name(name: &str) -> bool {
+    sdf::layer_registry::builtin_format(ar::extension(name)).is_some_and(|format| format.is_package())
 }
 
 /// Whether `name` names a native USD layer, one a non-package format reads

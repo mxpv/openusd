@@ -118,8 +118,10 @@ impl AssetKinds<'_> {
             .filter(|anchor| !self.resolver.is_uri(path) && self.resolver.is_uri(&anchor.to_string_lossy()))
             .map(|anchor| self.resolver.create_identifier(path, Some(anchor)));
         let path = anchored.as_deref().unwrap_or(path);
+        if self.resolver.package(path).is_some() {
+            return AssetKind::Package;
+        }
         match sdf::layer_registry::by_extension(self.formats, self.resolver.extension(path)) {
-            Some(format) if format.is_package() => AssetKind::Package,
             Some(_) => AssetKind::Layer,
             None if arc => AssetKind::Layer,
             None => AssetKind::Asset,
@@ -490,7 +492,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::sdf::layer_registry::tests::{PLANTED, Repo};
     use crate::sdf::layer_registry::{BUILTIN_FORMATS, default_resolver};
-    use crate::{gf, usdc};
+    use crate::{gf, usdc, usdz};
 
     /// The layer `text` parses to, held in a registry of its own.
     fn held(identifier: &str, text: &[u8]) -> Result<sdf::LayerHandle> {
@@ -505,7 +507,8 @@ pub(crate) mod tests {
     /// package, and a file of a registered format a layer.
     #[test]
     fn kind_through_resolver() {
-        let resolver = Repo(Vec::new());
+        let resolver = ar::Dispatcher::new(Box::new(Repo(Vec::new())), Vec::new(), &[("usdz", &usdz::UsdzResolver)])
+            .expect("the repository declares no scheme");
         let formats: Vec<&'static dyn sdf::FileFormat> =
             BUILTIN_FORMATS.iter().copied().chain([&PLANTED as _]).collect();
         let kinds = AssetKinds {

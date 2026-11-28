@@ -43,7 +43,7 @@ use std::iter;
 use std::marker::PhantomData;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::SystemTime;
 
 use crate::tf;
@@ -487,6 +487,19 @@ pub trait Resolver: Send + Sync {
         })
     }
 
+    /// Drops what the calling thread's [`CacheScope`] keeps of the package
+    /// at `package` and of every package nested in it, whatever reads them,
+    /// so the scope's next read of them opens them as they are now. The base
+    /// trait keeps nothing; a [`Dispatcher`] asks each of its readers.
+    fn forget(&self, _package: &str) {}
+
+    /// The reader of the package at `location`, a resolved path, or `None`
+    /// where it is no package this resolver reads into. The base trait reads
+    /// none; a [`Dispatcher`] answers with its readers.
+    fn package(&self, _location: &str) -> Option<&'static dyn PackageResolver> {
+        None
+    }
+
     /// Whether the asset `asset_path` names depends on more than the path
     /// itself, such as the directories a search consults or what exists
     /// beside the layer that authors it (C++
@@ -583,17 +596,11 @@ fn is_scheme(scheme: &str) -> bool {
 
 /// A reader of one kind of package, the assets inside a package file
 /// (C++ `ArPackageResolver`). A [`Dispatcher`] hands it each level of a
-/// package-relative path whose package has an extension it
-/// [`handles`](Self::handles).
+/// package-relative path whose package has an extension it serves.
 ///
 /// Each call is given the resolver that opens the package itself, which for
 /// a package nested in another is an entry of the package around it.
-pub trait PackageResolver: Send + Sync {
-    /// Whether the resolver reads packages whose file extension, without the
-    /// leading dot, is `extension`. The extension is matched as the package
-    /// path spells it.
-    fn handles(&self, extension: &str) -> bool;
-
+pub trait PackageResolver: Any + Send + Sync {
     /// A token naming this reader, part of the [`identity`](Resolver::identity)
     /// of a dispatcher that holds it: two readers that read any package
     /// differently return different tokens.
@@ -608,23 +615,62 @@ pub trait PackageResolver: Send + Sync {
     /// `package` (C++ `ArPackageResolver::OpenAsset`).
     fn open_asset(&self, resolver: &dyn Resolver, package: &ResolvedPath, packaged: &str)
     -> io::Result<Box<dyn Asset>>;
+
+    /// What the package resolved at `package` holds, with its root layer, or
+    /// `None` for a package that cannot be opened. The files are spelled as
+    /// [`resolve`](Self::resolve) accepts them, byte for byte: the anchoring
+    /// rules match an authored path against the listing without asking the
+    /// reader, so a reader that resolves other spellings too lists them the
+    /// way it would resolve them.
+    fn files(&self, resolver: &dyn Resolver, package: &ResolvedPath) -> Option<PackageFiles>;
+
+    /// Drops what the calling thread's cache scope keeps of the package at
+    /// `package` and of the packages nested in it, so the scope's next read
+    /// of them opens them as they are now. The default keeps nothing in a
+    /// scope.
+    fn forget(&self, _resolver: &dyn Resolver, _package: &str) {}
+}
+
+/// What a package holds: its files in the order they are stored, and its
+/// root layer.
+///
+/// A package nested in another has files of its own, keyed by its packaged
+/// path (`outer.usdz[inner.usdz]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageFiles {
+    /// The file names, in the order they are stored.
+    pub files: Vec<String>,
+    /// The file that is the package's root layer (C++
+    /// `SdfFileFormat::GetPackageRootLayerPath`), or `None` for a package
+    /// with none.
+    pub root: Option<String>,
 }
 
 /// The resolver that hands each asset path to the resolver that serves it
 /// (C++ `ArDispatchingResolver`, the resolver `ArGetResolver` returns).
 ///
 /// A path that opens with a URI scheme a scheme resolver declares goes to
-/// that resolver, and every other path to the primary one. A package-relative path (`pkg.usdz[layer.usda]`) is served
-/// here: its outermost package through the resolver its scheme picks, and
-/// each packaged path inside it through the [`PackageResolver`] for its
-/// package's extension. A resolver written for one storage therefore never
-/// sees a package-relative path, nor a path of another resolver's scheme.
+/// that resolver, and every other path to the primary one. A package-relative
+/// path (`pkg.usdz[layer.usda]`) is served here: its outermost package through
+/// the resolver its scheme picks, and each packaged path inside it through the
+/// [`PackageResolver`] for its package's extension. A resolver written for one
+/// storage therefore never sees a package-relative path, nor a path of another
+/// resolver's scheme.
 pub struct Dispatcher {
     primary: Box<dyn Resolver>,
     /// The scheme resolvers, each serving the schemes it declares.
     schemed: Vec<Box<dyn Resolver>>,
-    packages: &'static [&'static dyn PackageResolver],
-    /// This dispatcher's [`cache_id`](Resolver::cache_id).
+    /// The package readers and the cache id they are served under.
+    packages: RwLock<Packages>,
+}
+
+/// The package readers of a [`Dispatcher`].
+struct Packages {
+    /// Each package extension served, lowercase, with its reader, in the
+    /// order they were added.
+    bindings: Vec<(String, &'static dyn PackageResolver)>,
+    /// The dispatcher's [`cache_id`](Resolver::cache_id), taken anew when a
+    /// reader is added.
     id: u64,
 }
 
@@ -648,12 +694,12 @@ pub enum SchemeError {
 impl Dispatcher {
     /// A dispatcher over `primary` and the scheme resolvers `schemed`, each
     /// serving the [`uri_schemes`](Resolver::uri_schemes) it declares, that
-    /// reads the packages `packages` handle, asking them in order. Fails with
-    /// [`SchemeError`].
+    /// reads each package extension of `packages` through its reader. Fails
+    /// with [`SchemeError`].
     pub(crate) fn new(
         primary: Box<dyn Resolver>,
         schemed: Vec<Box<dyn Resolver>>,
-        packages: &'static [&'static dyn PackageResolver],
+        packages: &[(&str, &'static dyn PackageResolver)],
     ) -> Result<Self, SchemeError> {
         let mut declared: Vec<&str> = primary.uri_schemes().to_vec();
         for resolver in &schemed {
@@ -673,9 +719,62 @@ impl Dispatcher {
         Ok(Self {
             primary,
             schemed,
-            packages,
-            id: crate::next_id(),
+            packages: RwLock::new(Packages {
+                bindings: packages
+                    .iter()
+                    .map(|&(extension, reader)| (extension.to_ascii_lowercase(), reader))
+                    .collect(),
+                id: crate::next_id(),
+            }),
         })
+    }
+
+    /// Reads packages with the file extension `extension` through `reader`,
+    /// unless a reader serves it already. A reader added gives the
+    /// dispatcher a new [`cache_id`](Resolver::cache_id), taken with the
+    /// readers, so nothing a cache scope kept from before, a failed open
+    /// included, answers for it.
+    pub(crate) fn add_package(&self, extension: &str, reader: &'static dyn PackageResolver) {
+        let mut packages = self.packages.write().unwrap_or_else(PoisonError::into_inner);
+        if packages
+            .bindings
+            .iter()
+            .all(|(served, _)| !served.eq_ignore_ascii_case(extension))
+        {
+            packages.id = crate::next_id();
+            packages.bindings.push((extension.to_ascii_lowercase(), reader));
+        }
+    }
+
+    /// Whether a reader of another type than `reader` holds its
+    /// [`identity`](PackageResolver::identity), which the dispatcher's
+    /// identity could not tell from it.
+    pub(crate) fn holds_other_package(&self, reader: &'static dyn PackageResolver) -> bool {
+        let (identity, kind) = (reader.identity(), (reader as &dyn Any).type_id());
+        self.bindings()
+            .iter()
+            .any(|&(_, held)| held.identity() == identity && (held as &dyn Any).type_id() != kind)
+    }
+
+    /// The package extensions served with their readers, copied out so that
+    /// no reader runs while the lock is held.
+    fn bindings(&self) -> Vec<(String, &'static dyn PackageResolver)> {
+        self.packages
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bindings
+            .clone()
+    }
+
+    /// Each reader held, once, in the order it was first added.
+    fn readers(&self) -> Vec<&'static dyn PackageResolver> {
+        let mut readers: Vec<&'static dyn PackageResolver> = Vec::new();
+        for (_, reader) in self.bindings() {
+            if readers.iter().all(|held| held.identity() != reader.identity()) {
+                readers.push(reader);
+            }
+        }
+        readers
     }
 
     /// The scheme resolver for the scheme `path` opens with, if one serves
@@ -694,14 +793,6 @@ impl Dispatcher {
     /// else the primary one.
     fn route(&self, path: &str) -> &dyn Resolver {
         self.schemed(path).unwrap_or(self.primary.as_ref())
-    }
-
-    /// The package resolver for the package resolved at `package`, by the
-    /// extension of its innermost path.
-    fn package(&self, package: &ResolvedPath) -> Option<&'static dyn PackageResolver> {
-        let package = package.to_string_lossy();
-        let extension = self.extension(&package);
-        self.packages.iter().copied().find(|reader| reader.handles(extension))
     }
 }
 
@@ -750,7 +841,9 @@ impl Resolver for Dispatcher {
         // holds none: each package is opened once.
         let _scope = is_package_relative_path(&packaged).then(CacheScope::begin);
         for level in package_levels(packaged) {
-            let found = self.package(&resolved)?.resolve(self, &resolved, &level)?;
+            let found = self
+                .package(&resolved.to_string_lossy())?
+                .resolve(self, &resolved, &level)?;
             resolved = ResolvedPath::new(nest_packaged_path(&resolved.to_string_lossy(), &found));
         }
         Some(resolved)
@@ -787,7 +880,7 @@ impl Resolver for Dispatcher {
                 .iter()
                 .fold(outer, |package, level| nest_packaged_path(&package, level)),
         );
-        let reader = self.package(&package).ok_or_else(|| {
+        let reader = self.package(&package.to_string_lossy()).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("no package resolver reads {package}"),
@@ -801,6 +894,25 @@ impl Resolver for Dispatcher {
     fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
         self.route(asset_path)
             .extension(&asset_path[innermost_span(asset_path)])
+    }
+
+    /// The reader serving the extension of `location`'s innermost path.
+    fn package(&self, location: &str) -> Option<&'static dyn PackageResolver> {
+        let extension = self.extension(location);
+        let packages = self.packages.read().unwrap_or_else(PoisonError::into_inner);
+        packages
+            .bindings
+            .iter()
+            .find(|(served, _)| served.eq_ignore_ascii_case(extension))
+            .map(|&(_, reader)| reader)
+    }
+
+    /// Forgets `package` through every reader held, so what any of them
+    /// keeps of a package nested in it, of whatever format, is dropped too.
+    fn forget(&self, package: &str) {
+        for reader in self.readers() {
+            reader.forget(self, package);
+        }
     }
 
     /// Whether `asset_path` opens with a scheme a scheme resolver serves, or
@@ -860,9 +972,9 @@ impl Resolver for Dispatcher {
     }
 
     /// The primary resolver's identity, each scheme with its resolver's in
-    /// scheme order, and the package readers' in the order they are asked,
-    /// each rendered losslessly so distinct configurations never share a
-    /// token.
+    /// scheme order, and each package extension with its reader's in
+    /// extension order, each rendered losslessly so distinct configurations
+    /// never share a token and equal ones, registered in any order, do.
     fn identity(&self) -> String {
         let mut schemes: Vec<(String, String)> = self
             .schemed
@@ -876,7 +988,12 @@ impl Resolver for Dispatcher {
             })
             .collect();
         schemes.sort();
-        let readers: Vec<&str> = self.packages.iter().map(|reader| reader.identity()).collect();
+        let bindings = self.bindings();
+        let mut readers: Vec<(&str, &str)> = bindings
+            .iter()
+            .map(|(extension, reader)| (extension.as_str(), reader.identity()))
+            .collect();
+        readers.sort_unstable();
         format!("{:?}{schemes:?}{readers:?}", self.primary.identity())
     }
 
@@ -888,7 +1005,9 @@ impl Resolver for Dispatcher {
     fn cache_id(&self, location: &str) -> Option<u64> {
         let package = outer_package(location);
         let location = package.as_deref().unwrap_or(location);
-        self.route(location).cache_id(location).map(|_| self.id)
+        // The resolver asked runs with the lock released.
+        let id = self.packages.read().unwrap_or_else(PoisonError::into_inner).id;
+        self.route(location).cache_id(location).map(|_| id)
     }
 }
 
@@ -1765,6 +1884,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::sdf::layer_registry::tests::dispatcher;
     use crate::usdz;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     /// A resolver under which every asset path resolves to itself and opens
     /// to what `open` gives, standing in for the storage underneath a
@@ -2399,6 +2519,57 @@ pub(crate) mod tests {
         assert_eq!(uri_scheme("C:/tex/a.png"), None);
         assert_eq!(uri_scheme("1x://model.usda"), None);
         assert_eq!(uri_scheme("tex/a:b.png"), None);
+    }
+
+    /// A reader that counts what it is asked to forget.
+    struct Forgetful {
+        identity: &'static str,
+        forgot: AtomicUsize,
+    }
+
+    impl PackageResolver for Forgetful {
+        fn identity(&self) -> &str {
+            self.identity
+        }
+
+        fn resolve(&self, _: &dyn Resolver, _: &ResolvedPath, _: &str) -> Option<String> {
+            None
+        }
+
+        fn open_asset(&self, _: &dyn Resolver, _: &ResolvedPath, _: &str) -> io::Result<Box<dyn Asset>> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+
+        fn files(&self, _: &dyn Resolver, _: &ResolvedPath) -> Option<PackageFiles> {
+            None
+        }
+
+        fn forget(&self, _: &dyn Resolver, _: &str) {
+            self.forgot.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// A package is forgotten through every reader, so a package of another
+    /// format nested in it is forgotten too.
+    #[test]
+    fn forget_every_reader() {
+        static OUTER: Forgetful = Forgetful {
+            identity: "outer",
+            forgot: AtomicUsize::new(0),
+        };
+        static INNER: Forgetful = Forgetful {
+            identity: "inner",
+            forgot: AtomicUsize::new(0),
+        };
+        let resolver = Dispatcher::new(
+            Box::new(DefaultResolver::new()),
+            Vec::new(),
+            &[("outer", &OUTER), ("inner", &INNER)],
+        )
+        .unwrap();
+        resolver.forget("/scene/x.outer");
+        assert_eq!(OUTER.forgot.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(INNER.forgot.load(AtomicOrdering::Relaxed), 1);
     }
 
     /// A dispatcher caches only for a primary resolver that caches, and its

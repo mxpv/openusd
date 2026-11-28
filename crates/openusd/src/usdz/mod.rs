@@ -163,25 +163,8 @@ impl sdf::FileFormat for UsdzFileFormat {
         sdf::FileFormatCaps::READ | sdf::FileFormatCaps::WRITE
     }
 
-    fn is_package(&self) -> bool {
-        true
-    }
-
-    fn package_files(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<sdf::PackageFiles> {
-        let files = open_package(resolver, package)
-            .ok()?
-            .with(|archive| archive.entry_names().ok())?;
-        Some(sdf::PackageFiles { files })
-    }
-
-    fn forget_package(&self, resolver: &dyn ar::Resolver, package: &str) {
-        package::forget_package(resolver, package);
-    }
-
-    /// The first entry stored, of any type, as C++ reads it from the
-    /// archive's local headers (`_GetFirstFileInZipFile`).
-    fn package_root<'m>(&self, package: &'m sdf::PackageFiles) -> Option<&'m str> {
-        package.files.first().map(String::as_str)
+    fn package_resolver(&self) -> Option<&'static dyn ar::PackageResolver> {
+        Some(&UsdzResolver)
     }
 
     fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
@@ -209,7 +192,7 @@ impl sdf::FileFormat for UsdzFileFormat {
                 return Some(package);
             };
             let nested = ar::ResolvedPath::new(ar::nest_packaged_path(&package.to_string_lossy(), &root));
-            if !sdf::LayerRegistry::is_package(resolver.extension(&root)) {
+            if resolver.package(&nested.to_string_lossy()).is_none() {
                 return Some(nested);
             }
             package = nested;
@@ -722,8 +705,9 @@ pub(crate) mod tests {
         let _root = registry.find_or_open(&outer)?.expect("the package opens");
         assert_eq!(package_stats().directory_parses - parses, 2);
 
-        let held = |files: &[&str]| sdf::PackageFiles {
+        let held = |files: &[&str]| ar::PackageFiles {
             files: files.iter().map(|&file| file.to_owned()).collect(),
+            root: files.first().map(|&file| file.to_owned()),
         };
         assert_eq!(
             registry.package_files(&outer)?,

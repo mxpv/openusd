@@ -11,14 +11,18 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::{Layer, LayerRegistry, LayerStore, PackageFiles, PackageListings, StoreRead};
+use super::{Layer, LayerRegistry, LayerStore, PackageListings, StoreRead};
 use crate::{ar, usdz};
 
-/// What the anchoring rules read of a package: its listing.
+/// What the anchoring rules read of a package: whether a location is one,
+/// and its listing.
 pub(crate) trait Listing {
-    /// What `package` holds, or `None` for a package that cannot be opened,
-    /// which holds nothing to anchor at.
-    fn files(&mut self, package: &str) -> Option<Rc<PackageFiles>>;
+    /// What `package` holds, its root layer included, or `None` for a
+    /// package that cannot be opened, which holds nothing to anchor at.
+    fn files(&mut self, package: &str) -> Option<Rc<ar::PackageFiles>>;
+
+    /// Whether the resolved `location` is a package a reader reads into.
+    fn is_package(&mut self, location: &str) -> bool;
 }
 
 /// A [`Listing`] of the packages a layer store holds.
@@ -29,13 +33,19 @@ pub(crate) trait Listing {
 pub(crate) struct HeldListing<'a, 'r>(pub(crate) &'a StoreRead<'r>);
 
 impl Listing for HeldListing<'_, '_> {
-    fn files(&mut self, package: &str) -> Option<Rc<PackageFiles>> {
+    fn files(&mut self, package: &str) -> Option<Rc<ar::PackageFiles>> {
         let held = self.0.package(package);
         debug_assert!(
             held.is_some(),
             "a live layer holds every package a path it authors is anchored in: {package}"
         );
         held?.files().cloned()
+    }
+
+    /// Whether the store holds `location` as a package: a layer holds every
+    /// package it lies in, is anchored at, or whose root it descends to.
+    fn is_package(&mut self, location: &str) -> bool {
+        self.0.package(location).is_some()
     }
 }
 
@@ -45,7 +55,7 @@ impl Listing for HeldListing<'_, '_> {
 pub(crate) struct ReadListing<'a> {
     resolver: &'a dyn ar::Resolver,
     store: Option<&'a LayerStore>,
-    listed: HashMap<String, Option<Rc<PackageFiles>>>,
+    listed: HashMap<String, Option<Rc<ar::PackageFiles>>>,
     /// Shares one open of each package among the listings, begun at the
     /// first that reads an asset.
     scope: Option<ar::CacheScope>,
@@ -64,7 +74,7 @@ impl<'a> ReadListing<'a> {
 }
 
 impl Listing for ReadListing<'_> {
-    fn files(&mut self, package: &str) -> Option<Rc<PackageFiles>> {
+    fn files(&mut self, package: &str) -> Option<Rc<ar::PackageFiles>> {
         if let Some(files) = self.listed.get(package) {
             return files.clone();
         }
@@ -77,6 +87,11 @@ impl Listing for ReadListing<'_> {
         });
         self.listed.insert(package.to_owned(), files.clone());
         files
+    }
+
+    /// Whether the resolver has a reader for `location`'s package.
+    fn is_package(&mut self, location: &str) -> bool {
+        self.resolver.package(location).is_some()
     }
 }
 
@@ -101,9 +116,10 @@ pub(crate) fn absolute_path_at(
 /// the layer. A search path, any other relative path, is anchored there when
 /// the package holds that entry, else beside the package's root layer when
 /// the package holds that one, else as the resolver anchors it at the
-/// package. A package's root layer here is its first entry, of any type,
-/// followed into a package nested there. Every other path goes through the
-/// resolver's [`create_identifier`](ar::Resolver::create_identifier).
+/// package. A package's root layer here is the one its reader lists
+/// ([`ar::PackageFiles::root`]), followed into a package nested there.
+/// Every other path goes through the resolver's
+/// [`create_identifier`](ar::Resolver::create_identifier).
 //
 // TODO: format arguments (`:SDF_FORMAT_ARGS:`) are not split from the path
 // before it is anchored, nor joined back after.
@@ -139,8 +155,8 @@ pub(crate) fn absolute_path_with(
         // (`outer.usdz[inner.usdz]`) included, or a layer inside a package.
         // A layer anchored at a package is its root layer already, so the
         // root's fallback is the same lookup.
-        let (site, at_root) = if is_package(resolver, &anchor) {
-            (Some(expand_root(resolver, listing, anchor.into_owned())), true)
+        let (site, at_root) = if listing.is_package(&anchor) {
+            (Some(expand_root(listing, anchor.into_owned())), true)
         } else {
             (ar::split_package_relative_path_inner(&anchor), false)
         };
@@ -151,7 +167,7 @@ pub(crate) fn absolute_path_with(
                 return ar::nest_packaged_path(&package, &entry);
             }
             if !at_root {
-                let (package, root) = expand_root(resolver, listing, package);
+                let (package, root) = expand_root(listing, package);
                 let entry = ar::join_packaged_path(parent(&root), asset_path);
                 if holds(listing, &package, &entry) {
                     return ar::nest_packaged_path(&package, &entry);
@@ -167,19 +183,15 @@ pub(crate) fn absolute_path_with(
 /// anchored at when that is a package, and those the innermost one's root
 /// descends through. These are the packages [`absolute_path_with`] reads
 /// for a path the layer authors.
-pub(crate) fn held_packages(
-    resolver: &dyn ar::Resolver,
-    real_path: &str,
-    listing: &mut dyn Listing,
-) -> PackageListings {
-    let innermost = if is_package(resolver, real_path) {
+pub(crate) fn held_packages(real_path: &str, listing: &mut dyn Listing) -> PackageListings {
+    let innermost = if listing.is_package(real_path) {
         real_path.to_owned()
     } else if let Some((package, _)) = ar::split_package_relative_path_inner(real_path) {
         package
     } else {
         return Vec::new();
     };
-    let (innermost, _) = expand_root(resolver, listing, innermost);
+    let (innermost, _) = expand_root(listing, innermost);
     let mut packages = ar::enclosing_packages(&innermost);
     packages.push(innermost);
     packages
@@ -191,34 +203,28 @@ pub(crate) fn held_packages(
         .collect()
 }
 
-/// `package` paired with its root layer, its first entry followed into each
-/// package nested there, the pair naming that innermost package (C++
-/// `_ExpandPackagePath`). A package that holds nothing has an empty root.
-/// Each package's format is the one its extension names, as `resolver`
-/// reads the extension.
-fn expand_root(resolver: &dyn ar::Resolver, listing: &mut dyn Listing, mut package: String) -> (String, String) {
-    let mut root = first_entry(resolver, listing, &package);
+/// `package` paired with its root layer, followed into each package nested
+/// there, the pair naming that innermost package (C++ `_ExpandPackagePath`).
+/// A package with no root layer has an empty root.
+fn expand_root(listing: &mut dyn Listing, mut package: String) -> (String, String) {
+    let mut root = package_root(listing, &package);
     for _ in 0..usdz::MAX_NESTING {
-        if !is_package(resolver, &root) {
+        let nested = ar::nest_packaged_path(&package, &root);
+        if root.is_empty() || !listing.is_package(&nested) {
             break;
         }
-        package = ar::nest_packaged_path(&package, &root);
-        root = first_entry(resolver, listing, &package);
+        package = nested;
+        root = package_root(listing, &package);
     }
     (package, root)
 }
 
-/// The root layer of `package` as its format names it from the package's
-/// listing ([`FileFormat::package_root`](super::FileFormat::package_root)),
-/// or empty.
-fn first_entry(resolver: &dyn ar::Resolver, listing: &mut dyn Listing, package: &str) -> String {
-    let Some(files) = listing.files(package) else {
-        return String::new();
-    };
-    super::layer_registry::builtin_format(resolver.extension(package))
-        .and_then(|format| format.package_root(&files))
+/// The root layer of `package` its listing names, or empty.
+fn package_root(listing: &mut dyn Listing, package: &str) -> String {
+    listing
+        .files(package)
+        .and_then(|files| files.root.clone())
         .unwrap_or_default()
-        .to_owned()
 }
 
 /// Whether `package` holds `entry`: whether the packaged path resolves.
@@ -231,11 +237,6 @@ fn holds(listing: &mut dyn Listing, package: &str, entry: &str) -> bool {
 /// The directory part of a packaged path, empty at the package's root.
 fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
-}
-
-/// Whether `path` names a package by its extension, as `resolver` reads it.
-fn is_package(resolver: &dyn ar::Resolver, path: &str) -> bool {
-    LayerRegistry::is_package(resolver.extension(path))
 }
 
 #[cfg(test)]
@@ -360,7 +361,7 @@ mod tests {
     #[test]
     fn custom_resolver_nests() {
         let primary = ar::tests::TestResolver(|| Err(io::ErrorKind::NotFound.into()));
-        let resolver = ar::Dispatcher::new(Box::new(primary), Vec::new(), &[]).unwrap();
+        let resolver = ar::Dispatcher::new(Box::new(primary), Vec::new(), &[("usdz", &usdz::UsdzResolver)]).unwrap();
         let packaged = ar::ResolvedPath::new("pkg.usdz[geom/scene.usda]");
         assert_eq!(
             absolute_path_at(&resolver, Some(&packaged), "./tex/a.png"),

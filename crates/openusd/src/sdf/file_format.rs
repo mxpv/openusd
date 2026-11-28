@@ -16,7 +16,7 @@ use std::{error, fmt, mem};
 use bitflags::bitflags;
 
 use super::{AbstractData, DataError, LayerData, PathParseError};
-use crate::{ar, tf};
+use crate::{ar, tf, usdz};
 
 /// Error returned by [`FileFormat::read`] and [`FileFormat::write`].
 #[derive(Debug, thiserror::Error)]
@@ -156,9 +156,10 @@ pub trait FileFormat: Sync {
 
     /// Whether a layer of this format is a package holding other assets (C++
     /// `SdfFileFormat::IsPackage`): it opens at its packaged root layer,
-    /// and as a dependency it is carried whole.
+    /// and as a dependency it is carried whole. A format is one when it has
+    /// a [`package_resolver`](Self::package_resolver).
     fn is_package(&self) -> bool {
-        false
+        self.package_resolver().is_some()
     }
 
     /// Whether a reload leaves an anonymous layer of this format as it is
@@ -196,37 +197,40 @@ pub trait FileFormat: Sync {
     /// (C++ `SdfLayer::GetRealPath`) — or `None` if this format cannot read it
     /// there.
     ///
-    /// The default is the identity: an ordinary layer loads from the location
-    /// it resolved to. A package format overrides this to select the package's
-    /// root layer, followed into a package nested as its first entry
+    /// An ordinary layer loads from the location it resolved to. A package
+    /// opens at its root layer, followed into a package nested as its root
     /// (`pkg.usdz` → `pkg.usdz[root.usd]`), so the package composes as an
-    /// ordinary layer stack and the paths authored inside it
-    /// anchor in-package; a package it cannot open returns `None`. Opening the
-    /// asset goes through `resolver` so a host-provided byte source is honored.
-    fn resolve_layer(&self, _resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
+    /// ordinary layer stack and the paths authored inside it anchor
+    /// in-package. The default asks this format's
+    /// [`package_resolver`](Self::package_resolver), then the reader
+    /// `resolver` has for each nested level, for the
+    /// [`root`](ar::PackageFiles::root) it lists. A package with no listing or
+    /// no root, or a chain nested deeper than [`usdz::MAX_NESTING`], opens at
+    /// the level reached, whose read reports the failure. Opening the asset
+    /// goes through `resolver` so a host-provided byte source is honored.
+    fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
+        let Some(mut reader) = self.package_resolver() else {
+            return Some(resolved.clone());
+        };
+        let mut package = resolved.clone();
+        for _ in 0..=usdz::MAX_NESTING {
+            let Some(root) = reader.files(resolver, &package).and_then(|files| files.root) else {
+                return Some(package);
+            };
+            let nested = ar::ResolvedPath::new(ar::nest_packaged_path(&package.to_string_lossy(), &root));
+            let Some(next) = resolver.package(&nested.to_string_lossy()) else {
+                return Some(nested);
+            };
+            (package, reader) = (nested, next);
+        }
         Some(resolved.clone())
     }
 
-    /// What the package at `package` holds, for a package format that can
-    /// list it, or `None`: a format that is no package, one that cannot list
-    /// its contents, or a package it cannot open. Opening the asset goes
-    /// through `resolver`, under the caller's cache scope.
-    ///
-    /// The default lists nothing.
-    fn package_files(&self, _resolver: &dyn ar::Resolver, _package: &ar::ResolvedPath) -> Option<PackageFiles> {
-        None
-    }
-
-    /// Drops what the calling thread's [`ar::CacheScope`] keeps of the
-    /// package at `package`, read through `resolver`, and of the packages
-    /// nested in it, so the scope's next read of them opens them as they are
-    /// now. The default keeps nothing in a scope.
-    fn forget_package(&self, _resolver: &dyn ar::Resolver, _package: &str) {}
-
-    /// The file of `package` that is its root layer (C++
-    /// `SdfFileFormat::GetPackageRootLayerPath`), or `None` for a format
-    /// that is no package or a package with no files.
-    fn package_root<'m>(&self, _package: &'m PackageFiles) -> Option<&'m str> {
+    /// The reader of this format's packages, through which their assets are
+    /// resolved, opened and listed (C++ `ArPackageResolver`, which a package
+    /// format's plugin pairs with its `SdfFileFormat`), or `None` for a format
+    /// that is no package. It serves the extensions the format claims.
+    fn package_resolver(&self) -> Option<&'static dyn ar::PackageResolver> {
         None
     }
 
@@ -254,18 +258,6 @@ pub trait FileFormat: Sync {
             data: None,
         })
     }
-}
-
-/// The files one package holds, at one level of nesting, in the order they
-/// are stored ([`FileFormat::package_files`]; C++ iterates an
-/// `SdfZipFile`'s files).
-///
-/// A package nested in another has files of its own, keyed by its packaged
-/// path (`outer.usdz[inner.usdz]`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageFiles {
-    /// The file names, in the order they are stored.
-    pub files: Vec<String>,
 }
 
 /// What [`FileFormat::write_bytes`] produces: the serialized bytes and, for

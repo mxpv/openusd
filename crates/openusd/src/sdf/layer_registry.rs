@@ -27,7 +27,7 @@ use std::sync::{Arc, LazyLock};
 use crate::sdf::{self, expr};
 use crate::usda::UsdaFileFormat;
 use crate::usdc::UsdcFileFormat;
-use crate::usdz::{UsdzFileFormat, UsdzResolver};
+use crate::usdz::UsdzFileFormat;
 use crate::{ar, vt};
 
 static USDA: UsdaFileFormat = UsdaFileFormat;
@@ -204,7 +204,8 @@ impl From<LoadError> for crate::Error {
 /// to them (see [`sdf::LayerHandle`]).
 #[derive(Clone)]
 pub struct LayerRegistry {
-    resolver: Arc<dyn ar::Resolver>,
+    /// The dispatcher every layer the registry holds resolves through.
+    resolver: Arc<ar::Dispatcher>,
     /// The formats layers are read in, shared by every clone of the
     /// registry, so the stages holding layers in one store read them in one
     /// set of formats.
@@ -335,14 +336,35 @@ impl LayerRegistry {
     ///
     /// Returns whether the format was added: one whose
     /// [`format_id`](sdf::FileFormat::format_id) the registry already reads is
-    /// not. A lookup takes the first format claiming an extension, so `format`
+    /// not, nor a package format whose reader's
+    /// [`identity`](ar::PackageResolver::identity) another reader the
+    /// registry holds has. Formats of distinct extensions may share a reader.
+    /// A lookup takes the first format claiming an extension, so `format`
     /// cannot take over one a built-in format claims.
+    ///
+    /// A package format's reader
+    /// ([`package_resolver`](sdf::FileFormat::package_resolver)) joins the
+    /// registry's resolver, so its packages are resolved, opened and anchored
+    /// into, and the resolver's [`identity`](ar::Resolver::identity) names it.
     ///
     /// Add a format before the registry opens the layers that need it. A
     /// stage already open does not compose again when a format is added: a
     /// layer it failed to read stays unread until the stage reloads.
     pub fn add_format(&self, format: &'static dyn sdf::FileFormat) -> bool {
-        self.formats.add(format)
+        let reader = format.package_resolver();
+        if reader.is_some_and(|reader| self.resolver.holds_other_package(reader)) {
+            return false;
+        }
+        let added = self.formats.add(format);
+        if added && let Some(reader) = reader {
+            // The reader serves only the extensions its format wins, so a
+            // format added later never takes over a layer an earlier one
+            // reads.
+            for extension in won_extensions(&self.formats.list(), format) {
+                self.resolver.add_package(extension, reader);
+            }
+        }
+        added
     }
 
     /// This registry after [`add_format`](Self::add_format), for a registry
@@ -447,7 +469,7 @@ impl LayerRegistry {
     /// registry, or from a resolver a stage calls while it reads the registry's
     /// layers.
     pub fn adopt(&self, mut layer: sdf::Layer) -> Result<sdf::LayerHandle, sdf::AdoptError> {
-        let (resolver, formats) = layer.set_registry(Some(Arc::clone(&self.resolver)), Some(self.formats.clone()));
+        let (resolver, formats) = layer.set_registry(Some(self.resolver.clone()), Some(self.formats.clone()));
         let packages = self.package_listings(layer.real_path());
         self.store().insert(layer, packages).map_err(|mut refused| {
             refused.layer.set_registry(resolver, formats);
@@ -461,7 +483,7 @@ impl LayerRegistry {
     /// Fails with
     /// [`LayerError::Busy`](sdf::LayerError::Busy) when called from inside an
     /// edit on this registry.
-    pub fn package_files(&self, package: &str) -> Result<Option<sdf::PackageFiles>, sdf::LayerError> {
+    pub fn package_files(&self, package: &str) -> Result<Option<ar::PackageFiles>, sdf::LayerError> {
         let Some(store) = self.held() else {
             return Ok(None);
         };
@@ -469,7 +491,7 @@ impl LayerRegistry {
             .read()?
             .package(package)
             .and_then(|held| held.files())
-            .map(|files| sdf::PackageFiles::clone(files)))
+            .map(|files| ar::PackageFiles::clone(files)))
     }
 
     /// The packages a layer read from `real_path` holds
@@ -481,27 +503,17 @@ impl LayerRegistry {
         if store.as_ref().is_some_and(|store| store.read().is_err()) {
             return Vec::new();
         }
-        sdf::held_packages(
-            &*self.resolver,
-            real_path,
-            &mut sdf::ReadListing::new(&*self.resolver, store.as_deref()),
-        )
+        sdf::held_packages(real_path, &mut sdf::ReadListing::new(self.resolver(), store.as_deref()))
     }
 
-    /// What the package at `package` holds, listed by the format its
-    /// extension names, or `None` where no format lists it.
-    // TODO: the listing, and the cache drop in `forget_packages`, are package
-    // reader concerns that `sdf::FileFormat` carries, found among the
-    // built-in formats only. C++ asks the package resolver
-    // (`ArPackageResolver`) both. Moving them onto `ar::PackageResolver`,
-    // reached through the registry's dispatcher by extension, would leave one
-    // owner of what a package holds. The listing reports no files for a
-    // package that cannot be opened, where `usdz::UsdzResolver::resolve`
-    // takes it to hold every entry.
-    // A package format added with `add_format` would then bring its package
-    // resolver, which the dispatcher reads its entries through.
-    pub(crate) fn list_package(resolver: &dyn ar::Resolver, package: &str) -> Option<sdf::PackageFiles> {
-        builtin_format(resolver.extension(package))?.package_files(resolver, &ar::ResolvedPath::new(package))
+    /// What the package at `package` holds, as its reader lists it
+    /// ([`ar::PackageResolver::files`]), or `None` where no reader of
+    /// `resolver` reads it or it cannot be opened, so it holds nothing to
+    /// anchor at.
+    pub(crate) fn list_package(resolver: &dyn ar::Resolver, package: &str) -> Option<ar::PackageFiles> {
+        resolver
+            .package(package)?
+            .files(resolver, &ar::ResolvedPath::new(package))
     }
 
     /// Free the layers whose last handle has dropped. A dropped handle leaves
@@ -527,14 +539,14 @@ impl LayerRegistry {
         if sdf::Layer::is_anonymous_identifier(asset_path) {
             return Cow::Borrowed(asset_path);
         }
-        self.resolver.in_memory_identifier(asset_path)
+        self.resolver().in_memory_identifier(asset_path)
     }
 
     /// Whether the resolver calls `asset_path`
     /// [context dependent](ar::Resolver::is_context_dependent_path). An
     /// anonymous layer identifier never is: it names the one layer.
     pub(crate) fn is_context_dependent_path(&self, asset_path: &str) -> bool {
-        !sdf::Layer::is_anonymous_identifier(asset_path) && self.resolver.is_context_dependent_path(asset_path)
+        !sdf::Layer::is_anonymous_identifier(asset_path) && self.resolver().is_context_dependent_path(asset_path)
     }
 
     /// Resolves the layer the composition graph should open at `identifier`.
@@ -641,24 +653,20 @@ impl LayerRegistry {
 
     /// Drops what the calling thread's cache scope keeps of the packages a
     /// layer read from `real_path` lies in, those nested in them included
-    /// ([`FileFormat::forget_package`](sdf::FileFormat::forget_package)), so
-    /// the scope's next read of them opens them as they are now.
+    /// ([`ar::PackageResolver::forget`]), so the scope's next read of them
+    /// opens them as they are now.
+    ///
+    /// The outermost package is forgotten through every reader, so a chain
+    /// of packages of different formats (`x.bundle[in.usdz[root.usda]]`) is
+    /// forgotten at every level, siblings of the layer's own chain included.
     pub(crate) fn forget_packages(resolver: &dyn ar::Resolver, real_path: &str) {
         let outermost = ar::enclosing_packages(real_path)
             .into_iter()
             .next()
-            .or_else(|| Self::is_package(resolver.extension(real_path)).then(|| real_path.to_owned()));
-        if let Some(package) = outermost
-            && let Some(format) = builtin_format(resolver.extension(&package))
-        {
-            format.forget_package(resolver, &package);
+            .or_else(|| resolver.package(real_path).is_some().then(|| real_path.to_owned()));
+        if let Some(package) = outermost {
+            resolver.forget(&package);
         }
-    }
-
-    /// Whether the format claiming `ext` reads packages
-    /// ([`FileFormat::is_package`](sdf::FileFormat::is_package)).
-    pub(crate) fn is_package(ext: &str) -> bool {
-        builtin_format(ext).is_some_and(|format| format.is_package())
     }
 
     /// Find the format of this registry with the given
@@ -718,7 +726,7 @@ impl LayerRegistry {
         )?;
         Ok(sdf::Layer::new_resolved(
             prepared,
-            Arc::clone(&self.resolver),
+            self.resolver.clone(),
             self.formats.clone(),
         ))
     }
@@ -1077,14 +1085,8 @@ fn by_id(formats: &[Format], id: &str) -> Option<Format> {
     formats.iter().copied().find(|f| f.format_id() == id)
 }
 
-/// The built-in format claiming `ext`, for a lookup no registry is in reach
-/// of: package listing and anchoring, the `usdz` archive's own entries and
-/// the asset walk.
-// TODO: these lookups do not find a format added to a registry: one that
-// reads packages, one the root layer of a `usdz` is in, or one a layer named
-// by an asset-valued attribute is in. They need the registry's set carried to
-// the package anchoring (`sdf::anchor`), the `usdz` reader and the asset walk
-// (`usd_utils::walk`).
+/// The built-in format claiming `ext`, for the `usdz` archive's own entries,
+/// which the USDZ specification has be native USD layers or packages.
 pub(crate) fn builtin_format(ext: &str) -> Option<Format> {
     by_extension(BUILTIN_FORMATS, ext)
 }
@@ -1111,7 +1113,20 @@ fn dispatcher(
     primary: Box<dyn ar::Resolver>,
     schemed: Vec<Box<dyn ar::Resolver>>,
 ) -> Result<ar::Dispatcher, ar::SchemeError> {
-    ar::Dispatcher::new(primary, schemed, &[&UsdzResolver])
+    let readers: Vec<(&str, &'static dyn ar::PackageResolver)> = BUILTIN_FORMATS
+        .iter()
+        .filter_map(|&format| Some((format, format.package_resolver()?)))
+        .flat_map(|(format, reader)| won_extensions(BUILTIN_FORMATS, format).map(move |extension| (extension, reader)))
+        .collect();
+    ar::Dispatcher::new(primary, schemed, &readers)
+}
+
+/// The extensions of `format` it wins among `formats`: those no format ahead
+/// of it claims.
+fn won_extensions<'a>(formats: &'a [Format], format: Format) -> impl Iterator<Item = &'static str> + 'a {
+    format.extensions().iter().copied().filter(move |&extension| {
+        by_extension(formats, extension).is_some_and(|winner| winner.format_id() == format.format_id())
+    })
 }
 
 /// The dispatcher over a [`DefaultResolver`](ar::DefaultResolver) with no
@@ -1131,6 +1146,7 @@ pub(crate) mod tests {
     use crate::Result;
     use crate::sdf::FileFormatCaps;
     use crate::tf;
+    use crate::usdz::UsdzResolver;
     use crate::usdz::tests::package;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -1279,7 +1295,7 @@ pub(crate) mod tests {
         }
         layers.push(sdf::Layer::new_resolved(
             layer,
-            Arc::clone(&registry.resolver),
+            registry.resolver.clone(),
             registry.formats.clone(),
         ));
         Ok(())
@@ -1425,6 +1441,375 @@ pub(crate) mod tests {
         assert!(layer.borrow().prim("/B")?.is_some());
         assert!(registry().find_or_open(path).is_err(), "no format reads it");
         Ok(())
+    }
+
+    /// A package format of a container of its own, not a zip: `BUNDLE` on a
+    /// line, then each entry's name and length on a line and its bytes. The
+    /// usdz reader cannot read it, so package code that reads every package
+    /// as a zip fails on it. It opens at its root layer through the default
+    /// [`resolve_layer`](sdf::FileFormat::resolve_layer).
+    pub(crate) struct Bundle;
+
+    /// The one [`Bundle`] a registry is given.
+    pub(crate) static BUNDLE: Bundle = Bundle;
+
+    /// The reader of [`Bundle`] packages, under the identity it holds.
+    struct BundleReader(&'static str);
+
+    /// The [`BundleReader`] the format names.
+    static BUNDLE_READER: BundleReader = BundleReader("bundle");
+
+    /// A format with the id and extensions it holds, reading packages
+    /// through the reader it holds, if any, and no layer.
+    struct Stub {
+        id: &'static str,
+        extensions: &'static [&'static str],
+        reader: Option<&'static dyn ar::PackageResolver>,
+    }
+
+    impl sdf::FileFormat for Stub {
+        fn format_id(&self) -> tf::Token {
+            self.id.into()
+        }
+
+        fn extensions(&self) -> &[&str] {
+            self.extensions
+        }
+
+        fn package_resolver(&self) -> Option<&'static dyn ar::PackageResolver> {
+            self.reader
+        }
+
+        fn read_bytes(&self, _: ar::AssetBuffer, _: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+            Err(sdf::FormatError::Encode {
+                reason: "unread".into(),
+            })
+        }
+
+        fn write(&self, _: &dyn sdf::AbstractData, _: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
+            Err(sdf::FormatError::Encode {
+                reason: "unwritten".into(),
+            })
+        }
+    }
+
+    /// The bytes of a bundle holding `entries`, in order.
+    pub(crate) fn bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut bytes = b"BUNDLE\n".to_vec();
+        for (name, data) in entries {
+            bytes.extend_from_slice(format!("{name} {}\n", data.len()).as_bytes());
+            bytes.extend_from_slice(data);
+        }
+        bytes
+    }
+
+    impl BundleReader {
+        /// The entries of the bundle at `package`, each with its bytes, or
+        /// `None` where it cannot be read.
+        fn entries(resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<Vec<(String, Vec<u8>)>> {
+            let bytes = resolver.open_asset(package).ok()?.read_all().ok()?;
+            let mut rest = bytes.strip_prefix(b"BUNDLE\n")?;
+            let mut entries = Vec::new();
+            while !rest.is_empty() {
+                let end = rest.iter().position(|&byte| byte == b'\n')?;
+                let (name, len) = str::from_utf8(&rest[..end]).ok()?.rsplit_once(' ')?;
+                let len: usize = len.parse().ok()?;
+                let data = rest.get(end + 1..end + 1 + len)?;
+                entries.push((name.to_owned(), data.to_vec()));
+                rest = &rest[end + 1 + len..];
+            }
+            Some(entries)
+        }
+    }
+
+    impl ar::PackageResolver for BundleReader {
+        fn identity(&self) -> &str {
+            self.0
+        }
+
+        fn resolve(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath, packaged: &str) -> Option<String> {
+            let entries = Self::entries(resolver, package)?;
+            entries
+                .iter()
+                .any(|(name, _)| name == packaged)
+                .then(|| packaged.to_owned())
+        }
+
+        fn open_asset(
+            &self,
+            resolver: &dyn ar::Resolver,
+            package: &ar::ResolvedPath,
+            packaged: &str,
+        ) -> io::Result<Box<dyn ar::Asset>> {
+            let (_, data) = Self::entries(resolver, package)
+                .and_then(|entries| entries.into_iter().find(|(name, _)| name == packaged))
+                .ok_or(io::ErrorKind::NotFound)?;
+            Ok(Box::new(io::Cursor::new(data)))
+        }
+
+        fn files(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<ar::PackageFiles> {
+            let files: Vec<String> = Self::entries(resolver, package)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            let root = files.first().cloned();
+            Some(ar::PackageFiles { files, root })
+        }
+    }
+
+    impl sdf::FileFormat for Bundle {
+        fn format_id(&self) -> tf::Token {
+            "bundle".into()
+        }
+
+        fn extensions(&self) -> &[&str] {
+            &["bundle"]
+        }
+
+        fn caps(&self) -> FileFormatCaps {
+            FileFormatCaps::READ
+        }
+
+        fn package_resolver(&self) -> Option<&'static dyn ar::PackageResolver> {
+            Some(&BUNDLE_READER)
+        }
+
+        fn read_bytes(&self, _: ar::AssetBuffer, source_name: &str) -> Result<sdf::LayerData, sdf::FormatError> {
+            Err(sdf::FormatError::Decode(Box::new(io::Error::other(format!(
+                "{source_name} is a bundle, read at its root layer"
+            )))))
+        }
+
+        fn write(&self, _: &dyn sdf::AbstractData, _: &mut dyn sdf::WriteSeek) -> Result<(), sdf::FormatError> {
+            Err(sdf::FormatError::Encode {
+                reason: "bundle is read-only".into(),
+            })
+        }
+    }
+
+    /// A package format added to a registry brings its reader: a bundle
+    /// opens at its root layer, a path names an entry inside it, and a path
+    /// authored inside it is anchored in it.
+    #[test]
+    fn package_format_reads() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("x.bundle");
+        fs::write(
+            &path,
+            bundle(&[
+                ("dir/root.usda", b"#usda 1.0\ndef \"Root\" {}\n"),
+                ("dir/child.usda", b"#usda 1.0\ndef \"Child\" {}\n"),
+            ]),
+        )?;
+        let path = path.canonicalize()?.to_string_lossy().into_owned();
+        let child = format!("{path}[dir/child.usda]");
+        let registry = registry();
+        assert!(registry.find_or_open(&child)?.is_none(), "no reader reads a bundle yet");
+
+        registry.add_format(&BUNDLE);
+        assert!(
+            sdf::FileFormat::is_package(&BUNDLE),
+            "a format with a reader is a package"
+        );
+        let root = registry
+            .find_or_open(&path)?
+            .expect("the bundle opens at its root layer");
+        assert!(root.borrow().prim("/Root")?.is_some());
+        let entry = registry.find_or_open(&child)?.expect("the entry resolves");
+        assert!(entry.borrow().prim("/Child")?.is_some());
+        assert_eq!(root.borrow().absolute_path("child.usda"), child);
+        Ok(())
+    }
+
+    /// A package format's reader serves only the extensions the format wins:
+    /// one that also claims `.usda` reads no text layer as a package.
+    #[test]
+    fn package_reader_precedence() {
+        static GREEDY_READER: BundleReader = BundleReader("greedy");
+        static GREEDY: Stub = Stub {
+            id: "greedy",
+            extensions: &["greedy", "usda"],
+            reader: Some(&GREEDY_READER),
+        };
+        let registry = registry();
+        assert!(registry.add_format(&GREEDY));
+        assert!(registry.resolver().package("/scene/a.greedy").is_some());
+        assert!(
+            registry.resolver().package("/scene/scene.usda").is_none(),
+            "the text format wins `.usda`"
+        );
+    }
+
+    /// A resolver's identity names which extension each reader serves:
+    /// registering a package format and a layer format that share an
+    /// extension in either order gives two identities, as the shared
+    /// extension is a package in one and not in the other.
+    #[test]
+    fn package_bindings_identity() {
+        static OTHER: Stub = Stub {
+            id: "other",
+            extensions: &["other"],
+            reader: None,
+        };
+        static WIDE: Stub = Stub {
+            id: "wide",
+            extensions: &["bundle", "other"],
+            reader: Some(&BUNDLE_READER),
+        };
+        let (package_first, layer_first) = (registry(), registry());
+        package_first.add_format(&WIDE);
+        package_first.add_format(&OTHER);
+        layer_first.add_format(&OTHER);
+        layer_first.add_format(&WIDE);
+        assert!(package_first.resolver().package("/a.other").is_some());
+        assert!(layer_first.resolver().package("/a.other").is_none());
+        assert_ne!(package_first.resolver().identity(), layer_first.resolver().identity());
+    }
+
+    /// Registries whose package extensions select the same readers share an
+    /// identity, whatever order the formats were added in.
+    #[test]
+    fn package_identity_order() {
+        static PACK_READER: BundleReader = BundleReader("pack");
+        static PACK: Stub = Stub {
+            id: "pack",
+            extensions: &["pack"],
+            reader: Some(&PACK_READER),
+        };
+        let (bundle_first, pack_first) = (registry(), registry());
+        bundle_first.add_format(&BUNDLE);
+        bundle_first.add_format(&PACK);
+        pack_first.add_format(&PACK);
+        pack_first.add_format(&BUNDLE);
+        assert_eq!(bundle_first.resolver().identity(), pack_first.resolver().identity());
+    }
+
+    /// A package format may share a reader the registry holds under an
+    /// extension of its own, while a reader of another type claiming a held
+    /// identity, which the resolver's identity could not tell apart, is
+    /// refused whole.
+    #[test]
+    fn package_reader_collision() {
+        /// A reader that is not the usdz one, claiming its identity.
+        struct Impostor;
+
+        impl ar::PackageResolver for Impostor {
+            fn identity(&self) -> &str {
+                "usdz"
+            }
+
+            fn resolve(&self, _: &dyn ar::Resolver, _: &ar::ResolvedPath, _: &str) -> Option<String> {
+                None
+            }
+
+            fn open_asset(
+                &self,
+                _: &dyn ar::Resolver,
+                _: &ar::ResolvedPath,
+                _: &str,
+            ) -> io::Result<Box<dyn ar::Asset>> {
+                Err(io::ErrorKind::NotFound.into())
+            }
+
+            fn files(&self, _: &dyn ar::Resolver, _: &ar::ResolvedPath) -> Option<ar::PackageFiles> {
+                None
+            }
+        }
+
+        static IMPOSTOR: Impostor = Impostor;
+        static PKGX: Stub = Stub {
+            id: "pkgx",
+            extensions: &["pkgx"],
+            reader: Some(&UsdzResolver),
+        };
+        static IMP: Stub = Stub {
+            id: "imp",
+            extensions: &["imp"],
+            reader: Some(&IMPOSTOR),
+        };
+        let registry = registry();
+        assert!(registry.add_format(&PKGX), "the usdz reader serves `.pkgx` too");
+        assert!(registry.resolver().package("/a.pkgx").is_some());
+        assert!(!registry.add_format(&IMP));
+        assert!(registry.find_by_id("imp").is_none(), "the format is not added");
+    }
+
+    /// A layer opened from a package is not saved over it, though its
+    /// identifier's own extension names an editable layer format: the
+    /// resolver that told it a package decides.
+    #[test]
+    fn package_save_refused() -> Result<()> {
+        /// A filesystem resolver that reads `masked.usda` as a bundle.
+        struct Masked(ar::DefaultResolver);
+
+        impl ar::Resolver for Masked {
+            fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+                self.0.create_identifier(asset_path, anchor)
+            }
+
+            fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+                self.0.resolve(asset_path)
+            }
+
+            fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+                self.0.resolve_for_new_asset(asset_path)
+            }
+
+            fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+                self.0.open_asset(resolved_path)
+            }
+
+            fn extension<'a>(&self, asset_path: &'a str) -> &'a str {
+                if asset_path.ends_with("masked.usda") {
+                    "bundle"
+                } else {
+                    self.0.extension(asset_path)
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("masked.usda");
+        let bytes = bundle(&[
+            ("root.usda", b"#usda 1.0\ndef \"Root\" {}\n"),
+            ("other.usda", b"#usda 1.0\n"),
+        ]);
+        fs::write(&path, &bytes)?;
+        let registry = LayerRegistry::new(Box::new(Masked(ar::DefaultResolver::new()))).with_format(&BUNDLE);
+        let root = registry
+            .find_or_open(&path.to_string_lossy())?
+            .expect("the archive opens at its root layer");
+        assert!(root.borrow().prim("/Root")?.is_some());
+        assert!(root.save().is_err());
+        assert_eq!(fs::read(&path)?, bytes, "the archive keeps its entries");
+        Ok(())
+    }
+
+    /// A resolver's identity names the package readers it holds: a package
+    /// format added changes it, and a layer format or a repeated add does
+    /// not. Registries built alike are alike, and a reader added gives a new
+    /// cache id.
+    #[test]
+    fn package_format_identity() {
+        let (one, two) = (registry(), registry());
+        assert_eq!(one.resolver().identity(), two.resolver().identity());
+        let bare = one.resolver().identity();
+        let cache = one.resolver().cache_id("/a.usdz");
+        one.add_format(&PLANTED);
+        assert_eq!(one.resolver().identity(), bare, "a layer format brings no reader");
+        assert_eq!(one.resolver().cache_id("/a.usdz"), cache);
+        one.add_format(&BUNDLE);
+        let read = one.resolver().identity();
+        assert_ne!(read, bare);
+        assert_ne!(
+            one.resolver().cache_id("/a.usdz"),
+            cache,
+            "a cache scope keeps nothing from before the reader"
+        );
+        one.add_format(&BUNDLE);
+        assert_eq!(one.resolver().identity(), read, "a repeated add changes nothing");
+        two.add_format(&BUNDLE);
+        assert_eq!(two.resolver().identity(), read, "registries built alike are alike");
     }
 
     /// A resolver that serves the one package it holds at every `repo://`

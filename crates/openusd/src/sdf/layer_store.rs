@@ -29,7 +29,7 @@ use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
 use super::layer::{Due, Reload};
 use super::{
     AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerRegistry, LayerSink, LayerSinkId,
-    Listing, PackageFiles, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
+    Listing, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
 };
 
 /// A failure to read, edit or add a layer of a
@@ -168,7 +168,7 @@ struct Slots {
 /// A package's listing and the slots of the layers that hold it.
 pub(crate) struct HeldPackage {
     /// What the package holds, `None` while no listing of it has succeeded.
-    files: Option<Rc<PackageFiles>>,
+    files: Option<Rc<ar::PackageFiles>>,
     /// The filled slots whose layers hold the package, live or awaiting a
     /// sweep.
     layers: Vec<u32>,
@@ -176,7 +176,7 @@ pub(crate) struct HeldPackage {
 
 /// The packages a layer holds, each with its listing where one was read
 /// ([`held_packages`]).
-pub(crate) type PackageListings = Vec<(String, Option<Rc<PackageFiles>>)>;
+pub(crate) type PackageListings = Vec<(String, Option<Rc<ar::PackageFiles>>)>;
 
 /// One arena slot: the epoch it is in, and its layer while it is filled.
 #[derive(Default)]
@@ -478,8 +478,7 @@ impl LayerHandle {
                 listed = true;
                 let mut listing = ReadListing::new(resolver.as_ref(), None);
                 for member in &mut members {
-                    member.packages =
-                        held_packages(resolver.as_ref(), read.layer(&member.handle).real_path(), &mut listing);
+                    member.packages = held_packages(read.layer(&member.handle).real_path(), &mut listing);
                 }
                 // A package whose listing changed, a nested one included,
                 // brings every live layer in it into the batch, so none keeps
@@ -520,7 +519,7 @@ impl LayerHandle {
                     members.push(Member {
                         asked: false,
                         held: read.held_by(&handle).to_vec(),
-                        packages: held_packages(resolver.as_ref(), layer.real_path(), &mut listing),
+                        packages: held_packages(layer.real_path(), &mut listing),
                         handle,
                         step: None,
                         package_changed: false,
@@ -1194,7 +1193,7 @@ impl Slots {
     /// holds the package, whose listing may predate a change. A live
     /// package keeps its listing otherwise: the root chains its layers hold
     /// were read from it.
-    fn hold_package(&mut self, package: String, files: Option<Rc<PackageFiles>>, index: u32, fresh: bool) {
+    fn hold_package(&mut self, package: String, files: Option<Rc<ar::PackageFiles>>, index: u32, fresh: bool) {
         let replace = fresh || self.package(&package).is_none();
         let held = self.packages.entry(package).or_insert(HeldPackage {
             files: None,
@@ -1330,7 +1329,7 @@ impl Slots {
 impl HeldPackage {
     /// What the package holds, or `None` where no listing of it succeeded:
     /// a package that cannot be opened.
-    pub(crate) fn files(&self) -> Option<&Rc<PackageFiles>> {
+    pub(crate) fn files(&self) -> Option<&Rc<ar::PackageFiles>> {
         self.files.as_ref()
     }
 }

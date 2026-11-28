@@ -5471,6 +5471,44 @@ pub(crate) mod tests {
         Stage::builder().in_memory("anon.usda")
     }
 
+    /// A stage composes a package of a format added to its registry, the
+    /// paths authored inside it anchored in it. Its stack identity is the
+    /// resolver's as the stage opened: one opened on the registry before the
+    /// format was added keeps its own.
+    #[test]
+    fn package_format_composes() -> Result<()> {
+        use crate::sdf::layer_registry::tests::{BUNDLE, bundle};
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("x.bundle"),
+            bundle(&[
+                (
+                    "dir/root.usda",
+                    b"#usda 1.0\ndef \"A\" (\n    references = @child.usda@</C>\n)\n{\n}\n",
+                ),
+                ("dir/child.usda", b"#usda 1.0\ndef \"C\" {\n    def \"Leaf\" {}\n}\n"),
+            ]),
+        )?;
+        let root = dir.path().join("root.usda");
+        fs::write(
+            &root,
+            "#usda 1.0\ndef \"S\" (\n    references = @x.bundle@</A>\n)\n{\n}\n",
+        )?;
+        let registry = sdf::LayerRegistry::default();
+        let early = Stage::builder()
+            .registry(registry.clone())
+            .open(root.to_str().unwrap())?;
+        let token = early.layer_stack_id().resolver.clone();
+        let stage = Stage::builder()
+            .registry(registry.clone())
+            .format(&BUNDLE)
+            .open(root.to_str().unwrap())?;
+        assert!(stage.prim("/S/Leaf")?.is_valid()?, "the bundle's sibling composes");
+        assert_ne!(stage.layer_stack_id().resolver, token);
+        assert_eq!(early.layer_stack_id().resolver, token);
+        Ok(())
+    }
+
     /// A reference into a file of a format the builder adds composes, through
     /// a resolver set after the format.
     #[test]

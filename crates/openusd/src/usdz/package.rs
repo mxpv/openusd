@@ -146,10 +146,6 @@ pub fn open_package(resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> 
 pub struct UsdzResolver;
 
 impl ar::PackageResolver for UsdzResolver {
-    fn handles(&self, extension: &str) -> bool {
-        extension.eq_ignore_ascii_case("usdz")
-    }
-
     fn identity(&self) -> &str {
         "usdz"
     }
@@ -178,6 +174,21 @@ impl ar::PackageResolver for UsdzResolver {
             .with(|archive| archive.entry(packaged))
             .map_err(PackageError::from)?;
         Ok(Box::new(io::Cursor::new(ar::AssetBuffer::Shared(entry.into_shared()))))
+    }
+
+    /// The entries in the order they are stored, the root layer the first of
+    /// them, of any type, as C++ reads it from the archive's local headers
+    /// (`_GetFirstFileInZipFile`).
+    fn files(&self, resolver: &dyn ar::Resolver, package: &ar::ResolvedPath) -> Option<ar::PackageFiles> {
+        let files = open_package(resolver, package)
+            .ok()?
+            .with(|archive| archive.entry_names().ok())?;
+        let root = files.first().cloned();
+        Some(ar::PackageFiles { files, root })
+    }
+
+    fn forget(&self, resolver: &dyn ar::Resolver, package: &str) {
+        forget_package(resolver, package);
     }
 }
 

@@ -93,7 +93,8 @@ source of truth for specifics.
   its layers hold: it routes a path by its URI scheme to the scheme resolver
   declaring it, else to the primary resolver, and serves package-relative
   paths above them through a `PackageResolver` per package format
-  (`usdz::UsdzResolver` for usdz).
+  (`usdz::UsdzResolver` for usdz), which a package format brings
+  (`sdf::FileFormat::package_resolver`).
   `CacheScope` (C++ `ArResolverScopedCache`) is the span, on one thread, over
   which opened packages are kept.
   `UdimPath` (C++ `UsdShadeUdimUtils`) is a texture path standing for a set of

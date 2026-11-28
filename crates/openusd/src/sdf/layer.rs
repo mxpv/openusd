@@ -692,7 +692,15 @@ impl Layer {
         // archive's extension as well.
         let destination = self.export_format(&self.identifier)?;
         let reader = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.identifier));
-        let package = destination.is_package() || reader.is_some_and(|format| format.is_package());
+        // A layer read from a package: its real path lies inside one, or its
+        // resolver reads its identifier as one.
+        let opened_from_package = ar::is_package_relative_path(self.real_path())
+            || self
+                .resolver
+                .as_ref()
+                .is_some_and(|resolver| resolver.package(&self.identifier).is_some());
+        let package =
+            destination.is_package() || reader.is_some_and(|format| format.is_package()) || opened_from_package;
         if !destination.caps().can_edit() || package {
             return Err(ExportError::NotEditable {
                 identifier: self.identifier.clone(),

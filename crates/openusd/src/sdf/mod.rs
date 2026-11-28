@@ -54,7 +54,7 @@ pub(crate) use data::mask_of;
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub(crate) use data::{field_kinds, field_sample, field_times};
 pub use expr::{Evaluation, EvaluationValue, Expr, ExprError, StringEvaluation, StringSegment};
-pub use file_format::{FileFormat, FileFormatCaps, FormatError, PackageFiles, WriteSeek, Written};
+pub use file_format::{FileFormat, FileFormatCaps, FormatError, WriteSeek, Written};
 pub use handle::{AttributeHandle, PrimHandle, PseudoRootHandle, RelationshipHandle};
 pub use layer::{
     AuthoringError, CommittedLayerChange, EditError, ExportError, Layer, LayerEdit, LayerSink, LayerSinkId,
