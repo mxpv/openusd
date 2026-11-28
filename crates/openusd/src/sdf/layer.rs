@@ -71,30 +71,10 @@ const ANONYMOUS_PREFIX: &str = "anon:";
 
 /// A single loaded layer in the composition.
 pub struct Layer {
-    /// Resolved, canonical identifier for this layer, read through
-    /// [`identifier`](Self::identifier). It never changes once the layer
-    /// exists: a registry indexes the layers it holds by it.
-    identifier: String,
-    /// The layer's resolved physical location when it differs from
-    /// [`identifier`](Self::identifier) — the anchor for the relative asset
-    /// paths it authors (C++ `SdfLayer::GetRealPath`). `None` (the common case)
-    /// means it equals the identifier; a package (`.usdz`) opens under the bare
-    /// package identifier while its real path is the package-relative default
-    /// layer (`pkg.usdz[root.usd]`), so paths authored inside it anchor
-    /// in-package against the real path rather than the identifier, and a layer
-    /// found through a resolver search directory keeps the search path as its
-    /// identifier while its real path is the file that directory holds. Read
-    /// through [`real_path`](Self::real_path), which falls back to the
-    /// identifier.
-    real_path: Option<String>,
-    /// The parsed scene description data, under a copy-on-write [`CowData`]
-    /// staging overlay. Every authoring write stages in the overlay; committing an
-    /// edit derives the composition record and drains the overlay into the backend.
-    /// Private so external callers reach it only through [`data`](Self::data) for
-    /// reads or a [`LayerEdit`] for authoring, keeping the authoring API's
-    /// bookkeeping invariants (`primChildren`, `propertyChildren`, ancestor
-    /// specifiers, …) in force.
-    data: CowData<LayerData>,
+    /// What the layer holds, shared with the store that lends it to
+    /// readers on other threads. It changes through
+    /// [`content_mut`](Self::content_mut) alone.
+    content: Arc<Content>,
     /// The change record for the edit in progress, derived from the overlay at
     /// commit. Refilled in place each commit; a commit with sinks or
     /// subscribers moves it into the transaction's record.
@@ -124,6 +104,54 @@ pub struct Layer {
     /// Whether the edit being staged reports a change of a package the layer
     /// lies in ([`LayerEdit::package_changed`]).
     package_changed: bool,
+}
+
+/// What a [`Layer`] holds: its identity and its scene description. It is
+/// `Send + Sync`, so a layer's store lends it to composition builds on other
+/// threads while the layer's sinks stay on the thread that owns it.
+pub(crate) struct Content {
+    /// Resolved, canonical identifier for this layer, read through
+    /// [`identifier`](Self::identifier). It never changes once the layer
+    /// exists: a registry indexes the layers it holds by it.
+    identifier: String,
+    /// The layer's resolved physical location when it differs from
+    /// [`identifier`](Self::identifier) — the anchor for the relative asset
+    /// paths it authors (C++ `SdfLayer::GetRealPath`). `None` (the common case)
+    /// means it equals the identifier; a package (`.usdz`) opens under the bare
+    /// package identifier while its real path is the package-relative default
+    /// layer (`pkg.usdz[root.usd]`), so paths authored inside it anchor
+    /// in-package against the real path rather than the identifier, and a layer
+    /// found through a resolver search directory keeps the search path as its
+    /// identifier while its real path is the file that directory holds. Read
+    /// through [`real_path`](Self::real_path), which falls back to the
+    /// identifier.
+    real_path: Option<String>,
+    /// The parsed scene description data, under a copy-on-write [`CowData`]
+    /// staging overlay. Every authoring write stages in the overlay; committing an
+    /// edit derives the composition record and drains the overlay into the backend.
+    /// Private so external callers reach it only through [`data`](Self::data) for
+    /// reads or a [`LayerEdit`] for authoring, keeping the authoring API's
+    /// bookkeeping invariants (`primChildren`, `propertyChildren`, ancestor
+    /// specifiers, …) in force.
+    data: CowData<LayerData>,
+}
+
+impl Content {
+    /// The layer's data as a read-only [`AbstractData`], staged edits
+    /// included.
+    pub(crate) fn data(&self) -> &dyn AbstractData {
+        &self.data
+    }
+
+    /// The layer's resolved, canonical identifier.
+    pub(crate) fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    /// The layer's `defaultPrim` metadata, `None` when unauthored.
+    pub(crate) fn default_prim(&self) -> Option<tf::Token> {
+        PseudoRootSpecRef::get(self.data())?.default_prim()
+    }
 }
 
 /// A reload of a layer from its asset ([`Layer::read_due`]): the edits
@@ -335,9 +363,11 @@ impl Layer {
     /// [`new_resolved`](Self::new_resolved).
     fn build(identifier: String, real_path: Option<String>, data: LayerData) -> Self {
         Self {
-            identifier,
-            real_path,
-            data: CowData::new(data),
+            content: Arc::new(Content {
+                identifier,
+                real_path,
+                data: CowData::new(data),
+            }),
             changes: ChangeList::new(),
             sinks: sink::Set::default(),
             resolver: None,
@@ -368,7 +398,19 @@ impl Layer {
     /// Borrow the layer's data as a read-only [`AbstractData`]. Reads see the
     /// staged-over-base view, so edits staged but not yet flushed are visible.
     pub fn data(&self) -> &dyn AbstractData {
-        &self.data
+        &self.content.data
+    }
+
+    /// The layer's content, to change. A layer changes only while its store
+    /// lends its content to no reader ([`shared_content`](Self::shared_content)).
+    fn content_mut(&mut self) -> &mut Content {
+        Arc::get_mut(&mut self.content).expect("a layer's content changes while no reader shares it")
+    }
+
+    /// The layer's content, for its store to lend to readers. The store drops
+    /// what it holds before the layer next changes.
+    pub(crate) fn shared_content(&self) -> Arc<Content> {
+        Arc::clone(&self.content)
     }
 
     /// Discard the layer's staged (uncommitted) edits, restoring the backend to
@@ -377,7 +419,7 @@ impl Layer {
     /// [`edit_layers`], which roll back automatically on failure, so a caller
     /// never sequences a rollback by hand.
     fn rollback(&mut self) {
-        self.data.rollback();
+        self.content_mut().data.rollback();
         self.reloading = None;
         self.package_changed = false;
     }
@@ -441,7 +483,7 @@ impl Layer {
     /// the overlay staged for the caller to roll back. Does not touch the
     /// backend.
     fn veto(&mut self, txn: &TxnContext) -> Result<(), sink::Error> {
-        self.changes.update(&self.data);
+        self.changes.update(&self.content.data);
         self.changes.set_reloaded(self.reloading.is_some());
         self.changes.set_package_changed(self.package_changed);
         if !self.changes.is_empty() && !self.sinks.is_empty() {
@@ -465,7 +507,7 @@ impl Layer {
         let change = self.pending_change(txn);
         let commit = PendingCommit { change: &change, txn };
         let prepared = subscribers.iter().filter_map(|s| s.prepare(&commit)).collect();
-        (Footprint::of(self.data.overlay(), &self.changes), prepared)
+        (Footprint::of(self.content.data.overlay(), &self.changes), prepared)
     }
 
     /// Whether a commit to this layer has anyone to hand a record to: one of
@@ -477,9 +519,9 @@ impl Layer {
     /// The staged edit as its observers see it.
     fn pending_change(&self, txn: &TxnContext) -> PendingLayerChange<'_> {
         PendingLayerChange {
-            layer_identifier: &self.identifier,
-            base: &**self.data.base(),
-            overlay: self.data.overlay(),
+            layer_identifier: &self.content.identifier,
+            base: &**self.content.data.base(),
+            overlay: self.content.data.overlay(),
             change_list: &self.changes,
             generation: txn.id.get(),
         }
@@ -493,7 +535,7 @@ impl Layer {
     /// counts, even one that re-sets a field to the value the base already
     /// holds.
     pub fn is_dirty(&self) -> bool {
-        self.unsaved || !self.data.is_empty()
+        self.unsaved || !self.content.data.is_empty()
     }
 
     /// Whether reading the layer's file again would give back what the layer
@@ -509,13 +551,13 @@ impl Layer {
     /// record from prior direct edits would be redundant. The edits stay
     /// unsaved.
     pub(crate) fn discard_changes(&mut self) {
-        self.unsaved |= !self.data.is_empty();
-        self.data.commit();
+        self.unsaved |= !self.content.data.is_empty();
+        self.content_mut().data.commit();
     }
 
     /// The layer's resolved, canonical identifier.
     pub fn identifier(&self) -> &str {
-        &self.identifier
+        &self.content.identifier
     }
 
     /// Where the layer was found, or `None` for an anonymous layer, which was
@@ -540,7 +582,7 @@ impl Layer {
     /// anonymous layer anchors against; [`resolved_path`](Self::resolved_path)
     /// is the one that says so.
     pub(crate) fn real_path(&self) -> &str {
-        self.real_path.as_deref().unwrap_or(&self.identifier)
+        self.content.real_path.as_deref().unwrap_or(&self.content.identifier)
     }
 
     /// The location that anchors the relative asset paths this layer authors,
@@ -666,13 +708,13 @@ impl Layer {
     pub fn save(&mut self) -> Result<(), ExportError> {
         if self.is_anonymous() {
             return Err(ExportError::Anonymous {
-                identifier: self.identifier.clone(),
+                identifier: self.content.identifier.clone(),
             });
         }
-        let path = FsPath::new(&self.identifier);
+        let path = FsPath::new(&self.content.identifier);
         if !path.is_absolute() {
             return Err(ExportError::NotAFilePath {
-                identifier: self.identifier.clone(),
+                identifier: self.content.identifier.clone(),
             });
         }
         // The layer is written back in the format it was read in (C++
@@ -690,20 +732,20 @@ impl Layer {
         // package too, which reads in its root layer's format while its
         // identifier names the archive, and when that format claims the
         // archive's extension as well.
-        let destination = self.export_format(&self.identifier)?;
-        let reader = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.identifier));
+        let destination = self.export_format(&self.content.identifier)?;
+        let reader = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.content.identifier));
         // A layer read from a package: its real path lies inside one, or its
         // resolver reads its identifier as one.
         let opened_from_package = ar::is_package_relative_path(self.real_path())
             || self
                 .resolver
                 .as_ref()
-                .is_some_and(|resolver| resolver.package(&self.identifier).is_some());
+                .is_some_and(|resolver| resolver.package(&self.content.identifier).is_some());
         let package =
             destination.is_package() || reader.is_some_and(|format| format.is_package()) || opened_from_package;
         if !destination.caps().can_edit() || package {
             return Err(ExportError::NotEditable {
-                identifier: self.identifier.clone(),
+                identifier: self.content.identifier.clone(),
                 format: destination.format_id(),
             });
         }
@@ -719,13 +761,13 @@ impl Layer {
         // comparison would have nothing left to prove.
         let written = format.write_bytes(self.data())?;
         let create = |source| ExportError::Create {
-            filename: self.identifier.clone(),
+            filename: self.content.identifier.clone(),
             source,
         };
         let mut temp = tf::SafeOutputFile::create(path).map_err(create)?;
         temp.file().write_all(&written.bytes).map_err(create)?;
         let replaced = temp.persist().map_err(|source| ExportError::Replace {
-            filename: self.identifier.clone(),
+            filename: self.content.identifier.clone(),
             source,
         });
         if let Some(serialized) = written.data {
@@ -733,14 +775,14 @@ impl Layer {
                 Ok(()) => self.reopen_saved(&written.bytes, format),
                 Err(_) => None,
             };
-            self.data = CowData::new(reopened.unwrap_or(serialized));
+            self.content_mut().data = CowData::new(reopened.unwrap_or(serialized));
         }
         self.unsaved &= replaced.is_err();
         if replaced.is_ok()
             && let Some(resolver) = &self.resolver
         {
             let resolved = ar::ResolvedPath::new(self.real_path());
-            self.modified = asset_time(resolver.as_ref(), &self.identifier, &resolved);
+            self.modified = asset_time(resolver.as_ref(), &self.content.identifier, &resolved);
         }
         replaced
     }
@@ -785,11 +827,11 @@ impl Layer {
             // as C++ `SdfLayer::CreateAnonymous` takes it, whatever format
             // the content was read in; a tag naming none is the text
             // format's.
-            let format = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.identifier));
+            let format = super::layer_registry::by_extension(&self.formats(), ar::extension(&self.content.identifier));
             if format.is_some_and(|format| format.skip_anonymous_reload()) {
                 return Ok(None);
             }
-            let edits = content_edits(&self.data, &Data::rooted())?;
+            let edits = content_edits(&self.content.data, &Data::rooted())?;
             let reloaded = Reloaded {
                 format: self.format,
                 modified: AssetTime::Unread,
@@ -813,8 +855,8 @@ impl Layer {
         let formats = self.formats();
         // The asset may have moved since it was read, so the identifier
         // resolves again.
-        let resolved = super::LayerRegistry::resolve_layer_with(&formats, resolver.as_ref(), &self.identifier)
-            .ok_or_else(|| crate::Error::UnresolvedAsset(self.identifier.clone()))?;
+        let resolved = super::LayerRegistry::resolve_layer_with(&formats, resolver.as_ref(), &self.content.identifier)
+            .ok_or_else(|| crate::Error::UnresolvedAsset(self.content.identifier.clone()))?;
         // TODO: C++ reloads a layer from where its identifier resolves now
         // (`DidChangeLayerResolvedPath`). A registry, a stage's graph and a
         // handle index or anchor the layer by the real path it was read at, so
@@ -823,12 +865,12 @@ impl Layer {
         // among them.
         if *resolved != *self.real_path() {
             return Err(super::LayerError::Moved {
-                identifier: self.identifier.clone(),
+                identifier: self.content.identifier.clone(),
                 resolved: resolved.to_string(),
             }
             .into());
         }
-        let modified = asset_time(resolver.as_ref(), &self.identifier, &resolved);
+        let modified = asset_time(resolver.as_ref(), &self.content.identifier, &resolved);
         if !force && !self.is_dirty() && modified.same(self.modified) {
             return Ok(None);
         }
@@ -850,13 +892,18 @@ impl Layer {
             } => (resolver, resolved, modified),
         };
         let formats = self.formats();
-        let prepared =
-            super::LayerRegistry::read(&formats, resolver.as_ref(), self.identifier.clone(), resolved, modified)?;
+        let prepared = super::LayerRegistry::read(
+            &formats,
+            resolver.as_ref(),
+            self.content.identifier.clone(),
+            resolved,
+            modified,
+        )?;
         let reloaded = Reloaded {
             format: prepared.format,
             modified: prepared.modified,
         };
-        let edits = content_edits(&self.data, prepared.data.as_ref())?;
+        let edits = content_edits(&self.content.data, prepared.data.as_ref())?;
         Ok(Reload { edits, reloaded })
     }
 
@@ -1140,7 +1187,7 @@ impl Layer {
     /// `SdfLayer::IsAnonymous`; an anonymous layer has no asset-resolvable
     /// location.
     pub fn is_anonymous(&self) -> bool {
-        Self::is_anonymous_identifier(&self.identifier)
+        Self::is_anonymous_identifier(&self.content.identifier)
     }
 
     /// Whether `identifier` is an anonymous-layer identifier (the `anon:` prefix),
@@ -1303,7 +1350,7 @@ impl Layer {
     /// Whether the pseudo-root spec authors `key`, including an explicit
     /// opinion that carries an "empty"/default value.
     fn has_root_field(&self, key: FieldKey) -> bool {
-        self.data.has_field(&Path::abs_root(), key.as_str())
+        self.content.data.has_field(&Path::abs_root(), key.as_str())
     }
 }
 
@@ -1337,14 +1384,14 @@ impl LayerEdit<'_> {
     /// each parent's children field in step itself
     /// ([`AbstractData::create_spec`]).
     pub fn data_mut(&mut self) -> &mut dyn AbstractData {
-        &mut self.layer.data
+        &mut self.layer.content_mut().data
     }
 
     /// Brings the layer to the content a reload read
     /// ([`Layer::read_due`]), and has the commit take on the asset's state
     /// and report the reload ([`ChangeList::did_reload_content`]).
     pub(crate) fn reload(&mut self, reload: Reload) {
-        let data = &mut self.layer.data;
+        let data = &mut self.layer.content_mut().data;
         for edit in reload.edits {
             match edit {
                 ContentEdit::EraseSpec(path) => data.erase_spec(&path),
@@ -1552,7 +1599,7 @@ impl LayerEdit<'_> {
 impl std::fmt::Debug for Layer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Layer")
-            .field("identifier", &self.identifier)
+            .field("identifier", &self.content.identifier)
             .finish_non_exhaustive()
     }
 }
@@ -1636,7 +1683,7 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
         // was.
         layer.unsaved |= !layer.changes.entries().is_empty();
         layer.package_changed = false;
-        layer.data.commit();
+        layer.content_mut().data.commit();
         // A reload leaves the layer as its asset holds it, so saved.
         if let Some(reloaded) = layer.reloading.take() {
             layer.format = reloaded.format;
@@ -1659,7 +1706,7 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
         // and the layer's next commit grows a fresh one; a record that shares
         // the list (`Rc<ChangeList>`) would keep one buffer per layer.
         let record = Rc::new(CommitRecord {
-            identifier: layer.identifier.clone(),
+            identifier: layer.content.identifier.clone(),
             txn: txn.id,
             changes: mem::take(&mut layer.changes),
             // TODO(perf): every subscribed commit builds and sorts its
@@ -2555,7 +2602,7 @@ pub(crate) mod tests {
         });
 
         layer.discard_changes();
-        assert!(layer.data.is_empty(), "nothing staged remains");
+        assert!(layer.content.data.is_empty(), "nothing staged remains");
         assert!(
             layer.prim(Path::new("/World").unwrap()).unwrap().is_some(),
             "the authored content survives"

@@ -4758,6 +4758,14 @@ impl Stage {
     pub fn traverse(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         self.settle()?;
         let needed = predicate.consulted_bits();
+        // A walk that prunes as the default one does visits what a prefetch
+        // composes, so the prims it is about to read compose together.
+        if cfg!(feature = "rayon")
+            && !predicate.traverse_instance_proxies
+            && predicate.inherited_projection() == PrimPredicate::DEFAULT.inherited_projection()
+        {
+            self.with_cache(|graph, cache| cache.prefetch(graph, &sdf::Path::abs_root()))?;
+        }
         // Each prim carries its parent's status and the population epoch it
         // was read under. While the population is unchanged the prim composes
         // its inherited bits from that status and its own opinions, as C++

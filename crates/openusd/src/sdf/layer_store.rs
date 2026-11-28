@@ -21,12 +21,13 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::rc::{Rc, Weak};
 use std::slice;
+use std::sync::Arc;
 use std::thread;
 
 use crate::ar;
 
 use super::commit::{Committed, Dispatch, Subscriber, TxnContext};
-use super::layer::{Due, Reload};
+use super::layer::{Content, Due, Reload};
 use super::{
     AuthoringError, DataError, EditError, ExportError, Layer, LayerEdit, LayerRegistry, LayerSink, LayerSinkId,
     Listing, ReadListing, TargetLayer, dry_run_layers, edit_layers, held_packages, sink,
@@ -153,6 +154,8 @@ pub(crate) struct LayerStore {
 struct Slots {
     /// Every slot ever filled, live or free.
     slots: Vec<Slot>,
+    /// The content of each filled slot's layer, at the slot's index.
+    contents: Contents,
     /// Indexes of free slots, reused before the arena grows.
     free: Vec<u32>,
     /// Live slots by layer identifier.
@@ -162,21 +165,59 @@ struct Slots {
     /// What each package a live layer was read from holds, by package path,
     /// a nested package by its own packaged path. A package is held while
     /// any live layer lies in it.
-    packages: HashMap<String, HeldPackage>,
+    packages: Packages,
+}
+
+/// The content of each layer a store holds, by slot: what a read on another
+/// thread borrows, where the slots themselves stay on the thread that owns
+/// them. A layer an edit holds has no content here until the edit ends.
+#[derive(Default)]
+pub(crate) struct Contents(Vec<Option<Arc<Content>>>);
+
+impl Contents {
+    /// The content of the layer in the slot `key` names. Panics for a slot
+    /// that holds no layer, or one an edit holds.
+    pub(crate) fn get(&self, key: SlotKey) -> &Content {
+        self.0[key.index as usize]
+            .as_deref()
+            .expect("a read finds the content of every layer its store holds")
+    }
+}
+
+/// The slots an edit borrows, with the layers it takes. Dropped, it lends
+/// those layers' content to the reads that follow, whether the edit returned
+/// or unwound.
+struct Edited<'a> {
+    /// The borrow of the slots.
+    slots: RefMut<'a, Slots>,
+    /// The slots of the layers the edit takes.
+    keys: &'a [SlotKey],
+}
+
+impl Drop for Edited<'_> {
+    fn drop(&mut self) {
+        for &key in self.keys {
+            self.slots.lend(key);
+        }
+    }
 }
 
 /// A package's listing and the slots of the layers that hold it.
 pub(crate) struct HeldPackage {
     /// What the package holds, `None` while no listing of it has succeeded.
-    files: Option<Rc<ar::PackageFiles>>,
+    files: Option<Arc<ar::PackageFiles>>,
     /// The filled slots whose layers hold the package, live or awaiting a
     /// sweep.
     layers: Vec<u32>,
 }
 
+/// What each package a store's layers were read from holds, by package
+/// path.
+pub(crate) type Packages = HashMap<String, HeldPackage>;
+
 /// The packages a layer holds, each with its listing where one was read
 /// ([`held_packages`]).
-pub(crate) type PackageListings = Vec<(String, Option<Rc<ar::PackageFiles>>)>;
+pub(crate) type PackageListings = Vec<(String, Option<Arc<ar::PackageFiles>>)>;
 
 /// One arena slot: the epoch it is in, and its layer while it is filled.
 #[derive(Default)]
@@ -691,12 +732,25 @@ impl LayerHandle {
         })
     }
 
+    /// The slot of the store that holds the layer.
+    pub(crate) fn key(&self) -> SlotKey {
+        self.token.key
+    }
+
     /// Run `f` on the layer with the registry borrowed mutably. Fails with
     /// [`LayerError::Busy`] while the layer is borrowed, and from inside a
     /// composition read or an edit on the same registry.
     fn with_layer_mut<R>(&self, f: impl FnOnce(&mut Layer) -> R) -> Result<R, LayerError> {
-        self.with_entry_mut(|entry| Rc::get_mut(&mut entry.layer).map(f))?
-            .ok_or(LayerError::Busy)
+        let keys = [self.token.key];
+        let result = {
+            let slots = self.store.slots_mut().map_err(|_| LayerError::Busy)?;
+            let mut edited = Edited { slots, keys: &keys };
+            edited.slots.withhold(keys[0]);
+            let entry = edited.slots.entry_mut(keys[0]).expect("a handle keeps its slot filled");
+            Rc::get_mut(&mut entry.layer).map(f)
+        };
+        self.store.sweep_dead();
+        result.ok_or(LayerError::Busy)
     }
 
     /// Run `f` on the layer's slot entry with the registry borrowed mutably,
@@ -806,6 +860,26 @@ pub(crate) struct StoreRead<'a> {
 }
 
 impl StoreRead<'_> {
+    /// The content of every layer the store holds, for a read to share
+    /// with other threads.
+    pub(crate) fn contents(&self) -> &Contents {
+        &self
+            .slots
+            .as_ref()
+            .expect("a read holds its borrow until it drops")
+            .contents
+    }
+
+    /// The packages the store's layers were read from, for a read to share
+    /// with other threads.
+    pub(crate) fn packages(&self) -> &Packages {
+        &self
+            .slots
+            .as_ref()
+            .expect("a read holds its borrow until it drops")
+            .packages
+    }
+
     /// The layer `handle` names. The handle belongs to this store.
     pub(crate) fn layer(&self, handle: &LayerHandle) -> &Layer {
         &self
@@ -944,6 +1018,7 @@ impl LayerStore {
         layer.discard_changes();
         let index = slots.free.pop().unwrap_or_else(|| {
             slots.slots.push(Slot::default());
+            slots.contents.0.push(None);
             u32::try_from(slots.slots.len() - 1).expect("fewer than u32::MAX layers")
         });
         let slot = &mut slots.slots[index as usize];
@@ -962,6 +1037,7 @@ impl LayerStore {
             slots.hold_package(package.clone(), files, index, false);
             held.push(package);
         }
+        slots.contents.0[index as usize] = Some(layer.shared_content());
         slots.slots[index as usize].entry = Some(Entry {
             layer: Rc::new(layer),
             subscribers: sink::Set::default(),
@@ -1130,19 +1206,20 @@ impl LayerStore {
             }
         }
         let result = 'edit: {
-            let Ok(mut slots) = self.slots_mut() else {
+            let Ok(slots) = self.slots_mut() else {
                 break 'edit Err(LayerError::Busy.into());
             };
+            let keys: Vec<SlotKey> = handles.iter().map(|handle| handle.token.key).collect();
+            let mut edited = Edited { slots, keys: &keys };
             // A single layer, the common edit, takes its slot directly, without
             // the scan that pairs several keys with their slots.
-            if let [handle] = handles {
-                match slots.target(handle.token.key) {
+            if let [key] = keys[..] {
+                match edited.slots.target(key) {
                     Some(target) => f(&mut [target]),
                     None => Err(LayerError::Busy.into()),
                 }
             } else {
-                let keys: Vec<SlotKey> = handles.iter().map(|handle| handle.token.key).collect();
-                match slots.targets(&keys) {
+                match edited.slots.targets(&keys) {
                     Some(mut targets) => f(&mut targets),
                     None => Err(LayerError::Busy.into()),
                 }
@@ -1193,7 +1270,7 @@ impl Slots {
     /// holds the package, whose listing may predate a change. A live
     /// package keeps its listing otherwise: the root chains its layers hold
     /// were read from it.
-    fn hold_package(&mut self, package: String, files: Option<Rc<ar::PackageFiles>>, index: u32, fresh: bool) {
+    fn hold_package(&mut self, package: String, files: Option<Arc<ar::PackageFiles>>, index: u32, fresh: bool) {
         let replace = fresh || self.package(&package).is_none();
         let held = self.packages.entry(package).or_insert(HeldPackage {
             files: None,
@@ -1260,6 +1337,20 @@ impl Slots {
         slot.entry.as_ref()
     }
 
+    /// Stops lending the content of the layer in the slot `key` names, which
+    /// an edit is about to take. [`lend`](Self::lend) ends it.
+    fn withhold(&mut self, key: SlotKey) {
+        self.contents.0[key.index as usize] = None;
+    }
+
+    /// Lends the content of the layer in the slot `key` names to the reads
+    /// that follow.
+    fn lend(&mut self, key: SlotKey) {
+        if let Some(content) = self.entry(key).map(|entry| entry.layer.shared_content()) {
+            self.contents.0[key.index as usize] = Some(content);
+        }
+    }
+
     /// [`entry`](Self::entry), mutably.
     fn entry_mut(&mut self, key: SlotKey) -> Option<&mut Entry> {
         let slot = self
@@ -1272,6 +1363,7 @@ impl Slots {
     /// The layer the live slot `key` names, beside its subscribers, or `None`
     /// while a [`LayerGuard`] or live query borrows it.
     fn target(&mut self, key: SlotKey) -> Option<TargetLayer<'_>> {
+        self.withhold(key);
         let entry = self.entry_mut(key).expect("a handle keeps its slot filled");
         entry.target()
     }
@@ -1282,6 +1374,9 @@ impl Slots {
     fn targets(&mut self, keys: &[SlotKey]) -> Option<Vec<TargetLayer<'_>>> {
         // TODO(perf): pairing keys with slots scans the whole arena; walking
         // the slots in key-index order would visit only the named ones.
+        for &key in keys {
+            self.withhold(key);
+        }
         let position: HashMap<u32, usize> = keys.iter().enumerate().map(|(at, key)| (key.index, at)).collect();
         let mut found: Vec<(usize, &mut Entry)> = self
             .slots
@@ -1308,6 +1403,7 @@ impl Slots {
             return None;
         }
         let entry = slot.entry.take()?;
+        self.contents.0[key.index as usize] = None;
         // Every guard holds a handle: a slot no handle holds has no guard.
         debug_assert_eq!(Rc::strong_count(&entry.layer), 1, "no guard outlives the handles");
         slot.epoch = slot.epoch.wrapping_add(1);
@@ -1329,7 +1425,7 @@ impl Slots {
 impl HeldPackage {
     /// What the package holds, or `None` where no listing of it succeeded:
     /// a package that cannot be opened.
-    pub(crate) fn files(&self) -> Option<&Rc<ar::PackageFiles>> {
+    pub(crate) fn files(&self) -> Option<&Arc<ar::PackageFiles>> {
         self.files.as_ref()
     }
 }

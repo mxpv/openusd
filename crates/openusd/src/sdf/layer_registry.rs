@@ -329,6 +329,12 @@ impl LayerRegistry {
         self.resolver.as_ref()
     }
 
+    /// [`resolver`](Self::resolver), to hold beside the registry and share
+    /// with other threads.
+    pub(crate) fn shared_resolver(&self) -> Arc<dyn ar::Resolver> {
+        Arc::clone(&self.resolver) as Arc<dyn ar::Resolver>
+    }
+
     /// Reads layers in `format` too, after the formats the registry already
     /// reads. Every clone of the registry reads it from then on, and so does
     /// every layer the registry holds, as C++ registers a `SdfFileFormat`

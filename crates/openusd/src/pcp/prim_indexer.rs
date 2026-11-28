@@ -107,7 +107,7 @@ use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeDesc, NodeFlags, NodeId, PrimIndexGraph, is_class_based_arc};
 use super::prim_index::{CompositionContext, Demand, PrimEntry, first_spec_layer, stack_has_spec};
 use super::{
-    CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerId, LayerView, QueryError, VariantFallbackMap,
+    CompositionDiagnostic, CycleChain, CycleHop, ExpressionContext, LayerId, LayerRead, QueryError, VariantFallbackMap,
 };
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
@@ -422,7 +422,7 @@ pub(crate) struct BuildOutput {
 #[derive(Clone, Copy)]
 struct Inputs<'a> {
     /// The layer stack being composed.
-    stack: &'a LayerView<'a>,
+    stack: LayerRead<'a>,
     /// Composition context flowing from the parent prim.
     ctx: &'a CompositionContext,
     /// The stage's variant fallbacks (C++
@@ -467,8 +467,9 @@ struct VariantOpinions {
 /// grown node-by-node (C++ `Pcp_PrimIndexer`).
 ///
 /// All borrowed inputs are shared references, so each build is an independent
-/// pure function over the layer stack and incoming context (Rayon-friendly —
-/// see the `TODO(rayon)` on the cross-prim driver in `index_cache.rs`).
+/// pure function over the layer stack and incoming context, which
+/// [`IndexCache::prefetch`](super::IndexCache::prefetch) runs for sibling
+/// prims on several threads.
 pub(crate) struct Indexer<'a, 'f> {
     /// Shared read-only inputs (layer stack, context, cached indices).
     inputs: Inputs<'a>,
@@ -539,7 +540,7 @@ pub(crate) struct Indexer<'a, 'f> {
 
 impl<'a, 'f> Indexer<'a, 'f> {
     pub(crate) fn new(
-        stack: &'a LayerView<'a>,
+        stack: LayerRead<'a>,
         ctx: &'a CompositionContext,
         variant_fallbacks: &'a VariantFallbackMap,
         cached_indices: &'a sdf::PathTable<PrimEntry>,
@@ -3502,7 +3503,7 @@ mod tests {
         loop {
             let ambient = LayerStackId::ROOT;
             let out = Indexer::new(
-                &stack.read_view(),
+                stack.read_view().shared(),
                 &ctx,
                 &VariantFallbackMap::new(),
                 &sdf::PathTable::new(),
@@ -4104,7 +4105,7 @@ mod tests {
         let ctx = CompositionContext::default();
         let ambient = LayerStackId::ROOT;
         // Seed the child build with the parent's composed index, as the cache does.
-        let root_index = PrimIndex::build_with_context(&Path::new("/Root").unwrap(), &s.read_view(), &ctx)
+        let root_index = PrimIndex::build_with_context(&Path::new("/Root").unwrap(), s.read_view().shared(), &ctx)
             .expect("root index build");
         let mut cached = sdf::PathTable::new();
         cached.insert(
@@ -4120,11 +4121,18 @@ mod tests {
                 built: PrimRevision::placeholder(),
             },
         );
-        let child = Indexer::new(&s.read_view(), &ctx, &VariantFallbackMap::new(), &cached, ambient, true)
-            .build(&Path::new("/Root/Child").unwrap())
-            .expect("indexer build")
-            .graph
-            .expect("child composed by indexer");
+        let child = Indexer::new(
+            s.read_view().shared(),
+            &ctx,
+            &VariantFallbackMap::new(),
+            &cached,
+            ambient,
+            true,
+        )
+        .build(&Path::new("/Root/Child").unwrap())
+        .expect("indexer build")
+        .graph
+        .expect("child composed by indexer");
         assert!(
             child
                 .nodes()

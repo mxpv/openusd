@@ -187,7 +187,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | Feature | Status | Version | Notes |
 |---|---|---|---|
 | [Variable expressions](https://openusd.org/release/api/_sdf__page__variable_expressions.html) | :white_check_mark: | `0.7.0` | `sdf::expr`: 13 built-in functions and string interpolation; session and root layer `expressionVariables` compose; failures reach `Stage::composition_errors` |
-| Parallelism (Rayon) | :construction: | | Composition graph is `&`-only, ready for parallel execution |
+| Parallelism (Rayon) | :construction: | | Under the `rayon` feature, `usd::Stage::traverse` composes sibling prims on a thread pool<br>Remaining — layer reads; dependency registration; prototype subtrees |
 | Color configuration (`colorConfiguration`, `colorManagementSystem`) | :white_check_mark: | `0.9.0` | `usd::Stage::color_configuration`, with a fallback set on `usd::StageBuilder`<br>Remaining — site fallbacks from a `plugInfo.json` `UsdColorConfigFallbacks` entry |
 | Memory-mapped layers | :white_check_mark: | `0.8.0` | An `unsafe` opt-in through `ar::DefaultResolver::map_files` |
 | [Shared layers](https://openusd.org/release/api/class_sdf_layer.html) (C++ `SdfLayer::FindOrOpen`) | :construction: | `0.9.0` | `sdf::LayerRegistry::find_or_open` shares one layer between stages through `sdf::LayerHandle`, with live spec handles and reload<br>Remaining:<br>- reloading a layer whose asset moved (C++ `DidChangeLayerResolvedPath`); see the `TODO` in `Layer::reload_due`<br>- shared layers over a lazily decoded backend, and shared layers with an identity; see the `TODO` in `Layer::from_shared` |
