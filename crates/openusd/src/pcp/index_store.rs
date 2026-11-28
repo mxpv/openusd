@@ -21,13 +21,12 @@ use std::slice;
 
 use crate::sdf::{self, Path};
 
-use super::dependencies::Dependencies;
+use super::dependencies::{Dependencies, Registration};
 use super::diagnostics::Diagnostics;
 use super::instancing::RetiredPrototype;
-use super::layer_graph::{LayerGraph, LayerView};
+use super::layer_graph::{GraphCore, LayerView};
 use super::layer_stack::{LayerStackId, StackMarks};
 use super::prim_index::{CompositionContext, NodeRuns, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
-use super::prim_indexer::ExprVarDeps;
 use super::{CompositionDiagnostic, LayerId, QueryError};
 
 /// Per-prim composition index storage with dependency tracking. See the
@@ -359,19 +358,17 @@ impl IndexStore {
     }
 
     /// Caches `index` at `path` with the `context` its children inherit and its
-    /// build `errors`, registering its dependencies — the `(layer, site)` map
-    /// derived from the index plus the build's per-stack expression-variable
-    /// names (`expr_var_deps`). The single insertion point: entries and
-    /// dependencies are written together. Returns whether it settled a
-    /// work-set entry at `path`.
+    /// build `errors`, registering its dependencies: the `registration`
+    /// derived from the index and its build ([`Registration::of`]). The
+    /// single insertion point: entries and dependencies are written together.
+    /// Returns whether it settled a work-set entry at `path`.
     pub(super) fn insert(
         &mut self,
-        graph: &LayerGraph,
         path: &Path,
         index: PrimIndex,
         context: CompositionContext,
         errors: Diagnostics,
-        expr_var_deps: ExprVarDeps,
+        registration: Registration,
     ) -> bool {
         // Owner counts pair one increment per entry with one decrement at its
         // removal; a silent overwrite would double-count.
@@ -380,7 +377,7 @@ impl IndexStore {
         // A prim the work set held is rebuilt: the new entry counts its own
         // stacks, so the dropped index's stop being owned.
         let settled = self.settle(path);
-        self.deps.add(path, &index, graph, expr_var_deps);
+        self.deps.add(path, registration);
         let revision = self.mint_revision();
         self.entries.insert(
             path.clone(),
@@ -660,7 +657,7 @@ impl IndexStore {
             // the index its revision stamp and its report.
             let mut runs = rescan.refreshed.remove(&prim).unwrap_or_default();
             let was_empty = index.is_empty();
-            let refresh = index.refresh_has_specs_at(layer, path, graph, &mut runs);
+            let refresh = index.refresh_has_specs_at(layer, path, graph.shared(), &mut runs);
             // Several sites of one round may each flip it, so the set keeps
             // the parity: whether the round as a whole moved it.
             if index.is_empty() != was_empty && !rescan.appeared.remove(&prim) {
@@ -732,7 +729,7 @@ impl IndexStore {
                 // node the refresh should have matched and missed shows up only
                 // as a stack that stayed put.
                 debug_assert!(
-                    entry.index.spec_stack_matches_rebuild(graph),
+                    entry.index.spec_stack_matches_rebuild(graph.shared()),
                     "spliced spec stack diverged from a full rebuild at {path}",
                 );
             }
@@ -750,7 +747,7 @@ impl IndexStore {
     /// path on a layer its graph does not yet touch. Such a registration
     /// observes exactly its own path, so what it contributes is the changed path
     /// itself, whatever depth the registration sits at.
-    pub(super) fn lookup_with_ancestors(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+    pub(super) fn lookup_with_ancestors(&self, graph: &GraphCore, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
         let mut found = self.translated_sites(graph, layer_id, site_path, Ancestry::AtOrAbove);
         if self.deps.has_path_ancestor(site_path) {
             found.push(site_path.clone());
@@ -765,7 +762,7 @@ impl IndexStore {
     /// ones its graph never touched, which is right for invalidation and wrong
     /// for a report about one layer's site: a prim merely cached at `/Source`
     /// would answer a question about `/Source` in a layer it does not read.
-    pub(super) fn graph_ancestor_lookup(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+    pub(super) fn graph_ancestor_lookup(&self, graph: &GraphCore, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
         dedup_owned(self.translated_sites(graph, layer_id, site_path, Ancestry::AtOrAbove))
     }
 
@@ -776,7 +773,7 @@ impl IndexStore {
     /// whose dependents read the change at their own path.
     pub(super) fn translated_ancestor_dependents(
         &self,
-        graph: &LayerGraph,
+        graph: &GraphCore,
         layer_id: LayerId,
         site_path: &Path,
     ) -> Vec<Path> {
@@ -792,7 +789,7 @@ impl IndexStore {
     /// One dependent can be reached through several of its own nodes — two
     /// references to the same prim — and each names its own composed path, so
     /// this yields a path per node rather than one per dependent.
-    fn translated_sites(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path, reach: Ancestry) -> Vec<Path> {
+    fn translated_sites(&self, graph: &GraphCore, layer_id: LayerId, site_path: &Path, reach: Ancestry) -> Vec<Path> {
         let mut out = Vec::new();
         // One scratch buffer for the whole walk: a site typically names a single
         // node, and a fresh vector per pair would be the round's only allocation
@@ -1374,6 +1371,8 @@ fn failed_assets(entry: &PrimEntry) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::pcp::LayerGraph;
+    use crate::pcp::prim_indexer::ExprVarDeps;
 
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
@@ -1403,13 +1402,13 @@ pub(crate) mod tests {
 
     /// Registers `index` at `path` so the lookups can join it back.
     fn register(store: &mut IndexStore, g: &LayerGraph, path: &Path, index: PrimIndex) {
+        let registration = Registration::of(path, &index, g, ExprVarDeps::default());
         store.insert(
-            g,
             path,
             index,
             CompositionContext::default(),
             Diagnostics::default(),
-            ExprVarDeps::default(),
+            registration,
         );
     }
 

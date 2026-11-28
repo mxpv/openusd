@@ -28,7 +28,7 @@ use crate::vt::Value;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
 use super::prim_resolve::compose_specifier;
-use super::{IndexCache, LayerGraph, LayerId, LayerView, QueryError};
+use super::{GraphCore, IndexCache, LayerId, LayerView, QueryError};
 
 /// Pending prim opinions, keyed by the site — a layer and the spec path in
 /// it — they are to be written at.
@@ -120,7 +120,7 @@ impl PrimIndex {
     /// Whether a spec `overlay` creates un-culls an arc of this index whose
     /// subtree only a rebuild composes: one at a culled node that is not
     /// [`revivable`], or at a culled node the index erased.
-    fn revived_by(&self, graph: &LayerGraph, overlay: &Overlay) -> bool {
+    fn revived_by(&self, graph: &GraphCore, overlay: &Overlay) -> bool {
         let created = |stack, path: &Path| {
             graph
                 .layer_stack(stack)

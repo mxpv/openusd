@@ -22,7 +22,7 @@ use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, RelocateKind, SpecSite, extend_reversed};
 use super::prim_indexer::{BuildResult, ExprVarDeps};
-use super::{LayerGraph, LayerId, LayerView, QueryError, VariantFallbackMap};
+use super::{GraphCore, LayerGraph, LayerId, LayerRead, LayerView, QueryError, VariantFallbackMap};
 
 /// How much of the composition graph a value-resolution walk visits
 /// ([`PrimIndex::live_sites`]) — C++ `Usd_Resolver`'s `skipEmptyNodes`.
@@ -329,7 +329,7 @@ impl PrimIndex {
     /// among those that contribute opinions, at `path` whose layer stack
     /// holds `layer` (C++ `PcpPrimIndex::GetNodeProvidingSpec`); `graph`
     /// holds the stacks. `None` where no node does.
-    pub(crate) fn node_providing_spec(&self, graph: &LayerGraph, layer: LayerId, path: &Path) -> Option<Node<'_>> {
+    pub(crate) fn node_providing_spec(&self, graph: &GraphCore, layer: LayerId, path: &Path) -> Option<Node<'_>> {
         self.nodes()
             .find(|node| node.path() == path && graph.stack_contains(node.layer_stack_id(), layer))
     }
@@ -435,7 +435,7 @@ impl PrimIndex {
         prim_path: &Path,
         layer: LayerId,
         path: &Path,
-        graph: &LayerGraph,
+        graph: &GraphCore,
         out: &mut Vec<NodeId>,
     ) {
         out.clear();
@@ -642,7 +642,7 @@ impl PrimIndex {
         &mut self,
         layer: LayerId,
         path: &Path,
-        graph: &LayerView<'_>,
+        graph: LayerRead<'_>,
         runs: &mut NodeRuns,
     ) -> SpecRefresh {
         let mut refresh = SpecRefresh::default();
@@ -703,7 +703,7 @@ impl PrimIndex {
 
     /// Installs the spec stack and clip flag this index composes, replacing
     /// whatever it held. Run by the index builder, the single composition seam.
-    fn finalize_spec_stack(&mut self, graph: &LayerView<'_>) {
+    fn finalize_spec_stack(&mut self, graph: LayerRead<'_>) {
         let (stack, authors_clips) = self.build_spec_stack(graph);
         self.spec_stack = stack;
         self.authors_clips = authors_clips;
@@ -788,7 +788,7 @@ impl PrimIndex {
     ///
     /// A node's members are probed from its [`spec_from`](Node::spec_from):
     /// the indexer already found the stronger ones to author no spec.
-    fn build_spec_stack(&self, graph: &LayerView<'_>) -> (Vec<SpecSite>, bool) {
+    fn build_spec_stack(&self, graph: LayerRead<'_>) -> (Vec<SpecSite>, bool) {
         let mut stack = Vec::new();
         let mut authors_clips = false;
         for &id in self.graph.strength_order() {
@@ -824,7 +824,7 @@ impl PrimIndex {
     /// node's entries landed and whether the clip flag survived, not whether a
     /// flag is itself current. The flag transitions are covered by
     /// [`refresh_has_specs_at`](Self::refresh_has_specs_at)'s rebuild rules.
-    pub(super) fn spec_stack_matches_rebuild(&self, graph: &LayerView<'_>) -> bool {
+    pub(super) fn spec_stack_matches_rebuild(&self, graph: LayerRead<'_>) -> bool {
         let (rebuilt, authors_clips) = self.build_spec_stack(graph);
         self.authors_clips == authors_clips
             && self.spec_stack.len() == rebuilt.len()
@@ -1095,9 +1095,10 @@ impl PrimIndex {
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
-    /// previously-composed prim indices. Cached indices are checked before
-    /// building from scratch, ensuring inherit/specialize targets use the
-    /// fully-composed result (including ancestor-propagated specs).
+    /// previously-composed prim indices. A cached index at `path` is returned
+    /// as it is, and a build seeds its graph from the cached index of
+    /// `path`'s parent, the one other entry it reads. Arc targets are
+    /// composed by nested builds.
     ///
     /// `load_payloads` is the per-path payload-inclusion decision for `path`
     /// itself (`IndexCache::is_loaded`) — a pure function of `path`
@@ -1113,7 +1114,7 @@ impl PrimIndex {
     /// which the caller registers with the cached prim's dependencies.
     pub(crate) fn build_with_cache(
         path: &Path,
-        stack: &LayerView<'_>,
+        stack: LayerRead<'_>,
         ctx: &CompositionContext,
         fallbacks: &VariantFallbackMap,
         cached_indices: &sdf::PathTable<PrimEntry>,
@@ -1147,7 +1148,7 @@ impl PrimIndex {
     #[allow(clippy::too_many_arguments)] // each input is a distinct composition parameter
     pub(crate) fn build_with_cache_in(
         path: &Path,
-        stack: &LayerView<'_>,
+        stack: LayerRead<'_>,
         ctx: &CompositionContext,
         fallbacks: &VariantFallbackMap,
         cached_indices: &sdf::PathTable<PrimEntry>,
@@ -1258,7 +1259,7 @@ impl PrimIndex {
     /// where the strongest node declaring it lists it (C++
     /// `UsdVariantSets::GetNames` over `PcpComposeSiteVariantSets`). Every
     /// node is read, inert ones included, as C++ reads its whole node range.
-    pub(crate) fn variant_set_names(&self, graph: &LayerView<'_>) -> Result<Vec<String>, QueryError> {
+    pub(crate) fn variant_set_names(&self, graph: LayerRead<'_>) -> Result<Vec<String>, QueryError> {
         let mut names: Vec<String> = Vec::new();
         for node in self.ordered_nodes() {
             for name in compose_arc_list_in::<String>(&[node], FieldKey::VariantSetNames, graph)? {
@@ -1274,7 +1275,7 @@ impl PrimIndex {
     /// `UsdVariantSet::GetVariantNames`): each node at a prim or
     /// variant-selection site reads `variantChildren` at its own site's set
     /// across its layer stack (C++ `PcpComposeSiteVariantSetOptions`).
-    pub(crate) fn variant_names(&self, graph: &LayerView<'_>, set: &str) -> Result<Vec<String>, QueryError> {
+    pub(crate) fn variant_names(&self, graph: LayerRead<'_>, set: &str) -> Result<Vec<String>, QueryError> {
         let mut names = BTreeSet::new();
         for node in self.ordered_nodes() {
             let path = node.path();
@@ -1398,7 +1399,7 @@ impl Deref for PrimIndexView<'_> {
 /// so the flag the refresh derives from it agrees with the one the indexer
 /// computes by asking directly.
 fn push_node_run(
-    graph: &LayerView<'_>,
+    graph: LayerRead<'_>,
     node: Node<'_>,
     id: NodeId,
     from: usize,
@@ -1452,14 +1453,14 @@ pub(super) fn registers_site(node: Node<'_>, prim_path: &Path) -> bool {
 ///
 /// Short-circuits on the first member that answers yes, which is all its callers
 /// want.
-pub(super) fn stack_has_spec(graph: &LayerView<'_>, stack: LayerStackId, path: &Path) -> bool {
+pub(super) fn stack_has_spec(graph: LayerRead<'_>, stack: LayerStackId, path: &Path) -> bool {
     first_spec_layer(graph, stack, path).is_some()
 }
 
 /// The position in `stack` of the strongest layer that authors a spec at
 /// `path`, the probe behind [`stack_has_spec`] for a caller that records
 /// where it stopped ([`Node::spec_from`]).
-pub(super) fn first_spec_layer(graph: &LayerView<'_>, stack: LayerStackId, path: &Path) -> Option<u16> {
+pub(super) fn first_spec_layer(graph: LayerRead<'_>, stack: LayerStackId, path: &Path) -> Option<u16> {
     let position = graph
         .layer_stack(stack)
         .iter()
@@ -1514,7 +1515,7 @@ pub(crate) mod tests {
         /// ancestors, since the indexer seeds a child from its cached parent.
         pub(crate) fn build_with_context(
             path: &Path,
-            stack: &LayerView<'_>,
+            stack: LayerRead<'_>,
             ctx: &CompositionContext,
         ) -> BuildResult<Self> {
             Self::build_with_cache(
@@ -1587,9 +1588,15 @@ pub(crate) mod tests {
             let mut last = None;
             let mut pending: Vec<Demand> = Vec::new();
             for ancestor in &chain {
-                let (index, _errors, demands, _deps, _copied) =
-                    PrimIndex::build_with_cache(ancestor, &stack.read_view(), &parent_ctx, &fallbacks, &cache, true)
-                        .expect("index build failed");
+                let (index, _errors, demands, _deps, _copied) = PrimIndex::build_with_cache(
+                    ancestor,
+                    stack.read_view().shared(),
+                    &parent_ctx,
+                    &fallbacks,
+                    &cache,
+                    true,
+                )
+                .expect("index build failed");
                 pending.extend(demands);
                 parent_ctx = index.context_for_children(&parent_ctx);
                 cache.insert(
@@ -1636,7 +1643,7 @@ pub(crate) mod tests {
 
     /// The arc and target path of each unresolved-prim-path diagnostic that
     /// composing `prim` in `stack` reports.
-    fn unresolved_targets(stack: &LayerView<'_>, prim: &str) -> Result<Vec<(ArcType, String)>> {
+    fn unresolved_targets(stack: LayerRead<'_>, prim: &str) -> Result<Vec<(ArcType, String)>> {
         let (_, errors, _, _, _) = PrimIndex::build_with_cache(
             &Path::new(prim)?,
             stack,
@@ -2280,7 +2287,7 @@ def "World" (
         let fallbacks = VariantFallbackMap::new().add("v", ["hi"]);
         let (index, ..) = PrimIndex::build_with_cache(
             &Path::new("/World").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
             &fallbacks,
             &sdf::PathTable::new(),
@@ -2366,7 +2373,7 @@ def "Root" (
 
         let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2396,7 +2403,7 @@ def "Root" (
             let model = parse_usda("#usda 1.0\ndef Scope \"Present\" {}\n");
             let stack = two_layer_stack(root, model);
             assert_eq!(
-                unresolved_targets(&stack.read_view(), "/Mounted")?,
+                unresolved_targets(stack.read_view().shared(), "/Mounted")?,
                 [(arc, target.to_string())]
             );
         }
@@ -2438,7 +2445,7 @@ def Scope "NestedMissing" (references = </Outer/ToAbsent>) {}
 "#,
         );
         let stack = one_layer_stack(layer);
-        let unresolved = |prim: &str| unresolved_targets(&stack.read_view(), prim);
+        let unresolved = |prim: &str| unresolved_targets(stack.read_view().shared(), prim);
         assert_eq!(
             unresolved("/RootMissing")?,
             [(ArcType::Reference, "/Absent".to_string())]
@@ -2498,7 +2505,7 @@ def "Outer" (
 
         let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2553,7 +2560,7 @@ def "Outer"
 
         let (_index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Root").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2586,7 +2593,7 @@ def "Prim" (
         let build = |stack: &LayerGraph| {
             PrimIndex::build_with_cache(
                 &Path::new("/Prim").unwrap(),
-                &stack.read_view(),
+                stack.read_view().shared(),
                 &CompositionContext::default(),
                 &VariantFallbackMap::new(),
                 &sdf::PathTable::new(),
@@ -2640,7 +2647,7 @@ def "Prim" (
 
         let (index, errors, _pending, _deps, _copied) = PrimIndex::build_with_cache(
             &Path::new("/Prim").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
             &VariantFallbackMap::new(),
             &sdf::PathTable::new(),
@@ -2948,7 +2955,7 @@ def "Prim" (
     /// memoized spec stack — which keeps only spec-authoring members — this lists
     /// every member, so [`offset_stack`] can assert the offset folding on layers
     /// that author no spec at the node's path.
-    fn node_layer_offsets(node: Node<'_>, graph: &LayerGraph) -> Vec<(LayerId, LayerOffset)> {
+    fn node_layer_offsets(node: Node<'_>, graph: &GraphCore) -> Vec<(LayerId, LayerOffset)> {
         let arc_offset = node.map_to_root().time_offset();
         graph
             .layer_stack(node.layer_stack_id())
@@ -3116,7 +3123,7 @@ def "Model"
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = PrimIndex::build_with_context(
             &Path::new("/Root").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
         )?;
 
@@ -3148,7 +3155,7 @@ def "Root" (
         let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = PrimIndex::build_with_context(
             &Path::new("/Root").unwrap(),
-            &stack.read_view(),
+            stack.read_view().shared(),
             &CompositionContext::default(),
         )?;
 

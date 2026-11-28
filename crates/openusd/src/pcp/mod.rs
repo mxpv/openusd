@@ -312,11 +312,11 @@
 //!
 //! # Remaining work
 //!
-//! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.
-//!   Each build is a pure function of `&LayerGraph`, the parent context, and the
-//!   cached indices (`TODO(rayon)`), but the shared `indices` map that
-//!   inherit/specialize targets read mid-build first needs a concurrent map or a
-//!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
+//! - Cross-prim parallelism: `IndexCache::prefetch` composes the sibling
+//!   prims a default traversal visits together, on a thread pool under the
+//!   `rayon` feature. Each prim is then admitted on the calling thread, where
+//!   dependency registration, layer loading and instancing stay serial
+//!   (`TODO(rayon)`), and a prototype's subtree composes prim by prim.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -381,7 +381,9 @@ pub use index_cache::{GraphStats, SpecSiteRecord, Tally};
 pub(crate) use index_store::{Owner, PrimRevision};
 pub(crate) use instancing::is_prototype_namespace;
 pub use layer_graph::StackIdentity;
-pub(crate) use layer_graph::{LayerGraph, LayerView, LoadFailure, MuteChange, Reclaim, SublayerDemand};
+pub(crate) use layer_graph::{
+    GraphCore, LayerGraph, LayerRead, LayerView, LoadFailure, MuteChange, Reclaim, SublayerDemand,
+};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::{LayerStackId, StackMarks};
 pub use load_rules::{LoadRules, Rule};
@@ -451,13 +453,13 @@ impl VariantFallbackMap {
 /// 24.0 default. When a sublayer or reference/payload target has a different
 /// effective rate than the layer that introduces it, the arc retimes by
 /// `introducing / target`, folded into the composed [`sdf::LayerOffset`]'s scale.
-pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
+pub(crate) fn effective_time_codes_per_second(data: &dyn sdf::AbstractData) -> f64 {
     // Read directly from the layer's `AbstractData`: this must work for any
     // backend (text, crate, in-memory), whereas the `PseudoRootSpec` accessors
     // require the concrete in-memory `Data` backing a `Layer` may not have.
     let root = Path::abs_root();
     let read = |key: FieldKey| -> Option<f64> {
-        match layer.data().try_field(&root, key.as_str()).ok()??.into_owned() {
+        match data.try_field(&root, key.as_str()).ok()??.into_owned() {
             Value::Double(v) => Some(v),
             Value::Float(v) => Some(v as f64),
             _ => None,
@@ -1371,7 +1373,7 @@ mod tests {
     #[test]
     fn effective_tcps_clamps_degenerate() {
         let header = |meta: &str| format!("#usda 1.0\n(\n{meta}\n)\ndef \"A\" {{}}\n");
-        let tcps = |meta: &str| effective_time_codes_per_second(&layer("l.usd", &header(meta)));
+        let tcps = |meta: &str| effective_time_codes_per_second(layer("l.usd", &header(meta)).data());
 
         assert_eq!(tcps("    timeCodesPerSecond = 48"), 48.0, "authored rate is used");
         assert_eq!(

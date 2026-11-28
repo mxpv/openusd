@@ -25,7 +25,7 @@ use crate::sdf::{self, Path};
 
 use super::prim_index::{PrimIndex, registers_site};
 use super::prim_indexer::ExprVarDeps;
-use super::{LayerGraph, LayerId, LayerStackId};
+use super::{GraphCore, LayerId, LayerStackId};
 
 #[derive(Debug, Default)]
 pub(super) struct Dependencies {
@@ -111,91 +111,32 @@ impl Dependencies {
         kept.extend(self.by_default_prim.keys());
     }
 
-    /// Register every `(layer stack, node.path)` site referenced by `index` as a
-    /// dependency of `prim_index_path`, together with the per-stack
-    /// expression-variable names its build read (`expr_var_deps`, from
-    /// [`BuildOutput::expr_var_deps`](super::prim_indexer::BuildOutput::expr_var_deps)).
-    /// Replaces any prior registration for the same prim. A site registers
-    /// once, for its node's stack. A change to any member layer of that stack
-    /// fans out to this prim.
-    ///
-    /// The implicit "self" edge — a Root node whose path equals the prim's
-    /// own path — is skipped to keep the map compact. C++
-    /// `PcpDependencyTypeRoot` follows the same rule.
-    pub(super) fn add(
-        &mut self,
-        prim_index_path: &Path,
-        index: &PrimIndex,
-        graph: &LayerGraph,
-        expr_var_deps: ExprVarDeps,
-    ) {
+    /// Registers `registration` as the dependencies of `prim_index_path`,
+    /// replacing any prior registration for the same prim. A change to any
+    /// member layer of a registered site's stack fans out to this prim.
+    pub(super) fn add(&mut self, prim_index_path: &Path, registration: Registration) {
         // Clear any previous registration before adding the new one.
         self.remove(prim_index_path);
 
-        // `seen` provides O(1) dedup as we walk graph nodes; the parallel
-        // `registered` Vec preserves insertion order for the reverse-map
-        // entry (the order is irrelevant to lookups but helps debug).
-        let mut seen: FxHashSet<(LayerStackId, Path)> = FxHashSet::default();
-        let mut registered: Vec<(LayerStackId, Path)> = Vec::new();
-        // Whether a node composes against the root stack, the self-Root edge the
-        // site map skips included.
-        let mut root_user = false;
-        // The layer stacks this index composes against, for the two stack-keyed
-        // maps and their shared retraction. The root stack is left implicit:
-        // every prim composes in it, so recording it in `by_stack` would mirror
-        // the whole cache per prim; `prims_for_stack` answers for it with the
-        // pseudo-root instead.
-        let mut stacks: HashSet<LayerStackId> = HashSet::new();
-        // Include the culled nodes the graph keeps and inert relocation-source
-        // nodes: authoring a spec at such a site must invalidate this prim so the
-        // node un-culls / re-relocates on recomposition. A culled node the graph
-        // erased still read its site: a spec authored there can bring it back
-        // (C++ `PcpCulledDependency`).
-        let live = index.dependency_nodes().map(|node| {
-            debug_assert!(
-                !node.layer_id().is_valid() || graph.stack_contains(node.layer_stack_id(), node.layer_id()),
-                "a node's representative layer is a member of its stack, so the stack lookups reach it",
-            );
-            // The site map skips the self-Root edge to stay compact;
-            // `root_users` keeps it (the prim reads its own root stack).
-            (
-                node.layer_stack_id(),
-                node.path(),
-                registers_site(node, prim_index_path),
-            )
-        });
-        let erased = index
-            .culled_dependencies()
-            .iter()
-            .map(|culled| (culled.layer_stack, &culled.site, true));
-        for (stack, path, registers) in live.chain(erased) {
-            if stack == LayerStackId::ROOT {
-                root_user = true;
-            } else {
-                stacks.insert(stack);
-            }
-            if !registers {
-                continue;
-            }
-            let key = (stack, path.clone());
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            registered.push(key);
+        let Registration {
+            sites,
+            root_user,
+            stacks,
+            vars,
+            muted,
+            defaults,
+        } = registration;
+        for (stack, site) in &sites {
             self.per_stack
-                .entry(stack)
+                .entry(*stack)
                 .or_default()
-                .get_or_insert_default(path)
+                .get_or_insert_default(site)
                 .push(prim_index_path.clone());
         }
         if root_user {
             self.root_users.insert(prim_index_path.clone());
         }
-        // Fold the variable-reading stacks into the same retraction set — the
-        // root stack included here, since its per-prim names are the step-4
-        // lookup even though `by_stack` leaves it implicit.
-        for (stack, names) in expr_var_deps {
-            stacks.insert(stack);
+        for (stack, names) in vars {
             self.by_stack_vars
                 .entry(stack)
                 .or_default()
@@ -206,36 +147,12 @@ impl Dependencies {
                 self.by_stack.entry(stack).or_default().insert(prim_index_path.clone());
             }
         }
-
-        // A reference/payload target this index depends on the mute state of but has
-        // no live site for: one muted before loading (never interned — its canonical
-        // identifier is in `NonSiteDeps::muted_unloaded`), or one muted after
-        // loading (its stack emptied, so it grafted no node — the interned target
-        // root, whose identifier is that same canonical). Register both by
-        // canonical identifier so unmuting the target fans back here, without
-        // counting it as reached.
-        let muted: HashSet<String> = index
-            .muted_unloaded_targets()
-            .iter()
-            .cloned()
-            .chain(
-                index
-                    .muted_external_targets()
-                    .iter()
-                    .map(|&t| graph.identifier(t).to_string()),
-            )
-            .collect();
         for canonical in &muted {
             self.by_muted_canonical
                 .entry(canonical.clone())
                 .or_default()
                 .insert(prim_index_path.clone());
         }
-
-        // Layers whose `defaultPrim` this index's composition consulted. Collected
-        // through a set because one target reached by both a `references` and a
-        // `payload` arc records twice.
-        let defaults: HashSet<LayerId> = index.default_prim_layers().iter().copied().collect();
         for &layer in &defaults {
             self.by_default_prim
                 .entry(layer)
@@ -243,7 +160,7 @@ impl Dependencies {
                 .insert(prim_index_path.clone());
         }
 
-        self.by_prim.insert(prim_index_path.clone(), registered);
+        self.by_prim.insert(prim_index_path.clone(), sites);
         // The common arc-free, expression-free index registers under no stack
         // (its only stack is the implicit root), so skip an empty entry.
         if !stacks.is_empty() {
@@ -374,7 +291,7 @@ impl Dependencies {
     /// `layer_id` is paired with it once per stack.
     pub(super) fn ancestor_sites<'a>(
         &'a self,
-        graph: &'a LayerGraph,
+        graph: &'a GraphCore,
         layer_id: LayerId,
         site_path: &'a Path,
     ) -> impl Iterator<Item = (&'a Path, &'a Path)> {
@@ -398,7 +315,7 @@ impl Dependencies {
     /// with no ancestor or subtree walk. The spec-tier rescan uses this to
     /// reach the nodes sitting at that precise site whose `has_specs` flag an
     /// inert spec add or remove can flip.
-    pub(super) fn exact_lookup(&self, graph: &LayerGraph, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+    pub(super) fn exact_lookup(&self, graph: &GraphCore, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
         let per_stack = self
             .stack_tables(graph, layer_id)
             .filter_map(|map| map.get(site_path))
@@ -424,7 +341,7 @@ impl Dependencies {
     /// folded in here: a prim whose only registration is its own path under
     /// `prefix` is a namespace descendant of `prefix`, so the caller's
     /// literal-path subtree drop already reaches it.
-    pub(super) fn subtree_lookup(&self, graph: &LayerGraph, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
+    pub(super) fn subtree_lookup(&self, graph: &GraphCore, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
         Self::dedup_paths(
             self.stack_tables(graph, layer_id)
                 .flat_map(|map| map.subtree(prefix).flat_map(|(_, deps)| deps.as_slice())),
@@ -434,7 +351,7 @@ impl Dependencies {
     /// The site tables of the stacks holding `layer_id`.
     fn stack_tables<'a>(
         &'a self,
-        graph: &'a LayerGraph,
+        graph: &'a GraphCore,
         layer_id: LayerId,
     ) -> impl Iterator<Item = &'a sdf::PathTable<Vec<Path>>> {
         graph
@@ -450,7 +367,7 @@ impl Dependencies {
     /// names by layers that stay members of the stacks the change restructures.
     /// A referrer that only *skipped* a muted target reaches it through
     /// [`indices_for_mute_toggle`](Self::indices_for_mute_toggle).
-    pub(super) fn indices_for_layers(&self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
+    pub(super) fn indices_for_layers(&self, graph: &GraphCore, affected: &HashSet<LayerId>) -> Vec<Path> {
         let stacks: BTreeSet<LayerStackId> = affected.iter().flat_map(|&layer| graph.stacks_using(layer)).collect();
         Self::dedup_paths(self.stack_users(&stacks))
     }
@@ -549,6 +466,123 @@ impl Dependencies {
     }
 }
 
+/// What one composed prim index registers in [`Dependencies`]: a value
+/// derived from the index alone, so a build computes it wherever it runs and
+/// [`Dependencies::add`] only files it.
+#[derive(Debug, Default)]
+pub(super) struct Registration {
+    /// The `(layer stack, site path)` pairs the index's graph reads, each
+    /// once, in graph order.
+    sites: Vec<(LayerStackId, Path)>,
+    /// Whether a node composes against the root stack, the self-Root edge
+    /// the site list skips included.
+    root_user: bool,
+    /// The layer stacks the index composes against or read a variable from.
+    /// The root stack appears only for a variable read: every prim composes
+    /// in it, so [`Dependencies::prims_for_stack`] answers for it with the
+    /// pseudo-root.
+    stacks: HashSet<LayerStackId>,
+    /// The expression-variable names the build read, per stack.
+    vars: Vec<(LayerStackId, HashSet<String>)>,
+    /// The canonical identifiers of the muted reference and payload targets
+    /// the index depends on the mute state of.
+    muted: HashSet<String>,
+    /// The layers whose `defaultPrim` the composition consulted.
+    defaults: HashSet<LayerId>,
+}
+
+impl Registration {
+    /// Collects every `(layer stack, node.path)` site `index` references as a
+    /// dependency of `prim_index_path`, together with the per-stack
+    /// expression-variable names its build read (`expr_var_deps`, from
+    /// [`BuildOutput::expr_var_deps`](super::prim_indexer::BuildOutput::expr_var_deps)).
+    /// A site registers once, for its node's stack.
+    ///
+    /// The implicit "self" edge — a Root node whose path equals the prim's
+    /// own path — is skipped to keep the map compact. C++
+    /// `PcpDependencyTypeRoot` follows the same rule.
+    pub(super) fn of(prim_index_path: &Path, index: &PrimIndex, graph: &GraphCore, expr_var_deps: ExprVarDeps) -> Self {
+        // `seen` provides O(1) dedup as we walk graph nodes; `sites` keeps
+        // insertion order (irrelevant to lookups, but it helps debugging).
+        let mut seen: FxHashSet<(LayerStackId, Path)> = FxHashSet::default();
+        let mut sites: Vec<(LayerStackId, Path)> = Vec::new();
+        let mut root_user = false;
+        let mut stacks: HashSet<LayerStackId> = HashSet::new();
+        // Include the culled nodes the graph keeps and inert relocation-source
+        // nodes: authoring a spec at such a site must invalidate this prim so the
+        // node un-culls / re-relocates on recomposition. A culled node the graph
+        // erased still read its site: a spec authored there can bring it back
+        // (C++ `PcpCulledDependency`).
+        let live = index.dependency_nodes().map(|node| {
+            debug_assert!(
+                !node.layer_id().is_valid() || graph.stack_contains(node.layer_stack_id(), node.layer_id()),
+                "a node's representative layer is a member of its stack, so the stack lookups reach it",
+            );
+            // The site list skips the self-Root edge to stay compact;
+            // `root_user` keeps it (the prim reads its own root stack).
+            (
+                node.layer_stack_id(),
+                node.path(),
+                registers_site(node, prim_index_path),
+            )
+        });
+        let erased = index
+            .culled_dependencies()
+            .iter()
+            .map(|culled| (culled.layer_stack, &culled.site, true));
+        for (stack, path, registers) in live.chain(erased) {
+            if stack == LayerStackId::ROOT {
+                root_user = true;
+            } else {
+                stacks.insert(stack);
+            }
+            if !registers {
+                continue;
+            }
+            let key = (stack, path.clone());
+            if seen.insert(key.clone()) {
+                sites.push(key);
+            }
+        }
+        // Fold the variable-reading stacks into the same retraction set, the
+        // root stack included, since its per-prim names are what a targeted
+        // variable lookup reads even though `by_stack` leaves it implicit.
+        let vars: Vec<_> = expr_var_deps.into_iter().collect();
+        stacks.extend(vars.iter().map(|(stack, _)| *stack));
+
+        // A reference/payload target this index depends on the mute state of but has
+        // no live site for: one muted before loading (never interned — its canonical
+        // identifier is in `NonSiteDeps::muted_unloaded`), or one muted after
+        // loading (its stack emptied, so it grafted no node — the interned target
+        // root, whose identifier is that same canonical). Register both by
+        // canonical identifier so unmuting the target fans back here, without
+        // counting it as reached.
+        let muted = index
+            .muted_unloaded_targets()
+            .iter()
+            .cloned()
+            .chain(
+                index
+                    .muted_external_targets()
+                    .iter()
+                    .map(|&t| graph.identifier(t).to_string()),
+            )
+            .collect();
+        // Collected through a set because one target reached by both a
+        // `references` and a `payload` arc records twice.
+        let defaults = index.default_prim_layers().iter().copied().collect();
+
+        Self {
+            sites,
+            root_user,
+            stacks,
+            vars,
+            muted,
+            defaults,
+        }
+    }
+}
+
 /// `path` and its ancestors, stopping where a variant selection ends the
 /// namespace chain (C++ `Pcp_Dependencies::ForEachDependencyOnSite`, USD mode).
 ///
@@ -583,6 +617,7 @@ fn retract<K: Eq + Hash>(forward: &mut HashMap<K, sdf::PathSet>, reverse: &mut s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcp::LayerGraph;
     use crate::pcp::LayerStackId;
     use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
@@ -591,6 +626,11 @@ mod tests {
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")
+    }
+
+    /// Registers `index`'s dependencies for `path`, as a cached build does.
+    fn add(deps: &mut Dependencies, path: &Path, index: &PrimIndex, graph: &GraphCore, vars: ExprVarDeps) {
+        deps.add(path, Registration::of(path, index, graph, vars));
     }
 
     /// A layer graph of `n` sublayer-free in-memory layers, so the sublayer
@@ -605,7 +645,7 @@ mod tests {
 
     /// The dependent paths `ancestor_sites` reports for a site, deduplicated
     /// in first-seen order — what the table knows before any translation.
-    fn dependents(deps: &Dependencies, graph: &LayerGraph, layer: LayerId, site: &Path) -> Vec<Path> {
+    fn dependents(deps: &Dependencies, graph: &GraphCore, layer: LayerId, site: &Path) -> Vec<Path> {
         let mut out: Vec<Path> = Vec::new();
         for (_, dep) in deps.ancestor_sites(graph, layer, site) {
             if !out.contains(dep) {
@@ -644,7 +684,7 @@ mod tests {
         let mut index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
         index.record_default_prim(l1);
         index.record_default_prim(l1);
-        deps.add(&foo, &index, &g, ExprVarDeps::default());
+        add(&mut deps, &foo, &index, &g, ExprVarDeps::default());
 
         assert_eq!(deps.prims_using_default_prim(l1), vec![foo.clone()]);
         assert!(deps.prims_using_default_prim(l0).is_empty(), "only the layer consulted");
@@ -666,11 +706,11 @@ mod tests {
         let source = p("/Source");
         // A prim whose only registration is its own path, on no particular layer.
         let bystander = make_index(&g, &source, vec![(ArcType::Root, l0, source.clone())]);
-        deps.add(&source, &bystander, &g, ExprVarDeps::default());
+        add(&mut deps, &source, &bystander, &g, ExprVarDeps::default());
         // A prim whose graph genuinely reads `/Source` on `l1`.
         let user = p("/User");
         let reader = make_index(&g, &user, vec![(ArcType::Reference, l1, source.clone())]);
-        deps.add(&user, &reader, &g, ExprVarDeps::default());
+        add(&mut deps, &user, &reader, &g, ExprVarDeps::default());
 
         assert_eq!(
             dependents(&deps, &g, l1, &source),
@@ -696,7 +736,7 @@ mod tests {
         let mut deps = Dependencies::default();
         let foo = p("/Foo");
         let index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
-        deps.add(&foo, &index, &g, ExprVarDeps::default());
+        add(&mut deps, &foo, &index, &g, ExprVarDeps::default());
         assert!(
             dependents(&deps, &g, l0, &foo).is_empty(),
             "the self-Root edge registers no site"
@@ -723,7 +763,7 @@ mod tests {
                 (ArcType::Reference, l1, there.clone()),
             ],
         );
-        deps.add(&here, &index, &g, ExprVarDeps::default());
+        add(&mut deps, &here, &index, &g, ExprVarDeps::default());
         assert_eq!(dependents(&deps, &g, l1, &there), vec![here.clone()]);
     }
 
@@ -739,14 +779,16 @@ mod tests {
         let mut deps = Dependencies::default();
 
         let local = p("/Local");
-        deps.add(
+        add(
+            &mut deps,
             &local,
             &make_index(&g, &local, vec![(ArcType::Root, l0, local.clone())]),
             &g,
             ExprVarDeps::default(),
         );
         let refp = p("/Ref");
-        deps.add(
+        add(
+            &mut deps,
             &refp,
             &make_index(
                 &g,
@@ -791,7 +833,7 @@ mod tests {
                 (ArcType::Inherit, l0, arc_site.clone()),
             ],
         );
-        deps.add(&here, &index, &g, ExprVarDeps::default());
+        add(&mut deps, &here, &index, &g, ExprVarDeps::default());
         assert_eq!(dependents(&deps, &g, l0, &p("/X/Y/Child")), vec![here.clone()]);
         // The site itself reaches the dependent too.
         assert_eq!(dependents(&deps, &g, l0, &arc_site), vec![here]);
@@ -810,13 +852,15 @@ mod tests {
         let sel = p("/Sel");
         let model = p("/Model");
         let variant = p("/Model{lod=high}");
-        deps.add(
+        add(
+            &mut deps,
             &plain,
             &make_index(&g, &plain, vec![(ArcType::Reference, l0, model.clone())]),
             &g,
             ExprVarDeps::default(),
         );
-        deps.add(
+        add(
+            &mut deps,
             &sel,
             &make_index(&g, &sel, vec![(ArcType::Reference, l0, variant.clone())]),
             &g,
@@ -849,7 +893,8 @@ mod tests {
         let l0 = g.all_ids()[0];
         let mut deps = Dependencies::default();
         let model = p("/Model");
-        deps.add(
+        add(
+            &mut deps,
             &model,
             &make_index(&g, &model, vec![(ArcType::Root, l0, model.clone())]),
             &g,
@@ -871,13 +916,15 @@ mod tests {
         let b = p("/B");
         let xy = p("/X/Y");
         let xy_child = p("/X/Y/Child");
-        deps.add(
+        add(
+            &mut deps,
             &a,
             &make_index(&g, &a, vec![(ArcType::Reference, l0, xy.clone())]),
             &g,
             ExprVarDeps::default(),
         );
-        deps.add(
+        add(
+            &mut deps,
             &b,
             &make_index(&g, &b, vec![(ArcType::Reference, l0, xy_child.clone())]),
             &g,
@@ -896,7 +943,8 @@ mod tests {
         let mut deps = Dependencies::default();
         let here = p("/A");
         let there = p("/X");
-        deps.add(
+        add(
+            &mut deps,
             &here,
             &make_index(&g, &here, vec![(ArcType::Reference, l0, there.clone())]),
             &g,
@@ -917,7 +965,8 @@ mod tests {
         let inside = [p("/A/B"), p("/A/C")];
         let outside = p("/AB");
         for prim in inside.iter().chain([&outside]) {
-            deps.add(
+            add(
+                &mut deps,
                 prim,
                 &make_index(&g, prim, vec![(ArcType::Reference, l0, shared.clone())]),
                 &g,

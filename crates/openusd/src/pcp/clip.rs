@@ -36,7 +36,7 @@ use crate::vt::Value;
 use super::asset_resolve::{self, AssetMode, AssetSite};
 use super::clip_manifest::{self, ClipSetKey};
 use super::diagnostics::Diagnostics;
-use super::layer_graph::{LayerGraph, LayerView, LoadFailure};
+use super::layer_graph::{GraphCore, LayerView, LoadFailure};
 use super::prim_graph::Node;
 use super::prim_resolve::Supplied;
 use super::value_resolve::{self, ValueState};
@@ -873,7 +873,7 @@ impl ClipCache {
     /// nothing: the prim resolves its sets afresh when it next composes.
     pub(crate) fn mark_live_layers(
         &self,
-        graph: &LayerGraph,
+        graph: &GraphCore,
         kept: &mut HashSet<LayerId>,
         clips: &mut HashSet<LayerId>,
         cached: impl Fn(&Path) -> bool,
@@ -2225,6 +2225,7 @@ pub(crate) mod tests {
     use std::mem;
 
     use super::*;
+    use crate::pcp::LayerGraph;
     use crate::sdf;
 
     /// Opens the clip and manifest layers `identifiers` into `graph`, marking

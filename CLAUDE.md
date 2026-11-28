@@ -104,8 +104,9 @@ source of truth for specifics.
   LIVERPS strength ordering across layers, kept a pure function of `(graph,
   context, cached indices)` so it stays parallelizable. Composition drives layer
   loading: a reference/payload target opens on first use and the demand travels
-  out through `BuildOutput` to the stage's load barrier. A build reads layer
-  content through `LayerView`, the graph with one borrow of its layers' store.
+  out through `BuildOutput` to the stage's load barrier. A query reads layer
+  content through `LayerView`, the graph with one borrow of its layers' store,
+  and a build through the `LayerRead` it lends, which threads share.
   Start at `pcp/mod.rs` — it has the LIVERPS overview and a per-file structure
   table.
 
@@ -446,6 +447,8 @@ Key external dependencies:
 - `half` - 16-bit floating point support (re-exported as `f16`)
 - `logos` - Lexer generator for USDA tokenization
 - `lz4_flex` - Compression for binary format
+- `rayon` (optional, `rayon` feature) - The thread pool sibling prims compose
+  on during a stage traversal
 - `memmap2` (optional, `mmap` feature) - Read-only file mappings a resolver
   opts into with `ar::DefaultResolver::map_files`
 - `num-traits` - Numeric traits

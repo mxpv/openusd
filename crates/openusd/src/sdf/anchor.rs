@@ -9,9 +9,9 @@
 //! needs from their assets ([`ReadListing`], through [`absolute_path_at`]).
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use super::{Layer, LayerRegistry, LayerStore, PackageListings, StoreRead};
+use super::{Layer, LayerRegistry, LayerStore, PackageListings, Packages};
 use crate::{ar, usdz};
 
 /// What the anchoring rules read of a package: whether a location is one,
@@ -19,7 +19,7 @@ use crate::{ar, usdz};
 pub(crate) trait Listing {
     /// What `package` holds, its root layer included, or `None` for a
     /// package that cannot be opened, which holds nothing to anchor at.
-    fn files(&mut self, package: &str) -> Option<Rc<ar::PackageFiles>>;
+    fn files(&mut self, package: &str) -> Option<Arc<ar::PackageFiles>>;
 
     /// Whether the resolved `location` is a package a reader reads into.
     fn is_package(&mut self, location: &str) -> bool;
@@ -30,11 +30,11 @@ pub(crate) trait Listing {
 /// A layer read from a package holds the packages it lies in and those its
 /// innermost package's root descends through ([`held_packages`]), the only
 /// packages the anchoring rules read for a path that layer authors.
-pub(crate) struct HeldListing<'a, 'r>(pub(crate) &'a StoreRead<'r>);
+pub(crate) struct HeldListing<'a>(pub(crate) &'a Packages);
 
-impl Listing for HeldListing<'_, '_> {
-    fn files(&mut self, package: &str) -> Option<Rc<ar::PackageFiles>> {
-        let held = self.0.package(package);
+impl Listing for HeldListing<'_> {
+    fn files(&mut self, package: &str) -> Option<Arc<ar::PackageFiles>> {
+        let held = self.0.get(package);
         debug_assert!(
             held.is_some(),
             "a live layer holds every package a path it authors is anchored in: {package}"
@@ -45,7 +45,7 @@ impl Listing for HeldListing<'_, '_> {
     /// Whether the store holds `location` as a package: a layer holds every
     /// package it lies in, is anchored at, or whose root it descends to.
     fn is_package(&mut self, location: &str) -> bool {
-        self.0.package(location).is_some()
+        self.0.contains_key(location)
     }
 }
 
@@ -55,7 +55,7 @@ impl Listing for HeldListing<'_, '_> {
 pub(crate) struct ReadListing<'a> {
     resolver: &'a dyn ar::Resolver,
     store: Option<&'a LayerStore>,
-    listed: HashMap<String, Option<Rc<ar::PackageFiles>>>,
+    listed: HashMap<String, Option<Arc<ar::PackageFiles>>>,
     /// Shares one open of each package among the listings, begun at the
     /// first that reads an asset.
     scope: Option<ar::CacheScope>,
@@ -74,7 +74,7 @@ impl<'a> ReadListing<'a> {
 }
 
 impl Listing for ReadListing<'_> {
-    fn files(&mut self, package: &str) -> Option<Rc<ar::PackageFiles>> {
+    fn files(&mut self, package: &str) -> Option<Arc<ar::PackageFiles>> {
         if let Some(files) = self.listed.get(package) {
             return files.clone();
         }
@@ -83,7 +83,7 @@ impl Listing for ReadListing<'_> {
             .and_then(|store| Some(store.read().ok()?.package(package)?.files().cloned()));
         let files = held.unwrap_or_else(|| {
             self.scope.get_or_insert_with(ar::CacheScope::begin);
-            LayerRegistry::list_package(self.resolver, package).map(Rc::new)
+            LayerRegistry::list_package(self.resolver, package).map(Arc::new)
         });
         self.listed.insert(package.to_owned(), files.clone());
         files

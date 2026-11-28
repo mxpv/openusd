@@ -23,6 +23,7 @@ use crate::sdf;
 use crate::sdf::Path;
 use crate::tf::Token;
 
+use super::dependencies::Registration;
 use super::diagnostics::Diagnostics;
 use super::index_cache::{IndexCache, OwnStatus};
 use super::index_store::Owner;
@@ -929,14 +930,8 @@ impl IndexCache {
     fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
         let (index, context, nodes_copied) = prototype_root_index(self.cached(canonical), canonical, prototype);
         self.count_copy(nodes_copied);
-        self.cache_index(
-            graph,
-            prototype,
-            index,
-            context,
-            Diagnostics::default(),
-            ExprVarDeps::default(),
-        );
+        let registration = Registration::of(prototype, &index, graph, ExprVarDeps::default());
+        self.cache_index(prototype, index, context, Diagnostics::default(), registration);
     }
 
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by

@@ -18,7 +18,7 @@ use crate::sdf::{self, Path, RelocateList, element_cmp};
 use crate::tf::Token;
 
 use super::diagnostics::Diagnostics;
-use super::layer_graph::{LayerGraph, LayerView};
+use super::layer_graph::{GraphCore, LayerView};
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::ArcType;
@@ -532,11 +532,7 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
 /// rename. Used to apply relocates to a relationship/connection's *deleted*
 /// target paths, which have no per-node origin to translate through (resolved
 /// targets translate through their node's own map instead).
-pub(crate) fn effective_relocates(
-    graph: &LayerGraph,
-    path: &Path,
-    indices: &sdf::PathTable<PrimEntry>,
-) -> RelocateList {
+pub(crate) fn effective_relocates(graph: &GraphCore, path: &Path, indices: &sdf::PathTable<PrimEntry>) -> RelocateList {
     let stack_maps = collect_stack_maps(graph, path, indices);
     let mut result: RelocateList = Vec::new();
 
@@ -586,7 +582,7 @@ pub(crate) fn effective_relocates(
 /// other cached prims in the same root subtree that have layers with
 /// relocates.
 fn collect_stack_maps(
-    graph: &LayerGraph,
+    graph: &GraphCore,
     path: &Path,
     indices: &sdf::PathTable<PrimEntry>,
 ) -> Vec<(LayerStackId, MapFunction)> {
