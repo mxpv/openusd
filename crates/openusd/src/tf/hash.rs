@@ -36,6 +36,26 @@ impl HashState {
     pub fn code(&self) -> u64 {
         self.state.wrapping_mul(11_400_714_819_323_198_549).swap_bytes()
     }
+
+    /// The code C++ `TfHash::Combine` gives the byte strings `parts`, each
+    /// appended in order. A `std::map<std::string, std::string>` is its
+    /// entries in key order, each key then its value:
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use openusd::tf::HashState;
+    ///
+    /// let roles = BTreeMap::from([("displayColor", "Color"), ("st", "TextureCoordinate")]);
+    /// let code = HashState::combine(roles.iter().flat_map(|(key, role)| [*key, *role]));
+    /// assert_eq!(code, HashState::combine(["displayColor", "Color", "st", "TextureCoordinate"]));
+    /// ```
+    pub fn combine(parts: impl IntoIterator<Item: AsRef<[u8]>>) -> u64 {
+        let mut state = Self::default();
+        for part in parts {
+            state.append(part);
+        }
+        state.code()
+    }
 }
 
 /// SpookyHash V2 (Bob Jenkins, public domain), as OpenUSD's `arch/hash.cpp`
@@ -248,15 +268,6 @@ mod spooky {
 mod tests {
     use super::*;
 
-    /// C++ `TfHash::Combine` of `strings`, in order.
-    fn combine(strings: &[&str]) -> u64 {
-        let mut state = HashState::default();
-        for s in strings {
-            state.append(s);
-        }
-        state.code()
-    }
-
     // The expected codes in these tests are C++ `TfHash::Combine`'s at
     // OpenUSD 26.08 (`tf/hash.h`, `arch/hash.cpp`).
 
@@ -285,7 +296,7 @@ mod tests {
             ),
         ];
         for (a, b, expected) in golden {
-            assert_eq!(combine(&[a, b]), *expected, "Combine({a:?}, {b:?})");
+            assert_eq!(HashState::combine([a, b]), *expected, "Combine({a:?}, {b:?})");
         }
     }
 
@@ -295,8 +306,8 @@ mod tests {
         let long192 = format!("/{}", "a".repeat(191));
         let long300: String = (0..30).map(|i| format!("/segment_{i}")).collect();
         assert!(long300.len() >= 192);
-        assert_eq!(combine(&[&long192, "/"]), 0x284b94e778823972);
-        assert_eq!(combine(&[&long300, &long192]), 0x35ea98eaf50ec046);
+        assert_eq!(HashState::combine([long192.as_str(), "/"]), 0x284b94e778823972);
+        assert_eq!(HashState::combine([&long300, &long192]), 0x35ea98eaf50ec046);
     }
 
     /// Short messages whose last 0..15 bytes are 4, 6, 7, 8, 9, 11, 13 and 15
@@ -315,7 +326,7 @@ mod tests {
             ("/World/Instancer/Prototype_abcd", 0xa3e710a9e73eb0ea),
         ];
         for (a, expected) in golden {
-            assert_eq!(combine(&[a, "/"]), *expected, "Combine({a:?}, \"/\")");
+            assert_eq!(HashState::combine([a, "/"]), *expected, "Combine({a:?}, \"/\")");
         }
     }
 
@@ -323,11 +334,11 @@ mod tests {
     /// order, each key then its value.
     #[test]
     fn combine_map() {
-        assert_eq!(combine(&["displayColor", "Color"]), 0x2a699f1bd0ef6389);
+        assert_eq!(HashState::combine(["displayColor", "Color"]), 0x2a699f1bd0ef6389);
         assert_eq!(
-            combine(&["displayColor", "Color", "displayOpacity", "", "st", "TextureCoordinate"]),
+            HashState::combine(["displayColor", "Color", "displayOpacity", "", "st", "TextureCoordinate"]),
             0xde7ff2d00ca8c5c6
         );
-        assert_eq!(combine(&["foo", ""]), 0xddc3440b5e101171);
+        assert_eq!(HashState::combine(["foo", ""]), 0xddc3440b5e101171);
     }
 }
