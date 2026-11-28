@@ -276,7 +276,7 @@ pub(crate) mod tests {
     use crate::ar::Resolver;
     use crate::ar::tests::TestResolver;
     use crate::sdf::FileFormat;
-    use crate::sdf::layer_registry::tests::dispatcher;
+    use crate::sdf::layer_registry::tests::{PLANTED, dispatcher};
     use crate::usd::{PrimPredicate, Stage, TimeCode};
     use crate::vt;
     use std::cell::RefCell;
@@ -345,6 +345,37 @@ pub(crate) mod tests {
         fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
             Ok(0)
         }
+    }
+
+    /// An entry a format added to the registry reads opens where a path
+    /// names it, though it is never a package's default layer: that is the
+    /// first entry only when it is a native USD layer or a nested package,
+    /// as the USDZ specification has it.
+    #[test]
+    fn registered_entry_named() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = sdf::LayerRegistry::default();
+        registry.add_format(&PLANTED);
+        let named = dir.path().join("pkg.usdz");
+        fs::write(
+            &named,
+            package(&[("root.usda", b"#usda 1.0\n"), ("look.planted", b"Look\n")]),
+        )?;
+        let look = registry
+            .find_or_open(&format!("{}[look.planted]", named.display()))?
+            .expect("the entry resolves");
+        assert!(look.borrow().prim("/Look")?.is_some());
+
+        let first = dir.path().join("look.usdz");
+        fs::write(
+            &first,
+            package(&[("look.planted", b"Look\n"), ("root.usda", b"#usda 1.0\n")]),
+        )?;
+        assert!(
+            registry.find_or_open(&first.to_string_lossy()).is_err(),
+            "a first entry that is no native layer is no default layer"
+        );
+        Ok(())
     }
 
     #[test]
